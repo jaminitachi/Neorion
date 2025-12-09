@@ -23,6 +23,14 @@ Neorion generates a highly compressed, semantic architecture map of your **Next.
 > [!NOTE]
 > The **Interactive Graph** feature is currently in **Beta**. We are actively refining the physics engine and visual representation. Feedback is welcome!
 
+## Installation
+
+1. **Search**: Open the Extensions view in VS Code (`Ctrl+Shift+X`) and search for **"Neorion"**.
+   ![Search Neorion](media/install_search.png)
+
+2. **Download**: Click the **Install** button.
+   ![Install Neorion](media/install_result.png)
+
 ## 🤖 How to use with AI Agents (Cursor, Claude, Antigravity)
 
 **This is the most powerful way to use Neorion.**
