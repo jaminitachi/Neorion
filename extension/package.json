@@ -1,0 +1,66 @@
+{
+  "name": "neorion",
+  "displayName": "Neorion",
+  "publisher": "neOriOn",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neOriOn/neorion"
+  },
+  "description": "Optimizes codebase context for LLM coding tools by generating an architectural graph.",
+  "version": "0.2.2",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:neo.generateGraph",
+    "onCommand:neo.showGraph"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "neo.generateGraph",
+        "title": "Neorion: Generate Architecture Map"
+      },
+      {
+        "command": "neo.showGraph",
+        "title": "Neorion: Show Architecture Graph (Beta)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "neo-arch-explorer",
+          "title": "Neorion",
+          "icon": "resources/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "neo-arch-explorer": [
+        {
+          "id": "neoArchView",
+          "name": "Architecture Map",
+          "icon": "resources/icon.png"
+        }
+      ]
+    }
+  },
+  "icon": "resources/icon.png",
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "ts-morph": "^21.0.0",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.80.0"
+  }
+}
