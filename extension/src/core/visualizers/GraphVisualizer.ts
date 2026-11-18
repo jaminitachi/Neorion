@@ -1,3 +1,4 @@
+import * as path from 'path';
 import * as vscode from 'vscode';
 import { CodebaseGraph } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -8,7 +9,7 @@ export class GraphVisualizer {
     private readonly _extensionUri: vscode.Uri;
     private _disposables: vscode.Disposable[] = [];
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, private projectRoot: string) {
         this._panel = panel;
         this._extensionUri = extensionUri;
 
@@ -33,14 +34,17 @@ export class GraphVisualizer {
 
     private async openFile(filePath: string) {
         try {
-            const doc = await vscode.workspace.openTextDocument(filePath);
+            const fullPath = path.resolve(this.projectRoot, filePath);
+            const relative = path.relative(this.projectRoot, fullPath);
+            if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return;
+            const doc = await vscode.workspace.openTextDocument(fullPath);
             await vscode.window.showTextDocument(doc);
         } catch (e) {
             vscode.window.showErrorMessage(`Failed to open file: ${filePath}`);
         }
     }
 
-    public static createOrShow(extensionUri: vscode.Uri, graph: CodebaseGraph) {
+    public static createOrShow(extensionUri: vscode.Uri, graph: CodebaseGraph, projectRoot: string) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
@@ -48,6 +52,7 @@ export class GraphVisualizer {
         // If we already have a panel, show it.
         if (GraphVisualizer.currentPanel) {
             GraphVisualizer.currentPanel._panel.reveal(column);
+            GraphVisualizer.currentPanel.projectRoot = projectRoot;
             GraphVisualizer.currentPanel.update(graph);
             return;
         }
@@ -66,7 +71,7 @@ export class GraphVisualizer {
             }
         );
 
-        GraphVisualizer.currentPanel = new GraphVisualizer(panel, extensionUri);
+        GraphVisualizer.currentPanel = new GraphVisualizer(panel, extensionUri, projectRoot);
         GraphVisualizer.currentPanel.update(graph);
     }
 

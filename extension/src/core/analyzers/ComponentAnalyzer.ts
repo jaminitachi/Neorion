@@ -1,19 +1,13 @@
-import { Project, SourceFile, SyntaxKind, Node } from 'ts-morph';
+import { SourceFile, Node } from 'ts-morph';
 import type { ComponentNode, ComponentProp, ImportInfo } from '../types/GraphTypes';
 import * as path from 'path';
 import { DomainExtractor } from '../utils/DomainExtractor';
 
 export class ComponentAnalyzer {
-  private project: Project;
-
-  constructor(project: Project) {
-    this.project = project;
-  }
+  constructor(private readonly root: string) {}
 
   public analyzeFile(sourceFile: SourceFile): ComponentNode[] {
     const components: ComponentNode[] = [];
-    const filePath = sourceFile.getFilePath();
-    
     // Find function declarations or variable declarations that look like components
     const functions = sourceFile.getFunctions();
     const variables = sourceFile.getVariableDeclarations();
@@ -44,7 +38,7 @@ export class ComponentAnalyzer {
 
   private createComponentNode(name: string, sourceFile: SourceFile, node: Node): ComponentNode {
     const filePath = sourceFile.getFilePath();
-    const relativePath = path.relative(this.project.getFileSystem().getCurrentDirectory(), filePath);
+    const relativePath = path.relative(this.root, filePath).split(path.sep).join('/');
     const id = `cmp_${name}`;
     const isClient = sourceFile.getText().includes('"use client"') || sourceFile.getText().includes("'use client'");
     
@@ -52,7 +46,9 @@ export class ComponentAnalyzer {
     const imports: ImportInfo[] = sourceFile.getImportDeclarations().map(imp => {
       return {
         name: imp.getDefaultImport()?.getText() || imp.getNamedImports().map(ni => ni.getName()).join(', '),
-        from: imp.getModuleSpecifierValue(),
+        from: path.isAbsolute(imp.getModuleSpecifierValue())
+          ? path.relative(this.root, imp.getModuleSpecifierValue()).split(path.sep).join('/')
+          : imp.getModuleSpecifierValue(),
         isExternal: !imp.getModuleSpecifierValue().startsWith('.')
       };
     });
@@ -152,7 +148,7 @@ export class ComponentAnalyzer {
       id,
       name,
       description: enhancedDescription, 
-      path: filePath,
+      path: relativePath,
       kind: 'ui', 
       isClient,
       domain: DomainExtractor.extract(filePath),

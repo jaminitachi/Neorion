@@ -4,3 +4,5 @@ dist
 *.vsix
 .DS_Store
 .vscode-test
+
+codebase_graph.md

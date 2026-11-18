@@ -7,7 +7,7 @@ export class RouteAnalyzer {
   private project: Project;
   private appDir: string;
 
-  constructor(project: Project, appDir: string) {
+  constructor(project: Project, appDir: string, private readonly root: string) {
     this.project = project;
     this.appDir = appDir;
   }
@@ -16,7 +16,9 @@ export class RouteAnalyzer {
     const routes: RouteNode[] = [];
     const appDirSourceFiles = this.project.getSourceFiles().filter(sf => {
       const filePath = sf.getFilePath();
-      return filePath.includes('/app/') && !filePath.includes('node_modules');
+      const relative = path.relative(this.appDir, filePath);
+      return !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) &&
+        !relative.split(path.sep).includes('node_modules');
     });
 
     for (const sourceFile of appDirSourceFiles) {
@@ -56,7 +58,7 @@ export class RouteAnalyzer {
     return {
       id,
       path: urlPath,
-      file: relativePath,
+      file: path.relative(this.root, filePath).split(path.sep).join('/'),
       type,
       segment: path.basename(dirName),
       isClient,
