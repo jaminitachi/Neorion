@@ -25,6 +25,7 @@ function fetchRepository(name, url, revision) {
 fetchRepository('taxonomy', 'https://github.com/shadcn-ui/taxonomy.git', '298a8857c7128a0d121e7f699dfd729f23b3966d');
 fetchRepository('commerce', 'https://github.com/vercel/commerce.git', 'f7521d57d29f0eb3d23c1399cf9bb299d61fcd21');
 
+// The immutable npm release was built from Next.js commit 2eda33ce846f996ff627c7e8b64704259ecd4355.
 if (!fs.existsSync(path.join(fixtureRoot, 'create-next-app', 'package.json'))) {
   run('npx', ['--yes', 'create-next-app@16.0.3', 'create-next-app', '--typescript', '--eslint',
     '--tailwind', '--app', '--src-dir', '--use-npm', '--import-alias', '@/*', '--skip-install',

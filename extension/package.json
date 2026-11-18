@@ -55,7 +55,7 @@
     "compile": "tsc --noEmit && npm run bundle",
     "watch": "npm run bundle -- --watch",
     "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node16 --external:vscode --minify --legal-comments=external --outfile=out/extension.js",
-    "test": "node --test test/graph.test.cjs"
+    "test": "node test/run-tests.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

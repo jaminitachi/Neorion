@@ -7,6 +7,9 @@ const { generate } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
 
 const externalFixtures = process.env.NEORION_FIXTURES;
+if (process.env.CI && !externalFixtures) {
+  throw new Error('Set NEORION_FIXTURES to the directory created by test/fetch-fixtures.cjs in CI');
+}
 const fixtures = path.resolve(externalFixtures ?? path.join(__dirname, 'fixtures'));
 
 function copyFixture(t, name, prefix = '', root = fixtures) {
