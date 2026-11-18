@@ -256,10 +256,27 @@ def summarize():
     lines += ["| Repository | Graph tokens | File-list tokens |", "| --- | ---: | ---: |"]
     for repo, sizes in contexts.items():
         lines.append(f"| {REPO_INFO[repo][0]} | {sizes['B']:,} | {sizes['D']:,} |")
-    lines += ["", "Context sizes use o200k_base. The file list uses unique tracked paths and is limited by repository size.",
+    lines += ["", "Context sizes use o200k_base. Both complete tracked file lists fall short of the graph size. B and D differ in both representation and length.",
               "", "## Grading issues", ""]
-    issues = [f'- {row["id"]} ({row["condition"]}) failed JSON grading. {row["grade"]["format_error"]}'
-              for row in graded if "format_error" in row["grade"]]
+    expected = {question["id"]: question["answer"] for question in verified()}
+    issues = []
+    for row in graded:
+        if "format_error" not in row["grade"]:
+            continue
+        issue = f'- {row["id"]} ({row["condition"]}) failed JSON grading.'
+        raw = row["answer"] or ""
+        candidates = []
+        for match in re.finditer(r"\{", raw):
+            fragment = raw[match.start():]
+            try:
+                parsed, end = json.JSONDecoder().raw_decode(fragment)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict) and "answer" in parsed:
+                candidates.append(fragment[:end])
+        if len(candidates) == 1 and grade(candidates[0], expected[row["id"]])["exact"]:
+            issue += " The embedded JSON contains the exact answer. Extra text caused the strict score of zero."
+        issues.append(issue)
     lines += issues or (["No answer-format issues detected."] if graded else ["No answers were available to grade."])
     errors = [row["error"] for row in rows if "error" in row]
     if STATUS.exists():
