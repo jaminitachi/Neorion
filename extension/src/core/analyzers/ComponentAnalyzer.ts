@@ -283,7 +283,14 @@ export class ComponentAnalyzer {
       let primitiveCandidate = /^(?:src\/)?components\/ui\//.test(component.path);
       const render = (tag: Node) => {
         const binding = rootBinding(tag);
-        const targets = declarationsOf(tag).map(node => resolveComponent(node)).filter(Boolean);
+        const targets = declarationsOf(tag).flatMap(declaration => {
+          const assignment = declaration.getParent();
+          if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
+              assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken && assignment.getLeft() === declaration) {
+            return declarationsOf(assignment.getRight());
+          }
+          return [declaration];
+        }).map(node => resolveComponent(node)).filter(Boolean);
         if (!targets.length && binding !== tag) {
           targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
         }

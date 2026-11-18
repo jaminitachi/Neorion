@@ -97,7 +97,8 @@ test('commerce maps its revalidation handler and imported components', { skip: !
   assert.match(graph, /id="route:app\/api\/revalidate\/route.ts" path="\/api\/revalidate" type="api" methods="POST"/);
   assert.match(graph, /id="route:app\/error.tsx" path="\/" type="error"/);
   assert.match(graph, /<hook id="hook:components\/cart\/cart-context.tsx#useCart"/);
-  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#Grid" type="(?:imports renders|renders imports)"/);
+  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#Grid" type="imports"/);
+  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#GridItem" type="renders"/);
   assert.match(graph, /from="cmp:app\/layout.tsx#RootLayout" to="cmp:components\/cart\/cart-context.tsx#CartProvider" type="renders imports"/);
 });
 
