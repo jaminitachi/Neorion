@@ -5,7 +5,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const { Tiktoken } = require('js-tiktoken/lite');
 const o200kBase = require('js-tiktoken/ranks/o200k_base');
-const { generate } = require('./run.cjs');
+const { generate, visualize } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
 
 const externalFixtures = process.env.NEORION_FIXTURES;
@@ -20,104 +20,83 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
   const project = path.join(tmp, prefix, name);
   fs.cpSync(path.join(root, name), project, {
     recursive: true,
-    filter: file => !['.git', 'node_modules', '.next', 'codebase_graph.md'].includes(path.basename(file))
+    filter: file => !['.git', 'node_modules', '.next', '.neorion', 'codebase_graph.md'].includes(path.basename(file))
   });
   return { tmp, project };
 }
 
-function validateUiGroups(graph) {
-  const individualFiles = new Set([...graph.matchAll(/<component id="cmp:([^"#]+)#[^"]+"/g)]
-    .map(([, file]) => file));
-  const ids = [];
-  for (const [, directory, count, prefix, members] of graph.matchAll(
-    /<component-group id="cmp:([^"]+)" count="(\d+)" memberPrefix="([^"]+)" members="([^"]+)"/g
-  )) {
-    const entries = members.split(' ').map(entry => entry.split('(')[0]);
-    assert.equal(entries.length, Number(count));
-    const names = entries.map(entry => entry.split('#').at(-1));
-    for (const [index, entry] of entries.entries()) {
-      const file = directory + '/' + entry.split('#')[0];
-      assert.ok(!individualFiles.has(file), `grouped file is also listed individually: ${file}`);
-      const name = names[index];
-      const id = prefix + (names.indexOf(name) === names.lastIndexOf(name) ? name : entry);
-      assert.ok(id.length <= `cmp:${directory}/${entry}`.length);
-      ids.push(id);
+const tokenizer = new Tiktoken(o200kBase);
+const count = value => tokenizer.encode(value, [], []).length;
+
+function readMap(project, overview, name) {
+  assert.ok(overview.startsWith('# ' + name + ' architecture') ||
+    overview.split('\n').includes('# ' + name + ' architecture (mixed router)'));
+  const root = path.join(project, '.neorion/graph');
+  const details = fs.readdirSync(root).filter(file => file.endsWith('.md'));
+  for (const [, target] of overview.matchAll(/\]\((\.neorion\/graph\/[^)]+\.md)\)/g)) {
+    assert.ok(fs.existsSync(path.join(project, decodeURIComponent(target))), target);
+  }
+  const files = Object.fromEntries(details.map(file => [
+    decodeURIComponent(file), fs.readFileSync(path.join(root, file), 'utf8')
+  ]));
+  for (const [file, detail] of Object.entries(files)) {
+    assert.ok(count(detail) <= 3000, file);
+    assert.ok(!detail.includes(project));
+    assert.doesNotMatch(detail, /:\s+(?:GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)\(/);
+    if (file === '+dependencies.md') continue;
+    let directory;
+    for (const line of detail.split('\n')) {
+      if (line.endsWith('/') && !line.startsWith(' ')) directory = line;
+      if (line.startsWith('  ') && line.includes(': ')) {
+        const basename = line.trim().split(': ')[0].replace(/ \(c\)$/, '');
+        assert.ok(fs.existsSync(path.join(project, directory, basename)), `${directory}${basename}`);
+      }
     }
   }
-  return ids;
+  return files;
 }
 
-function validate(graph, project, name) {
-  assert.ok(graph.includes(`<codebase name="${name}"`));
-  assert.ok(!graph.includes(project));
-  assert.doesNotMatch(graph, /<component [^\n]*#(?:GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)"/);
-  const ids = [...graph.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
-  ids.push(...validateUiGroups(graph));
-  assert.equal(new Set(ids).size, ids.length, 'graph IDs must be unique');
-  for (const [, target] of graph.matchAll(/\b(?:from|to|component)="([^"]+)"/g)) {
-    assert.ok(ids.includes(target), `unresolved graph reference ${target}`);
-  }
-  const sourcePaths = [...graph.matchAll(/<(?:route|component|action) id="(?:route|cmp|action):([^"#]+)(?:#[^"]+)?" /g)]
-    .map(match => match[1]);
-  const directories = [...graph.matchAll(/<dir path="([^"]+)"/g)].map(match => match[1]);
-  for (const file of [...sourcePaths, ...directories]) {
-    assert.ok(!path.win32.isAbsolute(file) && !file.startsWith('../'), file);
-    assert.ok(fs.existsSync(path.join(project, file)), file);
-  }
-}
-
-test('taxonomy maps APIs, special routes, hooks and connections', { skip: !externalFixtures }, async t => {
+test('taxonomy maps APIs, special routes, duplicate component names, and hooks', { skip: !externalFixtures }, async t => {
   const { project } = copyFixture(t, 'taxonomy');
-  const graph = await generate(project);
-  validate(graph, project, 'taxonomy');
-  assert.match(graph, /id="route:app\/api\/posts\/route.ts" path="\/api\/posts" type="api" methods="GET POST"/);
-  assert.match(graph, /id="route:app\/\(editor\)\/editor\/\[postId\]\/not-found.tsx" path="\/editor\/\[postId\]" type="not-found"/);
-  assert.match(graph, /id="cmp:app\/\(docs\)\/layout.tsx#DocsLayout"/);
-  assert.match(graph, /id="cmp:app\/\(docs\)\/docs\/layout.tsx#DocsLayout"/);
-  assert.match(graph, /<hook id="hook:hooks\/use-mounted.ts#useMounted"/);
-  assert.match(graph, /<dir path="hooks" role="react_hooks"/);
-  assert.match(graph, /from="cmp:app\/\(docs\)\/layout.tsx#DocsLayout" to="cmp:components\/main-nav.tsx#MainNav" type="renders imports"/);
+  const overview = await generate(project);
+  const details = readMap(project, overview, 'taxonomy');
+  assert.match(overview, /posts  route.ts\[GET POST\]/);
+  assert.match(overview, /\[postId\].*not-found.tsx\(not-found\)/);
+  assert.match(details['app/(docs).md'], /layout.tsx: DocsLayout.*>.*MainNav/);
+  assert.equal((details['app/(docs).md'].match(/layout.tsx: DocsLayout/g) ?? []).length, 2);
+  assert.match(overview, /hooks\/use-mounted.ts: useMounted/);
+  assert.match(details['components/ui.md'], /badge.tsx: Badge\(className,variant\)/);
+  assert.match(details['components/ui.md'], /button.tsx: Button\(className,variant,size\)/);
+  assert.ok(count(overview) <= 1500);
 });
 
-test('taxonomy graph fits its token budget and preserves grouped UI props', { skip: !externalFixtures }, async t => {
-  const { project } = copyFixture(t, 'taxonomy');
-  const graph = await generate(project);
-  validateUiGroups(graph);
-  assert.match(graph, /<component-group [^\n]*badge\.tsx#Badge\(className,variant\)/);
-  assert.match(graph, /<component-group [^\n]*button\.tsx#Button\(className,variant,size\)/);
-  const tokens = new Tiktoken(o200kBase).encode(graph, [], []).length;
-  // The pinned fixture measured 11,015 tokens with UI props and member edges intact.
-  assert.ok(tokens <= 11800, `taxonomy graph uses ${tokens} tokens (budget: 11,800)`);
-});
-
-test('commerce maps its revalidation handler and imported components', { skip: !externalFixtures }, async t => {
+test('commerce maps its revalidation handler and distinguishes render and import edges', { skip: !externalFixtures }, async t => {
   const { project } = copyFixture(t, 'commerce');
-  const graph = await generate(project);
-  validate(graph, project, 'commerce');
-  assert.match(graph, /id="route:app\/api\/revalidate\/route.ts" path="\/api\/revalidate" type="api" methods="POST"/);
-  assert.match(graph, /id="route:app\/error.tsx" path="\/" type="error"/);
-  assert.match(graph, /<hook id="hook:components\/cart\/cart-context.tsx#useCart"/);
-  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#Grid" type="imports"/);
-  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#GridItem" type="renders"/);
-  assert.match(graph, /from="cmp:app\/layout.tsx#RootLayout" to="cmp:components\/cart\/cart-context.tsx#CartProvider" type="renders imports"/);
+  const overview = await generate(project);
+  const details = readMap(project, overview, 'commerce');
+  assert.match(overview, /api\/revalidate  route.ts\[POST\]/);
+  assert.match(overview, /error.tsx\(error\)/);
+  assert.match(overview, /components\/cart\/cart-context.tsx: useCart/);
+  assert.match(details['components/layout.md'], /product-grid-items.tsx:.*>.*GridItem\[render\].*Grid\[import\]/);
+  assert.match(details['app.md'], /layout.tsx:.*>.*CartProvider\b/);
+  assert.ok(count(overview) <= 1500);
 });
 
 test('create-next-app detects src/app and links namespace imports, local JSX and aliased hooks', { skip: !externalFixtures }, async t => {
   const { tmp, project } = copyFixture(t, 'create-next-app', 'apps');
   augmentScaffold(project);
-  const graph = await generate(tmp, undefined, [path.join(project, 'tsconfig.json')]);
-  validate(graph, project, 'create-next-app');
-  assert.match(graph, /<dir path="src\/app" role="routes"/);
-  assert.match(graph, /id="route:src\/app\/page.tsx" path="\/" type="page"/);
-  assert.match(graph, /id="route:src\/app\/api\/status\/route.ts" path="\/api\/status" type="api" methods="GET POST"/);
-  assert.match(graph, /from="cmp:src\/app\/page.tsx#Home" to="cmp:src\/components\/status.tsx#Status" type="renders imports"/);
-  assert.match(graph, /from="cmp:src\/components\/status.tsx#Status" to="cmp:src\/components\/status.tsx#LocalLabel" type="renders"/);
-  assert.match(graph, /id="cmp:src\/components\/status.tsx#Status" [^\n]* hooks="hook:src\/hooks\/use-status.ts#useStatus"/);
+  const overview = await generate(tmp, undefined, [path.join(project, 'tsconfig.json')]);
+  const details = readMap(project, overview, 'create-next-app');
+  assert.match(overview, /src\/app.*page.tsx=Home/);
+  assert.match(overview, /api\/status  route.ts\[GET POST\]/);
+  assert.match(details['src/app.md'], /page.tsx: Home.*> Status/);
+  assert.match(details['src/components.md'], /status.tsx \(c\):.*Status h:useStatus.*Status > LocalLabel\[render\]/);
+  assert.ok(count(overview) <= 1500);
 
   fs.writeFileSync(path.join(project, 'package.json'), '{}');
   fs.renameSync(project, path.join(tmp, 'fallback-name'));
   const fallback = path.join(tmp, 'fallback-name');
-  validate(await generate(fallback), fallback, 'fallback-name');
+  readMap(fallback, await generate(fallback), 'fallback-name');
 });
 
 function reviewFixture(t) {
@@ -156,72 +135,55 @@ test('allowlists dependency specs and emits development dependency names only', 
   pkg.dependencies = { ...unsafe, ...safe };
   pkg.devDependencies['dev-only'] = 'file:/home/secretuser';
   fs.writeFileSync(pkgFile, JSON.stringify(pkg));
-  const graph = await generate(project);
-  for (const name of Object.keys(unsafe)) {
-    assert.ok(graph.includes('name="' + name + '" version="[redacted]"'), name);
-  }
-  for (const [name, spec] of Object.entries(safe)) {
-    const escaped = spec.replaceAll('>', '&gt;').replaceAll('<', '&lt;');
-    assert.ok(graph.includes('name="' + name + '" version="' + escaped + '"'), name);
-  }
-  assert.match(graph, /<dev-dependencies names="dev-only" \/>/);
-  assert.doesNotMatch(graph, /secretuser|private|name="dev-only"/);
+  const overview = await generate(project);
+  const graph = readMap(project, overview, 'review-fixture')['+dependencies.md'];
+  for (const name of Object.keys(unsafe)) assert.ok(graph.includes(name + ' [redacted]'), name);
+  for (const [name, spec] of Object.entries(safe)) assert.ok(graph.includes(name + ' ' + spec + '\n'), name);
+  assert.match(graph, /dev dev-only$/m);
+  assert.doesNotMatch(graph, /secretuser|private/);
 });
 
-test('resolves relative and aliased factory hooks to one project file and omits React hooks', async t => {
+test('resolves factory hooks across aliases and omits React hooks', async t => {
   const project = reviewFixture(t);
-  const graph = await generate(project);
-  validate(graph, project, 'review-fixture');
-  const hooks = [...graph.matchAll(/<hook id="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(hooks, ['hook:src/lib/store.ts#useCartStore']);
-  assert.equal([...graph.matchAll(/hooks="hook:src\/lib\/store.ts#useCartStore"/g)].length, 2);
+  const overview = await generate(project);
+  const details = readMap(project, overview, 'review-fixture');
+  assert.equal([...overview.matchAll(/src\/lib\/store.ts: useCartStore/g)].length, 1);
+  assert.equal(Object.values(details).join('\n').match(/h:useCartStore/g).length, 2);
+  assert.doesNotMatch(Object.values(details).join('\n'), /useState/);
 });
 
-test('links JSX to the existing component behind a default export and ignores rest props', async t => {
-  const graph = await generate(reviewFixture(t));
-  assert.match(graph, /from="cmp:src\/app\/\(account\)\/layout.tsx#Layout" to="cmp:src\/components\/panel.tsx#Inner" type="renders imports"/);
-  assert.match(graph, /id="cmp:src\/components\/panel.tsx#Inner" isClient="false" props="children"/);
-  assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
-  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="1"/);
-  assert.match(graph, /from="cmp:src\/components\/panel.tsx#Inner" to="src-ui:Button" type="renders imports"/);
-});
-
-test('resolves a plain default identifier without duplicating the component or its edges', async t => {
-  const project = reviewFixture(t);
-  const panel = path.join(project, 'src/components/panel.tsx');
-  fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('memo(Inner)', 'Inner'));
-  const graph = await generate(project);
-  assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
-  assert.match(graph, /to="cmp:src\/components\/panel.tsx#Inner" type="renders imports"/);
-  assert.equal(graph.match(/from="cmp:src\/components\/panel.tsx#Inner"/g).length, 1);
-});
-
-test('collapses a named memo wrapper and redirects references to its component', async t => {
-  const project = reviewFixture(t);
-  const panel = path.join(project, 'src/components/panel.tsx');
-  fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('export default memo(Inner)',
-    'const Panel = memo(Inner); export default Panel'));
-  const graph = await generate(project);
-  validate(graph, project, 'review-fixture');
-  assert.match(graph, /id="cmp:src\/components\/panel\.tsx#Panel" isClient="false" props="children"/);
-  assert.doesNotMatch(graph, /panel\.tsx#(?:Inner|default)/);
-  assert.match(graph, /#Layout" to="cmp:src\/components\/panel\.tsx#Panel" type="renders imports"/);
-  assert.equal(graph.match(/from="cmp:src\/components\/panel\.tsx#Panel"/g).length, 1);
-});
+for (const [label, replacement, name] of [
+  ['memo', 'export default memo(Inner)', 'Inner'],
+  ['plain default identifier', 'export default Inner', 'Inner'],
+  ['named memo wrapper', 'const Panel = memo(Inner); export default Panel', 'Panel']
+]) {
+  test(`resolves ${label} to one component with its props and edges`, async t => {
+    const project = reviewFixture(t);
+    const panel = path.join(project, 'src/components/panel.tsx');
+    fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('export default memo(Inner)', replacement));
+    const details = readMap(project, await generate(project), 'review-fixture');
+    assert.equal(details['src/components.md'].split('panel.tsx:').length, 2);
+    assert.ok(details['src/components.md'].includes(`panel.tsx: ${name}(children) h:useCartStore | +1 UI/icon targets`));
+    assert.ok(details['src/app/(account).md'].includes(`> ${name}\n`));
+    assert.match(details['src/components/ui.md'], /button.tsx: Button\(children\)/);
+    assert.doesNotMatch(details['src/components.md'], /rest|default|Button/);
+  });
+}
 
 test('maps Pages API endpoints and reports mixed, Pages-only and App-only routers', async t => {
   const project = reviewFixture(t);
   const mixed = await generate(project);
-  assert.match(mixed, /router="mixed"/);
-  assert.match(mixed, /id="route:src\/pages\/api\/auth\/\[\.\.\.nextauth\].ts" path="\/api\/auth\/\[\.\.\.nextauth\]" type="api" methods="ALL" isClient="false"/);
-  assert.doesNotMatch(mixed, /<component id="cmp:src\/pages\/api/);
+  assert.match(mixed, /\(mixed router\)/);
+  assert.match(mixed, /pages\/api\/auth  \[\.\.\.nextauth\].ts\[\*\]/);
+  const details = readMap(project, mixed, 'review-fixture');
+  assert.match(details['src/pages/api.md'], /\[\.\.\.nextauth\].ts: route/);
   const appDir = path.join(project, 'src', 'app');
   const moved = path.join(project, 'app-disabled');
   fs.renameSync(appDir, moved);
-  assert.match(await generate(project), /router="pages"/);
+  assert.match(await generate(project), /\(pages router\)/);
   fs.renameSync(moved, appDir);
   fs.rmSync(path.join(project, 'src', 'pages'), { recursive: true });
-  assert.match(await generate(project), /router="app"/);
+  assert.match(await generate(project), /\(app router\)/);
 });
 
 test('reports layout scope, wrapped pages and Next.js special files and actions', async t => {
@@ -231,15 +193,15 @@ test('reports layout scope, wrapped pages and Next.js special files and actions'
   }
   fs.writeFileSync(path.join(project, 'src/app/help/opengraph-image.png'), '');
   const graph = await generate(project);
-  assert.match(graph, /scope="\/\(account\)" type="layout" wraps="route:src\/app\/\(account\)\/page.tsx"/);
-  assert.match(graph, /path="\/robots.txt" type="robots"/);
-  assert.match(graph, /path="\/sitemap.xml" type="sitemap"/);
-  assert.doesNotMatch(graph, /cmp:src\/app\/(?:robots|sitemap|opengraph-image)\./);
-  assert.match(graph, /path="\/opengraph-image" type="opengraph-image"/);
-  assert.match(graph, /path="\/help\/opengraph-image.png" type="opengraph-image"/);
-  for (const type of ['template', 'default', 'global-error']) assert.ok(graph.includes(`type="${type}"`));
-  assert.match(graph, /id="action:src\/app\/actions.ts#updateAccount"/);
-  assert.match(graph, /id="action:src\/app\/help\/page.tsx#HelpPage.submit"/);
+  assert.match(graph, /\(account\)  layout.tsx\(L\)=Layout  page.tsx=AccountPage/);
+  for (const name of ['robots.txt', 'sitemap.xml', 'opengraph-image', 'help/opengraph-image.png']) {
+    assert.ok(graph.includes('→ /' + name), name);
+  }
+  for (const type of ['template', 'default', 'global-error']) assert.ok(graph.includes(`(${type})`));
+  const details = readMap(project, graph, 'review-fixture');
+  assert.doesNotMatch(details['src/app.md'], /(?:robots|sitemap|opengraph-image)\.tsx?: Special/);
+  assert.match(graph, /src\/app\/actions.ts#updateAccount/);
+  assert.match(graph, /src\/app\/help\/page.tsx#HelpPage.submit/);
   assert.doesNotMatch(graph, /privateHelper/);
 });
 
@@ -259,25 +221,17 @@ test('links used actions through JSX props, callbacks and imports with stable sc
   ].join('\n');
   fs.writeFileSync(page, source);
   const graph = await generate(project);
-  validate(graph, project, 'review-fixture');
-  const uses = graph.split('\n').filter(line => line.includes('type="uses-action"')).sort();
-  for (const [component, action] of [
-    ['HelpPage', 'app/actions.ts#updateAccount'],
-    ['HelpPage', 'app/help/page.tsx#HelpPage.save'],
-    ['HelpPage', 'app/help/page.tsx#HelpPage.(inline)'],
-    ['Other', 'app/help/page.tsx#Other.save']
-  ]) {
-    assert.ok(uses.includes('    <edge from="cmp:src/app/help/page.tsx#' + component +
-      '" to="action:src/' + action + '" type="uses-action" />'), action);
-  }
-  assert.equal(uses.length, 4);
+  const details = readMap(project, graph, 'review-fixture');
+  const help = details['src/app/help.md'];
+  assert.match(help, /HelpPage > .*updateAccount\[action\].*HelpPage.\(inline\)\[action\].*HelpPage.save\[action\]/);
+  assert.match(help, /Other > .*Other.save\[action\]/);
+  assert.equal([...help.matchAll(/\[action\]/g)].length, 4);
   fs.writeFileSync(page, '// unrelated edit\n\n' + source);
-  assert.deepEqual((await generate(project)).split('\n').filter(line =>
-    line.includes('<action ') || line.includes('type="uses-action"')), graph.split('\n').filter(line =>
-    line.includes('<action ') || line.includes('type="uses-action"')));
+  assert.equal(await generate(project), graph);
+  assert.equal(readMap(project, graph, 'review-fixture')['src/app/help.md'], help);
 });
 
-test('folds UI primitives with file names and preserves member edges, hooks and domain components', async t => {
+test('keeps UI props, project hooks, outgoing domain edges and action calls while counting UI targets', async t => {
   const project = reviewFixture(t);
   const ui = path.join(project, 'src/components/ui');
   fs.mkdirSync(path.join(ui, 'forms'));
@@ -308,47 +262,99 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
     'export function Dialog({ open }) { return <Root open={open}><Radix.Content /></Root> }'
   ].join('\n'));
   const graph = await generate(project);
-  validate(graph, project, 'review-fixture');
-  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="4" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) radix.tsx#Root surface.tsx#Surface\(title\)" clientFiles="radix.tsx"\s*\/>/);
-  assert.match(graph, /from="src-ui:Dialog" to="src-ui:Root" type="renders"/);
-  assert.match(graph, /#Inner" to="src-ui:Button" type="renders imports"/);
-  assert.match(graph, /from="src-ui:Surface" to="cmp:src\/components\/banner.tsx#Banner" type="imports"/);
-  assert.match(graph, /from="src-ui:Surface" to="src-ui:Button" type="renders imports"/);
-  assert.match(graph, /id="cmp:src\/components\/ui\/toaster.tsx#ToastTitle"/);
-  assert.match(graph, /#Toaster" isClient="false" hooks="hook:src\/lib\/store.ts#useCartStore"/);
-  assert.match(graph, /#Toaster" to="cmp:src\/components\/banner.tsx#Banner" type="renders imports"/);
-  assert.match(graph, /#CheckoutForm" isClient="false" props="amount"/);
-  assert.match(graph, /#CheckoutForm" to="action:src\/app\/actions.ts#updateAccount" type="uses-action"/);
-  assert.match(graph, /#ToastRegion" to="cmp:src\/components\/ui\/toaster.tsx#Toaster" type="renders imports"/);
+  const details = readMap(project, graph, 'review-fixture');
+  const primitives = details['src/components/ui.md'];
+  assert.match(primitives, /radix.tsx \(c\): Dialog\(open\) \| Root.*\+1 UI\/icon targets/);
+  assert.match(primitives, /surface.tsx: Surface\(title\).*Banner\[import\].*\+1 UI\/icon targets/);
+  assert.match(primitives, /toaster.tsx: Toaster h:useCartStore \| ToastTitle \| Toaster > Banner/);
+  assert.match(primitives, /checkout-form.tsx: CheckoutForm\(amount\).*updateAccount\[action\]/);
+  assert.match(primitives, /toast-region.tsx: ToastRegion \| \+1 UI\/icon targets/);
 });
 
-test('folds a shadcn Slot or intrinsic button without folding unknown conditional targets', async t => {
+test('keeps props for conditional primitive wrappers', async t => {
   const project = reviewFixture(t);
-  const ui = path.join(project, 'src/components/ui');
-  fs.writeFileSync(path.join(ui, 'button.tsx'), [
+  fs.writeFileSync(path.join(project, 'src/components/ui/button.tsx'), [
     "import { Slot } from '@radix-ui/react-slot'",
     'export function Button({ asChild, children }) {',
     '  const Comp = asChild ? Slot : "button"',
     '  return <Comp>{children}</Comp>',
     '}'
   ].join('\n'));
-  fs.writeFileSync(path.join(ui, 'conditional.tsx'), [
-    "import { Slot } from '@radix-ui/react-slot'",
-    'export function Conditional({ asChild, Unknown }) {',
-    '  const Comp = asChild ? Slot : Unknown',
-    '  return <Comp />',
-    '}'
-  ].join('\n'));
-  const graph = await generate(project);
-  validate(graph, project, 'review-fixture');
-  assert.match(graph, /members="[^"]*button.tsx#Button\(asChild,children\)/);
-  assert.match(graph, /to="src-ui:Button" type="renders imports"/);
-  assert.match(graph, /<component id="cmp:src\/components\/ui\/conditional.tsx#Conditional"/);
+  const details = readMap(project, await generate(project), 'review-fixture');
+  assert.match(details['src/components/ui.md'], /button.tsx: Button\(asChild,children\)/);
 });
 
-test('explains group member IDs and client files before the graph', async t => {
-  const graph = await generate(reviewFixture(t));
-  const [intro] = graph.split('\x60\x60\x60xml');
-  assert.match(intro, /ui:Name.*src-ui:Name.*prefix:file#Name/);
-  assert.match(intro, /clientFiles.*isClient=true.*other member files are false/);
+test('reports aliased and namespace action calls outside component bodies', async t => {
+  const project = reviewFixture(t);
+  fs.writeFileSync(path.join(project, 'src/lib/submit.ts'), [
+    "import { updateAccount as update } from '../app/actions'",
+    "import * as actions from '../app/actions'",
+    'export async function submit() { await update(); await actions.updateAccount(); }'
+  ].join('\n'));
+  const overview = await generate(project);
+  const details = readMap(project, overview, 'review-fixture');
+  assert.match(overview, /src\/lib\/submit.ts > src\/app\/actions.ts#updateAccount/);
+  assert.match(details['src/lib.md'], /submit.ts: > src\/app\/actions.ts#updateAccount\[action\]$/m);
+  const { nodes, edges } = await visualize(project);
+  assert.ok(nodes.some(node => node.id === 'file:src/lib/submit.ts' && node.path === 'src/lib/submit.ts'));
+  assert.ok(edges.some(edge => edge.from === 'file:src/lib/submit.ts' &&
+    edge.to === 'action:src/app/actions.ts#updateAccount' && edge.title === 'uses-action'));
+});
+
+test('detects Pages API equality guards and switches on the exported handler request', async t => {
+  const project = reviewFixture(t);
+  const directory = path.join(project, 'src/pages/api');
+  fs.writeFileSync(path.join(directory, 'guard.ts'), `
+    const handler = (request, res) => {
+      if (request.method !== 'POST') return res.status(405).end();
+      if (res.method === 'HEAD') throw new Error();
+      return res.end();
+    };
+    export default handler;
+  `);
+  fs.writeFileSync(path.join(directory, 'switch.ts'), `
+    export default function handler(req, res) {
+      switch (req.method) {
+        case 'PATCH': case 'DELETE': return res.end();
+        default: return res.status(405).end();
+      }
+    }
+  `);
+  const overview = await generate(project);
+  assert.match(overview, /guard.ts\[POST\]/);
+  assert.match(overview, /switch.ts\[DELETE PATCH\]/);
+  assert.match(overview, /\[\.\.\.nextauth\].ts\[\*\]/);
+});
+
+test('enforces the tracked file-list budget and partitions oversized areas without losing route entries', async t => {
+  const project = reviewFixture(t);
+  const { execFileSync } = require('node:child_process');
+  const git = (...args) => execFileSync('git', args, { cwd: project, encoding: 'utf8' });
+  const api = path.join(project, 'src/pages/api');
+  for (let i = 0; i < 1800; i++) {
+    const file = path.join(api, `customer-analytics-archive-record-${i}.ts`);
+    fs.writeFileSync(file, "export default (req, res) => req.method === 'GET' ? res.end() : res.status(405).end()");
+  }
+  git('init', '-q');
+  git('add', '.');
+  const list = git('ls-files', '-z').split('\0').filter(Boolean).join('\n') + '\n';
+  const budget = Math.min(6000, Math.max(1500, Math.floor(count(list) / 4)));
+  assert.ok(budget > 1500);
+  const overview = await generate(project);
+  assert.ok(count(overview) <= budget);
+  assert.match(overview, /^Overview abbreviates .*Routes/);
+  assert.match(overview, /browse \[all details\]/);
+  assert.match(overview, /\[detail\]\(\.neorion\/graph\//);
+  const directory = path.join(project, '.neorion/graph');
+  const shards = fs.readdirSync(directory).filter(file => file.startsWith('src%2Fpages%2Fapi'));
+  assert.ok(shards.length > 1);
+  const contents = shards.map(file => fs.readFileSync(path.join(directory, file), 'utf8'));
+  for (const text of contents) assert.ok(count(text) <= 3000);
+  assert.equal(contents.join('').match(/: route customer-analytics-archive-record-\d+.ts\[GET\]/g).length, 1800);
+
+  fs.writeFileSync(path.join(directory, 'notes.md'), 'handwritten');
+  fs.rmSync(api, { recursive: true });
+  await generate(project);
+  assert.ok(shards.every(file => !fs.existsSync(path.join(directory, file))));
+  assert.equal(fs.readFileSync(path.join(directory, 'notes.md'), 'utf8'), 'handwritten');
 });

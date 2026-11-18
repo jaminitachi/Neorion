@@ -24,7 +24,6 @@ export interface ComponentNode {
   domain: string;
   props: string[];
   hooks: string[];
-  primitiveCandidate?: boolean;
   description?: string;
 }
 
@@ -59,4 +58,5 @@ export interface CodebaseGraph {
   libraries: LibraryInfo[];
   devDependencies: string[];
   actions: string[];
+  fileHooks: Map<string, { hooks: string[]; isClient: boolean }>;
 }

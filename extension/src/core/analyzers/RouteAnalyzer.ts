@@ -1,4 +1,4 @@
-import { Node, SourceFile } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import type { RouteNode } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -17,6 +17,58 @@ export function hasDirective(statements: Node[], directive: string): boolean {
     if (expression.getLiteralText() === directive) return true;
   }
   return false;
+}
+
+function pagesMethods(source?: SourceFile): string[] {
+  const methods = new Set<string>();
+  for (const declaration of source?.getExportedDeclarations().get('default') ?? []) {
+    let handler: Node | undefined = declaration;
+    if (Node.isVariableDeclaration(handler)) handler = handler.getInitializer();
+    if (Node.isExportAssignment(handler)) handler = handler.getExpression();
+    if (!Node.isFunctionDeclaration(handler) && !Node.isArrowFunction(handler) &&
+        !Node.isFunctionExpression(handler)) continue;
+    const request = handler.getParameters()[0]?.getNameNode();
+    const requestSymbol = Node.isIdentifier(request) ? request.getSymbol() : undefined;
+    const methodBinding = Node.isObjectBindingPattern(request) ? request.getElements().find(element =>
+      (element.getPropertyNameNode() ?? element.getNameNode()).getText() === 'method')
+      ?.getNameNode().getSymbol() : undefined;
+    const isMethod = (node: Node) => {
+      if (methodBinding && Node.isIdentifier(node)) return node.getSymbol() === methodBinding;
+      if (!requestSymbol || (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node))) return false;
+      const argument = Node.isElementAccessExpression(node) ? node.getArgumentExpression() : undefined;
+      const key = Node.isPropertyAccessExpression(node) ? node.getName() :
+        Node.isStringLiteral(argument) ? argument.getLiteralText() : undefined;
+      return key === 'method' && node.getExpression().getSymbol() === requestSymbol;
+    };
+    const collect = (node: Node) => {
+      if (Node.isStringLiteral(node)) methods.add(node.getLiteralText());
+    };
+    handler.getBody()?.forEachDescendant(node => {
+      if (Node.isSwitchStatement(node) && isMethod(node.getExpression())) {
+        for (const clause of node.getClauses()) {
+          if (Node.isCaseClause(clause)) collect(clause.getExpression());
+        }
+      }
+      if (Node.isCallExpression(node)) {
+        const callee = node.getExpression();
+        const [argument] = node.getArguments();
+        if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'includes' &&
+            argument && isMethod(argument)) {
+          const values = callee.getExpression();
+          if (Node.isArrayLiteralExpression(values)) values.getElements().forEach(collect);
+        }
+      }
+      if (Node.isBinaryExpression(node) && [
+        SyntaxKind.EqualsEqualsToken, SyntaxKind.EqualsEqualsEqualsToken,
+        SyntaxKind.ExclamationEqualsToken, SyntaxKind.ExclamationEqualsEqualsToken
+      ].includes(node.getOperatorToken().getKind())) {
+        if (isMethod(node.getLeft())) collect(node.getRight());
+        if (isMethod(node.getRight())) collect(node.getLeft());
+      }
+    });
+  }
+  const supported = HTTP_METHODS.filter(method => methods.has(method));
+  return supported.length ? supported : ['ALL'];
 }
 
 export class RouteAnalyzer {
@@ -48,7 +100,7 @@ export class RouteAnalyzer {
       if (match[1] !== 'index') parts.push(match[1]);
       return {
         id: `route:${file}`, file, type,
-        methods: type === 'api' ? ['ALL'] : undefined,
+        methods: type === 'api' ? pagesMethods(source) : undefined,
         path: '/' + parts.join('/'), isClient: !!source && isClientFile(source),
         domain: DomainExtractor.extract('/' + file)
       };

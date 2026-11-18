@@ -5,14 +5,21 @@ Neorion generates a local architecture map for Next.js projects written in TypeS
 ## Use in VS Code
 
 1. Open the project folder containing `tsconfig.json`.
-2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` in the project root.
-3. Run **Neorion: Show Architecture Graph (Beta)** to explore routes and components and open their source files.
+2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` and area details under `.neorion/graph/` in the project root.
+3. Run **Neorion: Show Architecture Graph (Beta)** to explore routes, components, and server action callers and open their source files.
 
 After running either Neorion command once in the current editor session, saving a TypeScript file or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
 
-In the Markdown, UI groups list members as `file.tsx#Name(prop1,prop2)`.
-Edges reference a member using the group's `memberPrefix` plus its component
-name. If a name is shared within the group, the edge uses the file and name.
+Give your coding assistant `codebase_graph.md` first. It contains the route tree,
+server actions, and a directory index. Follow a relevant area link for props,
+hooks, and file-level adjacency lists. If the overview abbreviates the area
+index, browse `.neorion/graph/` for the remaining details. UI primitive and icon
+targets are counted in the detail rows.
+
+The overview is capped at 25% of the tracked file-list token count, with a
+1,500-token floor and a 6,000-token ceiling. Without Git, Neorion builds the
+list from local files, skipping common generated directories. Individual
+detail parts are capped at 3,000 tokens. Both limits use `o200k_base`.
 
 ## Build and install locally
 

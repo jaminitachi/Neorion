@@ -8,3 +8,5 @@ dist
 codebase_graph.md
 
 extension/test/.fixtures/
+
+**/.neorion/graph/

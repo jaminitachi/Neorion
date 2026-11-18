@@ -5,7 +5,7 @@ import { validRange } from 'semver';
 import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
-import { MarkdownSerializer } from './core/serializers/MarkdownSerializer';
+import { writeGraph } from './core/serializers/GraphOutput';
 import { CodebaseGraph, DirectoryMetadata, LibraryInfo } from './core/types/GraphTypes';
 
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
@@ -142,12 +142,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             if (options.markdown) {
                 // 5. Serialize
                 if (progress) progress.report({ message: "Generating Markdown..." });
-                const serializer = new MarkdownSerializer();
-                const output = serializer.serialize(graph);
-
-                // 6. Write to file and open
-                const outputPath = path.join(projectPath, 'codebase_graph.md');
-                fs.writeFileSync(outputPath, output);
+                const outputPath = writeGraph(projectPath, graph);
 
                 if (!silent) {
                     const doc = await vscode.workspace.openTextDocument(outputPath);

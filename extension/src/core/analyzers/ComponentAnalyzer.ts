@@ -232,43 +232,14 @@ export class ComponentAnalyzer {
         .map(node => resolveComponent(node)).find(Boolean)?.id;
     }
 
-    const rendersExternal = (tag: Node, seen = new Set<Node>()): boolean => {
-      if (Node.isParenthesizedExpression(tag)) return rendersExternal(tag.getExpression(), seen);
-      if (Node.isConditionalExpression(tag)) {
-        return rendersExternal(tag.getWhenTrue(), new Set(seen)) && rendersExternal(tag.getWhenFalse(), seen);
-      }
-      if (Node.isStringLiteral(tag)) return /^[a-z]/.test(tag.getLiteralText());
-      if (!Node.isIdentifier(tag) && !Node.isPropertyAccessExpression(tag)) return false;
-      const binding = rootBinding(tag);
-      if (seen.has(binding)) return false;
-      seen.add(binding);
-      const symbol = binding.getSymbol();
-      for (const node of symbol?.getDeclarations() ?? []) {
-        const declaration = node.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
-        if (declaration && !declaration.isTypeOnly() &&
-            isPackageSpecifier(declaration.getModuleSpecifierValue())) {
-          const source = declaration.getModuleSpecifierSourceFile();
-          if (!source || !projectFiles.has(source)) return true;
-        }
-      }
-      return declarationsOf(binding).some(node => {
-        if (!Node.isVariableDeclaration(node)) return false;
-        const initializer = node.getInitializer();
-        return initializer !== undefined && rendersExternal(initializer, new Set(seen));
-      });
-    };
-
     const edges = new Map<string, ComponentEdge>();
-    for (const [node, component] of components) {
-      const addEdge = (to: string | undefined, type: ComponentEdge['type']) => {
-        if (!to || to === component.id) return;
-        const edge = { from: component.id, to, type };
-        edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
-      };
-
-      const body = bodies.get(node)!;
-      const file = body.getSourceFile();
-      const imports = new Map<Node, import('ts-morph').ImportDeclaration>();
+    const componentCalls = new Set<Node>();
+    type Imports = Map<Node, import('ts-morph').ImportDeclaration>;
+    const importsByFile = new Map<SourceFile, Imports>();
+    const importsFor = (file: SourceFile) => {
+      const cached = importsByFile.get(file);
+      if (cached) return cached;
+      const imports: Imports = new Map();
       for (const declaration of file.getImportDeclarations()) {
         if (declaration.isTypeOnly()) continue;
         const imported = [declaration.getDefaultImport(), declaration.getNamespaceImport(),
@@ -279,8 +250,49 @@ export class ComponentAnalyzer {
         }
       }
 
+      importsByFile.set(file, imports);
+      return imports;
+    };
+    const resolveHook = (expression: Node, imports: Imports) => {
+      const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
+      const original = binding.getSymbol()?.getDeclarations() ?? [];
+      const imported = original.find(declaration => imports.has(declaration));
+      const name = Node.isImportSpecifier(imported) ? imported.getName() :
+        Node.isPropertyAccessExpression(expression) ? expression.getName() : expression.getText();
+      if (!HOOK.test(name)) return;
+      const importDeclaration = imported && imports.get(imported);
+      const specifier = importDeclaration?.getModuleSpecifierValue();
+      if (specifier === 'react' || specifier === 'react-dom') return;
+      const targets = declarationsOf(expression);
+      const local = targets.map(target => localHooks.get(target)).find(hook => hook);
+      if (local) {
+        return local.id;
+      }
+      const source = targets.map(target => target.getSourceFile()).find(target => projectFiles.has(target)) ??
+        importDeclaration?.getModuleSpecifierSourceFile();
+      if (source && projectFiles.has(source)) {
+        const path = relativePath(source);
+        const id = `hook:${path}#${name}`;
+        hooks.set(id, { id, path, name });
+        return id;
+      } else if (specifier && isPackageSpecifier(specifier)) {
+        const id = `hook:${specifier}#${name}`;
+        hooks.set(id, { id, name, module: specifier });
+        return id;
+      }
+    };
+    for (const [node, component] of components) {
+      const addEdge = (to: string | undefined, type: ComponentEdge['type']) => {
+        if (!to || to === component.id) return;
+        const edge = { from: component.id, to, type };
+        edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
+      };
+
+      const body = bodies.get(node)!;
+      const file = body.getSourceFile();
+      const imports = importsFor(file);
+
       const usedHooks = new Set<string>();
-      let primitiveCandidate = /^(?:src\/)?components\/ui\//.test(component.path);
       const render = (tag: Node) => {
         const binding = rootBinding(tag);
         const targets = declarationsOf(tag).flatMap(declaration => {
@@ -295,9 +307,6 @@ export class ComponentAnalyzer {
           targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
         }
         for (const target of targets) addEdge(target?.id, 'renders');
-        const intrinsic = (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) ||
-          (Node.isStringLiteral(tag) && /^[a-z]/.test(tag.getLiteralText()));
-        if (!intrinsic && !targets.length && !rendersExternal(tag)) primitiveCandidate = false;
       };
       const inspect = (child: Node) => {
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
@@ -317,45 +326,43 @@ export class ComponentAnalyzer {
           }
         }
         if (!Node.isCallExpression(child)) return;
+        componentCalls.add(child);
         const expression = child.getExpression();
         const [argument] = child.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument);
-        const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
-        const original = binding.getSymbol()?.getDeclarations() ?? [];
-        const imported = original.find(declaration => imports.has(declaration));
-        const name = Node.isImportSpecifier(imported) ? imported.getName() :
-          Node.isPropertyAccessExpression(expression) ? expression.getName() : expression.getText();
-        if (['getState', 'setState', 'subscribe', 'dispatch'].includes(name)) primitiveCandidate = false;
-        if (!HOOK.test(name)) return;
-        primitiveCandidate = false;
-        const importDeclaration = imported && imports.get(imported);
-        const specifier = importDeclaration?.getModuleSpecifierValue();
-        if (specifier === 'react' || specifier === 'react-dom') return;
-        const targets = declarationsOf(expression);
-        const local = targets.map(target => localHooks.get(target)).find(hook => hook);
-        if (local) {
-          usedHooks.add(local.id);
-          return;
-        }
-        const source = targets.map(target => target.getSourceFile()).find(target => projectFiles.has(target)) ??
-          importDeclaration?.getModuleSpecifierSourceFile();
-        if (source && projectFiles.has(source)) {
-          const path = relativePath(source);
-          const id = `hook:${path}#${name}`;
-          hooks.set(id, { id, path, name });
-          usedHooks.add(id);
-        } else if (specifier && isPackageSpecifier(specifier)) {
-          const id = `hook:${specifier}#${name}`;
-          hooks.set(id, { id, name, module: specifier });
-          usedHooks.add(id);
-        }
+        const hook = resolveHook(expression, imports);
+        if (hook) usedHooks.add(hook);
       };
       inspect(body);
       body.forEachDescendant(inspect);
       component.hooks = [...usedHooks];
-      component.primitiveCandidate = primitiveCandidate;
     }
 
-    return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions] };
+    const fileHooks = new Map<string, { hooks: string[]; isClient: boolean }>();
+    for (const file of files) {
+      const relative = relativePath(file);
+      const from = `file:${relative}`;
+      const usedHooks = new Set<string>();
+      const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
+        .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
+      file.forEachDescendant(node => {
+        if (!Node.isCallExpression(node) || componentCalls.has(node)) return;
+        const expression = node.getExpression();
+        if (actions.size) {
+          for (const declaration of declarationsOf(expression)) {
+            const to = actionIds.get(declaration);
+            if (to) edges.set(JSON.stringify(['uses-action', from, to]), { from, to, type: 'uses-action' });
+          }
+        }
+        const name = Node.isPropertyAccessExpression(expression) ? expression.getName() :
+          Node.isIdentifier(expression) ? expression.getText() : '';
+        if (!HOOK.test(name) && !aliasedHooks.has(name)) return;
+        const hook = resolveHook(expression, importsFor(file));
+        if (hook && hooks.get(hook)?.path) usedHooks.add(hook);
+      });
+      if (usedHooks.size) fileHooks.set(relative, { hooks: [...usedHooks], isClient: isClientFile(file) });
+    }
+
+    return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
   }
 }

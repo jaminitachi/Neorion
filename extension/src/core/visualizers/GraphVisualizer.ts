@@ -95,9 +95,10 @@ export class GraphVisualizer {
         // 1. Prepare Nodes
         const routeNodes = graph.routes.map(r => ({ 
             id: r.id, 
-            label: r.methods?.length ? `${r.methods.join(", ")} ${r.path}` : r.scope ?? r.path,
+            label: r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.scope ?? r.path,
             group: r.domain || 'other', 
             title: [`Route: ${r.path}`, `File: ${r.file}`, `Domain: ${r.domain}`,
+                ...(r.methods?.includes('ALL') ? ['HTTP methods undetermined'] : []),
                 ...(r.wraps?.length ? ['Wraps:', ...r.wraps.map(id => id.slice('route:'.length))] : [])
             ].join('\n'),
             shape: 'box',     
@@ -123,7 +124,15 @@ export class GraphVisualizer {
                 title: `Server action: ${label}\nPath: ${file}`, shape: 'box', margin: 10
             };
         });
-        const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes];
+        const callerNodes = [...new Set(graph.edges.map(edge => edge.from).filter(id => id.startsWith('file:')))]
+            .map(id => {
+                const file = id.slice('file:'.length);
+                return {
+                    id, label: path.posix.basename(file), path: file,
+                    group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'box'
+                };
+            });
+        const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes, ...callerNodes];
         const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group)));
         
