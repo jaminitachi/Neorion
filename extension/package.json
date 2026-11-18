@@ -51,11 +51,12 @@
   },
   "icon": "resources/icon.png",
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run check:notices",
     "compile": "tsc --noEmit && npm run bundle",
     "watch": "npm run bundle -- --watch",
-    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node16 --external:vscode --minify --legal-comments=external --outfile=out/extension.js",
-    "test": "node test/run-tests.cjs"
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node16 --external:vscode --minify --legal-comments=external --metafile=out/bundle-meta.json --outfile=out/extension.js",
+    "test": "node test/run-tests.cjs",
+    "check:notices": "node test/check-notices.cjs"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
