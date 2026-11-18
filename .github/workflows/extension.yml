@@ -21,7 +21,5 @@ jobs:
           cache: npm
           cache-dependency-path: extension/package-lock.json
       - run: npm ci
-      - run: npm run compile
-      - run: node test/fetch-fixtures.cjs
+      - run: npx --no-install vsce package
       - run: npm test
-      - run: npx vsce package
