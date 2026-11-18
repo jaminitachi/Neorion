@@ -1,0 +1,40 @@
+{"id": "v3-ac-03", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E1"}
+{"id": "v3-ac-03", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E0"}
+{"id": "v3-pm-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-04", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 5, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-04", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 5, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-09", "type": "T5", "parsed": true, "path_ok": true, "template_score": 0.5, "f1": 0.75, "precision": null, "recall": null, "exact": false, "variant": "E1"}
+{"id": "v3-ac-09", "type": "T5", "parsed": true, "path_ok": true, "template_score": 0.5, "f1": 0.75, "precision": null, "recall": null, "exact": false, "variant": "E0"}
+{"id": "v3-pm-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-09", "type": "T5", "parsed": true, "path_ok": true, "template_score": 1.0, "f1": 1.0, "precision": null, "recall": null, "exact": true, "variant": "E0"}
+{"id": "v3-pm-09", "type": "T5", "parsed": true, "path_ok": true, "template_score": 0.5, "f1": 0.75, "precision": null, "recall": null, "exact": false, "variant": "E1"}
+{"id": "v3-pm-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-04", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E0"}
+{"id": "v3-pm-04", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E1"}
+{"id": "v3-ac-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-07", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-ac-07", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-03", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-03", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-07", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-07", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 2, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-pm-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 6, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E1"}
+{"id": "v3-pm-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E0"}
+{"id": "v3-ac-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E1"}
