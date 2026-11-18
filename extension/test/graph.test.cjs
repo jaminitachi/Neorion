@@ -345,3 +345,10 @@ test('folds a shadcn Slot or intrinsic button without folding unknown conditiona
   assert.match(graph, /to="src-ui:Button" type="renders imports"/);
   assert.match(graph, /<component id="cmp:src\/components\/ui\/conditional.tsx#Conditional"/);
 });
+
+test('explains group member IDs and client files before the graph', async t => {
+  const graph = await generate(reviewFixture(t));
+  const [intro] = graph.split('\x60\x60\x60xml');
+  assert.match(intro, /ui:Name.*src-ui:Name.*prefix:file#Name/);
+  assert.match(intro, /clientFiles.*isClient=true.*other member files are false/);
+});

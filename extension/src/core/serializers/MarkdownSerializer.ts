@@ -79,7 +79,10 @@ export class MarkdownSerializer {
       });
     }
     return [
-      '# Codebase Architecture Map', '', '```xml',
+      '# Codebase Architecture Map', '',
+      'Read `ui:Name` and `src-ui:Name` as group member IDs. For duplicate names, use `prefix:file#Name`.',
+      'Member files are relative to the group directory. `clientFiles` marks `isClient=true`; other member files are false.',
+      '', '```xml',
       `<codebase name="${escapeXml(graph.metadata.name)}" framework="nextjs" router="${graph.metadata.router}" language="ts">`,
       section('directories', graph.metadata.directories.map(directory => element('dir', { ...directory }))),
       section('routes', graph.routes.map(route => element('route', {
