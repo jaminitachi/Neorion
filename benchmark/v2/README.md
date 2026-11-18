@@ -90,7 +90,8 @@ ai-chatbot and q11, q12, q13, q15 and q18 for papermark. Each E run starts
 in its own clean snapshot of the pinned commit. E0 has neither graph artifact.
 E1 adds only the graph overview and all generated Markdown detail files.
 
-The runner caps the schedule at 80 planned calls plus four crash retries.
+The runner caps the schedule at 80 planned calls plus four crash retries. Each
+phase uses up to eight workers, and each invocation has a ten-minute timeout.
 Use a fresh scratch directory for the run and preserve the per-attempt JSON,
 including CLI failures. Session transcripts supply tool-use blocks keyed by
 the JSON result's session ID. CLI `duration_ms` supplies wall time. Input
@@ -100,6 +101,7 @@ the grader's normalized set comparison.
 
 ```sh
 python3 benchmark/v2/run.py /tmp/neorion-v2-contexts /tmp/neorion-v2-run
+python3 benchmark/v2/report.py /tmp/neorion-v2-run benchmark/v2/RESULTS.md
 ```
 
 ## Score saved answers
