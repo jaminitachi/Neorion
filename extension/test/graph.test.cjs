@@ -83,18 +83,43 @@ function reviewFixture(t) {
   return copyFixture(t, 'review', '', path.join(__dirname, 'fixtures')).project;
 }
 
-test('redacts external local dependencies and retains project-relative values', async t => {
+test('allowlists dependency specs and emits development dependency names only', async t => {
   const project = reviewFixture(t);
-  fs.symlinkSync(path.dirname(project), path.join(project, 'outside'), 'junction');
+  const pkgFile = path.join(project, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pkgFile));
+  const unsafe = {
+    ...pkg.dependencies,
+    gitFile: 'git+file:///home/secretuser/private/repo',
+    bare: '/home/secretuser/private/lib',
+    portal: 'portal:/home/secretuser/private/p',
+    bareWindows: 'C:\\Users\\secretuser\\lib',
+    bareHome: '~/private/local-lib',
+    unc: '\\\\host\\private',
+    relative: './private/lib',
+    npmPath: 'npm:alias@file:../private',
+    workspacePath: 'workspace:../private',
+    encodedGit: 'git+https://example.com/repo.git#%2Fprivate',
+    gitQuery: 'https://example.com/org/repo.git?dir=/private'
+  };
+  const safe = {
+    semver: '^1.2.0 || >=2.0.0 <3',
+    alias: 'npm:@scope/package@~1.0.0',
+    workspace: 'workspace:^',
+    git: 'git+https://example.com/org/repo.git#feature/branch'
+  };
+  pkg.dependencies = { ...unsafe, ...safe };
+  pkg.devDependencies['dev-only'] = 'file:/home/secretuser';
+  fs.writeFileSync(pkgFile, JSON.stringify(pkg));
   const graph = await generate(project);
-  assert.match(graph, /name="absolute" version="file:\[redacted\]"/);
-  assert.match(graph, /name="relative" version="link:\[redacted\]"/);
-  assert.match(graph, /name="windows" version="file:\[redacted\]"/);
-  assert.match(graph, /name="symlink" version="file:\[redacted\]"/);
-  assert.match(graph, /name="local" version="file:src\/lib"/);
-  assert.match(graph, /name="encoded" version="file:\[redacted\]"/);
-  assert.match(graph, /name="home" version="link:\[redacted\]"/);
-  assert.doesNotMatch(graph, /secretuser|private\/local-lib|dev-only/);
+  for (const name of Object.keys(unsafe)) {
+    assert.ok(graph.includes('name="' + name + '" version="[redacted]"'), name);
+  }
+  for (const [name, spec] of Object.entries(safe)) {
+    const escaped = spec.replaceAll('>', '&gt;').replaceAll('<', '&lt;');
+    assert.ok(graph.includes('name="' + name + '" version="' + escaped + '"'), name);
+  }
+  assert.match(graph, /<dev-dependencies names="dev-only" \/>/);
+  assert.doesNotMatch(graph, /secretuser|private|name="dev-only"/);
 });
 
 test('resolves relative and aliased factory hooks to one project file and omits React hooks', async t => {

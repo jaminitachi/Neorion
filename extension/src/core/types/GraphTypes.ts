@@ -56,5 +56,6 @@ export interface CodebaseGraph {
   hooks: HookNode[];
   edges: ComponentEdge[];
   libraries: LibraryInfo[];
+  devDependencies: string[];
   actions: string[];
 }

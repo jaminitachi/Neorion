@@ -60,6 +60,9 @@ export class MarkdownSerializer {
       section('server-actions', graph.actions.map(id => element('action', { id }))),
       section('edges', [...relationships.values()].map(edge => element('edge', edge))),
       section('dependencies', graph.libraries.map(library => element('lib', { ...library }))),
+      ...(graph.devDependencies.length ? [
+        '  ' + element('dev-dependencies', { names: graph.devDependencies.join(' ') })
+      ] : []),
       '</codebase>', '```', ''
     ].join('\n');
   }

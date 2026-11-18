@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { validRange } from 'semver';
 import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
@@ -114,14 +115,15 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
 
             let name = path.basename(projectPath);
             let libraries: LibraryInfo[] = [];
+            let devDependencies: string[] = [];
             if (fs.existsSync(packageJsonPath)) {
                 const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
                 if (typeof pkg?.name === 'string' && pkg.name.trim()) name = pkg.name;
                 libraries = Object.entries(pkg?.dependencies ?? {}).map(([name, version]) => ({
                     name,
-                    version: typeof version === 'string' ? version.replace(/^(file|link):(.*)$/s, (_, scheme, file) =>
-                        `${scheme}:${localDependencyPath(projectPath, file)}`) : ''
+                    version: safeDependencySpec(version)
                 }));
+                devDependencies = Object.keys(pkg?.devDependencies ?? {}).sort();
             }
 
             // 4. Construct Graph
@@ -133,7 +135,8 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 },
                 routes,
                 ...analysis,
-                libraries
+                libraries,
+                devDependencies
             };
 
             if (options.markdown) {
@@ -196,30 +199,20 @@ function staticMetadataFiles(directory: string): string[] {
     }).sort();
 }
 
-function localDependencyPath(root: string, file: string): string {
-    try {
-        file = decodeURIComponent(file);
-    } catch {
-        return '[redacted]';
-    }
-    if (file.startsWith('~') || file.includes('\0')) return '[redacted]';
-    if ((path.win32.isAbsolute(file) && !path.isAbsolute(file)) ||
-        (!path.isAbsolute(file) && /^[a-z]:/i.test(file))) return '[redacted]';
-    const target = path.resolve(root, file.replace(/\\/g, path.sep));
-    if (!isWithin(root, target)) return '[redacted]';
-    try {
-        let ancestor = target;
-        while (!fs.existsSync(ancestor)) {
-            if (fs.lstatSync(ancestor, { throwIfNoEntry: false })?.isSymbolicLink()) return '[redacted]';
-            const parent = path.dirname(ancestor);
-            if (ancestor === parent) return '[redacted]';
-            ancestor = parent;
-        }
-        if (!isWithin(fs.realpathSync(root), fs.realpathSync(ancestor))) return '[redacted]';
-    } catch {
-        return '[redacted]';
-    }
-    return path.relative(root, target).split(path.sep).join('/') || '.';
+function safeDependencySpec(value: unknown): string {
+    if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) return '[redacted]';
+    const spec = value.trim();
+    if (spec && validRange(spec)) return spec;
+
+    const alias = /^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@(.+))?$/i.exec(spec);
+    if (alias && (!alias[1] || validRange(alias[1]) || /^[a-z][a-z0-9-]*$/i.test(alias[1]))) return spec;
+
+    const workspace = /^workspace:(.+)$/.exec(spec)?.[1];
+    if (workspace && (validRange(workspace) || workspace === '^' || workspace === '~')) return spec;
+
+    // Accept repository URLs with plain path segments and an optional ref.
+    const git = /^(?:git\+)?https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[a-z0-9_-][a-z0-9_.-]*)+\.git(?:#[a-z0-9_-][a-z0-9_.-]*(?:\/[a-z0-9_-][a-z0-9_.-]*)*)?$/i;
+    return git.test(spec) ? spec : '[redacted]';
 }
 
 function isWithin(root: string, file: string): boolean {
