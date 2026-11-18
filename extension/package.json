@@ -4,7 +4,7 @@
   "publisher": "neOriOn",
   "repository": {
     "type": "git",
-    "url": "https://github.com/neOriOn/neorion"
+    "url": "https://github.com/jaminitachi/Neorion"
   },
   "description": "Optimizes codebase context for LLM coding tools by generating an architectural graph.",
   "version": "0.2.2",
@@ -52,15 +52,17 @@
   "icon": "resources/icon.png",
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
-  },
-  "dependencies": {
-    "ts-morph": "^21.0.0",
-    "typescript": "^5.0.0"
+    "compile": "tsc --noEmit && npm run bundle",
+    "watch": "npm run bundle -- --watch",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node16 --external:vscode --minify --legal-comments=external --outfile=out/extension.js"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.80.0"
-  }
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "4.1.1",
+    "esbuild": "0.28.2",
+    "ts-morph": "^21.0.1",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
 }
