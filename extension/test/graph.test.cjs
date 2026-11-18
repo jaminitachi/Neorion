@@ -307,7 +307,8 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
   ].join('\n'));
   const graph = await generate(project);
   validate(graph, project, 'review-fixture');
-  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="3" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) surface.tsx#Surface\(title\)"/);
+  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="4" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) radix.tsx#Root surface.tsx#Surface\(title\)"/);
+  assert.match(graph, /from="src-ui:Dialog" to="src-ui:Root" type="renders"/);
   assert.match(graph, /#Inner" to="src-ui:Button" type="renders imports"/);
   assert.match(graph, /from="src-ui:Surface" to="cmp:src\/components\/banner.tsx#Banner" type="imports"/);
   assert.match(graph, /from="src-ui:Surface" to="src-ui:Button" type="renders imports"/);
@@ -317,4 +318,28 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
   assert.match(graph, /#CheckoutForm" isClient="false" props="amount"/);
   assert.match(graph, /#CheckoutForm" to="action:src\/app\/actions.ts#updateAccount" type="uses-action"/);
   assert.match(graph, /#ToastRegion" to="cmp:src\/components\/ui\/toaster.tsx#Toaster" type="renders imports"/);
+});
+
+test('folds a shadcn Slot or intrinsic button without folding unknown conditional targets', async t => {
+  const project = reviewFixture(t);
+  const ui = path.join(project, 'src/components/ui');
+  fs.writeFileSync(path.join(ui, 'button.tsx'), [
+    "import { Slot } from '@radix-ui/react-slot'",
+    'export function Button({ asChild, children }) {',
+    '  const Comp = asChild ? Slot : "button"',
+    '  return <Comp>{children}</Comp>',
+    '}'
+  ].join('\n'));
+  fs.writeFileSync(path.join(ui, 'conditional.tsx'), [
+    "import { Slot } from '@radix-ui/react-slot'",
+    'export function Conditional({ asChild, Unknown }) {',
+    '  const Comp = asChild ? Slot : Unknown',
+    '  return <Comp />',
+    '}'
+  ].join('\n'));
+  const graph = await generate(project);
+  validate(graph, project, 'review-fixture');
+  assert.match(graph, /members="[^"]*button.tsx#Button\(asChild,children\)/);
+  assert.match(graph, /to="src-ui:Button" type="renders imports"/);
+  assert.match(graph, /<component id="cmp:src\/components\/ui\/conditional.tsx#Conditional"/);
 });

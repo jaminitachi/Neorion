@@ -23,6 +23,14 @@ function isPackageSpecifier(specifier: string): boolean {
     !path.isAbsolute(specifier) && !path.win32.isAbsolute(specifier);
 }
 
+function isRadixAlias(node: Node | undefined): node is import('ts-morph').PropertyAccessExpression {
+  if (!Node.isPropertyAccessExpression(node)) return false;
+  return (rootBinding(node).getSymbol()?.getDeclarations() ?? []).some(binding => {
+    const specifier = binding.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
+    return specifier === 'radix-ui' || specifier?.startsWith('@radix-ui/react-');
+  });
+}
+
 function unwrapComponent(node: Node | undefined): Node | undefined {
   while (node) {
     if (Node.isParenthesizedExpression(node)) node = node.getExpression();
@@ -161,8 +169,10 @@ export class ComponentAnalyzer {
       for (const node of candidates) {
         if (aliases.has(node)) continue;
         const fn = callable(node);
-        const body = fn ? fn.getBody() :
-          Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined;
+        const initializer = Node.isVariableDeclaration(node) && exported.has(node) ? node.getInitializer() : undefined;
+        const radixAlias = isRadixAlias(initializer) ? initializer : undefined;
+        const body = fn ? fn.getBody() : radixAlias ??
+          (Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined);
         if (!body) continue;
         const name = (Node.isFunctionDeclaration(node) || Node.isVariableDeclaration(node) ||
           Node.isClassDeclaration(node)) ? node.getName() ?? 'default' : 'default';
@@ -174,7 +184,7 @@ export class ComponentAnalyzer {
         }
         const isDefault = defaultDeclarations.has(node);
         if (HTTP_METHODS.includes(name) || (!isDefault && !/^[A-Z]/.test(name))) continue;
-        if (!(route && isDefault) && !hasRender(body)) continue;
+        if (!radixAlias && !(route && isDefault) && !hasRender(body)) continue;
 
         const id = `cmp:${relative}#${name}`;
         const parameter = fn?.getParameters()[0];
@@ -223,6 +233,12 @@ export class ComponentAnalyzer {
     }
 
     const rendersExternal = (tag: Node, seen = new Set<Node>()): boolean => {
+      if (Node.isParenthesizedExpression(tag)) return rendersExternal(tag.getExpression(), seen);
+      if (Node.isConditionalExpression(tag)) {
+        return rendersExternal(tag.getWhenTrue(), new Set(seen)) && rendersExternal(tag.getWhenFalse(), seen);
+      }
+      if (Node.isStringLiteral(tag)) return /^[a-z]/.test(tag.getLiteralText());
+      if (!Node.isIdentifier(tag) && !Node.isPropertyAccessExpression(tag)) return false;
       const binding = rootBinding(tag);
       if (seen.has(binding)) return false;
       seen.add(binding);
@@ -238,8 +254,7 @@ export class ComponentAnalyzer {
       return declarationsOf(binding).some(node => {
         if (!Node.isVariableDeclaration(node)) return false;
         const initializer = node.getInitializer();
-        return (Node.isIdentifier(initializer) || Node.isPropertyAccessExpression(initializer)) &&
-          rendersExternal(initializer, seen);
+        return initializer !== undefined && rendersExternal(initializer, new Set(seen));
       });
     };
 
