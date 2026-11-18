@@ -7,8 +7,10 @@ export interface RouteNode {
   id: string;
   path: string;
   file: string;
-  type: 'page' | 'layout' | 'loading' | 'error' | 'not-found' | 'api';
+  type: 'page' | 'layout' | 'loading' | 'error' | 'not-found' | 'api' | 'robots' | 'sitemap' | 'opengraph-image' | 'template' | 'default' | 'global-error';
   methods?: string[];
+  scope?: string;
+  wraps?: string[];
   componentId?: string;
   isClient: boolean;
   domain: string;
@@ -46,6 +48,7 @@ export interface LibraryInfo {
 export interface CodebaseGraph {
   metadata: {
     name: string;
+    router: 'app' | 'pages' | 'mixed' | 'none';
     directories: DirectoryMetadata[];
   };
   routes: RouteNode[];
@@ -53,4 +56,5 @@ export interface CodebaseGraph {
   hooks: HookNode[];
   edges: ComponentEdge[];
   libraries: LibraryInfo[];
+  actions: string[];
 }

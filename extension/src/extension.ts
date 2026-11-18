@@ -71,8 +71,12 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
     }
 
     const packageJsonPath = path.join(projectPath, 'package.json');
-    const rootApp = path.join(projectPath, 'app');
-    const appDir = fs.existsSync(rootApp) ? rootApp : path.join(projectPath, 'src', 'app');
+    const routerDirectory = (name: string) => {
+        const root = path.join(projectPath, name);
+        return fs.existsSync(root) ? root : path.join(projectPath, 'src', name);
+    };
+    const appDir = routerDirectory('app');
+    const pagesDir = routerDirectory('pages');
 
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {
         try {
@@ -88,19 +92,21 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                     !path.relative(projectPath, filePath).split(path.sep)
                         .some(part => part === 'node_modules' || part === '.next');
             });
-            const routeAnalyzer = new RouteAnalyzer(appDir, projectPath);
-            const routes = sourceFiles.flatMap(file => routeAnalyzer.analyzeFile(file) ?? []);
+            const routes = new RouteAnalyzer(appDir, pagesDir, projectPath).analyze(sourceFiles, staticMetadataFiles(appDir));
+            const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
+            const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
+            const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
             if (progress) progress.report({ message: "Scanning components and hooks..." });
             const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes);
 
             const directories = new Map<string, DirectoryMetadata>();
-            const app = path.relative(projectPath, appDir).split(path.sep).join('/');
+            const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
             for (const file of sourceFiles) {
                 const parts = path.relative(projectPath, file.getFilePath()).split(path.sep).slice(0, -1);
                 for (const [index, part] of parts.entries()) {
                     const directory = parts.slice(0, index + 1).join('/');
                     if (index > (parts[0] === 'src' ? 1 : 0)) break;
-                    const role = directory === app ? 'routes' : part === 'components' ? 'ui_components' :
+                    const role = routeDirectories.includes(directory) ? 'routes' : part === 'components' ? 'ui_components' :
                         part === 'hooks' ? 'react_hooks' : 'other';
                     directories.set(directory, { path: directory, role });
                 }
@@ -111,11 +117,10 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             if (fs.existsSync(packageJsonPath)) {
                 const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
                 if (typeof pkg?.name === 'string' && pkg.name.trim()) name = pkg.name;
-                const deps = { ...pkg?.dependencies, ...pkg?.devDependencies };
-                libraries = Object.entries(deps).map(([name, version]) => ({
+                libraries = Object.entries(pkg?.dependencies ?? {}).map(([name, version]) => ({
                     name,
-                    version: typeof version === 'string' ? version.replace(/^(file|link):(.+)$/, (_, scheme, file) =>
-                        `${scheme}:${(path.isAbsolute(file) ? path.relative(projectPath, file) : file).split(path.sep).join('/')}`) : ''
+                    version: typeof version === 'string' ? version.replace(/^(file|link):(.*)$/s, (_, scheme, file) =>
+                        `${scheme}:${localDependencyPath(projectPath, file)}`) : ''
                 }));
             }
 
@@ -123,6 +128,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             const graph: CodebaseGraph = {
                 metadata: {
                     name,
+                    router: hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none'),
                     directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
                 },
                 routes,
@@ -176,6 +182,44 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             await run(progress);
         });
     }
+}
+
+function staticMetadataFiles(directory: string): string[] {
+    if (!fs.existsSync(directory)) return [];
+    return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+        const file = path.join(directory, entry.name);
+        if (entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.')) {
+            return staticMetadataFiles(file);
+        }
+        return entry.isFile() && /^(?:opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name)
+            ? [file] : [];
+    }).sort();
+}
+
+function localDependencyPath(root: string, file: string): string {
+    try {
+        file = decodeURIComponent(file);
+    } catch {
+        return '[redacted]';
+    }
+    if (file.startsWith('~') || file.includes('\0')) return '[redacted]';
+    if ((path.win32.isAbsolute(file) && !path.isAbsolute(file)) ||
+        (!path.isAbsolute(file) && /^[a-z]:/i.test(file))) return '[redacted]';
+    const target = path.resolve(root, file.replace(/\\/g, path.sep));
+    if (!isWithin(root, target)) return '[redacted]';
+    try {
+        let ancestor = target;
+        while (!fs.existsSync(ancestor)) {
+            if (fs.lstatSync(ancestor, { throwIfNoEntry: false })?.isSymbolicLink()) return '[redacted]';
+            const parent = path.dirname(ancestor);
+            if (ancestor === parent) return '[redacted]';
+            ancestor = parent;
+        }
+        if (!isWithin(fs.realpathSync(root), fs.realpathSync(ancestor))) return '[redacted]';
+    } catch {
+        return '[redacted]';
+    }
+    return path.relative(root, target).split(path.sep).join('/') || '.';
 }
 
 function isWithin(root: string, file: string): boolean {

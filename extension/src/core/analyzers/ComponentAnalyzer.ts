@@ -2,7 +2,9 @@ import { Node, SourceFile } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, HookNode, RouteNode } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
-import { HTTP_METHODS, isClientFile } from './RouteAnalyzer';
+import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
+
+type NodeWithBody = import('ts-morph').FunctionDeclaration | import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression;
 
 const HOOK = /^use[A-Z0-9]/;
 
@@ -11,12 +13,21 @@ function declarationsOf(node: Node): Node[] {
   return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
 }
 
-function callable(node: Node) {
+function callable(node: Node, seen = new Set<Node>()): NodeWithBody | undefined {
+  if (seen.has(node)) return;
+  seen.add(node);
   if (Node.isFunctionDeclaration(node) && node.getBody()) return node;
   if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
     let initializer: Node | undefined = Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression();
     while (initializer) {
       if (Node.isArrowFunction(initializer) || Node.isFunctionExpression(initializer)) return initializer;
+      if (Node.isIdentifier(initializer) || Node.isPropertyAccessExpression(initializer)) {
+        for (const declaration of declarationsOf(initializer)) {
+          const resolved = callable(declaration, seen);
+          if (resolved) return resolved;
+        }
+        break;
+      }
       if (Node.isParenthesizedExpression(initializer)) initializer = initializer.getExpression();
       else if (Node.isCallExpression(initializer) &&
                /(?:^|\.)(?:memo|forwardRef)$/.test(initializer.getExpression().getText())) {
@@ -55,12 +66,37 @@ export class ComponentAnalyzer {
     const bodies = new Map<Node, Node>();
     const hooks = new Map<string, HookNode>();
     const localHooks = new Map<Node, HookNode>();
+    const projectFiles = new Set(files);
+    const actions = new Set<string>();
+    const relativePath = (file: SourceFile) => path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
     const routesByFile = new Map(routes.map(route => [route.file, route]));
 
     for (const file of files) {
-      const relative = path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
+      const relative = relativePath(file);
       const route = routesByFile.get(relative);
       if (route?.type === 'api') continue;
+      if (hasDirective(file.getStatements(), 'use server')) {
+        for (const [name, declarations] of file.getExportedDeclarations()) {
+          if (declarations.some(declaration => callable(declaration)?.isAsync())) {
+            actions.add(`action:${relative}#${name}`);
+          }
+        }
+      }
+      if (file.getFullText().includes('use server')) {
+        file.forEachDescendant(node => {
+          if (!Node.isFunctionDeclaration(node) && !Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return;
+          const body = node.getBody();
+          if (!node.isAsync() || !Node.isBlock(body) || !hasDirective(body.getStatements(), 'use server')) return;
+          const parent = node.getParent();
+          const name = Node.isVariableDeclaration(parent) ? parent.getName() :
+            Node.isArrowFunction(node) ? undefined : node.getName();
+          const isDefault = Node.isExportAssignment(parent) || (Node.isFunctionDeclaration(node) && node.isDefaultExport());
+          const action = `action:${relative}#${isDefault ? 'default' : name ?? '(inline)'}`;
+          if (!actions.has(action)) {
+            actions.add(`${action}:${node.getStartLineNumber()}`);
+          }
+        });
+      }
 
       const defaultDeclarations = new Set(file.getDefaultExportSymbol()?.getDeclarations().flatMap(node =>
         Node.isExportAssignment(node) ? [node, ...declarationsOf(node.getExpression())] : [node]) ?? []);
@@ -89,7 +125,7 @@ export class ComponentAnalyzer {
         const parameter = fn?.getParameters()[0];
         const pattern = parameter?.getNameNode();
         const props = pattern && Node.isObjectBindingPattern(pattern)
-          ? pattern.getElements().map(element =>
+          ? pattern.getElements().filter(element => !element.getDotDotDotToken()).map(element =>
             (element.getPropertyNameNode() ?? element.getNameNode()).getText())
           : [];
         const docs = Node.isVariableDeclaration(node) ? node.getVariableStatement() : node;
@@ -104,7 +140,7 @@ export class ComponentAnalyzer {
     }
 
     for (const file of files) {
-      const relative = path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
+      const relative = relativePath(file);
       const route = routesByFile.get(relative);
       if (!route || route.type === 'api' || route.componentId) continue;
       const exported = file.getExportedDeclarations().get('default');
@@ -120,16 +156,16 @@ export class ComponentAnalyzer {
         edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
       };
 
-      const file = node.getSourceFile();
-      const imports = new Map<Node, string>();
+      const body = bodies.get(node)!;
+      const file = body.getSourceFile();
+      const imports = new Map<Node, import('ts-morph').ImportDeclaration>();
       for (const declaration of file.getImportDeclarations()) {
         if (declaration.isTypeOnly()) continue;
-        const module = declaration.getModuleSpecifierValue();
         const imported = [declaration.getDefaultImport(), declaration.getNamespaceImport(),
           ...declaration.getNamedImports().filter(specifier => !specifier.isTypeOnly())
             .map(specifier => specifier.getAliasNode() ?? specifier.getNameNode())];
         for (const binding of imported) {
-          for (const declaration of binding?.getSymbol()?.getDeclarations() ?? []) imports.set(declaration, module);
+          for (const bindingDeclaration of binding?.getSymbol()?.getDeclarations() ?? []) imports.set(bindingDeclaration, declaration);
         }
       }
 
@@ -156,24 +192,34 @@ export class ComponentAnalyzer {
         const name = Node.isImportSpecifier(imported) ? imported.getName() :
           Node.isPropertyAccessExpression(expression) ? expression.getName() : expression.getText();
         if (!HOOK.test(name)) return;
-        const local = declarationsOf(expression).map(target => localHooks.get(target)).find(hook => hook);
+        const importDeclaration = imported && imports.get(imported);
+        const specifier = importDeclaration?.getModuleSpecifierValue();
+        if (specifier === 'react' || specifier === 'react-dom') return;
+        const targets = declarationsOf(expression);
+        const local = targets.map(target => localHooks.get(target)).find(hook => hook);
         if (local) {
           usedHooks.add(local.id);
-        } else if (imported) {
-          const specifier = imports.get(imported)!;
-          const module = path.isAbsolute(specifier)
-            ? path.relative(this.root, specifier).split(path.sep).join('/') : specifier;
-          const id = `hook:${module}#${name}`;
-          hooks.set(id, { id, name, module });
+          return;
+        }
+        const source = targets.map(target => target.getSourceFile()).find(target => projectFiles.has(target)) ??
+          importDeclaration?.getModuleSpecifierSourceFile();
+        if (source && projectFiles.has(source)) {
+          const path = relativePath(source);
+          const id = `hook:${path}#${name}`;
+          hooks.set(id, { id, path, name });
+          usedHooks.add(id);
+        } else if (specifier && !specifier.startsWith('.') && !path.isAbsolute(specifier) &&
+                   !path.win32.isAbsolute(specifier) && !specifier.startsWith('@/') && !specifier.startsWith('#')) {
+          const id = `hook:${specifier}#${name}`;
+          hooks.set(id, { id, name, module: specifier });
           usedHooks.add(id);
         }
       };
-      const body = bodies.get(node)!;
       inspect(body);
       body.forEachDescendant(inspect);
       component.hooks = [...usedHooks];
     }
 
-    return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()] };
+    return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions] };
   }
 }

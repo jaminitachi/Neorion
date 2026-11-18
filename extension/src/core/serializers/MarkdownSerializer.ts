@@ -22,26 +22,42 @@ function section(name: string, entries: string[]): string {
 
 export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph): string {
+    const routeComponents = new Set(graph.routes.map(route => route.componentId));
+    const primitives = new Map<string, string>();
+    const primitiveGroups = new Map<string, number>();
+    for (const component of graph.components) {
+      const directory = /^(?:src\/)?components\/ui(?=\/)/.exec(component.path)?.[0];
+      if (!directory || routeComponents.has(component.id)) continue;
+      const group = `cmp:${directory}`;
+      primitives.set(component.id, group);
+      primitiveGroups.set(group, (primitiveGroups.get(group) ?? 0) + 1);
+    }
     const relationships = new Map<string, { from: string; to: string; type: string }>();
     for (const edge of graph.edges) {
-      const key = JSON.stringify([edge.from, edge.to]);
+      if (primitives.has(edge.from)) continue;
+      const to = primitives.get(edge.to) ?? edge.to;
+      const key = JSON.stringify([edge.from, to]);
       const previous = relationships.get(key);
-      relationships.set(key, { ...edge, type: previous ? `${previous.type} ${edge.type}` : edge.type });
+      const types = new Set(previous?.type.split(' '));
+      types.add(edge.type);
+      relationships.set(key, { ...edge, to, type: [...types].join(' ') });
     }
     return [
       '# Codebase Architecture Map', '', '```xml',
-      `<codebase name="${escapeXml(graph.metadata.name)}" framework="nextjs" router="app" language="ts">`,
+      `<codebase name="${escapeXml(graph.metadata.name)}" framework="nextjs" router="${graph.metadata.router}" language="ts">`,
       section('directories', graph.metadata.directories.map(directory => element('dir', { ...directory }))),
       section('routes', graph.routes.map(route => element('route', {
-        id: route.id, path: route.path, file: route.file, type: route.type,
-        methods: route.methods?.join(' '), component: route.componentId, isClient: route.isClient
+        id: route.id, path: route.path, scope: route.scope, type: route.type,
+        methods: route.methods?.join(' '), wraps: route.wraps?.length ? route.wraps.join(' ') : undefined, component: route.componentId, isClient: route.isClient
       }))),
-      section('components', graph.components.map(component => element('component', {
-        id: component.id, name: component.name, path: component.path, isClient: component.isClient,
+      section('components', [...graph.components.filter(component => !primitives.has(component.id)).map(component => element('component', {
+        id: component.id, isClient: component.isClient,
         props: component.props.length ? component.props.join(' ') : undefined,
         hooks: component.hooks.length ? component.hooks.join(' ') : undefined
-      }, component.description))),
-      section('hooks', graph.hooks.map(hook => element('hook', { ...hook }))),
+      }, component.description)),
+        ...[...primitiveGroups].map(([id, count]) => element('component-group', { id, count: String(count) }))]),
+      section('hooks', graph.hooks.map(hook => element('hook', { id: hook.id }))),
+      section('server-actions', graph.actions.map(id => element('action', { id }))),
       section('edges', [...relationships.values()].map(edge => element('edge', edge))),
       section('dependencies', graph.libraries.map(library => element('lib', { ...library }))),
       '</codebase>', '```', ''
