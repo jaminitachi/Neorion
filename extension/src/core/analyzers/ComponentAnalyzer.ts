@@ -1,17 +1,13 @@
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, HookNode, RouteNode } from '../types/GraphTypes';
+import { collectApiFacts, collectRenameFacts, collectRenderFacts, declarationsOf, DetailFacts } from './ArchitectureFacts';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
 
 type NodeWithBody = import('ts-morph').FunctionDeclaration | import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression;
 
 const HOOK = /^use[A-Z0-9]/;
-
-function declarationsOf(node: Node): Node[] {
-  const symbol = node.getSymbol();
-  return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
-}
 
 function rootBinding(node: Node): Node {
   while (Node.isPropertyAccessExpression(node)) node = node.getExpression();
@@ -96,7 +92,7 @@ function lexicalName(node: Node): string | undefined {
 export class ComponentAnalyzer {
   constructor(private readonly root: string) {}
 
-  public analyze(files: SourceFile[], routes: RouteNode[]) {
+  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
     const components = new Map<Node, ComponentNode>();
     const bodies = new Map<Node, Node>();
     const aliases = new Map<Node, Node[]>();
@@ -368,6 +364,22 @@ export class ComponentAnalyzer {
       if (usedHooks.size) fileHooks.set(relative, { hooks: [...usedHooks], isClient: isClientFile(file) });
     }
 
-    return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
+    const facts: DetailFacts = new Map();
+    if (includeFacts) {
+      const symbols = new Map<Node, string>();
+      for (const [node, id] of actionIds) symbols.set(node, id.slice('action:'.length));
+      for (const [node, component] of components) symbols.set(node, component.id.slice('cmp:'.length));
+      for (const [node, hook] of localHooks) symbols.set(node, hook.id.slice('hook:'.length));
+      for (const [node, targets] of aliases) {
+        const component = resolveComponent(node);
+        if (component) symbols.set(node, component.id.slice('cmp:'.length));
+        const body = targets.map(target => bodies.get(target)).find(Boolean);
+        if (body) bodies.set(node, body);
+      }
+      collectRenameFacts(files, relativePath, symbols, facts);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable);
+    }
+    return { facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
   }
 }

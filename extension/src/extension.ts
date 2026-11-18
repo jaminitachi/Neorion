@@ -5,6 +5,7 @@ import { validRange } from 'semver';
 import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
+import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
 import { writeGraph } from './core/serializers/GraphOutput';
 import { CodebaseGraph, DirectoryMetadata, LibraryInfo } from './core/types/GraphTypes';
 
@@ -21,6 +22,14 @@ export function activate(context: vscode.ExtensionContext) {
     let showGraphDisposable = vscode.commands.registerCommand('neo.showGraph', async () => {
         await runAnalysis(context, { visualize: true });
     });
+
+    for (const [command, connect] of [['neo.connectAITools', true], ['neo.disconnectAITools', false]] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) return vscode.window.showErrorMessage('No workspace folder open');
+            await configureAgents(root, connect ? await findProject(root) ?? root : root, connect);
+        }));
+    }
 
     // Auto-update on save
     let debounceTimer: NodeJS.Timeout;
@@ -43,6 +52,33 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showGraphDisposable);
 }
 
+async function findProject(root: string) {
+    if (fs.existsSync(path.join(root, 'tsconfig.json'))) return root;
+    const configs = await vscode.workspace.findFiles('**/tsconfig.json', '**/{node_modules,.next}/**');
+    const candidates = configs.map(uri => uri.fsPath).filter(file => isWithin(root, file));
+    candidates.sort((a, b) =>
+        path.relative(root, a).split(path.sep).length -
+        path.relative(root, b).split(path.sep).length || a.localeCompare(b));
+    return candidates.length ? path.dirname(candidates[0]) : undefined;
+}
+
+async function configureAgents(root: string, project: string, connect: boolean) {
+    try {
+        const targets = connect ? await vscode.window.showQuickPick(AGENT_FILES.map(label => ({
+            label,
+            picked: fs.existsSync(path.join(root, label))
+        })), { canPickMany: true, placeHolder: 'Choose AI instruction files to update' }) : AGENT_FILES.map(label => ({ label }));
+        if (!targets?.length) return;
+        const selectedPaths = new Set(targets.map(target => path.join(root, target.label)));
+        const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
+        if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI instructions`);
+        const count = updateAgentFiles(root, project, targets.map(target => target.label), connect);
+        vscode.window.showInformationMessage(`Neorion updated ${count} AI instruction file(s).`);
+    } catch (error) {
+        vscode.window.showErrorMessage(`Could not update AI instructions: ${error}`);
+    }
+}
+
 interface AnalysisOptions {
     markdown?: boolean;
     visualize?: boolean;
@@ -55,21 +91,13 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
         return;
     }
 
-    let projectPath = workspaceFolders[0].uri.fsPath;
-    let tsConfigPath = path.join(projectPath, 'tsconfig.json');
-    if (!fs.existsSync(tsConfigPath)) {
-        const tsconfigs = await vscode.workspace.findFiles('**/tsconfig.json', '**/{node_modules,.next}/**');
-        const candidates = tsconfigs.map(uri => uri.fsPath).filter(file => isWithin(projectPath, file));
-        candidates.sort((a, b) =>
-            path.relative(projectPath, a).split(path.sep).length -
-            path.relative(projectPath, b).split(path.sep).length || a.localeCompare(b));
-        if (!candidates.length) {
-            if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
-            return;
-        }
-        tsConfigPath = candidates[0];
-        projectPath = path.dirname(tsConfigPath);
+    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    const projectPath = await findProject(workspaceRoot);
+    if (!projectPath) {
+        if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
+        return;
     }
+    const tsConfigPath = path.join(projectPath, 'tsconfig.json');
 
     const packageJsonPath = path.join(projectPath, 'package.json');
     const routerDirectory = (name: string) => {
@@ -98,7 +126,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
             const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
             if (progress) progress.report({ message: "Scanning components and hooks..." });
-            const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes);
+            const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes, !!options.markdown);
 
             const directories = new Map<string, DirectoryMetadata>();
             const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
@@ -134,6 +162,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                     directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
                 },
                 routes,
+                sourceFileCount: sourceFiles.length,
                 ...analysis,
                 libraries,
                 devDependencies
@@ -143,6 +172,16 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 // 5. Serialize
                 if (progress) progress.report({ message: "Generating Markdown..." });
                 const outputPath = writeGraph(projectPath, graph);
+
+                const promptKey = 'neo.agentPromptShown:' + projectPath;
+                if (context.workspaceState && !context.workspaceState.get(promptKey)) {
+                    const saved = context.workspaceState.update(promptKey, true);
+                    void Promise.resolve(saved).then(async () => {
+                        const answer = await vscode.window.showInformationMessage(
+                            'Connect AI tools to the Neorion architecture map?', 'Yes');
+                        if (answer === 'Yes') await configureAgents(workspaceRoot, projectPath, true);
+                    }).catch(error => console.error(error));
+                }
 
                 if (!silent) {
                     const doc = await vscode.workspace.openTextDocument(outputPath);

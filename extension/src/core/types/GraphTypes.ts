@@ -52,6 +52,8 @@ export interface CodebaseGraph {
     directories: DirectoryMetadata[];
   };
   routes: RouteNode[];
+  sourceFileCount: number;
+  facts: Map<string, Set<string>>;
   components: ComponentNode[];
   hooks: HookNode[];
   edges: ComponentEdge[];

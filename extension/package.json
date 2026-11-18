@@ -16,7 +16,9 @@
   ],
   "activationEvents": [
     "onCommand:neo.generateGraph",
-    "onCommand:neo.showGraph"
+    "onCommand:neo.showGraph",
+    "onCommand:neo.connectAITools",
+    "onCommand:neo.disconnectAITools"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -28,6 +30,14 @@
       {
         "command": "neo.showGraph",
         "title": "Neorion: Show Architecture Graph (Beta)"
+      },
+      {
+        "command": "neo.connectAITools",
+        "title": "Neorion: Connect AI tools"
+      },
+      {
+        "command": "neo.disconnectAITools",
+        "title": "Neorion: Disconnect AI tools"
       }
     ],
     "viewsContainers": {

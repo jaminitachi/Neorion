@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { count, assertOverviewLinks, overviewBudget } = require('./graph-output.cjs');
-const { generate, visualize } = require('./run.cjs');
+const { generate, visualize, register } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
 
 const externalFixtures = process.env.NEORION_FIXTURES;
@@ -19,7 +19,8 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
   const project = path.join(tmp, prefix, name);
   fs.cpSync(path.join(root, name), project, {
     recursive: true,
-    filter: file => !['.git', 'node_modules', '.next', '.neorion', 'codebase_graph.md'].includes(path.basename(file))
+    filter: file => !['.git', 'node_modules', '.next', '.neorion', 'codebase_graph.md'].includes(path.basename(file)) &&
+      path.relative(path.join(root, name), file) !== 'neorion/graph'
   });
   return { tmp, project };
 }
@@ -27,7 +28,7 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
 function readMap(project, overview, name) {
   assert.ok(overview.startsWith('# ' + name + ' architecture') ||
     overview.split('\n').includes('# ' + name + ' architecture (mixed router)'));
-  const root = path.join(project, '.neorion/graph');
+  const root = path.join(project, 'neorion/graph');
   const details = fs.readdirSync(root).filter(file => file.endsWith('.md'));
   assertOverviewLinks(project, overview);
   const files = Object.fromEntries(details.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
@@ -38,6 +39,7 @@ function readMap(project, overview, name) {
     if (file === '+dependencies.md' || file.startsWith('+reverse-')) continue;
     let directory;
     for (const line of detail.split('\n')) {
+      if (/^(rendered|rename|wrap|fetch) /.test(line)) continue;
       if (line.endsWith('/') && !line.startsWith(' ')) directory = line;
       if (line.startsWith('  ') && line.includes(': ')) {
         const basename = line.trim().split(': ')[0].replace(/ \(c\)$/, '');
@@ -64,6 +66,9 @@ test('taxonomy maps APIs, special routes, duplicate component names, and hooks',
     .reduce((total, [, detail]) => total + count(detail), 0);
   assert.ok(areaTotal <= 4500, `taxonomy area details: ${areaTotal}`);
   assert.ok(Object.values(details).reduce((total, detail) => total + count(detail), 0) <= 5000);
+  const facts = Object.values(details).join('\n');
+  for (const kind of ['wrap', 'fetch', 'rendered', 'rename']) assert.match(facts, new RegExp(`^${kind} `, 'm'));
+  assert.match(overview, /Detail budget abbreviates .*lists/);
 });
 
 test('commerce maps its revalidation handler and distinguishes render and import edges', { skip: !externalFixtures }, async t => {
@@ -361,7 +366,7 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
   assert.match(overview, /^Overview abbreviates .*Routes/);
   assert.match(overview, /browse \[all details\]/);
   assertOverviewLinks(project, overview);
-  const directory = path.join(project, '.neorion/graph');
+  const directory = path.join(project, 'neorion/graph');
   const shards = fs.readdirSync(directory).filter(file => file.startsWith('src~pages~api'));
   assert.ok(shards.length > 1);
   const contents = shards.map(file => fs.readFileSync(path.join(directory, file), 'utf8'));
@@ -403,7 +408,7 @@ test('publishes distinct literal paths for percent, route-group and tilde names'
   const overview = await generate(project);
   assertOverviewLinks(project, overview);
   assert.doesNotMatch(overview, /<[^>]*%[^>]*>/);
-  assert.match(overview, /<\.neorion\/graph\/src~app~\(report\)\.md>/);
+  assert.match(overview, /<neorion\/graph\/src~app~\(report\)\.md>/);
 });
 
 const benchRepos = process.env.NEORION_BENCH_REPOS;
@@ -420,7 +425,7 @@ for (const name of ['ai-chatbot', 'papermark']) {
     const overview = await generate(project);
     assertOverviewLinks(project, overview);
     assert.ok(count(overview) <= overviewBudget(listing));
-    const directory = path.join(project, '.neorion/graph');
+    const directory = path.join(project, 'neorion/graph');
     for (const file of fs.readdirSync(directory)) {
       assert.ok(count(fs.readFileSync(path.join(directory, file), 'utf8')) <= 3000, file);
     }
@@ -435,3 +440,159 @@ for (const name of ['ai-chatbot', 'papermark']) {
     }
   });
 }
+
+test('connects only selected AI instructions after consent, once per project, and restores originals', async t => {
+  const project = reviewFixture(t);
+  const agentFile = path.join(project, 'AGENTS.md');
+  const cursorRule = path.join(project, '.cursor/rules/neorion.mdc');
+  const claudeFile = path.join(project, 'CLAUDE.md');
+  const instructions = 'Existing instructions.\r\n';
+  const cursor = '---\r\ndescription: Existing rule\r\nalwaysApply: false\r\n---\r\nExisting body.';
+  fs.writeFileSync(agentFile, instructions);
+  fs.mkdirSync(path.dirname(cursorRule), { recursive: true });
+  fs.writeFileSync(cursorRule, cursor);
+  let answer;
+  let prompts = 0;
+  let picks = 0;
+  let selection = ['AGENTS.md', '.cursor/rules/neorion.mdc'];
+  const state = new Map();
+  const options = {
+    workspaceState: { get: key => state.get(key), update: async (key, value) => state.set(key, value) },
+    window: {
+      async showInformationMessage(_message, ...choices) {
+        if (choices.includes('Yes')) { prompts++; return answer; }
+      },
+      async showQuickPick(items) {
+        picks++;
+        assert.deepEqual(items.filter(item => item.picked).map(item => item.label),
+          ['AGENTS.md', '.cursor/rules/neorion.mdc']);
+        return items.filter(item => selection.includes(item.label));
+      }
+    }
+  };
+  const { commands } = register(project, undefined, [], options);
+  await commands.get('neo.generateGraph')();
+  await commands.get('neo.generateGraph')();
+  assert.equal(prompts, 1);
+  assert.equal(picks, 0);
+  assert.equal(fs.readFileSync(agentFile, 'utf8'), instructions);
+  assert.equal(fs.readFileSync(cursorRule, 'utf8'), cursor);
+
+  state.clear();
+  answer = 'Yes';
+  await commands.get('neo.generateGraph')();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(prompts, 2);
+  assert.equal(picks, 1);
+  const connected = fs.readFileSync(agentFile, 'utf8');
+  assert.match(connected, /<!-- neorion:start -->\r\n.*codebase_graph\.md.*neorion\/graph\/.*grep/);
+  assert.match(fs.readFileSync(cursorRule, 'utf8'), /^---\r\ndescription: Existing rule\r\nalwaysApply: true\r\n---/);
+  assert.ok(count(connected.slice(0, connected.indexOf(instructions))) <= 150);
+  assert.ok(!fs.existsSync(claudeFile));
+
+  selection = [...selection, 'CLAUDE.md'];
+  await commands.get('neo.connectAITools')();
+  assert.equal(fs.readFileSync(agentFile, 'utf8'), connected);
+  assert.ok(fs.existsSync(claudeFile));
+  await commands.get('neo.disconnectAITools')();
+  await commands.get('neo.disconnectAITools')();
+  assert.equal(fs.readFileSync(agentFile, 'utf8'), instructions);
+  assert.equal(fs.readFileSync(cursorRule, 'utf8'), cursor);
+  assert.ok(!fs.existsSync(claudeFile));
+});
+
+test('emits transitive render, App and Pages wrapping, rename and API facts with project paths', async t => {
+  const project = reviewFixture(t);
+  const write = (file, source) => {
+    const target = path.join(project, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, source);
+  };
+  write('src/components/architecture.tsx', `
+    export function Leaf() { return <aside /> }
+    export function Middle() { return <Leaf /> }
+    export function InnerProvider({ children }) { return <Context.Provider>{children}</Context.Provider> }
+    export function OuterProvider({ children: content }) { return <InnerProvider>{content}</InnerProvider> }
+    export function useArchitecture() { return 1 }
+  `);
+  write('src/components/barrel.ts', `
+    export { Leaf as Renamed, Middle, OuterProvider, useArchitecture } from './architecture';
+    export { report as reportAlias } from '../app/report';
+  `);
+  write('src/components/index.ts', "export * from './barrel'");
+  write('src/app/help/page.tsx', `
+    import { Middle as Content, Renamed, useArchitecture as useLocal, reportAlias as submit } from '@/components';
+    export default function Help() { return <Content /> }
+  `);
+  write('src/app/layout.tsx', `
+    import { OuterProvider as Provider } from '@/components';
+    export default function RootLayout({children}) { return <Provider>{children}</Provider> }
+  `);
+  write('src/app/(account)/template.tsx', 'export default function Template({children}) { return <main>{children}</main> }');
+  write('src/pages/_app.tsx', `
+    import { OuterProvider } from '@/components';
+    export default function App({ Component: Screen }) {
+      const getLayout = Screen.getLayout ?? (page => page);
+      return <OuterProvider>{getLayout(<Screen />)}</OuterProvider>;
+    }
+  `);
+  write('src/pages/index.tsx', `
+    import * as components from '@/components';
+    export default function Index() { return <components.Middle /> }
+    Index.getLayout = page => <PageProvider>{page}</PageProvider>;
+    function PageProvider({children}) { return <section>{children}</section> }
+  `);
+  write('src/app/api/report/[id]/route.ts', 'export function GET() {} export function POST() {}');
+  write('src/app/api/report/latest/route.ts', 'export function GET() {}');
+  write('src/pages/api/optional/[[...slug]].ts', 'export default function handler() {}');
+  write('src/components/fetches.ts', `
+    'use client';
+    export const latest = () => fetch('/api/report/latest?format=json');
+    export const optional = () => fetch('/api/optional');
+    export const save = (id) => fetch(\`/api/report/\${id}\`, { method: 'POST' });
+    export const missing = () => fetch('/api/unmapped');
+  `);
+  write('src/app/report.ts', `
+    'use server';
+    import { save } from '../components/fetches';
+    export async function report(id) { return save(id) }
+    export async function inline() { return fetch('/api/report/123') }
+  `);
+  const overview = await generate(project);
+  const details = Object.values(readMap(project, overview, 'review-fixture')).join('\n');
+  for (const fact of [
+    'rendered src/components/architecture.tsx#Leaf <- src/app/help/page.tsx /help',
+    'rendered src/components/architecture.tsx#Leaf <- src/pages/index.tsx /',
+    'rendered src/components/architecture.tsx#InnerProvider <- src/pages/index.tsx /',
+    'wrap src/app/help/page.tsx <- src/app/layout.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider',
+    'wrap src/app/(account)/page.tsx <- src/app/layout.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/app/(account)/layout.tsx',
+    'wrap src/pages/index.tsx <- src/pages/_app.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/pages/index.tsx#PageProvider',
+    'rename src/components/architecture.tsx#Leaf <- src/components/barrel.ts',
+    'rename src/components/architecture.tsx#Leaf <- src/components/index.ts',
+    'rename src/components/architecture.tsx#Leaf <- src/app/help/page.tsx',
+    'rename src/components/architecture.tsx#Middle <- src/pages/index.tsx',
+    'rename src/components/architecture.tsx#useArchitecture <- src/app/help/page.tsx',
+    'rename src/app/report.ts#report <- src/app/help/page.tsx',
+    'fetch src/components/fetches.ts -> src/app/api/report/latest/route.ts /api/report/latest',
+    'fetch src/components/fetches.ts -> src/app/api/report/[id]/route.ts /api/report/[id]',
+    'fetch src/components/fetches.ts -> src/pages/api/optional/[[...slug]].ts /api/optional/[[...slug]]',
+    'fetch src/app/report.ts#report -> src/app/api/report/[id]/route.ts /api/report/[id]',
+    'fetch src/app/report.ts#inline -> src/app/api/report/[id]/route.ts /api/report/[id]'
+  ]) assert.ok(details.includes(fact), fact);
+  assert.doesNotMatch(details, /\/api\/unmapped/);
+  assert.doesNotMatch(details, /rendered src\/components\/architecture\.tsx#Leaf <- src\/app\/\(account\)\/page/);
+});
+
+test('moves generated details into a visible directory and preserves handwritten legacy files', async t => {
+  const project = reviewFixture(t);
+  const legacy = path.join(project, '.neorion/graph');
+  fs.mkdirSync(legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, 'generated.md'), '<!-- Generated by Neorion -->\nold');
+  fs.writeFileSync(path.join(legacy, 'notes.md'), 'handwritten');
+  const overview = await generate(project);
+  assert.match(overview, /neorion\/graph\//);
+  assert.doesNotMatch(overview, /\.neorion\/graph\//);
+  assert.ok(fs.existsSync(path.join(project, 'neorion/graph/src~components.md')));
+  assert.ok(!fs.existsSync(path.join(legacy, 'generated.md')));
+  assert.equal(fs.readFileSync(path.join(legacy, 'notes.md'), 'utf8'), 'handwritten');
+});

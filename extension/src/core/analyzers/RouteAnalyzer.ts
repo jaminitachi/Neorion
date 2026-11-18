@@ -134,7 +134,7 @@ export class RouteAnalyzer {
     ];
     const app = path.relative(this.root, this.appDir).split(path.sep).join('/') + '/';
     const pages = routes.filter(route => route.type === 'page' && route.file.startsWith(app));
-    for (const layout of routes.filter(route => route.type === 'layout')) {
+    for (const layout of routes.filter(route => route.type === 'layout' || route.type === 'template')) {
       const directory = layout.file.slice(0, layout.file.lastIndexOf('/') + 1);
       layout.wraps = pages.filter(page => page.file.startsWith(directory)).map(page => page.id);
     }

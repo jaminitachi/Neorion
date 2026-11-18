@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
 
-function register(root, entry = require.resolve('../out/extension.js'), configs = []) {
+function register(root, entry = require.resolve('../out/extension.js'), configs = [], options = {}) {
   const commands = new Map();
   const webview = { onDidReceiveMessage() {}, asWebviewUri: value => value };
   const vscode = {
@@ -20,6 +20,7 @@ function register(root, entry = require.resolve('../out/extension.js'), configs 
       createWebviewPanel: () => ({ webview, onDidDispose() {} }),
       withProgress: (_options, run) => run({ report() {} }),
       showInformationMessage() {},
+      ...options.window,
       showTextDocument() {},
       showErrorMessage: message => { throw new Error(message); },
     },
@@ -31,7 +32,7 @@ function register(root, entry = require.resolve('../out/extension.js'), configs 
   };
   try {
     delete require.cache[entry];
-    require(entry).activate({ subscriptions: [], extensionUri: root });
+    require(entry).activate({ subscriptions: [], extensionUri: root, workspaceState: options.workspaceState });
   } finally {
     Module._load = load;
   }
@@ -52,7 +53,7 @@ async function visualize(root) {
   return JSON.parse(Buffer.from(payload, 'base64').toString('utf8'));
 }
 
-module.exports = { generate, visualize };
+module.exports = { generate, visualize, register };
 
 if (require.main === module) {
   const [root, entry] = process.argv.slice(2);

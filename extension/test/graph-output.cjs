@@ -17,7 +17,7 @@ function assertOverviewLinks(project, overview) {
     assert.ok(target.endsWith('/') ? stat?.isDirectory() : stat?.isFile(), target);
   }
   if (overview.startsWith('Overview abbreviates ') && overview.split('\n')[0].includes('Areas')) return;
-  const files = fs.readdirSync(path.join(project, '.neorion/graph')).filter(file => file.endsWith('.md'));
+  const files = fs.readdirSync(path.join(project, 'neorion/graph')).filter(file => file.endsWith('.md'));
   assert.deepEqual(targets.filter(target => target.endsWith('.md')).map(file => path.basename(file)).sort(), files.sort());
 }
 module.exports = { count, overviewBudget, assertOverviewLinks };
