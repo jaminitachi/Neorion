@@ -37,7 +37,7 @@ export interface HookNode {
 export interface ComponentEdge {
   from: string;
   to: string;
-  type: 'imports' | 'renders';
+  type: 'imports' | 'renders' | 'uses-action';
 }
 
 export interface LibraryInfo {

@@ -64,6 +64,17 @@ function hasRender(body: Node): boolean {
   return found;
 }
 
+function actionBinding(node: NodeWithBody): Node {
+  const parent = node.getParent();
+  return Node.isVariableDeclaration(parent) || Node.isExportAssignment(parent) ? parent : node;
+}
+
+function lexicalName(node: Node): string | undefined {
+  if (Node.isExportAssignment(node)) return 'default';
+  if (Node.isVariableDeclaration(node) || Node.isFunctionExpression(node)) return node.getName();
+  if (Node.isFunctionDeclaration(node)) return node.getName() ?? (node.isDefaultExport() ? 'default' : undefined);
+}
+
 export class ComponentAnalyzer {
   constructor(private readonly root: string) {}
 
@@ -75,6 +86,8 @@ export class ComponentAnalyzer {
     const localHooks = new Map<Node, HookNode>();
     const projectFiles = new Set(files);
     const actions = new Set<string>();
+    const actionIds = new Map<Node, string>();
+    const actionNames = new Set<Node>();
     const relativePath = (file: SourceFile) => path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
     const routesByFile = new Map(routes.map(route => [route.file, route]));
 
@@ -82,10 +95,28 @@ export class ComponentAnalyzer {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
       if (route?.type === 'api') continue;
+      const addAction = (name: string, fn: NodeWithBody, declaration: Node) => {
+        const binding = actionBinding(fn);
+        let id = actionIds.get(binding);
+        if (!id) {
+          const base = `action:${relative}#${name}`;
+          id = base;
+          for (let suffix = 2; actions.has(id); suffix++) id = `${base}~${suffix}`;
+          actions.add(id);
+        }
+        for (const target of [fn, binding, declaration]) {
+          actionIds.set(target, id);
+          if (Node.isVariableDeclaration(target) || Node.isFunctionDeclaration(target) || Node.isFunctionExpression(target)) {
+            const name = target.getNameNode();
+            if (name) actionNames.add(name);
+          }
+        }
+      };
       if (hasDirective(file.getStatements(), 'use server')) {
         for (const [name, declarations] of file.getExportedDeclarations()) {
-          if (declarations.some(declaration => callable(declaration)?.isAsync())) {
-            actions.add(`action:${relative}#${name}`);
+          for (const declaration of declarations) {
+            const fn = callable(declaration);
+            if (fn?.isAsync()) addAction(name, fn, declaration);
           }
         }
       }
@@ -94,14 +125,11 @@ export class ComponentAnalyzer {
           if (!Node.isFunctionDeclaration(node) && !Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return;
           const body = node.getBody();
           if (!node.isAsync() || !Node.isBlock(body) || !hasDirective(body.getStatements(), 'use server')) return;
-          const parent = node.getParent();
-          const name = Node.isVariableDeclaration(parent) ? parent.getName() :
-            Node.isArrowFunction(node) ? undefined : node.getName();
-          const isDefault = Node.isExportAssignment(parent) || (Node.isFunctionDeclaration(node) && node.isDefaultExport());
-          const action = `action:${relative}#${isDefault ? 'default' : name ?? '(inline)'}`;
-          if (!actions.has(action)) {
-            actions.add(`${action}:${node.getStartLineNumber()}`);
-          }
+          const binding = actionBinding(node);
+          const scopes = binding.getAncestors().reverse().filter(ancestor =>
+            !Node.isFunctionExpression(ancestor) || actionBinding(ancestor) === ancestor);
+          const name = [...scopes.map(lexicalName).filter(Boolean), lexicalName(binding) ?? '(inline)'].join('.');
+          addAction(name, node, binding);
         });
       }
 
@@ -172,10 +200,9 @@ export class ComponentAnalyzer {
 
     const edges = new Map<string, ComponentEdge>();
     for (const [node, component] of components) {
-      const addEdge = (target: Node, type: ComponentEdge['type']) => {
-        const child = resolveComponent(target);
-        if (!child || child.id === component.id) return;
-        const edge = { from: component.id, to: child.id, type };
+      const addEdge = (to: string | undefined, type: ComponentEdge['type']) => {
+        if (!to || to === component.id) return;
+        const edge = { from: component.id, to, type };
         edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
       };
 
@@ -194,20 +221,27 @@ export class ComponentAnalyzer {
 
       const usedHooks = new Set<string>();
       const inspect = (child: Node) => {
+        if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
+          if (!actionNames.has(child)) {
+            for (const target of declarationsOf(child)) addEdge(actionIds.get(target), 'uses-action');
+          }
+        } else if (Node.isArrowFunction(child) || Node.isFunctionExpression(child)) {
+          if (!Node.isVariableDeclaration(child.getParent())) addEdge(actionIds.get(child), 'uses-action');
+        }
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
-          for (const target of declarationsOf(child.getTagNameNode())) addEdge(target, 'renders');
+          for (const target of declarationsOf(child.getTagNameNode())) addEdge(resolveComponent(target)?.id, 'renders');
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
           if (binding.getSymbol()?.getDeclarations().some(declaration => imports.has(declaration))) {
-            for (const target of declarationsOf(child)) addEdge(target, 'imports');
+            for (const target of declarationsOf(child)) addEdge(resolveComponent(target)?.id, 'imports');
           }
         }
         if (!Node.isCallExpression(child)) return;
         const expression = child.getExpression();
         const [argument] = child.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) {
-          for (const target of declarationsOf(argument)) addEdge(target, 'renders');
+          for (const target of declarationsOf(argument)) addEdge(resolveComponent(target)?.id, 'renders');
         }
         const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
         const original = binding.getSymbol()?.getDeclarations() ?? [];

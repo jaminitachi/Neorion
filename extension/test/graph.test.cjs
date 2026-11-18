@@ -180,6 +180,40 @@ test('reports layout scope, wrapped pages and Next.js special files and actions'
   assert.match(graph, /path="\/help\/opengraph-image.png" type="opengraph-image"/);
   for (const type of ['template', 'default', 'global-error']) assert.ok(graph.includes(`type="${type}"`));
   assert.match(graph, /id="action:src\/app\/actions.ts#updateAccount"/);
-  assert.match(graph, /id="action:src\/app\/help\/page.tsx#submit:\d+"/);
+  assert.match(graph, /id="action:src\/app\/help\/page.tsx#HelpPage.submit"/);
   assert.doesNotMatch(graph, /privateHelper/);
+});
+
+test('links used actions through JSX props, callbacks and imports with stable scoped IDs', async t => {
+  const project = reviewFixture(t);
+  const page = path.join(project, 'src/app/help/page.tsx');
+  const source = [
+    "import { updateAccount as update } from '../actions'",
+    "import * as actions from '../actions'",
+    'export default function HelpPage() {',
+    "  async function save() { 'use server' }",
+    "  async function unused() { 'use server' }",
+    "  return <form action={save}><button onClick={() => actions.updateAccount()} />",
+    "    <button formAction={update} /><button formAction={async () => { 'use server' }} /></form>",
+    '}',
+    "export function Other() { const save = async () => { 'use server' }; return <form action={save} /> }"
+  ].join('\n');
+  fs.writeFileSync(page, source);
+  const graph = await generate(project);
+  validate(graph, project, 'review-fixture');
+  const uses = graph.split('\n').filter(line => line.includes('type="uses-action"')).sort();
+  for (const [component, action] of [
+    ['HelpPage', 'app/actions.ts#updateAccount'],
+    ['HelpPage', 'app/help/page.tsx#HelpPage.save'],
+    ['HelpPage', 'app/help/page.tsx#HelpPage.(inline)'],
+    ['Other', 'app/help/page.tsx#Other.save']
+  ]) {
+    assert.ok(uses.includes('    <edge from="cmp:src/app/help/page.tsx#' + component +
+      '" to="action:src/' + action + '" type="uses-action" />'), action);
+  }
+  assert.equal(uses.length, 4);
+  fs.writeFileSync(page, '// unrelated edit\n\n' + source);
+  assert.deepEqual((await generate(project)).split('\n').filter(line =>
+    line.includes('<action ') || line.includes('type="uses-action"')), graph.split('\n').filter(line =>
+    line.includes('<action ') || line.includes('type="uses-action"')));
 });

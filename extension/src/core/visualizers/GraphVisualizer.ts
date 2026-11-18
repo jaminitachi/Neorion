@@ -114,7 +114,16 @@ export class GraphVisualizer {
             path: c.path 
         }));
 
-        const rawNodes = [...routeNodes, ...componentNodes];
+        const actionNodes = graph.actions.map(id => {
+            const separator = id.lastIndexOf('#');
+            const file = id.slice('action:'.length, separator);
+            const label = id.slice(separator + 1);
+            return {
+                id, label, path: file, group: DomainExtractor.extract('/' + file),
+                title: `Server action: ${label}\nPath: ${file}`, shape: 'box', margin: 10
+            };
+        });
+        const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes];
         const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group)));
         
