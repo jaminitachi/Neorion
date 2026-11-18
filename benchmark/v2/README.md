@@ -20,8 +20,7 @@ normalized target name.
 The frozen set was screened by reading the questions and answers for reliance
 on repository-specific relationships. It excludes convention-driven concrete
 route lookup, method-only answers, simple props and transitive URL sets with
-fewer than three answers. The future condition-A screen measures whether
-models can still recover those relationships from memory or guessing.
+fewer than three answers. Condition A also measures whether models can recover those relationships from memory or guessing.
 
 ## Prepare prompts
 
@@ -31,7 +30,8 @@ From the repository root, with the extension dependencies installed:
 npm --prefix extension run compile
 node benchmark/v2/questions.cjs verify
 node benchmark/v2/contexts.cjs /tmp/neorion-v2-contexts /path/to/fixtures
-python3 benchmark/v2/benchmark.py prompts /tmp/neorion-v2-contexts /tmp/neorion-v2-prompts.jsonl
+python3 benchmark/v2/benchmark.py prompts /tmp/neorion-v2-contexts benchmark/v2/prompts.jsonl --include-agents
+(cd benchmark/v2 && sha256sum -c prompts.sha256)
 ```
 
 The optional last argument to `contexts.cjs` adds taxonomy, commerce and
@@ -42,6 +42,10 @@ re-derives the questions and checks the frozen SHA-256 before emitting prompts.
 - **A** supplies the question, repository name and answer-format instructions.
 - **B** adds the overview and up to three generated detail files.
 - **D** adds the complete tracked file list.
+- **E0** gives Claude Code a fresh copy of the pinned repository and the Read,
+  Grep and Glob tools.
+- **E1** uses the same tools in a separate fresh copy with the full
+  `codebase_graph.md` and `.neorion/graph/` details. Its prompt mentions both.
 
 For B, remove negative clauses beginning with words such as “exclude,” “omit,”
 or “except” for ranking only. For example, “Exclude layouts” contributes
@@ -57,24 +61,46 @@ camel-case boundaries, then by lexical filename order. The selector receives
 the public question and generated context. Each B row records its ordered
 `details` paths.
 
-## Screen with condition A before the scored comparison
+The question set froze at `16fcabb`. The B selector gained scope ranking and
+render-chain matching at `25170c9` after selected details had been compared
+with frozen answers. Complete B coverage increased from 17/20 at freeze to
+19/20 after the adjustment. q18 and q19 account for the increase. Always report
+the full set and the subset excluding q18 and q19.
 
-In a future run, send each A prompt in three fresh sessions with no files,
-tools, history or other conditions visible. Use the same model and settings
-planned for the scored comparison. Save rows with `id`, `condition: "A"`,
-`attempt` (1 through 3) and `response`. Apply the same exact-content grading as
-the main comparison:
+The ground-truth generator and graph analyzer compute the same imported JSX
+and call relations. This structurally favors B, which measures how well a
+model reads supplied graph facts. E measures the effect of making the graph
+available to an agent that can independently inspect the same source.
+
+## Run protocol
+
+Freeze all 80 user prompts in `prompts.jsonl` together with the grader and
+runner in `prompts.sha256` before sending any prompt. Run the logged-in
+Claude Code CLI with `--model opus --output-format json` and subscription
+authentication. A, B and D use fresh sessions in empty working directories
+with tools disabled. Run A first, then B and D, then E. The 20 scored A
+responses double as the guessability screen. A question is flagged when A
+returns the exact answer set after normalization. Report both with and
+without those IDs, including the combination with the selector exclusion.
+The single A response is a screen for observed guessability in this run.
+
+E selects five questions per repo by ascending SHA-256 of
+`20261119:<question ID>`. The paired IDs are q04, q05, q06, q07 and q10 for
+ai-chatbot and q11, q12, q13, q15 and q18 for papermark. Each E run starts
+in its own clean snapshot of the pinned commit. E0 has neither graph artifact.
+E1 adds only the graph overview and all generated Markdown detail files.
+
+The runner caps the schedule at 80 planned calls plus four crash retries.
+Use a fresh scratch directory for the run and preserve the per-attempt JSON,
+including CLI failures. Session transcripts supply tool-use blocks keyed by
+the JSON result's session ID. CLI `duration_ms` supplies wall time. Input
+tokens sum uncached input, cache creation and cache reads. Strict accuracy
+requires exact content and the requested JSON format. Content accuracy uses
+the grader's normalized set comparison.
 
 ```sh
-python3 benchmark/v2/benchmark.py precheck a-screen-responses.jsonl a-screen-results.jsonl
+python3 benchmark/v2/run.py /tmp/neorion-v2-contexts /tmp/neorion-v2-run
 ```
-
-Exclude questions answered exactly in all three attempts from the scored
-comparison. Publish the original digest, screen results, excluded IDs and
-remaining denominators. Collect fresh A responses for scoring alongside B and
-D on the retained IDs. Keep the original frozen file unchanged. This
-repository contains the offline screen and grader. Future model runs must
-supply the responses.
 
 ## Score saved answers
 
@@ -87,7 +113,8 @@ Each response row needs `id`, `condition` and `response`. The grader uses the
 last JSON object with an `answer` list, including objects in prose or fences.
 It reports strict JSON formatting independently of normalized exact set
 accuracy, precision, recall and F1. Differing answer objects set the ambiguity
-flag. URL answers use leading slashes. File answers use repo-relative paths.
+flag. Component-name answers accept `path#Name` and `Name`. URL answers
+accept an optional leading slash. File answers use repo-relative paths.
 
 For the B coverage audit, compare each prepared B prompt with the gold answer
 after prompt generation and independently of model responses. Save one row

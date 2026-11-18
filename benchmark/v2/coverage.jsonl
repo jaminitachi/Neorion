@@ -15,6 +15,6 @@
 {"id": "q15", "coverage": "complete", "evidence": "pages.md shows the dashboard render edges to all four tables. components~analytics.md shows each table renders DataTablePagination."}
 {"id": "q16", "coverage": "complete", "evidence": "pages~view.md shows the three relevant page render edges. components~view.md and ee~features.md show the three matching render edges to AccessForm."}
 {"id": "q17", "coverage": "complete", "evidence": "ee~features.md marks all three useFeatureFlags callers in scope with (c)."}
-{"id": "q18", "coverage": "complete", "evidence": "ee~features.md marks the three cancellation modals and permissions-sheet.tsx with (c) and records useTeam in all four."}
-{"id": "q19", "coverage": "complete", "evidence": "pages~datarooms.md shows three routes rendering components/links/links-table.tsx#LinksTable. pages~documents.md shows the fourth route. components~links.md shows that LinksTable renders LinksVisitors."}
+{"id": "q18", "coverage": "complete", "evidence": "ee~features.md marks the three cancellation modals and permissions-sheet.tsx with (c) and records useTeam in all four. Complete coverage followed the post-freeze selector adjustment."}
+{"id": "q19", "coverage": "complete", "evidence": "pages~datarooms.md shows three routes rendering components/links/links-table.tsx#LinksTable. pages~documents.md shows the fourth route. components~links.md shows that LinksTable renders LinksVisitors. Complete coverage followed the post-freeze selector adjustment."}
 {"id": "q20", "coverage": "complete", "evidence": "+reverse-renders.md lists all six page caller files for ViewerNotFound. pages~view.md confirms the route rows and direct render edges."}

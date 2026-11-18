@@ -1,6 +1,7 @@
 """Prepare v2 prompts and grade saved responses offline."""
 import argparse
 from collections import Counter
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -11,17 +12,21 @@ DIRECTORY = Path(__file__).resolve().parent
 METHODS = {"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
 
 
-def normalize(item, repo):
+def normalize(item, repo, template=None):
     item = item.strip().replace("\\", "/")
     prefix = repo.rsplit("/", 1)[-1] + "/"
     item = item.removeprefix("./").removeprefix(prefix).removeprefix("./")
+    if template == 7:
+        return item.rsplit("#", 1)[-1].strip()
+    if template == 10:
+        return "/" + item.lstrip("/")
     parts = item.split(maxsplit=1)
     if parts and parts[0].upper() in METHODS:
         return parts[0].upper() + (" " + " ".join(parts[1].split()) if len(parts) == 2 else "")
     return item
 
 
-def grade(response, expected, repo):
+def grade(response, expected, repo, template=None):
     decoder = json.JSONDecoder()
     candidates = []
     for match in re.finditer(r"\{", response):
@@ -34,8 +39,8 @@ def grade(response, expected, repo):
     start, end, obj = candidates[-1] if candidates else (0, 0, {})
     items = obj.get("answer")
     valid = items is not None and all(isinstance(item, str) for item in items)
-    predicted = {normalize(item, repo) for item in items} if valid else set()
-    truth = {normalize(item, repo) for item in expected}
+    predicted = {normalize(item, repo, template) for item in items} if valid else set()
+    truth = {normalize(item, repo, template) for item in expected}
     hits = len(truth & predicted)
     return {
         "format_ok": valid and set(obj) == {"answer"} and response.strip() == response[start:end],
@@ -143,7 +148,21 @@ def checked_questions():
     return read_lines(DIRECTORY / "questions.jsonl")
 
 
-def prompts(questions, contexts, output):
+AGENT_INSTRUCTION = "Inspect the repository using only the available read-only tools."
+GRAPH_INSTRUCTION = "The repository also contains codebase_graph.md and detail files under .neorion/graph/."
+E_SEED = "20261119"
+
+
+def agent_sample(questions):
+    selected = set()
+    for repo in sorted({item["repo"] for item in questions}):
+        pool = [item["id"] for item in questions if item["repo"] == repo]
+        selected.update(sorted(pool, key=lambda id: hashlib.sha256(f"{E_SEED}:{id}".encode()).digest())[:5])
+    return selected
+
+
+def prompts(questions, contexts, output, include_agents=False):
+    selected_ids = agent_sample(questions) if include_agents else set()
     with output.open("w") as stream:
         for item in questions:
             repo = item["repo"]
@@ -167,26 +186,29 @@ def prompts(questions, contexts, output):
                 if condition == "B":
                     row["details"] = [name for name, _ in details]
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+            if item["id"] in selected_ids:
+                for condition, context in (
+                    ("E0", AGENT_INSTRUCTION), ("E1", f"{AGENT_INSTRUCTION} {GRAPH_INSTRUCTION}")
+                ):
+                    row = {"id": item["id"], "condition": condition, "prompt": f"{context}\n\n{instruction}"}
+                    stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def precheck(questions, responses, output):
-    """Flag questions answered exactly in all three independent condition-A runs."""
+    """Flag questions answered exactly by the single scored A run."""
     expected = {item["id"]: item for item in questions}
-    runs = {question_id: {} for question_id in expected}
+    exact = {}
     for row in read_lines(responses):
-        question_id, attempt = row["id"], row["attempt"]
-        if row.get("condition") != "A" or type(attempt) is not int or attempt not in (1, 2, 3):
-            raise ValueError("Expected an A response with attempt 1, 2, or 3")
-        if attempt in runs[question_id]:
-            raise ValueError(f"Duplicate attempt {attempt} for {question_id}")
+        question_id = row["id"]
+        if row.get("condition") != "A" or question_id in exact:
+            raise ValueError("Expected one A response per question")
         item = expected[question_id]
-        runs[question_id][attempt] = grade(row["response"], item["answer"], item["repo"])["content_exact"]
-    if any(len(attempts) != 3 for attempts in runs.values()):
-        raise ValueError("Each question needs three independent condition-A attempts")
+        exact[question_id] = grade(row["response"], item["answer"], item["repo"], item.get("template"))["content_exact"]
+    if exact.keys() != expected.keys():
+        raise ValueError("Each question needs one A response")
     with output.open("w") as stream:
-        for question_id, attempts in runs.items():
-            exact = [attempts[i] for i in (1, 2, 3)]
-            stream.write(json.dumps({"id": question_id, "exact": exact, "drop": all(exact)}) + "\n")
+        for question_id, correct in exact.items():
+            stream.write(json.dumps({"id": question_id, "exact": correct, "drop": correct}) + "\n")
 
 
 def score(questions, responses, output, coverage=None):
@@ -211,7 +233,7 @@ def score(questions, responses, output, coverage=None):
                 raise ValueError(f"Duplicate or invalid response {key}")
             seen.add(key)
             item = lookup[key[0]]
-            result = grade(row["response"], item["answer"], item["repo"])
+            result = grade(row["response"], item["answer"], item["repo"], item.get("template"))
             groups[key[1]].append(result)
             record = {**row, "grade": result}
             if key[1] == "B" and audit:
@@ -244,6 +266,7 @@ def main():
     prepare = commands.add_parser("prompts")
     prepare.add_argument("contexts", type=Path)
     prepare.add_argument("output", type=Path)
+    prepare.add_argument("--include-agents", action="store_true")
     grading = commands.add_parser("grade")
     grading.add_argument("responses", type=Path)
     grading.add_argument("output", type=Path)
@@ -254,7 +277,7 @@ def main():
     args = parser.parse_args()
     questions = checked_questions()
     if args.command == "prompts":
-        prompts(questions, args.contexts, args.output)
+        prompts(questions, args.contexts, args.output, args.include_agents)
     elif args.command == "precheck":
         precheck(questions, args.responses, args.output)
     else:

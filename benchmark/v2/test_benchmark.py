@@ -73,19 +73,31 @@ class BenchmarkTests(unittest.TestCase):
             self.assertEqual([Path(file).stem for file, _ in select_details(question, root, limit=2)],
                              ["page", "table"])
 
-    def test_precheck_only_flags_three_exact_attempts(self):
-        questions = [{"id": key, "repo": "repo", "answer": ["yes"]} for key in ("q1", "q2")]
+    def test_normalizes_qualified_component_names_and_relative_urls(self):
+        for response, expected, template in (
+            ('{"answer":["components/analytics/links-table.tsx#LinksTable"]}', ["LinksTable"], 7),
+            ('{"answer":["datarooms/[id]","/documents/[id]"]}', ["/datarooms/[id]", "/documents/[id]"], 10),
+        ):
+            with self.subTest(template=template):
+                result = grade(response, expected, "mfts/papermark", template)
+                self.assertTrue(result["format_ok"])
+                self.assertTrue(result["content_exact"])
+                self.assertEqual(result["f1"], 1)
+                self.assertFalse(grade(response, expected, "mfts/papermark", 1)["content_exact"])
+
+    def test_precheck_flags_exact_a_content(self):
+        questions = [{"id": key, "repo": "repo", "answer": ["/yes"], "template": 10} for key in ("q1", "q2")]
         with TemporaryDirectory() as root:
             responses = Path(root) / "responses.jsonl"
             report = Path(root) / "screen.jsonl"
-            rows = [{"id": item["id"], "condition": "A", "attempt": attempt,
-                     "response": json.dumps({"answer": ["yes" if item["id"] == "q1" or attempt < 3 else "no"]})}
-                    for item in questions for attempt in (1, 2, 3)]
+            rows = [{"id": item["id"], "condition": "A",
+                     "response": json.dumps({"answer": ["yes" if item["id"] == "q1" else "no"]})}
+                    for item in questions]
             responses.write_text("\n".join(map(json.dumps, rows)))
             precheck(questions, responses, report)
             self.assertEqual([json.loads(row)["drop"] for row in report.read_text().splitlines()], [True, False])
-            responses.write_text("\n".join(map(json.dumps, rows[:-1])))
-            with self.assertRaisesRegex(ValueError, "three independent"):
+            responses.write_text(json.dumps(rows[0]))
+            with self.assertRaisesRegex(ValueError, "one A response"):
                 precheck(questions, responses, report)
 
 
