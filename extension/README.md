@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion generates a local architecture map for Next.js App Router projects written in TypeScript.
+Neorion generates a local architecture map for Next.js projects written in TypeScript.
 
 ## Use in VS Code
 
@@ -8,7 +8,7 @@ Neorion generates a local architecture map for Next.js App Router projects writt
 2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` in the project root.
 3. Run **Neorion: Show Architecture Graph (Beta)** to explore routes and components and open their source files.
 
-The extension refreshes the map after saving TypeScript files or `package.json`. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
+After running either Neorion command once in the current editor session, saving a TypeScript file or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
 
 ## Build and install locally
 
@@ -18,5 +18,8 @@ Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_
 
 ## Test locally
 
-Run `npm run compile`, `node test/fetch-fixtures.cjs`, and `npm test`.
-The fixture fetch uses pinned upstream revisions and skips installing the fixture projects' dependencies.
+Run `npm run compile` and `npm test` to use the fixtures included in the repository.
+
+For the upstream integration tests, run `node test/fetch-fixtures.cjs` followed by
+`NEORION_FIXTURES=test/.fixtures npm test`. The fetch uses pinned upstream revisions
+and skips installing the fixture projects' dependencies.
