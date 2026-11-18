@@ -128,22 +128,33 @@ test('resolves relative and aliased factory hooks to one project file and omits 
   validate(graph, project, 'review-fixture');
   const hooks = [...graph.matchAll(/<hook id="([^"]+)"/g)].map(match => match[1]);
   assert.deepEqual(hooks, ['hook:src/lib/store.ts#useCartStore']);
-  assert.equal([...graph.matchAll(/hooks="hook:src\/lib\/store.ts#useCartStore"/g)].length, 3);
+  assert.equal([...graph.matchAll(/hooks="hook:src\/lib\/store.ts#useCartStore"/g)].length, 2);
 });
 
-test('links JSX to the default memo identifier wrapper and ignores rest props', async t => {
+test('links JSX to the existing component behind a default export and ignores rest props', async t => {
   const graph = await generate(reviewFixture(t));
-  assert.match(graph, /from="cmp:src\/app\/\(account\)\/layout.tsx#Layout" to="cmp:src\/components\/panel.tsx#default" type="renders imports"/);
-  assert.match(graph, /id="cmp:src\/components\/panel.tsx#default" isClient="false" props="children"/);
+  assert.match(graph, /from="cmp:src\/app\/\(account\)\/layout.tsx#Layout" to="cmp:src\/components\/panel.tsx#Inner" type="renders imports"/);
+  assert.match(graph, /id="cmp:src\/components\/panel.tsx#Inner" isClient="false" props="children"/);
+  assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
   assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="1"/);
-  assert.match(graph, /from="cmp:src\/components\/panel.tsx#default" to="cmp:src\/components\/ui" type="renders imports"/);
+  assert.match(graph, /from="cmp:src\/components\/panel.tsx#Inner" to="cmp:src\/components\/ui" type="renders imports"/);
+});
+
+test('resolves a plain default identifier without duplicating the component or its edges', async t => {
+  const project = reviewFixture(t);
+  const panel = path.join(project, 'src/components/panel.tsx');
+  fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('memo(Inner)', 'Inner'));
+  const graph = await generate(project);
+  assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
+  assert.match(graph, /to="cmp:src\/components\/panel.tsx#Inner" type="renders imports"/);
+  assert.equal(graph.match(/from="cmp:src\/components\/panel.tsx#Inner"/g).length, 1);
 });
 
 test('maps Pages API endpoints and reports mixed, Pages-only and App-only routers', async t => {
   const project = reviewFixture(t);
   const mixed = await generate(project);
   assert.match(mixed, /router="mixed"/);
-  assert.match(mixed, /id="route:src\/pages\/api\/auth\/\[\.\.\.nextauth\].ts" path="\/api\/auth\/\[\.\.\.nextauth\]" type="api" isClient="false"/);
+  assert.match(mixed, /id="route:src\/pages\/api\/auth\/\[\.\.\.nextauth\].ts" path="\/api\/auth\/\[\.\.\.nextauth\]" type="api" methods="ALL" isClient="false"/);
   assert.doesNotMatch(mixed, /<component id="cmp:src\/pages\/api/);
   const appDir = path.join(project, 'src', 'app');
   const moved = path.join(project, 'app-disabled');
@@ -164,6 +175,7 @@ test('reports layout scope, wrapped pages and Next.js special files and actions'
   assert.match(graph, /scope="\/\(account\)" type="layout" wraps="route:src\/app\/\(account\)\/page.tsx"/);
   assert.match(graph, /path="\/robots.txt" type="robots"/);
   assert.match(graph, /path="\/sitemap.xml" type="sitemap"/);
+  assert.doesNotMatch(graph, /cmp:src\/app\/(?:robots|sitemap|opengraph-image)\./);
   assert.match(graph, /path="\/opengraph-image" type="opengraph-image"/);
   assert.match(graph, /path="\/help\/opengraph-image.png" type="opengraph-image"/);
   for (const type of ['template', 'default', 'global-error']) assert.ok(graph.includes(`type="${type}"`));

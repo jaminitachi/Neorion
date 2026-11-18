@@ -48,6 +48,7 @@ export class RouteAnalyzer {
       if (match[1] !== 'index') parts.push(match[1]);
       return {
         id: `route:${file}`, file, type,
+        methods: type === 'api' ? ['ALL'] : undefined,
         path: '/' + parts.join('/'), isClient: !!source && isClientFile(source),
         domain: DomainExtractor.extract('/' + file)
       };

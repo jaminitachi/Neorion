@@ -13,26 +13,32 @@ function declarationsOf(node: Node): Node[] {
   return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
 }
 
+function unwrapComponent(node: Node | undefined): Node | undefined {
+  while (node) {
+    if (Node.isParenthesizedExpression(node)) node = node.getExpression();
+    else if (Node.isCallExpression(node) &&
+             /(?:^|\.)(?:memo|forwardRef)$/.test(node.getExpression().getText())) {
+      node = node.getArguments()[0];
+    } else return node;
+  }
+}
+
+function isMetadata(route: RouteNode | undefined): boolean {
+  return route?.type === 'robots' || route?.type === 'sitemap' || route?.type === 'opengraph-image';
+}
+
 function callable(node: Node, seen = new Set<Node>()): NodeWithBody | undefined {
   if (seen.has(node)) return;
   seen.add(node);
   if (Node.isFunctionDeclaration(node) && node.getBody()) return node;
   if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
-    let initializer: Node | undefined = Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression();
-    while (initializer) {
-      if (Node.isArrowFunction(initializer) || Node.isFunctionExpression(initializer)) return initializer;
-      if (Node.isIdentifier(initializer) || Node.isPropertyAccessExpression(initializer)) {
-        for (const declaration of declarationsOf(initializer)) {
-          const resolved = callable(declaration, seen);
-          if (resolved) return resolved;
-        }
-        break;
+    const initializer = unwrapComponent(Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression());
+    if (Node.isArrowFunction(initializer) || Node.isFunctionExpression(initializer)) return initializer;
+    if (Node.isIdentifier(initializer) || Node.isPropertyAccessExpression(initializer)) {
+      for (const declaration of declarationsOf(initializer)) {
+        const resolved = callable(declaration, seen);
+        if (resolved) return resolved;
       }
-      if (Node.isParenthesizedExpression(initializer)) initializer = initializer.getExpression();
-      else if (Node.isCallExpression(initializer) &&
-               /(?:^|\.)(?:memo|forwardRef)$/.test(initializer.getExpression().getText())) {
-        initializer = initializer.getArguments()[0];
-      } else break;
     }
   }
 }
@@ -64,6 +70,7 @@ export class ComponentAnalyzer {
   public analyze(files: SourceFile[], routes: RouteNode[]) {
     const components = new Map<Node, ComponentNode>();
     const bodies = new Map<Node, Node>();
+    const defaultAliases = new Map<Node, Node[]>();
     const hooks = new Map<string, HookNode>();
     const localHooks = new Map<Node, HookNode>();
     const projectFiles = new Set(files);
@@ -98,13 +105,22 @@ export class ComponentAnalyzer {
         });
       }
 
-      const defaultDeclarations = new Set(file.getDefaultExportSymbol()?.getDeclarations().flatMap(node =>
-        Node.isExportAssignment(node) ? [node, ...declarationsOf(node.getExpression())] : [node]) ?? []);
+      if (isMetadata(route)) continue;
+      const defaultDeclarations = new Set(file.getDefaultExportSymbol()?.getDeclarations());
+      for (const assignment of file.getExportAssignments().filter(node => !node.isExportEquals())) {
+        const expression = unwrapComponent(assignment.getExpression());
+        if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression)) continue;
+        const targets = declarationsOf(expression);
+        if (!targets.length) continue;
+        defaultAliases.set(assignment, targets);
+        for (const target of targets) defaultDeclarations.add(target);
+      }
       const candidates = [
         ...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getExportAssignments().filter(node => !node.isExportEquals())
       ];
       for (const node of candidates) {
+        if (defaultAliases.has(node)) continue;
         const fn = callable(node);
         const body = fn ? fn.getBody() :
           Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined;
@@ -142,15 +158,22 @@ export class ComponentAnalyzer {
     for (const file of files) {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
-      if (!route || route.type === 'api' || route.componentId) continue;
+      if (!route || route.type === 'api' || isMetadata(route) || route.componentId) continue;
       const exported = file.getExportedDeclarations().get('default');
-      route.componentId = exported?.map(node => components.get(node)).find(Boolean)?.id;
+      route.componentId = exported?.flatMap(node => defaultAliases.get(node) ?? [node])
+        .map(node => components.get(node)).find(Boolean)?.id;
     }
+
+    const resolveComponent = (node: Node, seen = new Set<Node>()): ComponentNode | undefined => {
+      if (seen.has(node)) return;
+      seen.add(node);
+      return components.get(node) ?? defaultAliases.get(node)?.map(target => resolveComponent(target, seen)).find(Boolean);
+    };
 
     const edges = new Map<string, ComponentEdge>();
     for (const [node, component] of components) {
       const addEdge = (target: Node, type: ComponentEdge['type']) => {
-        const child = components.get(target);
+        const child = resolveComponent(target);
         if (!child || child.id === component.id) return;
         const edge = { from: component.id, to: child.id, type };
         edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
