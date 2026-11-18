@@ -3,13 +3,10 @@ const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { Tiktoken } = require('../../extension/node_modules/js-tiktoken/dist/lite.cjs');
-const ranks = require('../../extension/node_modules/js-tiktoken/dist/ranks/o200k_base.cjs');
 const { generate } = require('../../extension/test/run.cjs');
+const { count, overviewBudget, assertOverviewLinks } = require('../../extension/test/graph-output.cjs');
 
 const repos = path.resolve(__dirname, '../../../bench-repos');
-const tokenizer = new Tiktoken(ranks);
-const count = value => tokenizer.encode(value, [], []).length;
 const git = (root, ...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
 const heldOut = ['ai-chatbot', 'papermark'];
 
@@ -29,11 +26,12 @@ async function prepare(name, source, scratch, output) {
       .map(entry => path.relative(root, path.join(entry.parentPath ?? entry.path, entry.name))).sort();
   const listing = tracked.join('\n') + '\n';
   const overview = await generate(root);
+  assertOverviewLinks(root, overview);
   const directory = path.join(root, '.neorion/graph');
   const detailSizes = fs.readdirSync(directory).filter(file => file.endsWith('.md'))
     .map(file => ({ file, tokens: count(fs.readFileSync(path.join(directory, file), 'utf8')) }))
     .sort((a, b) => b.tokens - a.tokens || a.file.localeCompare(b.file));
-  const budget = Math.min(6000, Math.max(1500, Math.floor(count(listing) / 4)));
+  const budget = overviewBudget(listing);
   assert.ok(count(overview) <= budget && detailSizes.every(detail => detail.tokens <= 3000), name);
   if (output && heldOut.includes(name)) {
     const context = path.join(output, name);

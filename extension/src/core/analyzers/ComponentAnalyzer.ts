@@ -281,55 +281,55 @@ export class ComponentAnalyzer {
         return id;
       }
     };
+    const addEdge = (from: string, to: string | undefined, type: ComponentEdge['type']) => {
+      if (!to || to === from) return;
+      edges.set(JSON.stringify([type, from, to]), { from, to, type });
+    };
+    const render = (tag: Node, from: string) => {
+      const binding = rootBinding(tag);
+      const targets = declarationsOf(tag).flatMap(declaration => {
+        const assignment = declaration.getParent();
+        if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
+            assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken && assignment.getLeft() === declaration) {
+          return declarationsOf(assignment.getRight());
+        }
+        return [declaration];
+      }).map(node => resolveComponent(node)).filter(Boolean);
+      if (!targets.length && binding !== tag) {
+        targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
+      }
+      for (const target of targets) addEdge(from, target?.id, 'renders');
+    };
+    const componentTags = new Set<Node>();
     for (const [node, component] of components) {
-      const addEdge = (to: string | undefined, type: ComponentEdge['type']) => {
-        if (!to || to === component.id) return;
-        const edge = { from: component.id, to, type };
-        edges.set(JSON.stringify([type, edge.from, edge.to]), edge);
-      };
-
       const body = bodies.get(node)!;
       const file = body.getSourceFile();
       const imports = importsFor(file);
 
       const usedHooks = new Set<string>();
-      const render = (tag: Node) => {
-        const binding = rootBinding(tag);
-        const targets = declarationsOf(tag).flatMap(declaration => {
-          const assignment = declaration.getParent();
-          if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
-              assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken && assignment.getLeft() === declaration) {
-            return declarationsOf(assignment.getRight());
-          }
-          return [declaration];
-        }).map(node => resolveComponent(node)).filter(Boolean);
-        if (!targets.length && binding !== tag) {
-          targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
-        }
-        for (const target of targets) addEdge(target?.id, 'renders');
-      };
       const inspect = (child: Node) => {
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           if (!actionNames.has(child)) {
-            for (const target of declarationsOf(child)) addEdge(actionIds.get(target), 'uses-action');
+            for (const target of declarationsOf(child)) addEdge(component.id, actionIds.get(target), 'uses-action');
           }
         } else if (Node.isArrowFunction(child) || Node.isFunctionExpression(child)) {
-          if (!Node.isVariableDeclaration(child.getParent())) addEdge(actionIds.get(child), 'uses-action');
+          if (!Node.isVariableDeclaration(child.getParent())) addEdge(component.id, actionIds.get(child), 'uses-action');
         }
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
-          render(child.getTagNameNode());
+          componentTags.add(child);
+          render(child.getTagNameNode(), component.id);
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
           if (binding.getSymbol()?.getDeclarations().some(declaration => imports.has(declaration))) {
-            for (const target of declarationsOf(child)) addEdge(resolveComponent(target)?.id, 'imports');
+            for (const target of declarationsOf(child)) addEdge(component.id, resolveComponent(target)?.id, 'imports');
           }
         }
         if (!Node.isCallExpression(child)) return;
         componentCalls.add(child);
         const expression = child.getExpression();
         const [argument] = child.getArguments();
-        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument);
+        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id);
         const hook = resolveHook(expression, imports);
         if (hook) usedHooks.add(hook);
       };
@@ -346,12 +346,17 @@ export class ComponentAnalyzer {
       const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       file.forEachDescendant(node => {
+        if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !componentTags.has(node)) {
+          render(node.getTagNameNode(), from);
+        }
         if (!Node.isCallExpression(node) || componentCalls.has(node)) return;
         const expression = node.getExpression();
+        const [argument] = node.getArguments();
+        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, from);
         if (actions.size) {
           for (const declaration of declarationsOf(expression)) {
             const to = actionIds.get(declaration);
-            if (to) edges.set(JSON.stringify(['uses-action', from, to]), { from, to, type: 'uses-action' });
+            addEdge(from, to, 'uses-action');
           }
         }
         const name = Node.isPropertyAccessExpression(expression) ? expression.getName() :

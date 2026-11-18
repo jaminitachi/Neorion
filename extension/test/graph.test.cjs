@@ -3,8 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
-const { Tiktoken } = require('js-tiktoken/lite');
-const o200kBase = require('js-tiktoken/ranks/o200k_base');
+const { count, assertOverviewLinks, overviewBudget } = require('./graph-output.cjs');
 const { generate, visualize } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
 
@@ -25,25 +24,18 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
   return { tmp, project };
 }
 
-const tokenizer = new Tiktoken(o200kBase);
-const count = value => tokenizer.encode(value, [], []).length;
-
 function readMap(project, overview, name) {
   assert.ok(overview.startsWith('# ' + name + ' architecture') ||
     overview.split('\n').includes('# ' + name + ' architecture (mixed router)'));
   const root = path.join(project, '.neorion/graph');
   const details = fs.readdirSync(root).filter(file => file.endsWith('.md'));
-  for (const [, target] of overview.matchAll(/\]\((\.neorion\/graph\/[^)]+\.md)\)/g)) {
-    assert.ok(fs.existsSync(path.join(project, decodeURIComponent(target))), target);
-  }
-  const files = Object.fromEntries(details.map(file => [
-    decodeURIComponent(file), fs.readFileSync(path.join(root, file), 'utf8')
-  ]));
+  assertOverviewLinks(project, overview);
+  const files = Object.fromEntries(details.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
   for (const [file, detail] of Object.entries(files)) {
     assert.ok(count(detail) <= 3000, file);
     assert.ok(!detail.includes(project));
     assert.doesNotMatch(detail, /:\s+(?:GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)\(/);
-    if (file === '+dependencies.md') continue;
+    if (file === '+dependencies.md' || file.startsWith('+reverse-')) continue;
     let directory;
     for (const line of detail.split('\n')) {
       if (line.endsWith('/') && !line.startsWith(' ')) directory = line;
@@ -62,12 +54,16 @@ test('taxonomy maps APIs, special routes, duplicate component names, and hooks',
   const details = readMap(project, overview, 'taxonomy');
   assert.match(overview, /posts  route.ts\[GET POST\]/);
   assert.match(overview, /\[postId\].*not-found.tsx\(not-found\)/);
-  assert.match(details['app/(docs).md'], /layout.tsx: DocsLayout.*>.*MainNav/);
-  assert.equal((details['app/(docs).md'].match(/layout.tsx: DocsLayout/g) ?? []).length, 2);
+  assert.match(details['app~(docs).md'], /layout.tsx: DocsLayout.*>.*MainNav/);
+  assert.equal((details['app~(docs).md'].match(/layout.tsx: DocsLayout/g) ?? []).length, 2);
   assert.match(overview, /hooks\/use-mounted.ts: useMounted/);
-  assert.match(details['components/ui.md'], /badge.tsx: Badge\(className,variant\)/);
-  assert.match(details['components/ui.md'], /button.tsx: Button\(className,variant,size\)/);
-  assert.ok(count(overview) <= 1500);
+  assert.match(details['components~ui.md'], /badge.tsx: Badge\(className,variant\)/);
+  assert.match(details['components~ui.md'], /button.tsx: Button\(className,variant,size\)/);
+  assert.ok(count(overview) <= 1000);
+  const areaTotal = Object.entries(details).filter(([file]) => !file.startsWith('+reverse-'))
+    .reduce((total, [, detail]) => total + count(detail), 0);
+  assert.ok(areaTotal <= 4500, `taxonomy area details: ${areaTotal}`);
+  assert.ok(Object.values(details).reduce((total, detail) => total + count(detail), 0) <= 5000);
 });
 
 test('commerce maps its revalidation handler and distinguishes render and import edges', { skip: !externalFixtures }, async t => {
@@ -77,9 +73,9 @@ test('commerce maps its revalidation handler and distinguishes render and import
   assert.match(overview, /api\/revalidate  route.ts\[POST\]/);
   assert.match(overview, /error.tsx\(error\)/);
   assert.match(overview, /components\/cart\/cart-context.tsx: useCart/);
-  assert.match(details['components/layout.md'], /product-grid-items.tsx:.*>.*GridItem\[render\].*Grid\[import\]/);
+  assert.match(details['components~layout.md'], /product-grid-items.tsx:.*>.*GridItem\[render\].*Grid\[import\]/);
   assert.match(details['app.md'], /layout.tsx:.*>.*CartProvider\b/);
-  assert.ok(count(overview) <= 1500);
+  assert.ok(count(overview) <= 800);
 });
 
 test('create-next-app detects src/app and links namespace imports, local JSX and aliased hooks', { skip: !externalFixtures }, async t => {
@@ -89,9 +85,9 @@ test('create-next-app detects src/app and links namespace imports, local JSX and
   const details = readMap(project, overview, 'create-next-app');
   assert.match(overview, /src\/app.*page.tsx=Home/);
   assert.match(overview, /api\/status  route.ts\[GET POST\]/);
-  assert.match(details['src/app.md'], /page.tsx: Home.*> Status/);
-  assert.match(details['src/components.md'], /status.tsx \(c\):.*Status h:useStatus.*Status > LocalLabel\[render\]/);
-  assert.ok(count(overview) <= 1500);
+  assert.match(details['src~app.md'], /page.tsx: Home.*> Status/);
+  assert.match(details['src~components.md'], /status.tsx \(c\):.*Status h:useStatus.*Status > LocalLabel\[render\]/);
+  assert.ok(count(overview) <= 500);
 
   fs.writeFileSync(path.join(project, 'package.json'), '{}');
   fs.renameSync(project, path.join(tmp, 'fallback-name'));
@@ -162,11 +158,11 @@ for (const [label, replacement, name] of [
     const panel = path.join(project, 'src/components/panel.tsx');
     fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('export default memo(Inner)', replacement));
     const details = readMap(project, await generate(project), 'review-fixture');
-    assert.equal(details['src/components.md'].split('panel.tsx:').length, 2);
-    assert.ok(details['src/components.md'].includes(`panel.tsx: ${name}(children) h:useCartStore | +1 UI/icon targets`));
-    assert.ok(details['src/app/(account).md'].includes(`> ${name}\n`));
-    assert.match(details['src/components/ui.md'], /button.tsx: Button\(children\)/);
-    assert.doesNotMatch(details['src/components.md'], /rest|default|Button/);
+    assert.equal(details['src~components.md'].split('panel.tsx:').length, 2);
+    assert.ok(details['src~components.md'].includes(`panel.tsx: ${name}(children) h:useCartStore | +1 UI/icon targets`));
+    assert.ok(details['src~app~(account).md'].includes(`> ${name}\n`));
+    assert.match(details['src~components~ui.md'], /button.tsx: Button\(children\)/);
+    assert.doesNotMatch(details['src~components.md'], /rest|default|Button/);
   });
 }
 
@@ -176,7 +172,7 @@ test('maps Pages API endpoints and reports mixed, Pages-only and App-only router
   assert.match(mixed, /\(mixed router\)/);
   assert.match(mixed, /pages\/api\/auth  \[\.\.\.nextauth\].ts\[\*\]/);
   const details = readMap(project, mixed, 'review-fixture');
-  assert.match(details['src/pages/api.md'], /\[\.\.\.nextauth\].ts: route/);
+  assert.match(details['src~pages~api.md'], /\[\.\.\.nextauth\].ts: route/);
   const appDir = path.join(project, 'src', 'app');
   const moved = path.join(project, 'app-disabled');
   fs.renameSync(appDir, moved);
@@ -199,7 +195,7 @@ test('reports layout scope, wrapped pages and Next.js special files and actions'
   }
   for (const type of ['template', 'default', 'global-error']) assert.ok(graph.includes(`(${type})`));
   const details = readMap(project, graph, 'review-fixture');
-  assert.doesNotMatch(details['src/app.md'], /(?:robots|sitemap|opengraph-image)\.tsx?: Special/);
+  assert.doesNotMatch(details['src~app.md'], /(?:robots|sitemap|opengraph-image)\.tsx?: Special/);
   assert.match(graph, /src\/app\/actions.ts#updateAccount/);
   assert.match(graph, /src\/app\/help\/page.tsx#HelpPage.submit/);
   assert.doesNotMatch(graph, /privateHelper/);
@@ -222,13 +218,13 @@ test('links used actions through JSX props, callbacks and imports with stable sc
   fs.writeFileSync(page, source);
   const graph = await generate(project);
   const details = readMap(project, graph, 'review-fixture');
-  const help = details['src/app/help.md'];
+  const help = details['src~app~help.md'];
   assert.match(help, /HelpPage > .*updateAccount\[action\].*HelpPage.\(inline\)\[action\].*HelpPage.save\[action\]/);
   assert.match(help, /Other > .*Other.save\[action\]/);
   assert.equal([...help.matchAll(/\[action\]/g)].length, 4);
   fs.writeFileSync(page, '// unrelated edit\n\n' + source);
   assert.equal(await generate(project), graph);
-  assert.equal(readMap(project, graph, 'review-fixture')['src/app/help.md'], help);
+  assert.equal(readMap(project, graph, 'review-fixture')['src~app~help.md'], help);
 });
 
 test('keeps UI props, project hooks, outgoing domain edges and action calls while counting UI targets', async t => {
@@ -263,7 +259,7 @@ test('keeps UI props, project hooks, outgoing domain edges and action calls whil
   ].join('\n'));
   const graph = await generate(project);
   const details = readMap(project, graph, 'review-fixture');
-  const primitives = details['src/components/ui.md'];
+  const primitives = details['src~components~ui.md'];
   assert.match(primitives, /radix.tsx \(c\): Dialog\(open\) \| Root.*\+1 UI\/icon targets/);
   assert.match(primitives, /surface.tsx: Surface\(title\).*Banner\[import\].*\+1 UI\/icon targets/);
   assert.match(primitives, /toaster.tsx: Toaster h:useCartStore \| ToastTitle \| Toaster > Banner/);
@@ -281,7 +277,7 @@ test('keeps props for conditional primitive wrappers', async t => {
     '}'
   ].join('\n'));
   const details = readMap(project, await generate(project), 'review-fixture');
-  assert.match(details['src/components/ui.md'], /button.tsx: Button\(asChild,children\)/);
+  assert.match(details['src~components~ui.md'], /button.tsx: Button\(asChild,children\)/);
 });
 
 test('reports aliased and namespace action calls outside component bodies', async t => {
@@ -294,7 +290,7 @@ test('reports aliased and namespace action calls outside component bodies', asyn
   const overview = await generate(project);
   const details = readMap(project, overview, 'review-fixture');
   assert.match(overview, /src\/lib\/submit.ts > src\/app\/actions.ts#updateAccount/);
-  assert.match(details['src/lib.md'], /submit.ts: > src\/app\/actions.ts#updateAccount\[action\]$/m);
+  assert.match(details['src~lib.md'], /submit.ts: > src\/app\/actions.ts#updateAccount\[action\]$/m);
   const { nodes, edges } = await visualize(project);
   assert.ok(nodes.some(node => node.id === 'file:src/lib/submit.ts' && node.path === 'src/lib/submit.ts'));
   assert.ok(edges.some(edge => edge.from === 'file:src/lib/submit.ts' &&
@@ -320,7 +316,27 @@ test('detects Pages API equality guards and switches on the exported handler req
       }
     }
   `);
+  fs.writeFileSync(path.join(directory, 'preflight.ts'), `
+    export default function handler(req, res) {
+      if (req.method === 'OPTIONS') return res.end();
+      return tusServer.handle(req, res);
+    }
+  `);
+  fs.writeFileSync(path.join(directory, 'wrapped.ts'), `
+    function wrap(handler) {
+      return async (req, res) => {
+        await handler({ ...await authenticate(req), req, res });
+      };
+    }
+    export default wrap(({ req: request, res }) => {
+      if (request.method === 'GET') return res.end();
+      if (request.method === 'DELETE') return res.end();
+      return res.status(405).end();
+    });
+  `);
   const overview = await generate(project);
+  assert.match(overview, /preflight.ts\[\*\]/);
+  assert.match(overview, /wrapped.ts\[GET DELETE\]/);
   assert.match(overview, /guard.ts\[POST\]/);
   assert.match(overview, /switch.ts\[DELETE PATCH\]/);
   assert.match(overview, /\[\.\.\.nextauth\].ts\[\*\]/);
@@ -338,15 +354,15 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
   git('init', '-q');
   git('add', '.');
   const list = git('ls-files', '-z').split('\0').filter(Boolean).join('\n') + '\n';
-  const budget = Math.min(6000, Math.max(1500, Math.floor(count(list) / 4)));
+  const budget = overviewBudget(list);
   assert.ok(budget > 1500);
   const overview = await generate(project);
   assert.ok(count(overview) <= budget);
   assert.match(overview, /^Overview abbreviates .*Routes/);
   assert.match(overview, /browse \[all details\]/);
-  assert.match(overview, /\[detail\]\(\.neorion\/graph\//);
+  assertOverviewLinks(project, overview);
   const directory = path.join(project, '.neorion/graph');
-  const shards = fs.readdirSync(directory).filter(file => file.startsWith('src%2Fpages%2Fapi'));
+  const shards = fs.readdirSync(directory).filter(file => file.startsWith('src~pages~api'));
   assert.ok(shards.length > 1);
   const contents = shards.map(file => fs.readFileSync(path.join(directory, file), 'utf8'));
   for (const text of contents) assert.ok(count(text) <= 3000);
@@ -358,3 +374,64 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
   assert.ok(shards.every(file => !fs.existsSync(path.join(directory, file))));
   assert.equal(fs.readFileSync(path.join(directory, 'notes.md'), 'utf8'), 'handwritten');
 });
+
+
+test('keeps the most used hook when the overview truncates hook definitions', async t => {
+  const project = reviewFixture(t);
+  const hooks = path.join(project, 'src/lib');
+  for (let i = 0; i < 200; i++) {
+    fs.writeFileSync(path.join(hooks, `a-low-${i}.ts`), `export function useLow${i}() { return 0; }`);
+  }
+  fs.writeFileSync(path.join(hooks, 'z-team.ts'), 'export function useTeam() { return 0; }');
+  for (const name of ['first', 'second']) {
+    fs.writeFileSync(path.join(hooks, name + '.ts'), "import { useTeam } from './z-team'; useTeam()");
+  }
+  const overview = await generate(project);
+  assert.match(overview, /^Overview abbreviates Project hooks/);
+  assert.match(overview, /src\/lib\/z-team.ts: useTeam/);
+  assert.match(readMap(project, overview, 'review-fixture')['+reverse-hooks.md'],
+    /useTeam \(2\)\n  src\/lib\/: first.ts second.ts/);
+});
+
+test('publishes distinct literal paths for percent, route-group and tilde names', async t => {
+  const project = reviewFixture(t);
+  for (const area of ['(report%2F)', '(report~)', '(report)']) {
+    const directory = path.join(project, 'src/app', area);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'page.tsx'), 'export default function Report() { return null; }');
+  }
+  const overview = await generate(project);
+  assertOverviewLinks(project, overview);
+  assert.doesNotMatch(overview, /<[^>]*%[^>]*>/);
+  assert.match(overview, /<\.neorion\/graph\/src~app~\(report\)\.md>/);
+});
+
+const benchRepos = process.env.NEORION_BENCH_REPOS;
+for (const name of ['ai-chatbot', 'papermark']) {
+  test(`${name} overview links open literally and remain within independent token budgets`, { skip: !benchRepos }, async t => {
+    const { execFileSync } = require('node:child_process');
+    const source = path.resolve(benchRepos, name);
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-bench-test-'));
+    t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+    const project = path.join(tmp, name);
+    execFileSync('git', ['clone', '--quiet', '--shared', source, project]);
+    const listing = execFileSync('git', ['-C', project, 'ls-files', '-z'], { encoding: 'utf8' })
+      .split('\0').filter(Boolean).join('\n') + '\n';
+    const overview = await generate(project);
+    assertOverviewLinks(project, overview);
+    assert.ok(count(overview) <= overviewBudget(listing));
+    const directory = path.join(project, '.neorion/graph');
+    for (const file of fs.readdirSync(directory)) {
+      assert.ok(count(fs.readFileSync(path.join(directory, file), 'utf8')) <= 3000, file);
+    }
+    if (name === 'papermark') {
+      assert.match(overview, /context\/team-context.tsx: useTeam/);
+      assert.match(overview, /\[\[\.\.\.file\]\].ts\[\*\]/);
+      assert.match(overview, /members.ts\[GET DELETE\]/);
+      const hooks = fs.readFileSync(path.join(directory, '+reverse-hooks.md'), 'utf8');
+      assert.match(hooks, /^useTeam \(177\)$/m);
+      const renders = fs.readFileSync(path.join(directory, '+reverse-renders.md'), 'utf8');
+      assert.match(renders, /ProBannerSection \(5\)\n  components\/links\/link-sheet\/: link-options.tsx\n  components\/welcome\/containers\/: onboarding-dataroom-link-options.tsx onboarding-link-options.tsx\n  pages\/settings\/presets\/: \[id\].tsx new.tsx/);
+    }
+  });
+}

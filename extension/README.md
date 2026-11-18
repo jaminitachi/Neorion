@@ -14,7 +14,10 @@ Give your coding assistant `codebase_graph.md` first. It contains the route tree
 server actions, and a directory index. Follow a relevant area link for props,
 hooks, and file-level adjacency lists. If the overview abbreviates the area
 index, browse `.neorion/graph/` for the remaining details. UI primitive and icon
-targets are counted in the detail rows.
+targets are counted in the detail rows. The reverse usage links collect caller
+files for the most used project components, hooks, and actions that fit in
+each index. Hook definitions are prioritized by the number of caller files
+when the overview is abbreviated.
 
 The overview is capped at 25% of the tracked file-list token count, with a
 1,500-token floor and a 6,000-token ceiling. Without Git, Neorion builds the
@@ -34,3 +37,6 @@ Run `npm run compile` and `npm test` to use the fixtures included in the reposit
 For the upstream integration tests, run `node test/fetch-fixtures.cjs` followed by
 `NEORION_FIXTURES=test/.fixtures npm test`. The fetch uses pinned upstream revisions
 and skips installing the fixture projects' dependencies.
+
+Set `NEORION_BENCH_REPOS` to the directory with the two pinned benchmark
+checkouts to include their link, token budget, and Pages API regression tests.

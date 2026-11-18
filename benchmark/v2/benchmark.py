@@ -52,28 +52,53 @@ def words(text):
     return set(re.findall(r"[a-z0-9]{2,}", text.lower()))
 
 
-def choose_detail(question, repository):
-    """Rank generated details using the public question and generated Markdown only."""
-    question_words = words(question)
+def select_details(question, repository, limit=3):
+    """Rank details using only affirmative question text and generated Markdown."""
+    positive = re.sub(r"\b(?:exclude|excluding|omit|except|without|ignore|do not include)\b[^.!?;,]*",
+                      " ", question, flags=re.IGNORECASE)
+    symbols = set(re.findall(r"\b[A-Za-z][A-Za-z0-9]*[a-z0-9][A-Z][A-Za-z0-9]*\b", positive))
+    question_words = words(positive)
+    page_urls = set(re.findall(r"(?<![\w/])(/[^\s,!?;]+)\s+page file\b", positive))
+
+    def has_page_file(text):
+        directory = ""
+        for line in text.splitlines():
+            if line.startswith(("pages/", "src/pages/")) and line.endswith("/"):
+                directory = line.removeprefix("src/").removeprefix("pages")
+            match = re.match(r"  ([^ :]+)\.[jt]sx?(?: \(c\))?: .*\broute ", line)
+            if match and directory:
+                url = directory.rstrip("/") if match[1] == "index" else directory + match[1]
+                if (url or "/") in page_urls:
+                    return True
+        return False
     candidates = []
     frequencies = Counter()
     for file in sorted((repository / ".neorion/graph").glob("*.md")):
-        text = file.read_text()
-        heading = text.splitlines()[1].removeprefix("# ")
         if file.name.startswith("+dependencies"):
             continue
-        area_hits = question_words & words(heading)
-        body_hits = question_words & words(text)
-        frequencies.update(body_hits)
-        explicit = "/" in heading and re.search(
-            rf"(?<![\w/]){re.escape(heading)}(?=/|\W|$)", question, re.IGNORECASE
-        )
-        candidates.append((file, text, bool(explicit), area_hits, body_hits))
+        text = file.read_text()
+        heading = text.splitlines()[1].removeprefix("# ")
+        hits = question_words & words(text)
+        frequencies.update(hits)
+        explicit = re.search(rf"(?<![\w/]){re.escape(heading)}(?=/)", positive, re.IGNORECASE)
+        exact = {symbol for symbol in symbols if re.search(rf"\b{re.escape(symbol)}\b", text)}
+        indexed = sum(bool(re.search(rf"^{re.escape(symbol)} \(\d+\)$", text, re.MULTILINE))
+                      for symbol in exact) if file.name.startswith("+reverse-") else 0
+        relationships = sum(len(re.findall(
+            rf"^  .*(?:\bh:[^|]*\b{re.escape(symbol)}\b|>[^|]*\b{re.escape(symbol)}\b(?!\[import\]))",
+            text, re.MULTILINE
+        )) for symbol in exact)
+        candidates.append((file, text, bool(explicit), bool(page_urls and has_page_file(text)),
+                           indexed, len(exact), relationships, hits))
     if not candidates:
-        raise ValueError(f"No graph area details in {repository}")
-    rank = lambda entry: (entry[2], len(entry[3]), sum(1 / frequencies[term] for term in sorted(entry[4])))
-    file, text, *_ = max(candidates, key=rank)
-    return file.relative_to(repository).as_posix(), text
+        raise ValueError(f"No graph details in {repository}")
+
+    def rank(entry):
+        _, _, explicit, route, indexed, exact, relationships, hits = entry
+        return explicit, route, indexed, exact, relationships, sum(1 / frequencies[term] for term in sorted(hits))
+
+    return [(file.relative_to(repository).as_posix(), text)
+            for file, text, *_ in sorted(candidates, key=rank, reverse=True)[:limit]]
 
 
 def read_lines(path):
@@ -91,7 +116,7 @@ def prompts(questions, contexts, output):
             repo = item["repo"]
             question = item["question"]
             repository = contexts / repo.rsplit("/", 1)[-1]
-            name, detail = choose_detail(question, repository)
+            details = select_details(question, repository)
             instruction = (
                 f"Repository: {repo}\n{question}\n"
                 'Return only a JSON object of the form {"answer":["item"]}. '
@@ -99,20 +124,52 @@ def prompts(questions, contexts, output):
             )
             overview = (repository / "codebase_graph.md").read_text()
             listing = (repository / "file-list.txt").read_text()
+            selected = "\n".join(f"Detail file {name}\n{text}" for name, text in details)
             for condition, context in (
-                ("A", ""), ("B", f"Overview\n{overview}\nDetail file {name}\n{detail}"),
+                ("A", ""), ("B", f"Overview\n{overview}\n{selected}"),
                 ("D", f"Tracked file list\n{listing}")
             ):
                 row = {"id": item["id"], "condition": condition,
                        "prompt": f"{context}\n\n{instruction}" if context else instruction}
                 if condition == "B":
-                    row["detail"] = name
+                    row["details"] = [name for name, _ in details]
                 stream.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def score(questions, responses, output):
+def precheck(questions, responses, output):
+    """Flag questions answered exactly in all three independent condition-A runs."""
+    expected = {item["id"]: item for item in questions}
+    runs = {question_id: {} for question_id in expected}
+    for row in read_lines(responses):
+        question_id, attempt = row["id"], row["attempt"]
+        if row.get("condition") != "A" or type(attempt) is not int or attempt not in (1, 2, 3):
+            raise ValueError("Expected an A response with attempt 1, 2, or 3")
+        if attempt in runs[question_id]:
+            raise ValueError(f"Duplicate attempt {attempt} for {question_id}")
+        item = expected[question_id]
+        runs[question_id][attempt] = grade(row["response"], item["answer"], item["repo"])["content_exact"]
+    if any(len(attempts) != 3 for attempts in runs.values()):
+        raise ValueError("Each question needs three independent condition-A attempts")
+    with output.open("w") as stream:
+        for question_id, attempts in runs.items():
+            exact = [attempts[i] for i in (1, 2, 3)]
+            stream.write(json.dumps({"id": question_id, "exact": exact, "drop": all(exact)}) + "\n")
+
+
+def score(questions, responses, output, coverage=None):
     lookup = {item["id"]: item for item in questions}
+    audit = {}
+    if coverage:
+        for row in read_lines(coverage):
+            key = row["id"]
+            if (key not in lookup or key in audit or row["coverage"] not in {"complete", "partial", "absent"}
+                    or not row["evidence"].strip()):
+                raise ValueError(f"Invalid B coverage audit row for {key}")
+            audit[key] = row
+        if audit.keys() != lookup.keys():
+            raise ValueError("B coverage audit must include each question")
     seen = set()
+    coverage_groups = Counter()
     groups = {condition: [] for condition in "ABD"}
     with output.open("w") as stream:
         for row in read_lines(responses):
@@ -123,7 +180,11 @@ def score(questions, responses, output):
             item = lookup[key[0]]
             result = grade(row["response"], item["answer"], item["repo"])
             groups[key[1]].append(result)
-            stream.write(json.dumps({**row, "grade": result}) + "\n")
+            record = {**row, "grade": result}
+            if key[1] == "B" and audit:
+                record["context_audit"] = audit[key[0]]
+                coverage_groups[(audit[key[0]]["coverage"], result["content_exact"])] += 1
+            stream.write(json.dumps(record) + "\n")
     print("| Condition | Scored | Exact content | Mean F1 | Format violations | Ambiguous |")
     print("| --- | ---: | ---: | ---: | ---: | ---: |")
     for condition, results in groups.items():
@@ -136,6 +197,13 @@ def score(questions, responses, output):
         ambiguous = sum(item["ambiguous"] for item in results)
         print(f"| {condition} | {len(results)}/{len(questions)} | {exact}/{len(results)} | {mean:.3f} | {violations} | {ambiguous} |")
 
+    if audit:
+        print("\n| B answer coverage | Scored | Exact content |")
+        print("| --- | ---: | ---: |")
+        for status in ("complete", "partial", "absent"):
+            exact = coverage_groups[(status, True)]
+            print(f"| {status} | {exact + coverage_groups[(status, False)]} | {exact} |")
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -146,12 +214,18 @@ def main():
     grading = commands.add_parser("grade")
     grading.add_argument("responses", type=Path)
     grading.add_argument("output", type=Path)
+    grading.add_argument("--coverage", type=Path)
+    screen = commands.add_parser("precheck")
+    screen.add_argument("responses", type=Path)
+    screen.add_argument("output", type=Path)
     args = parser.parse_args()
     questions = checked_questions()
     if args.command == "prompts":
         prompts(questions, args.contexts, args.output)
+    elif args.command == "precheck":
+        precheck(questions, args.responses, args.output)
     else:
-        score(questions, args.responses, args.output)
+        score(questions, args.responses, args.output, args.coverage)
 
 
 if __name__ == "__main__":
