@@ -5,7 +5,7 @@ import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
 import { MarkdownSerializer } from './core/serializers/MarkdownSerializer';
-import { CodebaseGraph, LibraryInfo } from './core/types/GraphTypes';
+import { CodebaseGraph, DirectoryMetadata, LibraryInfo } from './core/types/GraphTypes';
 
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
 
@@ -82,23 +82,30 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 tsConfigFilePath: tsConfigPath,
             });
 
-            // 1. Analyze Routes
-            // appDir is already calculated above
-            const routeAnalyzer = new RouteAnalyzer(project, appDir, projectPath);
-            const routes = routeAnalyzer.analyze();
-            
-            // 2. Analyze Components
-            if (progress) progress.report({ message: "Scanning components..." });
-            const componentAnalyzer = new ComponentAnalyzer(projectPath);
-            const sourceFiles = project.getSourceFiles().filter(sf => {
-                const filePath = sf.getFilePath();
-                return isWithin(projectPath, filePath) && !path.relative(projectPath, filePath)
-                    .split(path.sep).some(part => part === 'node_modules' || part === '.next');
+            const sourceFiles = project.getSourceFiles().filter(file => {
+                const filePath = file.getFilePath();
+                return !file.isDeclarationFile() && isWithin(projectPath, filePath) &&
+                    !path.relative(projectPath, filePath).split(path.sep)
+                        .some(part => part === 'node_modules' || part === '.next');
             });
-            
-            const components = sourceFiles.flatMap(sf => componentAnalyzer.analyzeFile(sf));
+            const routeAnalyzer = new RouteAnalyzer(appDir, projectPath);
+            const routes = sourceFiles.flatMap(file => routeAnalyzer.analyzeFile(file) ?? []);
+            if (progress) progress.report({ message: "Scanning components and hooks..." });
+            const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes);
 
-            // 3. Analyze Dependencies
+            const directories = new Map<string, DirectoryMetadata>();
+            const app = path.relative(projectPath, appDir).split(path.sep).join('/');
+            for (const file of sourceFiles) {
+                const parts = path.relative(projectPath, file.getFilePath()).split(path.sep).slice(0, -1);
+                for (const [index, part] of parts.entries()) {
+                    const directory = parts.slice(0, index + 1).join('/');
+                    if (index > (parts[0] === 'src' ? 1 : 0)) break;
+                    const role = directory === app ? 'routes' : part === 'components' ? 'ui_components' :
+                        part === 'hooks' ? 'react_hooks' : 'other';
+                    directories.set(directory, { path: directory, role });
+                }
+            }
+
             let name = path.basename(projectPath);
             let libraries: LibraryInfo[] = [];
             if (fs.existsSync(packageJsonPath)) {
@@ -107,8 +114,8 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 const deps = { ...pkg?.dependencies, ...pkg?.devDependencies };
                 libraries = Object.entries(deps).map(([name, version]) => ({
                     name,
-                    version: version as string,
-                    role: 'dependency'
+                    version: typeof version === 'string' ? version.replace(/^(file|link):(.+)$/, (_, scheme, file) =>
+                        `${scheme}:${(path.isAbsolute(file) ? path.relative(projectPath, file) : file).split(path.sep).join('/')}`) : ''
                 }));
             }
 
@@ -116,14 +123,10 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             const graph: CodebaseGraph = {
                 metadata: {
                     name,
-                    framework: 'nextjs',
-                    router: 'app',
-                    language: 'ts',
-                    directories: []
+                    directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
                 },
                 routes,
-                components,
-                hooks: [],
+                ...analysis,
                 libraries
             };
 

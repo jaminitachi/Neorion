@@ -94,7 +94,7 @@ export class GraphVisualizer {
         // 1. Prepare Nodes
         const routeNodes = graph.routes.map(r => ({ 
             id: r.id, 
-            label: r.path, 
+            label: r.methods?.length ? `${r.methods.join(", ")} ${r.path}` : r.path,
             group: r.domain || 'other', 
             title: `Route: ${r.path}\nFile: ${r.file}\nDomain: ${r.domain}`,
             shape: 'box',     
@@ -111,38 +111,8 @@ export class GraphVisualizer {
             path: c.path 
         }));
 
-        const hookSet = new Set<string>();
-        graph.components.forEach(c => {
-            if (c.hooks) c.hooks.forEach(h => hookSet.add(h));
-        });
-        
-        const hookNodes = Array.from(hookSet).map(h => ({
-            id: `hook_${h}`,
-            label: h,
-            group: 'hooks',
-            title: `Hook: ${h}\n(Inferred from usage)`,
-            shape: 'diamond', 
-            size: 20,
-            path: '' 
-        }));
-        // Hooks hidden per user request to reduce clutter
-        // const hookSet = new Set<string>();
-        // graph.components.forEach(c => {
-        //     if (c.hooks) c.hooks.forEach(h => hookSet.add(h));
-        // });
-        
-        // const hookNodes = Array.from(hookSet).map(h => ({
-        //     id: `hook_${h}`,
-        //     label: h,
-        //     group: 'hooks',
-        //     title: `Hook: ${h}\n(Inferred from usage)`,
-        //     shape: 'diamond', 
-        //     size: 20,
-        //     path: '' 
-        // }));
-
         const rawNodes = [...routeNodes, ...componentNodes];
-        let nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
+        const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group)));
         
         // Hub nodes with reduced mass to prevent spinning
@@ -170,43 +140,20 @@ export class GraphVisualizer {
         };
 
         const edges = [
-             // Route to Component (Page to Root Component)
-             ...graph.routes.filter(r => r.componentName).map(r => ({ 
-                 from: r.id, 
-                 to: `cmp_${r.componentName}`, 
-                 arrows: 'to', 
-                 dashes: false,
-                 physics: true,
-                 length: 50, // Page <-> Root Component is TIGHT
-                 width: 2
-             })),
-             // Component to Component (Imports)
-             ...graph.components.flatMap(c => c.imports.filter(i => !i.isExternal).map(i => ({ 
-                 from: c.id, 
-                 to: `cmp_${i.name}`, 
-                 arrows: 'to', 
-                 dashes: false,
-                 physics: true, // Re-enabled dragging physics!
-                 length: getEdgeLength(c.id, `cmp_${i.name}`),
-                 color: { opacity: 0.2 } 
-             }))),
-             // Hub Gravity (Nodes to their Domain Hubs)
-             ...nodes.filter(n => !n.id.startsWith('hub_')).map(n => ({
-                 from: n.id, 
-                 to: `hub_${n.group}`, 
-                 color: { opacity: 0 }, 
-                 length: 100, // Medium orbit
-                 physics: true, 
-                 smooth: false, 
-                 dashes: false, 
-                 width: 0 
-             }))
+            ...graph.routes.flatMap(route => route.componentId ? [{
+                from: route.id, to: route.componentId, arrows: 'to', length: 50, width: 2
+            }] : []),
+            ...graph.edges.map(edge => ({
+                from: edge.from, to: edge.to, title: edge.type, arrows: 'to',
+                dashes: edge.type === 'imports', length: getEdgeLength(edge.from, edge.to)
+            })),
+            ...nodes.map(node => ({
+                from: node.id, to: `hub_${node.group}`, color: { opacity: 0 },
+                length: 100, smooth: false, width: 0
+            }))
         ];
 
-        const validNodeIds = new Set(nodes.map(n => n.id));
-        const validEdges = edges.filter(e => validNodeIds.has(e.to) && validNodeIds.has(e.from));
-
-        const graphPayload = { nodes, edges: validEdges };
+        const graphPayload = { nodes: [...nodes, ...hubNodes], edges };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload)).toString('base64');
 
         const groupsConfig = domains.reduce((acc, domain) => {

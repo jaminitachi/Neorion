@@ -1,101 +1,50 @@
-import type { CodebaseGraph, RouteNode, ComponentNode, HookNode, LibraryInfo } from '../types/GraphTypes';
+import type { CodebaseGraph } from '../types/GraphTypes';
+
+type Attribute = string | boolean | undefined;
+
+function escapeXml(value: string): string {
+  const entities: Record<string, string> = {
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&apos;',
+    '`': '&#96;', '\n': '&#10;', '\r': '&#13;', '\t': '&#9;'
+  };
+  return value.replace(/[&<>"'`\n\r\t]/g, character => entities[character]);
+}
+
+function element(name: string, attributes: Record<string, Attribute>, text?: string): string {
+  const attrs = Object.entries(attributes).flatMap(([key, value]) =>
+    value === undefined ? [] : [` ${key}="${escapeXml(String(value))}"`]).join('');
+  return text ? `<${name}${attrs}>${escapeXml(text)}</${name}>` : `<${name}${attrs} />`;
+}
+
+function section(name: string, entries: string[]): string {
+  return [`  <${name}>`, ...entries.map(entry => `    ${entry}`), `  </${name}>`].join('\n');
+}
 
 export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph): string {
-    return `# Codebase Architecture Map
-
-\`\`\`xml
-<codebase name="${graph.metadata.name}" framework="${graph.metadata.framework}" router="${graph.metadata.router}" language="${graph.metadata.language}">
-  <directories>
-${graph.metadata.directories.map(d => `    <dir path="${d.path}" role="${d.role}" />`).join('\n')}
-  </directories>
-
-  <routes>
-${graph.routes.map(r => this.serializeRoute(r)).join('\n')}
-  </routes>
-
-  <components>
-${graph.components.map(c => this.serializeComponent(c)).join('\n')}
-  </components>
-
-  <hooks>
-${graph.hooks.map(h => this.serializeHook(h)).join('\n')}
-  </hooks>
-
-  <dependencies>
-${graph.libraries.map(l => `    <lib name="${l.name}" version="${l.version}" role="${l.role}" />`).join('\n')}
-  </dependencies>
-</codebase>
-\`\`\`
-`;
-  }
-
-  private serializeRoute(route: RouteNode): string {
-    const attrs = [
-      `id="${route.id}"`,
-      `path="${route.path}"`,
-      `file="${route.file}"`,
-      `type="${route.type}"`,
-      `segment="${route.segment}"`,
-      `isClient="${route.isClient}"`
-    ].join(' ');
-
-    return `    <route ${attrs} />`;
-  }
-
-  private serializeComponent(component: ComponentNode): string {
-    const attrs = [
-      `id="${component.id}"`,
-      `name="${component.name}"`,
-      `path="${component.path}"`,
-      `kind="${component.kind}"`,
-      `isClient="${component.isClient}"`
-    ].join(' ');
-
-    const props = component.props.length > 0
-      ? `\n      <props>\n${component.props.map(p => `        <prop name="${p.name}" type="${this.escapeXml(p.type)}" required="${p.required}" />`).join('\n')}\n      </props>`
-      : '';
-
-    const imports = component.imports.length > 0
-      ? `\n      <imports>\n${component.imports.map(i => `        <import name="${i.name}" from="${i.from}" />`).join('\n')}\n      </imports>`
-      : '';
-    
-    const hooks = component.hooks.length > 0
-        ? `\n      <usesHooks>\n${component.hooks.map(h => `        <hook name="${h}" />`).join('\n')}\n      </usesHooks>`
-        : '';
-
-    const description = component.description 
-        ? `\n      <description>${this.escapeXml(component.description)}</description>` 
-        : '';
-    
-    // DEBUG: Trace missing descriptions
-    if (!component.description) {
-        console.log(`[NEORION DEBUG] Component ${component.name} has NO description!`);
-    } else {
-        console.log(`[NEORION DEBUG] Component ${component.name} description len: ${component.description.length}`);
+    const relationships = new Map<string, { from: string; to: string; type: string }>();
+    for (const edge of graph.edges) {
+      const key = JSON.stringify([edge.from, edge.to]);
+      const previous = relationships.get(key);
+      relationships.set(key, { ...edge, type: previous ? `${previous.type} ${edge.type}` : edge.type });
     }
-
-    if (!description && !props && !imports && !hooks) {
-      return `    <component ${attrs} />`;
-    }
-
-    return `    <component ${attrs}>${description}${props}${imports}${hooks}\n    </component>`;
-  }
-
-  private serializeHook(hook: HookNode): string {
-    return `    <hook id="${hook.id}" name="${hook.name}" path="${hook.path}" />`;
-  }
-
-  private escapeXml(unsafe: string): string {
-    return unsafe.replace(/[<>&'"]/g, c => {
-      switch (c) {
-        case '<': return '&lt;';
-        case '>': return '&gt;';
-        case '&': return '&amp;';
-        case '\'': return '&apos;';
-        case '"': return '&quot;';
-        default: return c;
-      }
-    });
+    return [
+      '# Codebase Architecture Map', '', '```xml',
+      `<codebase name="${escapeXml(graph.metadata.name)}" framework="nextjs" router="app" language="ts">`,
+      section('directories', graph.metadata.directories.map(directory => element('dir', { ...directory }))),
+      section('routes', graph.routes.map(route => element('route', {
+        id: route.id, path: route.path, file: route.file, type: route.type,
+        methods: route.methods?.join(' '), component: route.componentId, isClient: route.isClient
+      }))),
+      section('components', graph.components.map(component => element('component', {
+        id: component.id, name: component.name, path: component.path, isClient: component.isClient,
+        props: component.props.length ? component.props.join(' ') : undefined,
+        hooks: component.hooks.length ? component.hooks.join(' ') : undefined
+      }, component.description))),
+      section('hooks', graph.hooks.map(hook => element('hook', { ...hook }))),
+      section('edges', [...relationships.values()].map(edge => element('edge', edge))),
+      section('dependencies', graph.libraries.map(library => element('lib', { ...library }))),
+      '</codebase>', '```', ''
+    ].join('\n');
   }
 }

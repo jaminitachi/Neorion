@@ -1,69 +1,58 @@
-import { Project, SourceFile, SyntaxKind } from 'ts-morph';
+import { Node, SourceFile } from 'ts-morph';
 import * as path from 'path';
 import type { RouteNode } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
 
-export class RouteAnalyzer {
-  private project: Project;
-  private appDir: string;
+export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'];
 
-  constructor(project: Project, appDir: string, private readonly root: string) {
-    this.project = project;
-    this.appDir = appDir;
+export function isClientFile(file: SourceFile): boolean {
+  for (const statement of file.getStatements()) {
+    if (!Node.isExpressionStatement(statement)) return false;
+    const expression = statement.getExpression();
+    if (!Node.isStringLiteral(expression)) return false;
+    if (expression.getLiteralText() === 'use client') return true;
   }
+  return false;
+}
 
-  public analyze(): RouteNode[] {
-    const routes: RouteNode[] = [];
-    const appDirSourceFiles = this.project.getSourceFiles().filter(sf => {
-      const filePath = sf.getFilePath();
-      const relative = path.relative(this.appDir, filePath);
-      return !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative) &&
-        !relative.split(path.sep).includes('node_modules');
-    });
+export class RouteAnalyzer {
+  constructor(private readonly appDir: string, private readonly root: string) {}
 
-    for (const sourceFile of appDirSourceFiles) {
-      const filePath = sourceFile.getFilePath();
-      const relativePath = path.relative(this.appDir, filePath);
-      const fileName = path.basename(filePath);
+  public analyzeFile(source: SourceFile): RouteNode | undefined {
+    const filePath = source.getFilePath();
+    const relative = path.relative(this.appDir, filePath);
+    const parts = relative.split(path.sep);
+    if (path.isAbsolute(relative) ||
+        parts[0] === '..' || parts.some(part => part.startsWith('_'))) return;
 
-      if (fileName === 'page.tsx' || fileName === 'layout.tsx' || fileName === 'loading.tsx') {
-        const routeNode = this.createRouteNode(sourceFile, relativePath);
-        if (routeNode) {
-          routes.push(routeNode);
-        }
+    const filename = parts.pop()!;
+    const match = /^(page|layout|loading|error|not-found|route)\.[jt]sx?$/.exec(filename);
+    if (!match) return;
+    const type = (match[1] === 'route' ? 'api' : match[1]) as RouteNode['type'];
+    const file = path.relative(this.root, filePath).split(path.sep).join('/');
+    const exports = type === 'api' ? source.getExportSymbols().map(symbol => symbol.getName()) : [];
+    const segments: string[] = [];
+    for (const part of parts) {
+      if (part.startsWith('@') || /^\([^()]+\)$/.test(part)) continue;
+      const intercept = /^(\(\.\.\.\)|(?:\(\.\.\))+|\(\.\))(.+)$/.exec(part);
+      if (intercept) {
+        const marker = intercept[1];
+        if (marker === '(...)') segments.length = 0;
+        else if (marker.startsWith('(..)')) segments.splice(Math.max(0, segments.length - marker.length / 4));
+        segments.push(intercept[2]);
+      } else {
+        segments.push(part.replace(/^%5[fF]/, '_'));
       }
     }
 
-    return routes;
-  }
-
-  private createRouteNode(sourceFile: SourceFile, relativePath: string): RouteNode | null {
-    const filePath = sourceFile.getFilePath(); // Get full file path here
-    const fileName = path.basename(relativePath);
-    const dirName = path.dirname(relativePath);
-    
-    // Calculate URL path from directory structure
-    // e.g. app/login/page.tsx -> /login
-    // e.g. app/(auth)/login/page.tsx -> /login (ignoring groups)
-    let urlPath = '/' + dirName.split(path.sep)
-      .filter(part => !part.startsWith('(') && part !== '.')
-      .join('/');
-    
-    if (urlPath === '/.') urlPath = '/'; // Root page
-
-    const type = fileName.replace('.tsx', '') as 'page' | 'layout' | 'loading';
-    const id = `route_${dirName.replace(/\//g, '_')}_${type}`.replace(/[\(\)\.]/g, '');
-    const isClient = sourceFile.getText().includes('"use client"') || sourceFile.getText().includes("'use client'");
-
     return {
-      id,
-      path: urlPath,
-      file: path.relative(this.root, filePath).split(path.sep).join('/'),
+      id: `route:${file}`,
+      path: '/' + segments.join('/'),
+      file,
       type,
-      segment: path.basename(dirName),
-      isClient,
-      domain: DomainExtractor.extract(filePath)
-      // TODO: Extract component name and used hooks
+      methods: type === 'api' ? HTTP_METHODS.filter(method => exports.includes(method)) : undefined,
+      isClient: isClientFile(source),
+      domain: DomainExtractor.extract('/' + file)
     };
   }
 }
