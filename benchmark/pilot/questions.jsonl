@@ -1,0 +1,10 @@
+{"id": "q01", "repo": "vercel/ai-chatbot", "question": "Which TSX files directly render the AppSidebar component?", "answer": ["app/(chat)/layout.tsx"]}
+{"id": "q02", "repo": "vercel/ai-chatbot", "question": "Which HTTP methods are explicitly exported by the App Router endpoint /api/document? Return method names.", "answer": ["DELETE", "GET", "POST"]}
+{"id": "q03", "repo": "vercel/ai-chatbot", "question": "Which layout.tsx files wrap the /chat/[id] App Router page, including the root layout?", "answer": ["app/(chat)/layout.tsx", "app/layout.tsx"]}
+{"id": "q04", "repo": "vercel/ai-chatbot", "question": "Which TSX files directly call the deleteTrailingMessages server action?", "answer": ["components/chat/message-editor.tsx"]}
+{"id": "q05", "repo": "vercel/ai-chatbot", "question": "Which TSX files directly call the useAutoResume hook?", "answer": ["hooks/use-active-chat.tsx"]}
+{"id": "q06", "repo": "mfts/papermark", "question": "Which App Router page files under app/(auth) directly render LoginClient or RegisterClient?", "answer": ["app/(auth)/login/page.tsx", "app/(auth)/register/page.tsx"]}
+{"id": "q07", "repo": "mfts/papermark", "question": "Which App Router endpoints under /api/cron explicitly export an HTTP method? Return each method and URL path as one string, with a single space between them.", "answer": ["POST /api/cron/dataroom-digest/daily", "POST /api/cron/dataroom-digest/weekly", "POST /api/cron/domains", "POST /api/cron/welcome-user", "POST /api/cron/year-in-review"]}
+{"id": "q08", "repo": "mfts/papermark", "question": "Which layout.tsx files wrap the /login App Router page, including the root layout?", "answer": ["app/(auth)/layout.tsx", "app/layout.tsx"]}
+{"id": "q09", "repo": "mfts/papermark", "question": "Which TSX files within app/(auth) directly call the useLastUsed hook?", "answer": ["app/(auth)/login/page-client.tsx"]}
+{"id": "q10", "repo": "mfts/papermark", "question": "What file defines the Pages Router custom App entry point?", "answer": ["pages/_app.tsx"]}
