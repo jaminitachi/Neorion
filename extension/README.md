@@ -15,3 +15,8 @@ The extension refreshes the map after saving TypeScript files or `package.json`.
 From this directory, run `npm ci` and `npx vsce package`. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.
 
 Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.txt).
+
+## Test locally
+
+Run `npm run compile`, `node test/fetch-fixtures.cjs`, and `npm test`.
+The fixture fetch uses pinned upstream revisions and skips installing the fixture projects' dependencies.

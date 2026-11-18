@@ -6,3 +6,5 @@ dist
 .vscode-test
 
 codebase_graph.md
+
+extension/test/.fixtures/
