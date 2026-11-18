@@ -3,6 +3,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { Tiktoken } = require('js-tiktoken/lite');
+const o200kBase = require('js-tiktoken/ranks/o200k_base');
 const { generate } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
 
@@ -23,11 +25,34 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
   return { tmp, project };
 }
 
+function validateUiGroups(graph) {
+  const individualFiles = new Set([...graph.matchAll(/<component id="cmp:([^"#]+)#[^"]+"/g)]
+    .map(([, file]) => file));
+  const ids = [];
+  for (const [, directory, count, prefix, members] of graph.matchAll(
+    /<component-group id="cmp:([^"]+)" count="(\d+)" memberPrefix="([^"]+)" members="([^"]+)"/g
+  )) {
+    const entries = members.split(' ').map(entry => entry.split('(')[0]);
+    assert.equal(entries.length, Number(count));
+    const names = entries.map(entry => entry.split('#').at(-1));
+    for (const [index, entry] of entries.entries()) {
+      const file = directory + '/' + entry.split('#')[0];
+      assert.ok(!individualFiles.has(file), `grouped file is also listed individually: ${file}`);
+      const name = names[index];
+      const id = prefix + (names.indexOf(name) === names.lastIndexOf(name) ? name : entry);
+      assert.ok(id.length <= `cmp:${directory}/${entry}`.length);
+      ids.push(id);
+    }
+  }
+  return ids;
+}
+
 function validate(graph, project, name) {
   assert.ok(graph.includes(`<codebase name="${name}"`));
   assert.ok(!graph.includes(project));
   assert.doesNotMatch(graph, /<component [^\n]*#(?:GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)"/);
   const ids = [...graph.matchAll(/\bid="([^"]+)"/g)].map(match => match[1]);
+  ids.push(...validateUiGroups(graph));
   assert.equal(new Set(ids).size, ids.length, 'graph IDs must be unique');
   for (const [, target] of graph.matchAll(/\b(?:from|to|component)="([^"]+)"/g)) {
     assert.ok(ids.includes(target), `unresolved graph reference ${target}`);
@@ -54,6 +79,17 @@ test('taxonomy maps APIs, special routes, hooks and connections', { skip: !exter
   assert.match(graph, /from="cmp:app\/\(docs\)\/layout.tsx#DocsLayout" to="cmp:components\/main-nav.tsx#MainNav" type="renders imports"/);
 });
 
+test('taxonomy graph fits its token budget and preserves grouped UI props', { skip: !externalFixtures }, async t => {
+  const { project } = copyFixture(t, 'taxonomy');
+  const graph = await generate(project);
+  validateUiGroups(graph);
+  assert.match(graph, /<component-group [^\n]*badge\.tsx#Badge\(className,variant\)/);
+  assert.match(graph, /<component-group [^\n]*button\.tsx#Button\(className,variant,size\)/);
+  const tokens = new Tiktoken(o200kBase).encode(graph, [], []).length;
+  // The pinned fixture measured 11,015 tokens with UI props and member edges intact.
+  assert.ok(tokens <= 11800, `taxonomy graph uses ${tokens} tokens (budget: 11,800)`);
+});
+
 test('commerce maps its revalidation handler and imported components', { skip: !externalFixtures }, async t => {
   const { project } = copyFixture(t, 'commerce');
   const graph = await generate(project);
@@ -61,6 +97,7 @@ test('commerce maps its revalidation handler and imported components', { skip: !
   assert.match(graph, /id="route:app\/api\/revalidate\/route.ts" path="\/api\/revalidate" type="api" methods="POST"/);
   assert.match(graph, /id="route:app\/error.tsx" path="\/" type="error"/);
   assert.match(graph, /<hook id="hook:components\/cart\/cart-context.tsx#useCart"/);
+  assert.match(graph, /from="cmp:components\/layout\/product-grid-items\.tsx#ProductGridItems" to="cmp:components\/grid\/index\.tsx#Grid" type="(?:imports renders|renders imports)"/);
   assert.match(graph, /from="cmp:app\/layout.tsx#RootLayout" to="cmp:components\/cart\/cart-context.tsx#CartProvider" type="renders imports"/);
 });
 
@@ -107,6 +144,11 @@ test('allowlists dependency specs and emits development dependency names only', 
   const safe = {
     semver: '^1.2.0 || >=2.0.0 <3',
     alias: 'npm:@scope/package@~1.0.0',
+    next: 'latest',
+    canary: 'canary',
+    taggedAlias: 'npm:@scope/package@next',
+    nextTag: 'next',
+    beta: 'beta',
     workspace: 'workspace:^',
     git: 'git+https://example.com/org/repo.git#feature/branch'
   };
@@ -140,7 +182,7 @@ test('links JSX to the existing component behind a default export and ignores re
   assert.match(graph, /id="cmp:src\/components\/panel.tsx#Inner" isClient="false" props="children"/);
   assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
   assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="1"/);
-  assert.match(graph, /from="cmp:src\/components\/panel.tsx#Inner" to="cmp:src\/components\/ui" type="renders imports"/);
+  assert.match(graph, /from="cmp:src\/components\/panel.tsx#Inner" to="src-ui:Button" type="renders imports"/);
 });
 
 test('resolves a plain default identifier without duplicating the component or its edges', async t => {
@@ -151,6 +193,19 @@ test('resolves a plain default identifier without duplicating the component or i
   assert.equal(graph.match(/<component id="cmp:src\/components\/panel.tsx#[^"]+"/g).length, 1);
   assert.match(graph, /to="cmp:src\/components\/panel.tsx#Inner" type="renders imports"/);
   assert.equal(graph.match(/from="cmp:src\/components\/panel.tsx#Inner"/g).length, 1);
+});
+
+test('collapses a named memo wrapper and redirects references to its component', async t => {
+  const project = reviewFixture(t);
+  const panel = path.join(project, 'src/components/panel.tsx');
+  fs.writeFileSync(panel, fs.readFileSync(panel, 'utf8').replace('export default memo(Inner)',
+    'const Panel = memo(Inner); export default Panel'));
+  const graph = await generate(project);
+  validate(graph, project, 'review-fixture');
+  assert.match(graph, /id="cmp:src\/components\/panel\.tsx#Panel" isClient="false" props="children"/);
+  assert.doesNotMatch(graph, /panel\.tsx#(?:Inner|default)/);
+  assert.match(graph, /#Layout" to="cmp:src\/components\/panel\.tsx#Panel" type="renders imports"/);
+  assert.equal(graph.match(/from="cmp:src\/components\/panel\.tsx#Panel"/g).length, 1);
 });
 
 test('maps Pages API endpoints and reports mixed, Pages-only and App-only routers', async t => {
@@ -229,7 +284,8 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
   fs.writeFileSync(path.join(ui, 'toaster.tsx'), [
     "import { Banner } from '../banner'",
     "import { useCartStore } from '../../lib/store'",
-    'export function Toaster() { useCartStore(); return <Banner /> }'
+    'export function Toaster() { useCartStore(); return <Banner /> }',
+    'export function ToastTitle() { return <span /> }'
   ].join('\n'));
   fs.writeFileSync(path.join(ui, 'forms/checkout-form.tsx'), [
     "import { updateAccount } from '../../../app/actions'",
@@ -244,12 +300,18 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
     "import { Toaster } from './toaster'",
     'export function ToastRegion() { return <Toaster /> }'
   ].join('\n'));
+  fs.writeFileSync(path.join(ui, 'radix.tsx'), [
+    "import * as Radix from '@radix-ui/react-dialog'",
+    'export const Root = Radix.Root',
+    'export function Dialog({ open }) { return <Root open={open}><Radix.Content /></Root> }'
+  ].join('\n'));
   const graph = await generate(project);
   validate(graph, project, 'review-fixture');
-  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="2" files="button.tsx surface.tsx"/);
-  assert.match(graph, /#Inner" to="cmp:src\/components\/ui" type="renders imports" toMember="button.tsx#Button"/);
-  assert.match(graph, /from="cmp:src\/components\/ui" to="cmp:src\/components\/banner.tsx#Banner" type="imports" fromMember="surface.tsx#Surface"/);
-  assert.match(graph, /type="renders imports" fromMember="surface.tsx#Surface" toMember="button.tsx#Button"/);
+  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="3" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) surface.tsx#Surface\(title\)"/);
+  assert.match(graph, /#Inner" to="src-ui:Button" type="renders imports"/);
+  assert.match(graph, /from="src-ui:Surface" to="cmp:src\/components\/banner.tsx#Banner" type="imports"/);
+  assert.match(graph, /from="src-ui:Surface" to="src-ui:Button" type="renders imports"/);
+  assert.match(graph, /id="cmp:src\/components\/ui\/toaster.tsx#ToastTitle"/);
   assert.match(graph, /#Toaster" isClient="false" hooks="hook:src\/lib\/store.ts#useCartStore"/);
   assert.match(graph, /#Toaster" to="cmp:src\/components\/banner.tsx#Banner" type="renders imports"/);
   assert.match(graph, /#CheckoutForm" isClient="false" props="amount"/);

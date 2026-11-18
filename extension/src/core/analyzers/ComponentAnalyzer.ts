@@ -1,4 +1,4 @@
-import { Node, SourceFile } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, HookNode, RouteNode } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -11,6 +11,16 @@ const HOOK = /^use[A-Z0-9]/;
 function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
   return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
+}
+
+function rootBinding(node: Node): Node {
+  while (Node.isPropertyAccessExpression(node)) node = node.getExpression();
+  return node;
+}
+
+function isPackageSpecifier(specifier: string): boolean {
+  return !specifier.startsWith('.') && !specifier.startsWith('@/') && !specifier.startsWith('#') &&
+    !path.isAbsolute(specifier) && !path.win32.isAbsolute(specifier);
 }
 
 function unwrapComponent(node: Node | undefined): Node | undefined {
@@ -81,7 +91,7 @@ export class ComponentAnalyzer {
   public analyze(files: SourceFile[], routes: RouteNode[]) {
     const components = new Map<Node, ComponentNode>();
     const bodies = new Map<Node, Node>();
-    const defaultAliases = new Map<Node, Node[]>();
+    const aliases = new Map<Node, Node[]>();
     const hooks = new Map<string, HookNode>();
     const localHooks = new Map<Node, HookNode>();
     const projectFiles = new Set(files);
@@ -140,15 +150,16 @@ export class ComponentAnalyzer {
         if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression)) continue;
         const targets = declarationsOf(expression);
         if (!targets.length) continue;
-        defaultAliases.set(assignment, targets);
+        aliases.set(assignment, targets);
         for (const target of targets) defaultDeclarations.add(target);
       }
       const candidates = [
         ...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getExportAssignments().filter(node => !node.isExportEquals())
       ];
+      const exported = new Set<Node>([...file.getExportedDeclarations().values()].flat());
       for (const node of candidates) {
-        if (defaultAliases.has(node)) continue;
+        if (aliases.has(node)) continue;
         const fn = callable(node);
         const body = fn ? fn.getBody() :
           Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined;
@@ -181,21 +192,55 @@ export class ComponentAnalyzer {
         bodies.set(node, body);
         if (route && isDefault) route.componentId = id;
       }
+
+      for (const wrapper of file.getVariableDeclarations()) {
+        const initializer = wrapper.getInitializer();
+        const target = unwrapComponent(initializer);
+        if (!components.has(wrapper) || !Node.isCallExpression(initializer) || !Node.isIdentifier(target)) continue;
+        for (const inner of declarationsOf(target)) {
+          if (inner.getSourceFile() !== file || exported.has(inner) || !components.has(inner)) continue;
+          const innerId = components.get(inner)!.id;
+          components.delete(inner);
+          aliases.set(inner, [wrapper]);
+          if (route?.componentId === innerId) route.componentId = components.get(wrapper)!.id;
+        }
+      }
     }
+
+    const resolveComponent = (node: Node, seen = new Set<Node>()): ComponentNode | undefined => {
+      if (seen.has(node)) return;
+      seen.add(node);
+      return components.get(node) ?? aliases.get(node)?.map(target => resolveComponent(target, seen)).find(Boolean);
+    };
 
     for (const file of files) {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
       if (!route || route.type === 'api' || isMetadata(route) || route.componentId) continue;
       const exported = file.getExportedDeclarations().get('default');
-      route.componentId = exported?.flatMap(node => defaultAliases.get(node) ?? [node])
-        .map(node => components.get(node)).find(Boolean)?.id;
+      route.componentId = exported?.flatMap(node => aliases.get(node) ?? [node])
+        .map(node => resolveComponent(node)).find(Boolean)?.id;
     }
 
-    const resolveComponent = (node: Node, seen = new Set<Node>()): ComponentNode | undefined => {
-      if (seen.has(node)) return;
-      seen.add(node);
-      return components.get(node) ?? defaultAliases.get(node)?.map(target => resolveComponent(target, seen)).find(Boolean);
+    const rendersExternal = (tag: Node, seen = new Set<Node>()): boolean => {
+      const binding = rootBinding(tag);
+      if (seen.has(binding)) return false;
+      seen.add(binding);
+      const symbol = binding.getSymbol();
+      for (const node of symbol?.getDeclarations() ?? []) {
+        const declaration = node.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+        if (declaration && !declaration.isTypeOnly() &&
+            isPackageSpecifier(declaration.getModuleSpecifierValue())) {
+          const source = declaration.getModuleSpecifierSourceFile();
+          if (!source || !projectFiles.has(source)) return true;
+        }
+      }
+      return declarationsOf(binding).some(node => {
+        if (!Node.isVariableDeclaration(node)) return false;
+        const initializer = node.getInitializer();
+        return (Node.isIdentifier(initializer) || Node.isPropertyAccessExpression(initializer)) &&
+          rendersExternal(initializer, seen);
+      });
     };
 
     const edges = new Map<string, ComponentEdge>();
@@ -222,11 +267,15 @@ export class ComponentAnalyzer {
       const usedHooks = new Set<string>();
       let primitiveCandidate = /^(?:src\/)?components\/ui\//.test(component.path);
       const render = (tag: Node) => {
-        const targets = declarationsOf(tag).map(resolve => resolveComponent(resolve)).filter(Boolean);
+        const binding = rootBinding(tag);
+        const targets = declarationsOf(tag).map(node => resolveComponent(node)).filter(Boolean);
+        if (!targets.length && binding !== tag) {
+          targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
+        }
         for (const target of targets) addEdge(target?.id, 'renders');
         const intrinsic = (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) ||
           (Node.isStringLiteral(tag) && /^[a-z]/.test(tag.getLiteralText()));
-        if (!intrinsic && !targets.length) primitiveCandidate = false;
+        if (!intrinsic && !targets.length && !rendersExternal(tag)) primitiveCandidate = false;
       };
       const inspect = (child: Node) => {
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
@@ -273,8 +322,7 @@ export class ComponentAnalyzer {
           const id = `hook:${path}#${name}`;
           hooks.set(id, { id, path, name });
           usedHooks.add(id);
-        } else if (specifier && !specifier.startsWith('.') && !path.isAbsolute(specifier) &&
-                   !path.win32.isAbsolute(specifier) && !specifier.startsWith('@/') && !specifier.startsWith('#')) {
+        } else if (specifier && isPackageSpecifier(specifier)) {
           const id = `hook:${specifier}#${name}`;
           hooks.set(id, { id, name, module: specifier });
           usedHooks.add(id);

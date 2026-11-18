@@ -23,43 +23,58 @@ function section(name: string, entries: string[]): string {
 export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph): string {
     const routeComponents = new Set(graph.routes.map(route => route.componentId));
-    const primitives = new Map<string, string>();
-    for (const component of graph.components) {
-      const directory = /^(?:src\/)?components\/ui(?=\/)/.exec(component.path)?.[0];
-      if (!directory || !component.primitiveCandidate || component.hooks.length || routeComponents.has(component.id)) continue;
-      primitives.set(component.id, `cmp:${directory}`);
-    }
-    // A component can only be folded if all components it renders can also be folded.
+    const uiDirectory = /^(?:src\/)?components\/ui\//;
+    const componentsById = new Map(graph.components.map(component => [component.id, component]));
+    const unfolded = new Set(graph.components.filter(component =>
+      !uiDirectory.test(component.path) || !component.primitiveCandidate ||
+      component.hooks.length || routeComponents.has(component.id)
+    ).map(component => component.path));
+
+    // Keep all exports of a file together and propagate through render dependencies.
     let changed: boolean;
     do {
       changed = false;
       for (const edge of graph.edges) {
-        if (edge.type === 'uses-action' || (edge.type === 'renders' && !primitives.has(edge.to))) {
-          if (primitives.delete(edge.from)) changed = true;
+        const from = componentsById.get(edge.from);
+        const to = componentsById.get(edge.to);
+        if (!from || unfolded.has(from.path)) continue;
+        if (edge.type === 'uses-action' || (edge.type === 'renders' && to && unfolded.has(to.path))) {
+          unfolded.add(from.path);
+          changed = true;
         }
       }
     } while (changed);
-    const primitiveGroups = new Map<string, { count: number; files: Set<string> }>();
-    for (const component of graph.components) {
-      const id = primitives.get(component.id);
-      if (!id) continue;
-      const group = primitiveGroups.get(id) ?? { count: 0, files: new Set<string>() };
-      group.count++;
-      group.files.add(component.path.slice(id.length - 'cmp:'.length + 1));
-      primitiveGroups.set(id, group);
+
+    const memberIds = new Map<string, string>();
+    const primitiveGroups = new Map<string, string[]>();
+    const folded = graph.components.filter(component => !unfolded.has(component.path));
+    // Use the file-qualified suffix only when a name is shared within its group.
+    const nameCounts = new Map<string, number>();
+    for (const component of folded) {
+      const key = uiDirectory.exec(component.path)![0] + component.name;
+      nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+    }
+    for (const component of folded) {
+      const directory = uiDirectory.exec(component.path)![0];
+      const member = component.id.slice('cmp:'.length + directory.length);
+      const prefix = directory.startsWith('src/') ? 'src-ui' : 'ui';
+      const props = component.props.length ? `(${component.props.join(',')})` : '';
+      const suffix = nameCounts.get(directory + component.name) === 1 ? component.name : member;
+      memberIds.set(component.id, `${prefix}:${suffix}`);
+      const members = primitiveGroups.get(directory) ?? [];
+      members.push(member + props);
+      primitiveGroups.set(directory, members);
     }
     const relationships = new Map<string, Record<string, Attribute> & { type: string }>();
     for (const edge of graph.edges) {
-      const fromGroup = primitives.get(edge.from);
-      const toGroup = primitives.get(edge.to);
       const key = JSON.stringify([edge.from, edge.to]);
       const previous = relationships.get(key);
       const types = new Set(previous?.type.split(' '));
       types.add(edge.type);
       relationships.set(key, {
-        from: fromGroup ?? edge.from, to: toGroup ?? edge.to, type: [...types].join(' '),
-        fromMember: fromGroup && edge.from.slice(fromGroup.length + 1),
-        toMember: toGroup && edge.to.slice(toGroup.length + 1)
+        from: memberIds.get(edge.from) ?? edge.from,
+        to: memberIds.get(edge.to) ?? edge.to,
+        type: [...types].join(' ')
       });
     }
     return [
@@ -70,13 +85,16 @@ export class MarkdownSerializer {
         id: route.id, path: route.path, scope: route.scope, type: route.type,
         methods: route.methods?.join(' '), wraps: route.wraps?.length ? route.wraps.join(' ') : undefined, component: route.componentId, isClient: route.isClient
       }))),
-      section('components', [...graph.components.filter(component => !primitives.has(component.id)).map(component => element('component', {
+      section('components', [...graph.components.filter(component => !memberIds.has(component.id)).map(component => element('component', {
         id: component.id, isClient: component.isClient,
         props: component.props.length ? component.props.join(' ') : undefined,
         hooks: component.hooks.length ? component.hooks.join(' ') : undefined
       }, component.description)),
-        ...[...primitiveGroups].map(([id, { count, files }]) =>
-          element('component-group', { id, count: String(count), files: [...files].sort().join(' ') }))]),
+        ...[...primitiveGroups].map(([directory, members]) =>
+          element('component-group', {
+            id: `cmp:${directory.slice(0, -1)}`, count: String(members.length),
+            memberPrefix: directory.startsWith('src/') ? 'src-ui:' : 'ui:', members: members.sort().join(' ')
+          }))]),
       section('hooks', graph.hooks.map(hook => element('hook', { id: hook.id }))),
       section('server-actions', graph.actions.map(id => element('action', { id }))),
       section('edges', [...relationships.values()].map(edge => element('edge', edge))),

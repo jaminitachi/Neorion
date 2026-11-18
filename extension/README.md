@@ -10,6 +10,10 @@ Neorion generates a local architecture map for Next.js projects written in TypeS
 
 After running either Neorion command once in the current editor session, saving a TypeScript file or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
 
+In the Markdown, UI groups list members as `file.tsx#Name(prop1,prop2)`.
+Edges reference a member using the group's `memberPrefix` plus its component
+name. If a name is shared within the group, the edge uses the file and name.
+
 ## Build and install locally
 
 From this directory, run `npm ci` and `npx vsce package`. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.

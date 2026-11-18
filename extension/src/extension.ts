@@ -202,10 +202,11 @@ function staticMetadataFiles(directory: string): string[] {
 function safeDependencySpec(value: unknown): string {
     if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) return '[redacted]';
     const spec = value.trim();
-    if (spec && validRange(spec)) return spec;
+    const isTag = (version: string) => /^[a-z][a-z0-9-]*$/i.test(version);
+    if (spec && (validRange(spec) || isTag(spec))) return spec;
 
     const alias = /^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@(.+))?$/i.exec(spec);
-    if (alias && (!alias[1] || validRange(alias[1]) || /^[a-z][a-z0-9-]*$/i.test(alias[1]))) return spec;
+    if (alias && (!alias[1] || validRange(alias[1]) || isTag(alias[1]))) return spec;
 
     const workspace = /^workspace:(.+)$/.exec(spec)?.[1];
     if (workspace && (validRange(workspace) || workspace === '^' || workspace === '~')) return spec;
