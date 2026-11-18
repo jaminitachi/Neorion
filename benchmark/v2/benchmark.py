@@ -58,6 +58,7 @@ def select_details(question, repository, limit=3):
                       " ", question, flags=re.IGNORECASE)
     symbols = set(re.findall(r"\b[A-Za-z][A-Za-z0-9]*[a-z0-9][A-Z][A-Za-z0-9]*\b", positive))
     question_words = words(positive)
+    scopes = re.findall(r"\bunder\s+((?:[\w.-]+/)+)", positive, flags=re.IGNORECASE)
     page_urls = set(re.findall(r"(?<![\w/])(/[^\s,!?;]+)\s+page file\b", positive))
 
     def has_page_file(text):
@@ -71,31 +72,63 @@ def select_details(question, repository, limit=3):
                 if (url or "/") in page_urls:
                     return True
         return False
+
+    files = [(file, file.read_text()) for file in sorted((repository / ".neorion/graph").glob("*.md"))
+             if not file.name.startswith("+dependencies")]
+
+    def render_rows(text):
+        directory = ""
+        for line in text.splitlines():
+            if line.endswith("/") and not line.startswith(" "):
+                directory = line.removeprefix("./")
+            row = re.match(r"  ([^:]+): (.*)", line)
+            if not row:
+                continue
+            segments = row[2].split(" | ")
+            definition = re.match(r"[A-Za-z_$][\w$]*", segments[0])
+            for segment in segments:
+                if ">" not in segment:
+                    continue
+                source, targets = segment.split(">", 1)
+                source = source.strip() or (definition[0] if definition else "")
+                yield directory + row[1].removesuffix(" (c)"), source, {
+                    token.removesuffix("[render]") for token in targets.split()
+                    if not token.endswith(("[import]", "[action]"))
+                }, " | route " in row[2]
+
+    page_lookup = "page URLs" in positive and bool(symbols)
+    bridges = set()
+    if page_lookup:
+        for _, text in files:
+            for source_file, source, targets, is_route in render_rows(text):
+                if source and not is_route and any(token.rsplit("#", 1)[-1] in symbols for token in targets):
+                    bridges.update((source, f"{source_file}#{source}"))
     candidates = []
     frequencies = Counter()
-    for file in sorted((repository / ".neorion/graph").glob("*.md")):
-        if file.name.startswith("+dependencies"):
-            continue
-        text = file.read_text()
+    for file, text in files:
         heading = text.splitlines()[1].removeprefix("# ")
         hits = question_words & words(text)
         frequencies.update(hits)
         explicit = re.search(rf"(?<![\w/]){re.escape(heading)}(?=/)", positive, re.IGNORECASE)
         exact = {symbol for symbol in symbols if re.search(rf"\b{re.escape(symbol)}\b", text)}
-        indexed = sum(bool(re.search(rf"^{re.escape(symbol)} \(\d+\)$", text, re.MULTILINE))
+        indexed = sum(bool(re.search(rf"^(?:[^ \n]+#)?{re.escape(symbol)} \(\d+\)$", text, re.MULTILINE))
                       for symbol in exact) if file.name.startswith("+reverse-") else 0
         relationships = sum(len(re.findall(
             rf"^  .*(?:\bh:[^|]*\b{re.escape(symbol)}\b|>[^|]*\b{re.escape(symbol)}\b(?!\[import\]))",
             text, re.MULTILINE
         )) for symbol in exact)
-        candidates.append((file, text, bool(explicit), bool(page_urls and has_page_file(text)),
-                           indexed, len(exact), relationships, hits))
+        scope_rank = 2 if any((heading + "/").casefold().startswith(scope.casefold()) for scope in scopes) else bool(explicit)
+        page_hits = sum(is_route and any(
+            token in bridges or token.rsplit("#", 1)[-1] in symbols for token in targets
+        ) for _, _, targets, is_route in render_rows(text)) if page_lookup else 0
+        candidates.append((file, text, scope_rank, bool(page_urls and has_page_file(text)),
+                           indexed, page_hits, len(exact), relationships, hits))
     if not candidates:
         raise ValueError(f"No graph details in {repository}")
 
     def rank(entry):
-        _, _, explicit, route, indexed, exact, relationships, hits = entry
-        return explicit, route, indexed, exact, relationships, sum(1 / frequencies[term] for term in sorted(hits))
+        _, _, explicit, route, indexed, page_hits, exact, relationships, hits = entry
+        return explicit, route, indexed, page_hits, exact, relationships, sum(1 / frequencies[term] for term in sorted(hits))
 
     return [(file.relative_to(repository).as_posix(), text)
             for file, text, *_ in sorted(candidates, key=rank, reverse=True)[:limit]]

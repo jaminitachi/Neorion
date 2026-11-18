@@ -46,9 +46,11 @@ re-derives the questions and checks the frozen SHA-256 before emitting prompts.
 For B, remove negative clauses beginning with words such as “exclude,” “omit,”
 or “except” for ranking only. For example, “Exclude layouts” contributes
 neither word. Rank all detail parts independently, skipping dependencies.
-Prefer explicitly scoped directory paths, then a matching Pages source row
+Prefer explicitly scoped directories and their descendants, then a matching Pages source row
 when the question names a page URL, then exact subject headings in a reverse
-index. Next compare whole-symbol matches and the number of matching hook or
+index. For questions asking for page URLs, favor page rows that render the
+named target or a recorded renderer of that target. Next compare whole-symbol
+matches and the number of matching hook or
 outgoing relationship rows. Break remaining ties by
 the sum of inverse document frequencies of matching lowercase words, split at
 camel-case boundaries, then by lexical filename order. The selector receives
@@ -94,5 +96,7 @@ and an `evidence` string citing the supporting file and relationship, or
 identifying the missing relationship. For missing facts, check the full
 generated graph and record whether the selector missed a supporting detail or
 the graph omitted the fact. A render-chain answer requires evidence for both
-edges. Coverage is excluded from prompts. The optional audit input annotates
-B grades and reports exact accuracy by coverage.
+edges. Coverage is excluded from prompts. The checked-in `coverage.jsonl` records
+the audit for the frozen questions and the pinned generated contexts. Use a
+fresh audit for different contexts. The optional audit input annotates B
+grades and reports exact accuracy by coverage.
