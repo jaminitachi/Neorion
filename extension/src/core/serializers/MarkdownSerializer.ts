@@ -46,7 +46,7 @@ export class MarkdownSerializer {
     } while (changed);
 
     const memberIds = new Map<string, string>();
-    const primitiveGroups = new Map<string, string[]>();
+    const primitiveGroups = new Map<string, { members: string[]; clientFiles: Set<string> }>();
     const folded = graph.components.filter(component => !unfolded.has(component.path));
     // Use the file-qualified suffix only when a name is shared within its group.
     const nameCounts = new Map<string, number>();
@@ -61,9 +61,10 @@ export class MarkdownSerializer {
       const props = component.props.length ? `(${component.props.join(',')})` : '';
       const suffix = nameCounts.get(directory + component.name) === 1 ? component.name : member;
       memberIds.set(component.id, `${prefix}:${suffix}`);
-      const members = primitiveGroups.get(directory) ?? [];
-      members.push(member + props);
-      primitiveGroups.set(directory, members);
+      const group = primitiveGroups.get(directory) ?? { members: [], clientFiles: new Set<string>() };
+      group.members.push(member + props);
+      if (component.isClient) group.clientFiles.add(component.path.slice(directory.length));
+      primitiveGroups.set(directory, group);
     }
     const relationships = new Map<string, Record<string, Attribute> & { type: string }>();
     for (const edge of graph.edges) {
@@ -90,10 +91,11 @@ export class MarkdownSerializer {
         props: component.props.length ? component.props.join(' ') : undefined,
         hooks: component.hooks.length ? component.hooks.join(' ') : undefined
       }, component.description)),
-        ...[...primitiveGroups].map(([directory, members]) =>
+        ...[...primitiveGroups].map(([directory, { members, clientFiles }]) =>
           element('component-group', {
             id: `cmp:${directory.slice(0, -1)}`, count: String(members.length),
-            memberPrefix: directory.startsWith('src/') ? 'src-ui:' : 'ui:', members: members.sort().join(' ')
+            memberPrefix: directory.startsWith('src/') ? 'src-ui:' : 'ui:', members: members.sort().join(' '),
+            clientFiles: clientFiles.size ? [...clientFiles].sort().join(' ') : undefined
           }))]),
       section('hooks', graph.hooks.map(hook => element('hook', { id: hook.id }))),
       section('server-actions', graph.actions.map(id => element('action', { id }))),

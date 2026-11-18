@@ -302,13 +302,14 @@ test('folds UI primitives with file names and preserves member edges, hooks and 
     'export function ToastRegion() { return <Toaster /> }'
   ].join('\n'));
   fs.writeFileSync(path.join(ui, 'radix.tsx'), [
+    '"use client"',
     "import * as Radix from '@radix-ui/react-dialog'",
     'export const Root = Radix.Root',
     'export function Dialog({ open }) { return <Root open={open}><Radix.Content /></Root> }'
   ].join('\n'));
   const graph = await generate(project);
   validate(graph, project, 'review-fixture');
-  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="4" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) radix.tsx#Root surface.tsx#Surface\(title\)"/);
+  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="4" memberPrefix="src-ui:" members="button.tsx#Button\(children\) radix.tsx#Dialog\(open\) radix.tsx#Root surface.tsx#Surface\(title\)" clientFiles="radix.tsx"\s*\/>/);
   assert.match(graph, /from="src-ui:Dialog" to="src-ui:Root" type="renders"/);
   assert.match(graph, /#Inner" to="src-ui:Button" type="renders imports"/);
   assert.match(graph, /from="src-ui:Surface" to="cmp:src\/components\/banner.tsx#Banner" type="imports"/);
