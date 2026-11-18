@@ -220,6 +220,14 @@ export class ComponentAnalyzer {
       }
 
       const usedHooks = new Set<string>();
+      let primitiveCandidate = /^(?:src\/)?components\/ui\//.test(component.path);
+      const render = (tag: Node) => {
+        const targets = declarationsOf(tag).map(resolve => resolveComponent(resolve)).filter(Boolean);
+        for (const target of targets) addEdge(target?.id, 'renders');
+        const intrinsic = (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) ||
+          (Node.isStringLiteral(tag) && /^[a-z]/.test(tag.getLiteralText()));
+        if (!intrinsic && !targets.length) primitiveCandidate = false;
+      };
       const inspect = (child: Node) => {
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           if (!actionNames.has(child)) {
@@ -229,7 +237,7 @@ export class ComponentAnalyzer {
           if (!Node.isVariableDeclaration(child.getParent())) addEdge(actionIds.get(child), 'uses-action');
         }
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
-          for (const target of declarationsOf(child.getTagNameNode())) addEdge(resolveComponent(target)?.id, 'renders');
+          render(child.getTagNameNode());
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
@@ -240,15 +248,15 @@ export class ComponentAnalyzer {
         if (!Node.isCallExpression(child)) return;
         const expression = child.getExpression();
         const [argument] = child.getArguments();
-        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) {
-          for (const target of declarationsOf(argument)) addEdge(resolveComponent(target)?.id, 'renders');
-        }
+        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument);
         const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
         const original = binding.getSymbol()?.getDeclarations() ?? [];
         const imported = original.find(declaration => imports.has(declaration));
         const name = Node.isImportSpecifier(imported) ? imported.getName() :
           Node.isPropertyAccessExpression(expression) ? expression.getName() : expression.getText();
+        if (['getState', 'setState', 'subscribe', 'dispatch'].includes(name)) primitiveCandidate = false;
         if (!HOOK.test(name)) return;
+        primitiveCandidate = false;
         const importDeclaration = imported && imports.get(imported);
         const specifier = importDeclaration?.getModuleSpecifierValue();
         if (specifier === 'react' || specifier === 'react-dom') return;
@@ -275,6 +283,7 @@ export class ComponentAnalyzer {
       inspect(body);
       body.forEachDescendant(inspect);
       component.hooks = [...usedHooks];
+      component.primitiveCandidate = primitiveCandidate;
     }
 
     return { components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions] };

@@ -217,3 +217,39 @@ test('links used actions through JSX props, callbacks and imports with stable sc
     line.includes('<action ') || line.includes('type="uses-action"')), graph.split('\n').filter(line =>
     line.includes('<action ') || line.includes('type="uses-action"')));
 });
+
+test('folds UI primitives with file names and preserves member edges, hooks and domain components', async t => {
+  const project = reviewFixture(t);
+  const ui = path.join(project, 'src/components/ui');
+  fs.mkdirSync(path.join(ui, 'forms'));
+  fs.writeFileSync(path.join(project, 'src/components/banner.tsx'), 'export const Banner = () => <aside />');
+  fs.writeFileSync(path.join(ui, 'toaster.tsx'), [
+    "import { Banner } from '../banner'",
+    "import { useCartStore } from '../../lib/store'",
+    'export function Toaster() { useCartStore(); return <Banner /> }'
+  ].join('\n'));
+  fs.writeFileSync(path.join(ui, 'forms/checkout-form.tsx'), [
+    "import { updateAccount } from '../../../app/actions'",
+    'export function CheckoutForm({ amount }) { return <form action={updateAccount}>{amount}</form> }'
+  ].join('\n'));
+  fs.writeFileSync(path.join(ui, 'surface.tsx'), [
+    "import { Button } from './button'",
+    "import { Banner } from '../banner'",
+    'export function Surface({ title }) { return <Button>{title ?? Banner.name}</Button> }'
+  ].join('\n'));
+  fs.writeFileSync(path.join(ui, 'toast-region.tsx'), [
+    "import { Toaster } from './toaster'",
+    'export function ToastRegion() { return <Toaster /> }'
+  ].join('\n'));
+  const graph = await generate(project);
+  validate(graph, project, 'review-fixture');
+  assert.match(graph, /<component-group id="cmp:src\/components\/ui" count="2" files="button.tsx surface.tsx"/);
+  assert.match(graph, /#Inner" to="cmp:src\/components\/ui" type="renders imports" toMember="button.tsx#Button"/);
+  assert.match(graph, /from="cmp:src\/components\/ui" to="cmp:src\/components\/banner.tsx#Banner" type="imports" fromMember="surface.tsx#Surface"/);
+  assert.match(graph, /type="renders imports" fromMember="surface.tsx#Surface" toMember="button.tsx#Button"/);
+  assert.match(graph, /#Toaster" isClient="false" hooks="hook:src\/lib\/store.ts#useCartStore"/);
+  assert.match(graph, /#Toaster" to="cmp:src\/components\/banner.tsx#Banner" type="renders imports"/);
+  assert.match(graph, /#CheckoutForm" isClient="false" props="amount"/);
+  assert.match(graph, /#CheckoutForm" to="action:src\/app\/actions.ts#updateAccount" type="uses-action"/);
+  assert.match(graph, /#ToastRegion" to="cmp:src\/components\/ui\/toaster.tsx#Toaster" type="renders imports"/);
+});

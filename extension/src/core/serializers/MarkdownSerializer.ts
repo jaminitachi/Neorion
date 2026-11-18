@@ -24,23 +24,43 @@ export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph): string {
     const routeComponents = new Set(graph.routes.map(route => route.componentId));
     const primitives = new Map<string, string>();
-    const primitiveGroups = new Map<string, number>();
     for (const component of graph.components) {
       const directory = /^(?:src\/)?components\/ui(?=\/)/.exec(component.path)?.[0];
-      if (!directory || routeComponents.has(component.id)) continue;
-      const group = `cmp:${directory}`;
-      primitives.set(component.id, group);
-      primitiveGroups.set(group, (primitiveGroups.get(group) ?? 0) + 1);
+      if (!directory || !component.primitiveCandidate || component.hooks.length || routeComponents.has(component.id)) continue;
+      primitives.set(component.id, `cmp:${directory}`);
     }
-    const relationships = new Map<string, { from: string; to: string; type: string }>();
+    // A component can only be folded if all components it renders can also be folded.
+    let changed: boolean;
+    do {
+      changed = false;
+      for (const edge of graph.edges) {
+        if (edge.type === 'uses-action' || (edge.type === 'renders' && !primitives.has(edge.to))) {
+          if (primitives.delete(edge.from)) changed = true;
+        }
+      }
+    } while (changed);
+    const primitiveGroups = new Map<string, { count: number; files: Set<string> }>();
+    for (const component of graph.components) {
+      const id = primitives.get(component.id);
+      if (!id) continue;
+      const group = primitiveGroups.get(id) ?? { count: 0, files: new Set<string>() };
+      group.count++;
+      group.files.add(component.path.slice(id.length - 'cmp:'.length + 1));
+      primitiveGroups.set(id, group);
+    }
+    const relationships = new Map<string, Record<string, Attribute> & { type: string }>();
     for (const edge of graph.edges) {
-      if (primitives.has(edge.from)) continue;
-      const to = primitives.get(edge.to) ?? edge.to;
-      const key = JSON.stringify([edge.from, to]);
+      const fromGroup = primitives.get(edge.from);
+      const toGroup = primitives.get(edge.to);
+      const key = JSON.stringify([edge.from, edge.to]);
       const previous = relationships.get(key);
       const types = new Set(previous?.type.split(' '));
       types.add(edge.type);
-      relationships.set(key, { ...edge, to, type: [...types].join(' ') });
+      relationships.set(key, {
+        from: fromGroup ?? edge.from, to: toGroup ?? edge.to, type: [...types].join(' '),
+        fromMember: fromGroup && edge.from.slice(fromGroup.length + 1),
+        toMember: toGroup && edge.to.slice(toGroup.length + 1)
+      });
     }
     return [
       '# Codebase Architecture Map', '', '```xml',
@@ -55,7 +75,8 @@ export class MarkdownSerializer {
         props: component.props.length ? component.props.join(' ') : undefined,
         hooks: component.hooks.length ? component.hooks.join(' ') : undefined
       }, component.description)),
-        ...[...primitiveGroups].map(([id, count]) => element('component-group', { id, count: String(count) }))]),
+        ...[...primitiveGroups].map(([id, { count, files }]) =>
+          element('component-group', { id, count: String(count), files: [...files].sort().join(' ') }))]),
       section('hooks', graph.hooks.map(hook => element('hook', { id: hook.id }))),
       section('server-actions', graph.actions.map(id => element('action', { id }))),
       section('edges', [...relationships.values()].map(edge => element('edge', edge))),

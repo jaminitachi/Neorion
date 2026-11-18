@@ -24,6 +24,7 @@ export interface ComponentNode {
   domain: string;
   props: string[];
   hooks: string[];
+  primitiveCandidate?: boolean;
   description?: string;
 }
 
