@@ -1,3 +1,4 @@
+const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -28,7 +29,7 @@ function copyFixture(t, name, prefix = '', root = fixtures) {
 function readMap(project, overview, name) {
   assert.ok(overview.startsWith('# ' + name + ' architecture') ||
     overview.split('\n').includes('# ' + name + ' architecture (mixed router)'));
-  const root = path.join(project, 'neorion/graph');
+  const root = cachePath(project, 'neorion/graph');
   const details = fs.readdirSync(root).filter(file => file.endsWith('.md'));
   assertOverviewLinks(project, overview);
   const files = Object.fromEntries(details.map(file => [file, fs.readFileSync(path.join(root, file), 'utf8')]));
@@ -366,7 +367,7 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
   assert.match(overview, /^Overview abbreviates .*Routes/);
   assert.match(overview, /browse \[all details\]/);
   assertOverviewLinks(project, overview);
-  const directory = path.join(project, 'neorion/graph');
+  const directory = cachePath(project, 'neorion/graph');
   const shards = fs.readdirSync(directory).filter(file => file.startsWith('src~pages~api'));
   assert.ok(shards.length > 1);
   const contents = shards.map(file => fs.readFileSync(path.join(directory, file), 'utf8'));
@@ -392,7 +393,7 @@ test('links every area through a paginated index when direct links exceed the ov
   assert.match(overview, /\[Area index\]/);
   assert.ok(count(overview) <= 1500);
   assertOverviewLinks(project, overview);
-  const dir = path.join(project, 'neorion/graph');
+  const dir = cachePath(project, 'neorion/graph');
   const indexes = fs.readdirSync(dir).filter(file => file.startsWith('+areas'));
   assert.ok(indexes.length > 1);
   for (const index of indexes) assert.ok(count(fs.readFileSync(path.join(dir, index), 'utf8')) <= 3000);
@@ -442,7 +443,7 @@ for (const name of ['ai-chatbot', 'papermark']) {
     const overview = await generate(project);
     assertOverviewLinks(project, overview);
     assert.ok(count(overview) <= overviewBudget(listing));
-    const directory = path.join(project, 'neorion/graph');
+    const directory = cachePath(project, 'neorion/graph');
     let detailTotal = 0;
     for (const file of fs.readdirSync(directory)) {
       const tokens = count(fs.readFileSync(path.join(directory, file), 'utf8'));
@@ -543,9 +544,8 @@ test('connects only selected AI instructions after consent, once per project, an
   assert.equal(prompts, 2);
   assert.equal(picks, 1);
   const connected = fs.readFileSync(agentFile, 'utf8');
-  assert.match(connected, /<!-- neorion:start -->\r\n.*codebase_graph\.md.*neorion\/graph\/.*grep/);
+  assert.match(connected, /<!-- neorion:start -->\r\n.*read the Neorion overview.*codebase_graph\.md/);
   assert.match(fs.readFileSync(cursorRule, 'utf8'), /^---\r\ndescription: Existing rule\r\nalwaysApply: true\r\n---/);
-  assert.match(connected, /`rendered`.*`wrap`.*`rename`.*`fetch`/);
   assert.ok(count(connected.slice(0, connected.indexOf(instructions))) <= 150);
   assert.ok(!fs.existsSync(claudeFile));
 
@@ -701,7 +701,7 @@ test('marks early-return fallbacks and switch branches in wrapper chains', async
   assert.doesNotMatch(details, /^wrap .* <- .*#FallbackProvider$/m);
 });
 
-test('moves generated details into a visible directory and preserves handwritten legacy files', async t => {
+test('moves generated details out of the source tree and preserves handwritten legacy files', async t => {
   const project = reviewFixture(t);
   const legacy = path.join(project, '.neorion/graph');
   fs.mkdirSync(legacy, { recursive: true });
@@ -710,7 +710,7 @@ test('moves generated details into a visible directory and preserves handwritten
   const overview = await generate(project);
   assert.match(overview, /neorion\/graph\//);
   assert.doesNotMatch(overview, /\.neorion\/graph\//);
-  assert.ok(fs.existsSync(path.join(project, 'neorion/graph/src~components.md')));
+  assert.ok(fs.existsSync(cachePath(project, 'neorion/graph/src~components.md')));
   assert.ok(!fs.existsSync(path.join(legacy, 'generated.md')));
   assert.equal(fs.readFileSync(path.join(legacy, 'notes.md'), 'utf8'), 'handwritten');
 });

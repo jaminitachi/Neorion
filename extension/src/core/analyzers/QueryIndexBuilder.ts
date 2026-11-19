@@ -28,7 +28,7 @@ export class QueryIndexBuilder {
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
-      schema: 1, generator: `neorion ${VERSION}`, generatedAt: new Date().toISOString(), root: '.',
+      schema: 1, coverage: 1, generator: `neorion ${VERSION}`, generatedAt: new Date().toISOString(), root: '.',
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], mentions: Object.create(null)
     };
@@ -42,7 +42,7 @@ export class QueryIndexBuilder {
       if (byNode.has(node)) return byNode.get(node)!;
       const id = index.symbols.length + 1;
       const file = relativePath(node.getSourceFile());
-      index.symbols.push({ id, file, name, kind, line: node.getStartLineNumber(), exported: exported.has(node), aliasOf });
+      index.symbols.push({ id, file, name, kind, line: node.getStartLineNumber(), exported: exported.has(node) || undefined, aliasOf: aliasOf ?? undefined });
       byNode.set(node, id);
       names.add(name);
       return id;
@@ -185,12 +185,10 @@ export class QueryIndexBuilder {
             localNames.add(node.getName());
             record(node, declarations, 'import', node.getName() === property.getText() ? undefined : `import as ${node.getName()}`);
           }
-        } else if (Node.isExportDeclaration(node) && node.getModuleSpecifier()) {
+        } else if (Node.isExportDeclaration(node) && !node.compilerNode.exportClause) {
           const target = node.getModuleSpecifierSourceFile();
-          if (!node.getNamedExports().length && target) {
-            for (const [name, declarations] of exports.get(target) ?? []) {
-              if (name !== 'default') record(node, declarations, 're-export');
-            }
+          for (const [name, declarations] of (target && exports.get(target)) ?? []) {
+            if (name !== 'default') record(node, declarations, 'export-star');
           }
         } else if (Node.isExportSpecifier(node)) {
           record(node, declarationsOf(node.getAliasNode() ?? node.getNameNode()), 're-export');

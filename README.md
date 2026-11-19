@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion is a VS Code extension that turns a Next.js project using the App Router, the Pages Router, or both into a local architecture map. Start with the compact `codebase_graph.md` overview and follow its links into `neorion/graph/` for components, hooks, dependencies, and file relationships. The interactive graph lets you open source files from their nodes.
+Neorion is a VS Code extension that turns a Next.js project using the App Router, the Pages Router, or both into a local architecture map. Open the cached overview to browse components, hooks, dependencies, and file relationships. Use the `neorion_query` MCP tool for structural queries. The interactive graph lets you open source files from their nodes.
 
 ## Build and install
 

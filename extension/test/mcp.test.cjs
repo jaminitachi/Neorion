@@ -1,3 +1,4 @@
+const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -10,7 +11,7 @@ const { openMcp } = require('./mcp-helpers.cjs');
 const indexFile = '.neorion/index.v1.json';
 const stamp = '2026-11-19T06:00:00.000Z';
 const emptyIndex = () => ({
-  schema: 1, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
+  schema: 1, coverage: 1, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
   files: {}, symbols: [], routes: [], renderEdges: [], wrapChains: {}, routeWrap: {}, references: [], fetches: []
 });
 
@@ -27,7 +28,7 @@ function write(root, file, contents) {
 }
 
 function saveIndex(root, index) {
-  write(root, indexFile, JSON.stringify(index));
+  write(cachePath(root), indexFile, JSON.stringify(index));
 }
 
 async function program(t, base) {
@@ -62,7 +63,7 @@ async function program(t, base) {
     for (let i = 0; i < 20; i++) write(root, `fixture/many-${i}.ts`, "export { writeData as again } from './client';");
   }
   await generate(root);
-  const index = JSON.parse(fs.readFileSync(path.join(root, indexFile), 'utf8'));
+  const index = JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8'));
   index.generatedAt = stamp;
   saveIndex(root, index);
   return { root, index };
@@ -91,7 +92,8 @@ for (const fixture of ['create-next-app', 'ai-chatbot']) {
     for (const [name, args] of Object.entries(queries)) {
       const output = await client.text(name, args);
       const file = path.join(__dirname, 'goldens', fixture, name + '.txt');
-      assert.equal(output + '\n', fs.readFileSync(file, 'utf8'));
+      // Coverage is exercised against synthetic fixtures below.
+      assert.equal(output.replace(/# (?:complete|partial): [^\n]+$/, ''), fs.readFileSync(file, 'utf8'));
     }
   });
 }
@@ -124,6 +126,7 @@ test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts
   ]) {
     const output = await client.text(tool, args);
     const lines = output.split('\n');
+    assert.match(lines.pop(), /^# partial: output truncated$/);
     const omitted = Number(/^# more: (\d+)/.exec(lines.pop())?.[1]);
     const shown = lines.slice(1).filter(line => !line.startsWith('#')).length;
     assert.ok(shown > 0 && shown <= max, tool);
@@ -132,7 +135,7 @@ test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts
     assert.ok(lines.every(line => Buffer.byteLength(line) <= 400), tool);
   }
   const defaultLimit = await client.text('who_renders', { component: 'Target' });
-  assert.equal(defaultLimit.split('\n').length, 42);
+  assert.equal(defaultLimit.split('\n').length, 43);
 });
 
 test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases, callers, rename traps and wrapper boundaries', async t => {
@@ -148,8 +151,8 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
 
   const ambiguous = await client.text('who_renders', { component: 'Triangle' });
   assert.match(ambiguous, /^# ambiguous /);
-  assert.equal(ambiguous.split('\n').length, 4);
-  assert.ok(ambiguous.split('\n').slice(1).every(line => /^fixture\/[abc].tsx:1#Triangle component$/.test(line)));
+  assert.equal(ambiguous.split('\n').length, 5);
+  assert.ok(ambiguous.split('\n').slice(1, -1).every(line => /^fixture\/[abc].tsx:1#Triangle component$/.test(line)));
   const typo = await client.text('rename_impact', { symbol: 'writeDta' });
   assert.match(typo, /0 results/);
   assert.match(typo, /^# did you mean: .*#writeData$/m);
@@ -163,10 +166,12 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   const callers = await client.text('api_consumers', { route: '/api/neorion-test', callers: 1 });
   assert.match(callers, /^call1 .*use-client.ts:2 writeData$/m);
   assert.doesNotMatch(callers, /^call2|\[test\]/m);
+  assert.match(callers, /^# partial: caller depth limit$/m);
   assert.match(await client.text('api_consumers', { route: 'app/api/neorion-test/route.ts', includeTests: true }), /\[test\]/);
   assert.match(outputs.api_consumers, /^call2 .*entry.ts:2 useClient$/m);
   assert.match(outputs.rename_impact, /use  fixture\/use-client.ts:1,2  import as send/);
-  assert.match(outputs.rename_impact, /use  fixture\/reexports.ts:1  re-export/);
+  assert.match(outputs.rename_impact, /# pass-through fixture\/reexports\.ts:1 \(no edit\)/);
+  assert.doesNotMatch(outputs.rename_impact, /^use .*reexports.ts/m);
   assert.equal(outputs.rename_impact.match(/^use  fixture\/many-\d+\.ts:/gm).length, 20);
   assert.match(outputs.rename_impact, /vi\.mock key/);
   assert.match(outputs.rename_impact, /fixture\/destructure.test.ts:1,2 \[test\]  import as run/);
@@ -195,7 +200,7 @@ test('U11 returns tool errors for absent or invalid indexes and escaping or inva
   const missing = await client.call('search', { text: 'thing' });
   assert.equal(missing.isError, true);
   assert.equal(missing.content[0].text,
-    'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Architecture Map" in VS Code.');
+    'Neorion index missing or invalid. Run "Neorion: Generate Architecture Map" in VS Code.');
   saveIndex(root, { ...emptyIndex(), schema: 2 });
   assert.deepEqual(await client.call('search', { text: 'thing' }), missing);
   saveIndex(root, emptyIndex());
@@ -227,4 +232,44 @@ test('who_renders follows a JSX callback returned by a hook to the page route', 
   const dialog = await client.text('who_renders', { component: 'EditorDialog', direct: true });
   assert.match(dialog, /^direct ui\/editor-dialog\.tsx:9#DialogCallback$/m);
   assert.doesNotMatch(dialog, /UnusedCallback/);
+});
+
+test('compact API queries cover route literals, SWR keys, wrappers, and uncertainty', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'app/api/widgets/[id]/route.ts', 'export function GET() {}');
+  write(root, 'app/api/widgets/reserved/route.ts', 'export function GET() {}');
+  write(root, 'app/api/ping/route.ts', 'export function GET() {}');
+  write(root, 'widget.ts', [
+    "import useSWR, { mutate as invalidate } from 'swr';",
+    'export function update(id: string) { return invalidate(`/api/widgets/${id}?refresh=1`); }',
+    'export const useWidget = () => useSWR(["/api/widgets/123", 1]);',
+    'declare function request(input: string): void;',
+    'export function wrapped(id: string) { request(`/api/widgets/${id}`); }',
+    'export const key = `/api/widgets/456`;',
+    'export function ping() { return fetch("/api/ping"); }'
+  ].join('\n'));
+  write(root, 'caller.ts', 'import { wrapped } from "./widget"; export const open = () => wrapped("123");');
+  write(root, 'widget.test.ts', 'export const fixture = "/api/widgets/789";');
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = async target => {
+    const result = await client.request('tools/call', {
+      name: 'neorion_query', arguments: { kind: 'api_consumers', target }
+    });
+    assert.equal(result.isError, undefined, result.content[0]?.text);
+    return result.content[0].text;
+  };
+  const widgets = await query('/api/widgets/[id]');
+  assert.match(widgets, /^send +widget\.ts:2 update \? SWR key \[partial url\]$/m);
+  assert.match(widgets, /^send +widget\.ts:3 useWidget GET SWR key$/m);
+  assert.match(widgets, /^send +widget\.ts:5 wrapped \? route literal \[partial url\]$/m);
+  assert.match(widgets, /^send +widget\.ts:6 \? route literal$/m);
+  assert.match(widgets, /^send +widget\.test\.ts:1 .*\[test\]$/m);
+  assert.match(widgets, /^call1 +caller\.ts:1 wrapped$/m);
+  assert.match(widgets, /^# partial: uncertain URL matches$/m);
+  assert.match(await query('/api/widgets/reserved'), /^# partial: uncertain URL matches$/m);
+  assert.match(await query('/api/ping'), /^# complete: indexed route literals/m);
+  write(root, 'widget.ts', 'export const replacement = "/api/ping";');
+  assert.match(await query('/api/ping'), /^# partial: stale index$/m);
 });

@@ -3,12 +3,12 @@ import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type SymbolEntry } from './Index';
-import { tools } from './Tools';
+import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
 type Row = { text: string; files: string[]; pathEnd?: number };
-type Result = { rows: Row[]; title?: string; count?: string; targets?: string[]; notes?: Row[]; limit?: number };
+type Result = { rows: Row[]; title?: string; count?: string; targets?: string[]; notes?: Row[]; limit?: number; partial?: string };
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const bytes = (text: string) => Buffer.byteLength(text);
 const oneLine = (text: string) => text.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ');
@@ -39,32 +39,40 @@ function group<K, V>(values: V[], key: (value: V) => K): Map<K, V[]> {
   return result;
 }
 
-function validate(name: string, value: unknown): Record<string, string | number | boolean> {
-  const tool = tools.find(tool => tool.name === name);
-  if (!tool) throw new Error('Unknown Neorion tool.');
-  const { properties, required } = tool.inputSchema;
-  const spec = properties as unknown as Record<string, {
-    type: string; minLength?: number; maxLength?: number; enum?: string[]; minimum?: number; maximum?: number;
-    default?: string | number | boolean;
-  }>;
+function validate(name: string, value: unknown) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Expected an arguments object.');
-  for (const key of Object.keys(value)) {
-    if (!Object.prototype.hasOwnProperty.call(spec, key)) throw new Error(`Unexpected argument ${oneLine(key).slice(0, 80)}.`);
-  }
-  const args: ReturnType<typeof validate> = {};
-  for (const [key, rule] of Object.entries(spec)) {
-    const original = (value as Record<string, unknown>)[key];
-    const input: unknown = original === undefined ? rule.default : original;
-    if (input === undefined && !required.includes(key)) continue;
-    if (typeof input !== (rule.type === 'integer' ? 'number' : rule.type) ||
-        (typeof input === 'string' && ([...input].length < (rule.minLength ?? 0) ||
-          [...input].length > (rule.maxLength ?? Infinity) || (rule.enum && !rule.enum.includes(input)))) ||
-        (typeof input === 'number' && (!Number.isInteger(input) || input < rule.minimum! || input > rule.maximum!))) {
-      throw new Error(`Invalid argument ${key}.`);
+  const input = value as Record<string, unknown>;
+  const legacy = legacyKind(name);
+  const tool = (legacy ?? input.kind) as QueryKind;
+  if ((!legacy && name !== queryName) || !kinds.includes(tool)) throw new Error('Invalid query kind.');
+  const targetKey = legacy ? legacyTargets[legacy] : 'target';
+  const filterKey = legacy ? 'kind' : 'filter';
+  const options = {
+    who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
+    api_consumers: ['callers', 'includeTests'], search: [filterKey]
+  }[tool];
+  for (const key of Object.keys(input)) {
+    if (![targetKey, 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
+      throw new Error(`Unexpected argument ${oneLine(key).slice(0, 80)}.`);
     }
-    args[key] = input as string | number | boolean;
   }
-  return args;
+  const target = typeof input[targetKey] === 'string' ? (input[targetKey] as string).trim() : '';
+  if ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300)) {
+    throw new Error('Invalid query target.');
+  }
+  const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false,
+    includeExternal = false, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
+  const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
+  const integerInRange = (value: unknown, min: number, max: number): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
+  if (!integerInRange(limit, 1, tool === 'search' ? 50 : 100)) throw new Error('Invalid argument limit.');
+  if (!integerInRange(callers, 0, 2)) throw new Error('Invalid argument callers.');
+  if (tool === 'search' && ((rawFilter === null) || typeof filter !== 'string' ||
+      !tools[0].inputSchema.properties.filter.enum.includes(filter))) throw new Error('Invalid search filter.');
+  for (const key of ['direct', 'includeExternal', 'includeTests']) {
+    if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new Error(`Invalid argument ${key}.`);
+  }
+  return { tool, target, limit, callers, direct, includeExternal, includeTests, filter: String(filter) };
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -323,7 +331,22 @@ export class QueryEngine {
     const label = `decl ${location(symbol.file, symbol.line)}`;
     const rows = [{ ...row(label + flagTest(symbol.file), symbol.file), pathEnd: label.length }];
     const references = this.references.get(symbol.id) ?? [];
-    const uses = group(references.filter(ref => ref[1] !== symbol.file && (includeTests || !testFile(ref[1]))), ref => ref[1]);
+    const sourceLines = new Map<string, string[]>();
+    const exportStar = (ref: Reference) => {
+      if (ref[3] === 'export-star') return true;
+      if (this.index.coverage || ref[3] !== 're-export') return false;
+      if (!sourceLines.has(ref[1])) {
+        try {
+          sourceLines.set(ref[1], readFileSync(this.checkPath(ref[1]), 'utf8').split(/\r?\n/));
+        } catch {
+          sourceLines.set(ref[1], []);
+        }
+      }
+      return /^\s*export\s+(?:type\s+)?\*\s+from\b/.test(sourceLines.get(ref[1])!.slice(ref[2] - 1, ref[2] + 3).join('\n'));
+    };
+    const scoped = references.filter(ref => ref[1] !== symbol.file && (includeTests || !testFile(ref[1])));
+    const passthrough = scoped.filter(exportStar);
+    const uses = group(scoped.filter(ref => !exportStar(ref)), ref => ref[1]);
     for (const [file, refs] of [...uses].sort(([a], [b]) => Number(testFile(a)) - Number(testFile(b)) || compare(a, b))) {
       if (expired()) break;
       const lines = [...new Set(refs.map(ref => ref[2]))].sort((a, b) => a - b);
@@ -353,6 +376,9 @@ export class QueryEngine {
       }
       notes.push(current);
     }
+    for (const [, file, line] of passthrough.sort((a, b) => compare(a[1], b[1]) || a[2] - b[2])) {
+      if (!uses.has(file)) notes.push(row(`# pass-through ${location(file, line)} (no edit)`, file));
+    }
     return { rows, count: `${rows.length} files`, notes };
   }
 
@@ -363,15 +389,13 @@ export class QueryEngine {
     let owners = new Set<number>();
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
       .sort((a, b) => compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
-    const seenSends = new Set<string>();
     for (const fetch of fetches) {
       if (expired()) break;
       senders.add(fetch.file);
       const label = `send   ${location(fetch.file, fetch.line)}`;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${fetch.via}` +
         (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file);
-      if (!seenSends.has(text)) rows.push({ ...row(text, fetch.file), pathEnd: label.length });
-      seenSends.add(text);
+      rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
     }
     const traversed = new Set<number>();
@@ -399,6 +423,10 @@ export class QueryEngine {
       }
       owners = new Set([...next].filter(id => !traversed.has(id)));
     }
+    const moreCallers = levels > 0 && [...owners].some(owner => this.references.get(owner)?.some(
+      ([, file, line, kind, , caller]) => kind === 'call' && caller !== owner && (includeTests || !testFile(file)) &&
+        !seen.has(`${file}:${line} ${this.symbols.get(owner)?.name ?? 'unknown'}`)
+    ));
     const similar = [...new Set(this.index.routes.filter(other => other.kind === 'api' && other.url !== route.url &&
       (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/') ||
         other.url.slice(0, other.url.lastIndexOf('/')) === route.url.slice(0, route.url.lastIndexOf('/'))))
@@ -406,20 +434,20 @@ export class QueryEngine {
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? `${senders.size} sender${senders.size === 1 ? '' : 's'}, ${calls.size} callers` : undefined,
+      partial: fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
+        moreCallers ? 'caller depth limit' : undefined,
       notes: similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : []
     };
   }
 
   query(name: string, value: unknown) {
     const args = validate(name, value);
-    const tool = name.slice('neorion_'.length);
-    const target = String(args.component ?? args.symbol ?? args.route ?? args.text).trim();
-    if (!target) throw new Error('Enter a nonempty query target.');
+    const { tool, target } = args;
     const deadline = performance.now() + 1850;
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
-    if (tool === 'search') result = this.search(target, String(args.kind), expired);
+    if (tool === 'search') result = this.search(target, args.filter, expired);
     else if (tool === 'who_renders' || tool === 'rename_impact') {
       const matches = this.matchSymbol(target, tool === 'who_renders');
       if (matches.length > 1) {
@@ -439,7 +467,7 @@ export class QueryEngine {
         result = { rows: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)), limit: 10 };
       } else if (routes.length) result = tool === 'wrappers'
         ? this.wrappers(routes[0], !!args.includeExternal, expired)
-        : this.consumers(routes[0], Number(args.callers), !!args.includeTests, expired);
+        : this.consumers(routes[0], args.callers, !!args.includeTests, expired);
       else result.notes = this.suggestions(target, kind, expired);
     }
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
@@ -459,12 +487,14 @@ export class QueryEngine {
       }
       return !!status.get(file);
     };
-    const maxRows = result.limit ?? Number(args.limit);
+    const maxRows = result.limit ?? args.limit;
     const notesFirst = tool === 'wrappers';
     const renderedRows: { text: string; files: string[] }[] = [];
+    let shortened = false;
     const renderRow = (entry: Row) => {
       const suffix = entry.files.some(stale) ? ' [stale]' : '';
       const text = shorten(entry.text, entry.pathEnd ?? 0, 400 - bytes(suffix));
+      shortened ||= text !== oneLine(entry.text);
       // A path longer than the hard line cap cannot be represented intact.
       return text === undefined ? [] : [{ text: text + suffix, files: entry.files }];
     };
@@ -478,6 +508,17 @@ export class QueryEngine {
       if (resultBytes >= 6000) break;
     }
     const notes = (result.notes ?? []).flatMap(renderRow);
+    let snapshotStale = false;
+    if (this.index.coverage && !ambiguous && !result.partial && !shortened &&
+        renderedRows.length === result.rows.length && (tool === 'search' || result.targets)) {
+      for (const file of Object.keys(this.index.files)) {
+        if (expired()) break;
+        if (stale(file)) {
+          snapshotStale = true;
+          break;
+        }
+      }
+    }
     let shown = renderedRows.length;
     let noteCount = notes.length;
     for (;;) {
@@ -492,8 +533,18 @@ export class QueryEngine {
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
+      const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
+        staleCount || snapshotStale ? 'stale index' : omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
+        !this.index.coverage ? 'regenerate legacy index' : result.partial ??
+        (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
+      const scope = {
+        who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
+        rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),
+        search: 'indexed name and path matches'
+      }[tool];
+      const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
-        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : [])].join('\n');
+        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), coverage].join('\n');
       if (bytes(output) <= 6000) return output;
       if (noteCount) noteCount--;
       else shown--;

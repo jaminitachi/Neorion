@@ -1,3 +1,4 @@
+const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -9,7 +10,7 @@ const count = value => tokenizer.encode(value, [], []).length;
 const overviewBudget = listing => Math.min(6000, Math.max(1500, Math.floor(count(listing) / 4)));
 
 function assertOverviewLinks(project, overview) {
-  const pending = [{ directory: project, markdown: overview }];
+  const pending = [{ directory: cachePath(project), markdown: overview }];
   const reached = new Set();
   while (pending.length) {
     const { directory, markdown } = pending.pop();
@@ -26,7 +27,7 @@ function assertOverviewLinks(project, overview) {
       }
     }
   }
-  const root = path.join(project, 'neorion/graph');
+  const root = cachePath(project, 'neorion/graph');
   const files = fs.readdirSync(root).filter(file => file.endsWith('.md'));
   assert.ok(reached.size);
   for (const file of files) {

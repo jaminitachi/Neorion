@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { cachePath } = require('./workspace-cache.cjs');
 const Module = require('node:module');
 
 function register(root, entry = require.resolve('../out/extension.js'), configs = [], options = {}) {
@@ -44,7 +45,7 @@ async function generate(root, entry, configs = []) {
   await register(root, entry, configs).commands.get('neo.generateGraph')();
   const project = fs.existsSync(path.join(root, 'tsconfig.json'))
     ? root : path.dirname(configs[0]);
-  return fs.readFileSync(path.join(project, 'codebase_graph.md'), 'utf8');
+  return fs.readFileSync(cachePath(project, 'codebase_graph.md'), 'utf8');
 }
 
 async function visualize(root) {

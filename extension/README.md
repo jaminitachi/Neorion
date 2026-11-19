@@ -5,7 +5,7 @@ Neorion generates a local architecture map for Next.js projects written in TypeS
 ## Use in VS Code
 
 1. Open the project folder containing `tsconfig.json`.
-2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` and area details under `neorion/graph/` in the project root, along with `.neorion/index.v1.json`.
+2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` and area details under `neorion/graph/` in the local workspace cache, along with the query index, and open the overview.
 3. Run **Neorion: Show Architecture Graph (Beta)** to explore routes, components, and server action callers and open their source files.
 
 After running either Neorion command once in the current editor session, saving a TypeScript file or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
@@ -20,7 +20,7 @@ blocks, restores any Cursor setting changed by Neorion, and removes MCP entries 
 
 In **Connect AI tools**, select **Register Neorion query tools (MCP)** to opt in.
 Choose Claude Code, Cursor, or VS Code (Copilot agent). **Use bundled server**
-is the default. It copies the server into `.neorion/mcp/server.cjs` and works
+is the default. It stores the server in the local workspace cache and works
 offline with Node.js 18 or later. The optional pinned npm mode requires
 `neorion-mcp@0.4.0` to be published before it can run. Claude Code asks for
 approval before first using a project MCP server.
@@ -29,33 +29,29 @@ installed bundle and the project. Paste it into the global configuration for
 Codex CLI, Windsurf, or Gemini CLI. Copy a fresh snippet if the extension
 installation moves.
 
-| Tool | Answers |
-| --- | --- |
-| `neorion_who_renders` | Which page routes can render a component, including via a layout? |
-| `neorion_wrappers` | Which layouts and providers wrap a page, in outermost-first order? |
-| `neorion_rename_impact` | Which files contain checker-resolved references to a declaration? |
-| `neorion_api_consumers` | Which files send requests to an API route or call its sending function? |
-| `neorion_search` | Which declarations or routes match a name or path fragment? |
+Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/file, or search text).
 
-The server reads the local, unbudgeted index and returns app-relative
-`path:line` locations. Results have a 6,000-byte cap and default to 40 rows
-(20 for search). When a result is marked stale, regenerate the architecture map.
-Keep `.neorion/` local if you do not want to commit the index, bundled server,
-or connection state.
+| Kind | Answers |
+| --- | --- |
+| `who_renders` | Which page routes can render a component, including via a layout? |
+| `wrappers` | Which layouts and providers wrap a page, in outermost-first order? |
+| `rename_impact` | Which files contain checker-resolved references to a declaration? |
+| `api_consumers` | Which files contain API route literals or call a function that uses them? |
+| `search` | Which declarations or routes match a name or path fragment? |
+
+The server returns project-relative `path:line` locations. Results have a
+6,000-byte cap and default to 40 rows (20 for search). `complete` describes the
+indexed static matches in the query’s scope. `partial` gives the reason for
+uncertainty or missing results. Run **Generate Architecture Map** to refresh
+the snapshot after source changes. Reconnect a managed bundled registration to
+move it to the cache and refresh its instruction block.
 
 ### Markdown architecture map
 
-For tools without MCP registration, give your coding assistant `codebase_graph.md` first. It contains the route tree,
-server actions, and links to each area's first part. If the links outgrow the
-overview, follow its Area index link. Numbered parts in `neorion/graph/`
-continue the same area. Regeneration moves generated details out of the legacy
-hidden directory and preserves handwritten files there.
-
-Commit `neorion/graph/` to share the generated details, or add it to `.gitignore`
-to keep them local. Ripgrep skips ignored details by default. To keep the map
-searchable while filtering it out of a source-only query, use
-`rg --glob '!neorion/graph/**' --glob '!codebase_graph.md' PATTERN` from the
-project root.
+The overview opens from a per-project directory in the local user cache.
+Follow its area links to read the details. Numbered parts in `neorion/graph/`
+continue the same area. Regeneration removes recognized legacy generated
+files from the project and preserves handwritten files.
 
 Search the area details for lines starting with `rendered`, `wrap`, `rename`,
 or `fetch`. Render reachability follows static JSX and marks pages reached only

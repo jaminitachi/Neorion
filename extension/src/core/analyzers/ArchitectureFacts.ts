@@ -350,11 +350,11 @@ function apiSegments(argument: Node | undefined) {
     url = argument.getHead().getLiteralText() +
       argument.getTemplateSpans().map(span => '{}' + span.getLiteral().getLiteralText()).join('');
   } else return;
-  const partial = url.startsWith('{}/api/');
-  const local = partial ? url.slice(2) : url;
-  if (local.startsWith('/api/')) {
+  const prefix = /^(?:\{\}|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url)?.[0];
+  const local = prefix ? url.slice(prefix.length) : url;
+  if (/^\/api(?:[/?#]|$)/.test(local)) {
     const segments = local.split(/[?#]/, 1)[0].replace(/\/$/, '').slice(1).split('/');
-    return { segments, partial: partial || segments.some(segment => segment.includes('{}') && segment !== '{}') };
+    return { segments, partial: !!prefix, markdown: !prefix || prefix === '{}' };
   }
 }
 
@@ -394,24 +394,62 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: route.path.slice(1).split('/')
-  }));
+  })).map(endpoint => ({ ...endpoint, rank: endpoint.segments.map(part =>
+    part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' : part.startsWith('[') ? '2' : '3').join('') }));
   if (!endpoints.length) return;
+  endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
+  const urlMatches = (url: Node | undefined) => {
+    const parsed = apiSegments(url);
+    if (!parsed) return [];
+    const { segments, partial } = parsed;
+    const matches: { route: RouteNode; partial: boolean; markdown: boolean }[] = [];
+    let bestCertain: string | undefined;
+    let moreSpecificMatch = false;
+    for (const endpoint of endpoints) {
+      const { route, segments: pattern, rank } = endpoint;
+      if (bestCertain && rank < bestCertain) break;
+      let uncertain = false;
+      const compatible = pattern.every((part, i) => {
+        if (part.startsWith('[[...')) return true;
+        const segment = segments[i];
+        if (!segment) return false;
+        if (part.startsWith('[') || part === segment) return true;
+        if (!segment.includes('{}')) return false;
+        const regex = segment.split('{}').map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+        if (!new RegExp(`^${regex}$`).test(part)) return false;
+        uncertain = true;
+        return true;
+      }) && (pattern.at(-1)?.includes('...') || pattern.length === segments.length);
+      if (!compatible) continue;
+      if (!uncertain) bestCertain = rank;
+      matches.push({ route,
+        partial: partial || uncertain || moreSpecificMatch || segments.some(segment => segment.includes('{}') && segment !== '{}'),
+        markdown: !uncertain && parsed.markdown });
+      moreSpecificMatch ||= uncertain;
+    }
+    return matches;
+  };
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
   for (const file of files) {
-    if (!file.getFullText().includes('/api/')) continue;
+    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText())) continue;
+    const literals: Node[] = [];
+    const classified = new Set<Node>();
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
     file.forEachDescendant(node => {
+      if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node))) {
+        literals.push(node);
+      }
       if (!Node.isCallExpression(node)) return;
       const expression = node.getExpression();
       const isFetch = /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
         !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
       const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
       const isSwr = (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
-        ['default', 'useSWR'].includes(origin.name);
+        ['default', 'useSWR', 'mutate'].includes(origin.name);
       const axiosMethod = origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
@@ -425,40 +463,36 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const method = isFetch ? fetchMethod : axiosMethod;
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
       for (const url of isSwr ? swrUrls(argument) : [argument]) {
-        const parsed = apiSegments(url);
-        if (!parsed) continue;
-        const { segments, partial } = parsed;
-        const compatible = endpoints.filter(({ segments: pattern }) => pattern.every((part, i) => {
-          if (part.startsWith('[[...')) return true;
-          if (!segments[i]) return false;
-          if (part.startsWith('[...')) return true;
-          return part.startsWith('[') || part === segments[i];
-        }) && (pattern[pattern.length - 1]?.includes('...') || pattern.length === segments.length));
-        const specificity = ({ segments }: typeof endpoints[number]) =>
-          segments.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
-            part.startsWith('[') ? '2' : '3').join('');
-        compatible.sort((a, b) => specificity(b).localeCompare(specificity(a)));
-        for (const candidate of compatible) {
-          if (specificity(candidate) !== specificity(compatible[0])) break;
-          const { route } = candidate;
-          if (method && route.methods?.length && !route.methods.some(value => value === method || value === 'ALL' ||
-            (method === 'HEAD' && value === 'GET'))) continue;
+        for (const { route, partial, markdown } of urlMatches(url)) {
+          const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
+            value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
+          if (url) classified.add(url);
           const subject = action ? action.slice('action:'.length) : source;
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
           const kind = isSwr ? ' (SWR key)' : axiosMethod ? ' (axios)' : '';
-          addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate';
+          if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
-            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr ? 'GET' : '?'),
+            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr && origin?.name !== 'mutate' ? 'GET' : '?'),
             url: route.path, via: isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
             partial: partial || undefined
           });
-          if (isSwr) continue;
+          if (isSwr || !mapFact) continue;
           const targets = endpointsByCall.get(node) ?? [];
           targets.push({ route, kind });
           endpointsByCall.set(node, targets);
         }
       }
     });
+    for (const node of literals) {
+      if (classified.has(node)) continue;
+      for (const { route, partial } of urlMatches(node)) {
+        index?.fetch({
+          file: source, line: node.getStartLineNumber(), node, route: route.id, method: '?',
+          url: route.path, via: 'route literal', partial: partial || undefined
+        });
+      }
+    }
   }
 
   if (!endpointsByCall.size) return;

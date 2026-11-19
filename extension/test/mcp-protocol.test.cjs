@@ -1,3 +1,4 @@
+const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -35,10 +36,21 @@ test('P1–P3 real stdio initializes, advertises exact schemas and only emits JS
   fs.writeFileSync(path.join(root, 'tsconfig.json'), '{}');
   fs.writeFileSync(path.join(root, 'example.ts'), 'export const Example = 1;');
   await generate(root);
+  assert.deepEqual(snapshot(root).map(([file]) => file), ['', 'example.ts', 'tsconfig.json']);
+  try {
+    const files = execFileSync('rg', ['--files', '--hidden'], { cwd: root, encoding: 'utf8' });
+    assert.deepEqual(files.trim().split('\n').sort(), ['example.ts', 'tsconfig.json']);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
   const before = snapshot(root);
   const client = await openMcp(t, root);
   assert.deepEqual((await client.request('tools/list')).tools, require('./goldens/mcp-tools.json'));
-  assert.match(await client.text('search', { text: 'Example' }), /constant example.ts:1#Example/);
+  const result = await client.request('tools/call', {
+    name: 'neorion_query', arguments: { kind: 'search', target: 'Example' }
+  });
+  assert.match(result.content[0].text, /constant example.ts:1#Example/);
+  assert.match(result.content[0].text, /# complete: indexed name and path matches/);
   assert.equal(client.stdout.length, 3);
   assert.ok(client.stdout.every(line => JSON.parse(line).jsonrpc === '2.0'));
   await client.close();
@@ -54,7 +66,7 @@ test('P4 Formbricks index and five real stdio calls meet size and latency target
   execFileSync('git', ['-C', repo, 'archive', '--output', archive, 'HEAD:apps/web']);
   execFileSync('tar', ['-xf', archive, '-C', root]);
   await generate(root);
-  const size = fs.statSync(path.join(root, '.neorion/index.v1.json')).size;
+  const size = fs.statSync(cachePath(root, '.neorion/index.v1.json')).size;
   assert.ok(size <= 15_000_000, `${size} bytes`);
   const client = await openMcp(t, root, process.env.NEORION_MCP_ENTRY);
   const queries = {

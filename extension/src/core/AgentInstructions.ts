@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { DETAIL_DIRECTORY } from './serializers/MarkdownSerializer';
+import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
 const START = '<!-- neorion:start -->';
@@ -18,8 +18,6 @@ interface BlockState {
 }
 
 export function updateAgentFiles(root: string, graphRoot: string, targets: string[], connect: boolean, mcp = false) {
-  const prefix = path.relative(root, graphRoot).split(path.sep).join('/');
-  const graph = prefix ? prefix + '/' : '';
   const changes: { file: string; content: string; remove: boolean; removeRulesDirectory: boolean }[] = [];
   for (const target of targets) {
     if (!AGENT_FILES.includes(target)) throw new Error('Unknown AI instruction file');
@@ -74,8 +72,8 @@ export function updateAgentFiles(root: string, graphRoot: string, targets: strin
       if (separator) state.headerEof = true;
       const block = [
         START,
-        mcp ? 'For who renders a component, which layouts and providers wrap a route, what a rename touches, or who calls an API route, call the neorion_* tools first. Their results list path:line; confirm by reading only those lines, do not re-derive the whole chain. codebase_graph.md is a human overview; do not read it for these questions. Use Grep for anything else.' :
-        `For structure questions, read \`${graph}codebase_graph.md\` first. Follow its area links into \`${graph}${DETAIL_DIRECTORY}/\`. Numbered parts continue the same area. Search details for lines starting with \`rendered\`, \`wrap\`, \`rename\` or \`fetch\`. For source-only grep, exclude the generated graph directory. Check source when the map is incomplete or stale.`,
+        mcp ? 'Use neorion_query for rendering, wrappers, rename impact, API consumers, and symbol or route search.' :
+          `For architecture questions, read the Neorion overview at \`${path.join(workspaceCache(graphRoot), 'codebase_graph.md')}\`.`,
         ...(Object.keys(state).length ? [
           `<!-- neorion:state ${JSON.stringify(state).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')} -->`
         ] : []),

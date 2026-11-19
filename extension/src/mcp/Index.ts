@@ -10,8 +10,8 @@ export interface SymbolEntry {
   name: string;
   kind: 'component' | 'hook' | 'function' | 'constant';
   line: number;
-  exported: boolean;
-  aliasOf: string | null;
+  exported?: boolean;
+  aliasOf?: string | null;
 }
 
 export interface Wrapper {
@@ -38,6 +38,7 @@ export type Reference = [symbol: number, file: string, line: number, kind: strin
 
 export interface QueryIndex {
   schema: 1;
+  coverage?: 1;
   generator: string;
   generatedAt: string;
   root: '.';

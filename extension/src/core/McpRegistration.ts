@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { applyEdits, findNodeAtLocation, modify, parseTree, getNodeValue, type ParseError, type Node } from 'jsonc-parser';
+import { workspaceCache } from './WorkspaceCache';
 import { VERSION } from '../mcp/Index';
 
 export const MCP_TARGETS = {
@@ -27,6 +28,7 @@ interface ConfigState {
 interface State {
   configs: Partial<Record<McpTarget, ConfigState>>;
   bundle?: { hash: string; createdDirectory: boolean };
+  legacyBundle?: State['bundle'];
 }
 type Change = { file: string; content: string | Buffer | null };
 
@@ -99,16 +101,25 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   connect: boolean) {
   const changes: Change[] = [];
   const directories = new Set<string>();
-  const stateFile = checked(root, STATE);
+  const cache = workspaceCache(root);
+  if (exists(cache)?.isSymbolicLink()) throw new Error('Neorion cache is a symbolic link');
+  const stateFile = checked(cache, STATE);
   const originalState = read(stateFile);
-  const state: State = originalState === null ? { configs: {} } : JSON.parse(originalState);
+  const legacyStateFile = checked(root, STATE);
+  const legacyState = originalState === null ? read(legacyStateFile) : null;
+  const state: State = JSON.parse(originalState ?? legacyState ?? '{"configs":{}}');
   if (!state.configs || typeof state.configs !== 'object' ||
       Object.keys(state.configs).some(target => !Object.prototype.hasOwnProperty.call(MCP_TARGETS, target))) throw new Error('Invalid Neorion MCP connection state.');
-  const bundle = checked(root, BUNDLE);
+  if (legacyState !== null) {
+    state.legacyBundle = state.bundle;
+    delete state.bundle;
+  }
+  const bundle = checked(cache, BUNDLE);
   const relativeProject = path.relative(root, project).split(path.sep).join('/');
   const projectArgument = relativeProject || '.';
   const updated = new Set<McpTarget>();
 
+  let preserveLegacyBundle = false;
   for (const target of connect ? targets : Object.keys(state.configs) as McpTarget[]) {
     const { file: configFile, key, type, variable } = MCP_TARGETS[target];
     const file = checked(root, configFile);
@@ -140,13 +151,15 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
         }
         if (previous.createdDirectory) directories.add(path.dirname(file));
       }
+      if (previous?.entry.args?.[0]?.endsWith(BUNDLE) && previous.entry.args[0] !== bundle &&
+          original !== null && !changes.some(change => change.file === file)) preserveLegacyBundle = true;
       delete state.configs[target];
       updated.add(target);
       continue;
     }
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
-      ? { command: 'node', args: [variable ? '${workspaceFolder}/' + BUNDLE : BUNDLE, '--root', scopedProject] }
+      ? { command: 'node', args: [bundle, '--root', scopedProject] }
       : { command: 'npx', args: ['-y', `neorion-mcp@${VERSION}`, '--root', scopedProject] };
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
@@ -197,8 +210,19 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     delete state.bundle;
   }
 
-  const nextState = Object.keys(state.configs).length || state.bundle ? json(state) + '\n' : null;
+  if (state.legacyBundle && !Object.values(state.configs).some(({ entry, hadNeorion }) =>
+    hadNeorion || entry.args?.[0]?.endsWith(BUNDLE) && entry.args[0] !== bundle)) {
+    const oldBundle = checked(root, BUNDLE);
+    // Only retire a bundle that is still owned by this registration.
+    if (!preserveLegacyBundle && exists(oldBundle) && hash(fs.readFileSync(oldBundle)) === state.legacyBundle.hash) {
+      changes.push({ file: oldBundle, content: null });
+      if (state.legacyBundle.createdDirectory) directories.add(path.dirname(oldBundle));
+    }
+    delete state.legacyBundle;
+  }
+  const nextState = Object.keys(state.configs).length || state.bundle || state.legacyBundle ? json(state) + '\n' : null;
   if (originalState !== nextState) changes.push({ file: stateFile, content: nextState });
+  if (legacyState !== null) changes.push({ file: legacyStateFile, content: null });
   return {
     count: updated.size,
     configured: Object.keys(state.configs).length > 0,

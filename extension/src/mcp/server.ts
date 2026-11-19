@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync, statSync } from 'node:fs';
+import { workspaceCache } from '../core/WorkspaceCache';
 import { resolve } from 'node:path';
 import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -7,23 +8,24 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { tools } from './Tools';
+import { legacyKind, queryName, tools } from './Tools';
 
 type Call = { id: number; name: string; args: unknown };
 type Response = { id: number; text: string; isError?: true };
-const missing = 'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Architecture Map" in VS Code.';
+const missing = 'Neorion index missing or invalid. Run "Neorion: Generate Architecture Map" in VS Code.';
 
 function runQueries(root: string) {
-  const file = resolve(root, INDEX_PATH);
   let engine: QueryEngine | undefined;
   let loaded: string | undefined;
   function readIndex() {
     // A long-lived stdio session picks up an atomically regenerated index.
     try {
-      if (realpathSync(file) !== resolve(realpathSync(root), INDEX_PATH)) throw new Error(missing);
+      const cached = resolve(workspaceCache(root), INDEX_PATH);
+      const file = statSync(cached, { throwIfNoEntry: false }) ? cached : resolve(realpathSync(root), INDEX_PATH);
+      if (realpathSync(file) !== file) throw new Error(missing);
       const stat = statSync(file);
       if (!stat.isFile()) throw new Error(missing);
-      const signature = `${stat.ino}:${stat.mtimeMs}:${stat.size}`;
+      const signature = `${file}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
       if (signature !== loaded) {
         const index: QueryIndex = JSON.parse(readFileSync(file, 'utf8'));
         if (index.schema !== 1 || index.root !== '.' || typeof index.generatedAt !== 'string' ||
@@ -92,7 +94,7 @@ async function serve() {
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
-    if (!tools.some(tool => tool.name === name)) {
+    if (name !== queryName && !legacyKind(name)) {
       return { isError: true, content: [{ type: 'text', text: 'Unknown Neorion tool.' }] };
     }
     const id = ++nextId;
@@ -113,9 +115,9 @@ async function serve() {
       });
       current.postMessage({ id, name, args } satisfies Call);
     });
-    const target = args.component ?? args.symbol ?? args.route ?? args.text;
+    const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
-    const text = response?.text ?? `# timeout ${name.slice('neorion_'.length)} ${label} : 0 results`;
+    const text = response?.text ?? `# timeout ${legacyKind(name) ?? args.kind ?? 'query'} ${label} : 0 results (partial: timed out)`;
     return { ...(response?.isError ? { isError: true } : {}), content: [{ type: 'text', text }] };
   });
   process.stdin.once('end', () => { void server.close(); });

@@ -5,6 +5,8 @@ const path = require('node:path');
 
 const env = { ...process.env };
 let temporaryFixtures;
+const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-test-cache-'));
+env[process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_CACHE_HOME'] = cache;
 try {
   if (env.CI && !env.NEORION_FIXTURES) {
     temporaryFixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-ci-'));
@@ -18,5 +20,6 @@ try {
   if (tests.error) throw tests.error;
   process.exitCode = tests.status ?? 1;
 } finally {
+  fs.rmSync(cache, { recursive: true, force: true });
   if (temporaryFixtures) fs.rmSync(temporaryFixtures, { recursive: true, force: true });
 }
