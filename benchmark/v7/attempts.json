@@ -1,0 +1,2018 @@
+[
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "bd62c99b-e815-4ed7-9ca2-e23dd94fb5e9",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2094,
+    "wall_seconds": 17.406675689999247,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-02",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "8e24fee7-f046-494d-9819-681b44056d57",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2215,
+    "wall_seconds": 9.090805401006946,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-02",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "0aa01ae4-0812-492a-a757-c3122a2f3102",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2192,
+    "wall_seconds": 14.350500846994692,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-03",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "c56d4f7f-67d1-4aa8-bfca-129d93bf8497",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2179,
+    "wall_seconds": 4.655042368991417,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-03",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "e96dbfbc-afaa-4ecd-9d51-b210fabd7c67",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2218,
+    "wall_seconds": 5.350974942994071,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-08",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "b68cf80f-1ed1-4154-9f4e-c436e1b4d65b",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2203,
+    "wall_seconds": 7.081907879008213,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-08",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "6f684d42-4615-4110-accd-58dc2f5151ed",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2259,
+    "wall_seconds": 6.184576219005976,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-06",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "fd94ea37-f014-4ec3-a1d1-641dfce30565",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2273,
+    "wall_seconds": 13.601779195989366,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-06",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "0ef94240-4b45-4f2d-b36f-0ad1d8e7333c",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2343,
+    "wall_seconds": 10.506819082002039,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-12",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "52d6caf7-e8c7-42cc-8aec-d5f5fe7b8a90",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2410,
+    "wall_seconds": 15.419442489001085,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-12",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "89ad867f-074c-4f96-af37-66ac4c887125",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 1988,
+    "wall_seconds": 5.730641083995579,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-01",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "db53b9f1-51f0-49ba-b5d5-2df812017249",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2016,
+    "wall_seconds": 6.5515809310018085,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-01",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "4f3c0c86-5a07-42f1-9ad4-058f90bb9f32",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 1998,
+    "wall_seconds": 4.429453677992569,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-01",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "2a661f50-61fa-42f5-96b5-b152701176e5",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 1983,
+    "wall_seconds": 5.93293646798702,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-01",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "1cc7c7f5-0484-4a2e-a6f2-95c8594229dd",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2353,
+    "wall_seconds": 11.98169626800518,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-12",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "3c17602a-bd26-44a8-ad68-ebb02c7169b8",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2350,
+    "wall_seconds": 11.173938688996714,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-12",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "2ee17922-36fc-4c43-8a02-c19ab13527a3",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2233,
+    "wall_seconds": 14.905161827991833,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-11",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "c92c1754-ae33-435e-bc37-840f8bf7bc8a",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2117,
+    "wall_seconds": 9.74417522099975,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-11",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "b65c305f-6df9-4cd0-abf3-e8b965b7f4bd",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2356,
+    "wall_seconds": 16.917060566993314,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-10",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "8923eec0-2738-4706-a9e8-4faa6d020141",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2278,
+    "wall_seconds": 16.443613081006333,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-10",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "eb8bb104-439e-422e-8ce3-5cf0c405819d",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2171,
+    "wall_seconds": 3.010869688994717,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-14",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "76183ffa-24f6-44a2-8e38-828faff18bab",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2170,
+    "wall_seconds": 3.222135337011423,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-14",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "13fefc9d-ffd4-435e-81a6-b96c56900e1f",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2157,
+    "wall_seconds": 7.838795279007172,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-09",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "3efa3227-4297-446b-a8fb-15a77f69aaed",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2156,
+    "wall_seconds": 4.875826989999041,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-09",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "fb5464b9-bdb3-46a7-8626-48f165f01059",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2170,
+    "wall_seconds": 10.605668547010282,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-09",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "ad7039d6-6dfc-4939-a8ce-b449c8d467a0",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2192,
+    "wall_seconds": 10.195495207997737,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-09",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "5e29ef99-534d-4873-a6c3-b9fd76858b6e",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2157,
+    "wall_seconds": 4.5784127460065065,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-13",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "edfccb7a-a7da-4a51-b495-68a053b8fe84",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2178,
+    "wall_seconds": 3.6734225639957003,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-13",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "ce28ac76-6d1d-4bd1-a420-45af2558aa78",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2190,
+    "wall_seconds": 10.94426630900125,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-03",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "f8a58d9f-55e4-4628-8206-b4f00f2ba4c9",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2177,
+    "wall_seconds": 17.357654200008255,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-03",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "b61b1c4a-9e50-4ac4-80ec-03cc2b1ccede",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2315,
+    "wall_seconds": 5.678464377007913,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-10",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "114152ec-1b5c-43d7-b455-1c214f06158d",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2377,
+    "wall_seconds": 10.613484896995942,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-10",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "6d7edb4c-5214-4e5b-b16c-f76c45d65db2",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2343,
+    "wall_seconds": 24.42382326698862,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-04",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "df82e763-dbea-4c10-8c51-becdc21dc195",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2341,
+    "wall_seconds": 25.33136213599937,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-04",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "85aa367d-1f42-41b1-9555-7c0b84f04c8e",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2288,
+    "wall_seconds": 10.743039859007695,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-08",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "4f6a202c-b907-4bcc-b2b8-0a9868d9eaf3",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2209,
+    "wall_seconds": 7.697269817988854,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-08",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "3ae3206f-7bc6-4ae0-89dc-563a2c1f3000",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2197,
+    "wall_seconds": 3.7742124120122753,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-14",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "f68b5b64-0bfe-4c39-aeb4-fe3da5597c25",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2176,
+    "wall_seconds": 4.626956627995241,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-14",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "50647505-0011-41ea-97be-0382c789565d",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2254,
+    "wall_seconds": 4.375239041008172,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-06",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "dcbfb00a-4c3e-48ca-9f7b-60d4ac96541e",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2257,
+    "wall_seconds": 7.787026557009085,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-06",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "376dcbc1-1753-4e17-9b85-8ab696f7421e",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2683,
+    "wall_seconds": 116.46638192901446,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-05",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "d199fc1f-7fd0-48bf-a9e2-a404140c2810",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2835,
+    "wall_seconds": 51.71097907998774,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-05",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "c459bf6c-8b37-491e-adb5-2d4e521018cf",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2335,
+    "wall_seconds": 95.80849902800401,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-04",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "ae02870c-f792-468a-a73b-5824031a812e",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2851,
+    "wall_seconds": 13.213255470996955,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-04",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "0585e06f-c124-4069-bdfc-3003855b4464",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2338,
+    "wall_seconds": 4.755030581000028,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-07",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "e79ffb39-6234-49d8-bc55-21ac1209b3a0",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2336,
+    "wall_seconds": 4.081405856995843,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-07",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "6b50f034-f0d2-4b4e-82b0-c4251fca67da",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2084,
+    "wall_seconds": 84.44184499999392,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-02",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "14088165-9ca8-4687-a6cb-a9188fc56e4a",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2060,
+    "wall_seconds": 11.701759196992498,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-02",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "e1a9d2cf-5949-4670-9d79-7018d2a82483",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2159,
+    "wall_seconds": 6.58545050000248,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-13",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "af7d1f04-3512-4c3f-ad3f-47d4e7a8e5b2",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2159,
+    "wall_seconds": 4.976400617000763,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-13",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "d0747e56-2c84-43b2-b5f7-5ea448ad907c",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2361,
+    "wall_seconds": 3.877826329000527,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-07",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "23c6c8ef-9d74-4298-b73b-d6d55e8fa76d",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2346,
+    "wall_seconds": 8.91213161199994,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-07",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "session_id": "240cfb0d-91f6-4977-9555-24fddb9a35b0",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2712,
+    "wall_seconds": 18.12351456900069,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-05",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "session_id": "77cb362c-ffc0-4080-b32a-a7624a8ecc1c",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2689,
+    "wall_seconds": 13.470660500999657,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-05",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "session_id": "8700153f-dc87-4294-80d5-f7ecd08e65a4",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2121,
+    "wall_seconds": 9.541726112991455,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": null,
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "336cc4fbf19beaada7ccf9986414fa91851a8d7a07dfb3ccbe800a69eed0ab49"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E0/app",
+    "id": "v7-rallly-11",
+    "attempt": 0,
+    "is_error": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "session_id": "36bff6ae-3fb8-4f6f-95d8-76db5e0556c9",
+    "exit_code": 0,
+    "timeout": false,
+    "output_bytes": 2120,
+    "wall_seconds": 9.942858477996197,
+    "before": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "after": {
+      "tree_sha256": "4eaecb5a93826baddec24f849714aefa4075df8c5100e851fc1d31ca3d5ede7a",
+      "connect_files": {
+        ".cursor/mcp.json": null,
+        ".cursor/rules/neorion.mdc": null,
+        ".mcp.json": "279b0c992a446d8a19c2957bb75d080a3678754a254e9c0a8bd3d61d029b62ad",
+        ".vscode/mcp.json": null,
+        "AGENTS.md": "63f2c50380ed6303237cce215ce27af1d620d094c215e28d1b1538a3c070e3bb",
+        "CLAUDE.md": "1bec9f9bf92c49b3ac4cd896728f9aad3e7cb598e388518cde28411cae21958c"
+      }
+    },
+    "transcript": true,
+    "cwd": "/tmp/neorion-bench-v7/E2/app",
+    "id": "v7-rallly-11",
+    "attempt": 0,
+    "is_error": false
+  }
+]

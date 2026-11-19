@@ -1,0 +1,282 @@
+[
+ {
+  "id": "v7-rallly-02",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-02",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-03",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-03",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-08",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-08",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-06",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-06",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-12",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-12",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-01",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-01",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-01",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-01",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-12",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-12",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-11",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-11",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-10",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-10",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-14",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-14",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-09",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-09",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-09",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-09",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-13",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-13",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-03",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-03",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-10",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-10",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-04",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-04",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-08",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-08",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-14",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-14",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-06",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-06",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-05",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-05",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-04",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-04",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-07",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-07",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-02",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-02",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-13",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-13",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-07",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-07",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-05",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-05",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v7-rallly-11",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v7-rallly-11",
+  "model": "haiku",
+  "variant": "E2"
+ }
+]

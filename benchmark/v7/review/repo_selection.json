@@ -1,0 +1,19 @@
+{
+ "seed": "neorion-bench-v7-20261120",
+ "checked_at": "2026-11-19T19:05:51Z",
+ "order": ["makeplane/plane", "documenso/documenso", "lukevella/rallly", "midday-ai/midday", "calcom/cal.com", "lobehub/lobe-chat", "openstatusHQ/openstatus", "unkeyed/unkey", "sadmann7/skateshop", "umami-software/umami", "elie222/inbox-zero", "nextjs/saas-starter"],
+ "skipped": [
+  {"repo": "makeplane/plane", "reason": "apps/web package.json uses react-router and vite, not Next.js; repository has 0 Next.js API route handlers"},
+  {"repo": "documenso/documenso", "reason": "main app is apps/remix (React Router); the only Next.js app is apps/docs with 13 pages and 1 API route"}
+ ],
+ "selected": {
+  "repo": "lukevella/rallly",
+  "url": "https://github.com/lukevella/rallly",
+  "license": "AGPL-3.0",
+  "stars_at_check": 5366,
+  "app_subdir": "apps/web",
+  "commit": "9ab01952cebd8db5165d0df1acaeeb5ea084b790",
+  "commit_date": "2026-11-19T18:19:45Z",
+  "eligibility": "apps/web: next 16.4.6, TypeScript (934 .ts/.tsx files), 54 src/app/**/page.tsx, 16 src/app/api/**/route.ts"
+ }
+}
