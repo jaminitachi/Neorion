@@ -434,7 +434,9 @@ export class QueryEngine {
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? `${senders.size} sender${senders.size === 1 ? '' : 's'}, ${calls.size} callers` : undefined,
-      partial: fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
+      partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
+        fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
+        fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
         moreCallers ? 'caller depth limit' : undefined,
       notes: similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : []
     };

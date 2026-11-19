@@ -90,6 +90,20 @@ function insert(original: string, bom: number, node: Node, key: string, value: u
   return { written: original.slice(0, offset) + insertion + original.slice(offset), insertion };
 }
 
+const launchBundle = [
+  'const [workspace, project] = process.argv.slice(1);',
+  'const { join, resolve } = require("node:path");',
+  `const cache = (${workspaceCache.toString()})(workspace);`,
+  `const server = join(cache, ${JSON.stringify(BUNDLE)});`,
+  'if (!require("node:fs").existsSync(server)) {',
+  '  console.error("Neorion MCP bundle missing. Run Neorion: Connect AI tools in this workspace.");',
+  '  process.exit(1);',
+  '}',
+  'process.argv.splice(1, 2, server, "--root", resolve(workspace, project));',
+  'process.execArgv = [];',
+  'require(server);'
+].join('\n');
+
 export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', project: string, bundleSource: string) {
   const command: Command = { command: 'node', args: [bundleSource, '--root', project] };
   return tool === 'Codex CLI'
@@ -159,7 +173,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     }
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
-      ? { command: 'node', args: [bundle, '--root', scopedProject] }
+      ? { command: 'node', args: ['-e', launchBundle, '--', variable ? '${workspaceFolder}' : '.', projectArgument] }
       : { command: 'npx', args: ['-y', `neorion-mcp@${VERSION}`, '--root', scopedProject] };
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);

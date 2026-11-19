@@ -4,7 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
-const { register } = require('./run.cjs');
+const { generate, register } = require('./run.cjs');
+const { openMcp } = require('./mcp-helpers.cjs');
 
 const REGISTER = 'Register Neorion query tools (MCP)';
 const COPY = 'Other tools: copy configuration snippet';
@@ -137,14 +138,24 @@ test('R4 rejects conflicts, malformed files, JSONC for strict clients, and symli
 
 test('R5 bundled registration resolves the server and monorepo root for each client', async t => {
   const env = setup(t, 'apps/web');
+  env.write('apps/web/tsconfig.json', '{}');
+  env.write('apps/web/example.ts', 'export const Example = 1;');
+  await generate(env.file('apps/web'));
   env.selections.mode = undefined;
   await env.connect();
   for (const [target, file] of Object.entries(files)) {
     const entry = JSON.parse(env.read(file))[key(target)].neorion;
-    const prefix = target === 'Claude Code' ? '' : '${workspaceFolder}/';
+    const workspace = target === 'Claude Code' ? '.' : '${workspaceFolder}';
     assert.equal(entry.command, 'node');
-    assert.deepEqual(entry.args, [cachePath(env.file('.'), '.neorion/mcp/server.cjs'), '--root', prefix + 'apps/web']);
+    assert.deepEqual(entry.args.slice(2), ['--', workspace, 'apps/web']);
+    assert.equal(entry.args[0], '-e');
+    assert.ok(!env.read(file).includes(env.file('.')));
     assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
+    const args = entry.args.map(arg => arg === '${workspaceFolder}' ? env.file('.') : arg);
+    const client = await openMcp(t, env.file('.'), { command: entry.command, args, cwd: env.file('.') });
+    assert.match(await client.text('search', { text: 'Example' }), /constant example\.ts:1#Example/);
+    assert.equal(client.stderr(), '');
+    await client.close();
   }
 });
 
@@ -163,8 +174,8 @@ test('Connect migrates a managed workspace bundle and old instructions to the ca
   env.selections.targets = ['Claude Code'];
   env.selections.mode = bundledMode;
   await env.connect();
-  assert.equal(JSON.parse(env.read('.mcp.json')).mcpServers.neorion.args[0],
-    cachePath(env.file('.'), '.neorion/mcp/server.cjs'));
+  assert.equal(JSON.parse(env.read('.mcp.json')).mcpServers.neorion.args[0], '-e');
+  assert.ok(fs.existsSync(cachePath(env.file('.'), '.neorion/mcp/server.cjs')));
   assert.ok(!fs.existsSync(env.file('.neorion/mcp/server.cjs')));
   assert.ok(!fs.existsSync(env.file('.neorion/connect-state.json')));
   assert.match(env.read('CLAUDE.md'), /^<!-- neorion:start -->\nUse neorion_query[^\n]*\n<!-- neorion:end -->\n$/);

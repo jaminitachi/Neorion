@@ -1,9 +1,9 @@
-import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-
-export function workspaceCache(root: string) {
+export function workspaceCache(root: string): string {
+  // Keep these imports local so the MCP launcher can use this function in Node's inline script.
+  const { createHash } = require('node:crypto') as typeof import('node:crypto');
+  const { realpathSync } = require('node:fs') as typeof import('node:fs');
+  const { homedir, tmpdir } = require('node:os') as typeof import('node:os');
+  const { isAbsolute, join, relative, resolve, sep } = require('node:path') as typeof import('node:path');
   const project = realpathSync(root);
   const home = homedir();
   const fallback = process.platform === 'darwin' ? join(home, 'Library', 'Caches') :

@@ -32,13 +32,14 @@ export interface FetchEntry {
   route: number;
   owner?: number;
   partial?: boolean;
+  dynamic?: boolean;
 }
 
 export type Reference = [symbol: number, file: string, line: number, kind: string, detail?: string, caller?: number];
 
 export interface QueryIndex {
   schema: 1;
-  coverage?: 1;
+  coverage?: 1 | 2;
   generator: string;
   generatedAt: string;
   root: '.';

@@ -11,7 +11,7 @@ const { openMcp } = require('./mcp-helpers.cjs');
 const indexFile = '.neorion/index.v1.json';
 const stamp = '2026-11-19T06:00:00.000Z';
 const emptyIndex = () => ({
-  schema: 1, coverage: 1, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
+  schema: 1, coverage: 2, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
   files: {}, symbols: [], routes: [], renderEdges: [], wrapChains: {}, routeWrap: {}, references: [], fetches: []
 });
 
@@ -272,4 +272,71 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
   assert.match(await query('/api/ping'), /^# complete: indexed route literals/m);
   write(root, 'widget.ts', 'export const replacement = "/api/ping";');
   assert.match(await query('/api/ping'), /^# partial: stale index$/m);
+});
+
+test('concatenated URLs are candidates for descendants and trailing slashes do not match a list route', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const route of ['items', 'items/[id]', 'items/special', 'items-other', 'exact/[id]']) {
+    write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
+  }
+  write(root, 'items.ts', [
+    'declare const id: string;',
+    'fetch("/api/items/" + id);',
+    'fetch("/api/items/");',
+    'fetch("/api/items/?limit=1");',
+    'fetch("/api/items");',
+    'const tail = "123";',
+    'fetch("/api/exact/" + tail);',
+    'declare function request(url: string): void;',
+    'request("/api/items/" + id);'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const route of ['items/[id]', 'items/special']) {
+    const output = await client.text('api_consumers', { route: '/api/' + route });
+    assert.match(output, /^send +items\.ts:2 GET fetch \[partial url\]$/m);
+    assert.match(output, /^send +items\.ts:9 \? route literal \[partial url\]$/m);
+    assert.match(output, /^# partial: dynamic URL$/m);
+  }
+  const list = await client.text('api_consumers', { route: '/api/items' });
+  assert.deepEqual(list.match(/^send.*$/gm), ['send   items.ts:5 GET fetch']);
+  assert.match(list, /^# complete:/m);
+  assert.doesNotMatch(await client.text('api_consumers', { route: '/api/items-other' }), /^send/m);
+  const exact = await client.text('api_consumers', { route: '/api/exact/[id]' });
+  assert.match(exact, /^send +items\.ts:7 GET fetch$/m);
+  assert.match(exact, /^# complete:/m);
+});
+
+test('template URLs resolve local and imported string constants and report unresolved suffixes', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const route of ['local/[id]', 'imported/[id]', 'exact-local/[id]', 'exact-imported/[id]']) {
+    write(root, `app/api/${route}/route.ts`, 'export function DELETE() {}');
+  }
+  write(root, 'paths.ts', 'export const remote = "/api/imported/"; export const exact = "/api/exact-imported"; export const key = "123";');
+  write(root, 'barrel.ts', 'export { remote as prefix, exact, key } from "./paths";');
+  write(root, 'imported.ts', [
+    'import { prefix, exact, key } from "./barrel";',
+    'declare const id: string;',
+    'fetch(`${prefix}${id}`, { method: "DELETE" });',
+    'fetch(`${exact}/${key}`, { method: "DELETE" });'
+  ].join('\n'));
+  write(root, 'local.ts', [
+    'const prefix = "/api/local" as const;',
+    'const exact = "/api/exact-local"; const key = "123";',
+    'declare const id: string;',
+    'fetch(`${prefix}/${id}`, { method: "DELETE" });',
+    'fetch(`${exact}/${key}`, { method: "DELETE" });'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const [source, dynamicLine, exactLine] of [['local', 4, 5], ['imported', 3, 4]]) {
+    const dynamic = await client.text('api_consumers', { route: `/api/${source}/[id]` });
+    assert.ok(dynamic.includes(`send   ${source}.ts:${dynamicLine} DELETE fetch [partial url]`), dynamic);
+    assert.match(dynamic, /^# partial: dynamic URL$/m);
+    const exact = await client.text('api_consumers', { route: `/api/exact-${source}/[id]` });
+    assert.ok(exact.includes(`send   ${source}.ts:${exactLine} DELETE fetch\n`), exact);
+    assert.match(exact, /^# complete:/m);
+  }
 });

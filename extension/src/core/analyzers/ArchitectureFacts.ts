@@ -343,19 +343,91 @@ export function collectRenderFacts(
   }
 }
 
-function apiSegments(argument: Node | undefined) {
-  let url: string;
-  if (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument)) url = argument.getLiteralText();
-  else if (Node.isTemplateExpression(argument)) {
-    url = argument.getHead().getLiteralText() +
-      argument.getTemplateSpans().map(span => '{}' + span.getLiteral().getLiteralText()).join('');
-  } else return;
-  const prefix = /^(?:\{\}|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url)?.[0];
-  const local = prefix ? url.slice(prefix.length) : url;
-  if (/^\/api(?:[/?#]|$)/.test(local)) {
-    const segments = local.split(/[?#]/, 1)[0].replace(/\/$/, '').slice(1).split('/');
-    return { segments, partial: !!prefix, markdown: !prefix || prefix === '{}' };
+const localApi = /^\/api(?:[/?#]|$)/;
+
+function addition(node: Node | undefined) {
+  return Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.PlusToken ? node : undefined;
+}
+
+function wrappedExpression(node: Node) {
+  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) ||
+      Node.isTypeAssertion(node) || Node.isSatisfiesExpression(node) || Node.isNonNullExpression(node)) {
+    return node.getExpression();
   }
+}
+
+type UrlText = { text: string; dynamic?: true; placeholders?: true };
+
+function urlText(node: Node | undefined, seen = new Set<Node>()): UrlText | undefined {
+  if (!node || seen.has(node)) return;
+  seen.add(node);
+  try {
+    if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
+      return { text: node.getLiteralText() };
+    }
+    const wrapped = wrappedExpression(node);
+    if (wrapped) return urlText(wrapped, seen);
+    if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
+      const [declaration] = declarationsOf(node);
+      if (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === 'const') {
+        return urlText(declaration.getInitializer(), seen);
+      }
+    }
+    const plus = addition(node);
+    if (plus) {
+      const left = urlText(plus.getLeft(), seen);
+      if (!left || left.dynamic) return left;
+      const right = urlText(plus.getRight(), seen);
+      if (localApi.test(left.text) && (left.placeholders || !right || right.placeholders)) {
+        const known = left.placeholders ? left.text : left.text + (right?.text ?? '');
+        return { text: known.split('{}', 1)[0], dynamic: true };
+      }
+      if (right && !left.placeholders && !right.placeholders) {
+        return { text: left.text + right.text, dynamic: right.dynamic };
+      }
+    }
+    if (Node.isTemplateExpression(node)) {
+      let text = node.getHead().getLiteralText();
+      let placeholders: true | undefined;
+      let prefixSlot = false;
+      for (const [i, span] of node.getTemplateSpans().entries()) {
+        const expression = span.getExpression();
+        const value = urlText(expression, seen);
+        if (i === 0 && !text && value && localApi.test(value.text)) {
+          prefixSlot = true;
+        }
+        if (value?.dynamic || (prefixSlot && (!value || value.placeholders))) {
+          return { text: text + (value?.text.split('{}', 1)[0] ?? ''), dynamic: true };
+        }
+        if (!value || value.placeholders) placeholders = true;
+        text += (value && !value.placeholders ? value.text : '{}') + span.getLiteral().getLiteralText();
+      }
+      return { text, placeholders };
+    }
+  } finally {
+    seen.delete(node);
+  }
+}
+
+function apiSegments(argument: Node | undefined) {
+  const url = urlText(argument);
+  if (!url) return;
+  const prefix = /^(?:\{\}|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
+  const local = prefix ? url.text.slice(prefix.length) : url.text;
+  if (localApi.test(local)) {
+    const [pathname] = local.split(/[?#]/, 1);
+    const segments = (url.placeholders && !url.dynamic ? pathname.replace(/\/$/, '') : pathname).slice(1).split('/');
+    return { segments, dynamic: url.dynamic, pathFixed: pathname !== local,
+      partial: !!prefix, markdown: !prefix || prefix === '{}' };
+  }
+}
+
+function matchesDynamicPrefix(pattern: string[], segments: string[], pathFixed: boolean) {
+  return segments.every((segment, i) => {
+    if (pattern[i]?.startsWith('[')) return !!segment || !pathFixed;
+    if (pattern.slice(0, i).some(part => part.includes('...'))) return !!segment || !pathFixed;
+    return !pathFixed && i === segments.length - 1 ? pattern[i]?.startsWith(segment) : pattern[i] === segment;
+  }) && (!pathFixed || pattern.length === segments.length || !!pattern.at(-1)?.includes('...'));
 }
 
 function swrUrls(key: Node | undefined, seen = new Set<Node>()): Node[] {
@@ -398,11 +470,13 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' : part.startsWith('[') ? '2' : '3').join('') }));
   if (!endpoints.length) return;
   endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
-  const urlMatches = (url: Node | undefined) => {
-    const parsed = apiSegments(url);
-    if (!parsed) return [];
+  const urlMatches = (parsed: NonNullable<ReturnType<typeof apiSegments>>) => {
     const { segments, partial } = parsed;
-    const matches: { route: RouteNode; partial: boolean; markdown: boolean }[] = [];
+    if (parsed.dynamic) {
+      return endpoints.filter(({ segments: pattern }) => matchesDynamicPrefix(pattern, segments, parsed.pathFixed))
+        .map(({ route }) => ({ route, partial: true, markdown: false, dynamic: true }));
+    }
+    const matches: { route: RouteNode; partial: boolean; markdown: boolean; dynamic?: boolean }[] = [];
     let bestCertain: string | undefined;
     let moreSpecificMatch = false;
     for (const endpoint of endpoints) {
@@ -433,14 +507,26 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText())) continue;
+    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const literals: Node[] = [];
     const classified = new Set<Node>();
+    const classify = (url: Node) => {
+      classified.add(url);
+      const wrapped = wrappedExpression(url);
+      const plus = addition(url);
+      if (wrapped) classify(wrapped);
+      else if (plus) {
+        classify(plus.getLeft());
+        classify(plus.getRight());
+      } else if (Node.isTemplateExpression(url)) {
+        for (const span of url.getTemplateSpans()) classify(span.getExpression());
+      }
+    };
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
     file.forEachDescendant(node => {
-      if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node))) {
+      if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node) || addition(node))) {
         literals.push(node);
       }
       if (!Node.isCallExpression(node)) return;
@@ -463,10 +549,12 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const method = isFetch ? fetchMethod : axiosMethod;
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
       for (const url of isSwr ? swrUrls(argument) : [argument]) {
-        for (const { route, partial, markdown } of urlMatches(url)) {
+        const parsed = apiSegments(url);
+        if (!url || !parsed) continue;
+        classify(url);
+        for (const { route, partial, markdown, dynamic } of urlMatches(parsed)) {
           const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
             value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-          if (url) classified.add(url);
           const subject = action ? action.slice('action:'.length) : source;
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
           const kind = isSwr ? ' (SWR key)' : axiosMethod ? ' (axios)' : '';
@@ -475,7 +563,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           index?.fetch({
             file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr && origin?.name !== 'mutate' ? 'GET' : '?'),
             url: route.path, via: isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
-            partial: partial || undefined
+            partial: partial || undefined, dynamic
           });
           if (isSwr || !mapFact) continue;
           const targets = endpointsByCall.get(node) ?? [];
@@ -486,10 +574,13 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     });
     for (const node of literals) {
       if (classified.has(node)) continue;
-      for (const { route, partial } of urlMatches(node)) {
+      const parsed = apiSegments(node);
+      if (!parsed) continue;
+      classify(node);
+      for (const { route, partial, dynamic } of urlMatches(parsed)) {
         index?.fetch({
           file: source, line: node.getStartLineNumber(), node, route: route.id, method: '?',
-          url: route.path, via: 'route literal', partial: partial || undefined
+          url: route.path, via: 'route literal', partial: partial || undefined, dynamic
         });
       }
     }

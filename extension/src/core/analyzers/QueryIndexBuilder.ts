@@ -28,7 +28,7 @@ export class QueryIndexBuilder {
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
-      schema: 1, coverage: 1, generator: `neorion ${VERSION}`, generatedAt: new Date().toISOString(), root: '.',
+      schema: 1, coverage: 2, generator: `neorion ${VERSION}`, generatedAt: new Date().toISOString(), root: '.',
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], mentions: Object.create(null)
     };

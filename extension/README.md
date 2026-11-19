@@ -21,7 +21,11 @@ blocks, restores any Cursor setting changed by Neorion, and removes MCP entries 
 In **Connect AI tools**, select **Register Neorion query tools (MCP)** to opt in.
 Choose Claude Code, Cursor, or VS Code (Copilot agent). **Use bundled server**
 is the default. It stores the server in the local workspace cache and works
-offline with Node.js 18 or later. The optional pinned npm mode requires
+offline with Node.js 18 or later. The project config locates the bundle at
+launch using the current workspace and local cache settings. Claude Code uses
+the project working directory, and Cursor and VS Code expand
+`${workspaceFolder}`. Run **Connect AI tools** to populate the cache for a new
+checkout or after moving a project. The optional pinned npm mode requires
 `neorion-mcp@0.4.0` to be published before it can run. Claude Code asks for
 approval before first using a project MCP server.
 **Other tools: copy configuration snippet** uses absolute paths to the
@@ -44,7 +48,7 @@ The server returns project-relative `path:line` locations. Results have a
 indexed static matches in the query’s scope. `partial` gives the reason for
 uncertainty or missing results. Run **Generate Architecture Map** to refresh
 the snapshot after source changes. Reconnect a managed bundled registration to
-move it to the cache and refresh its instruction block.
+refresh its launcher and instruction block.
 
 ### Markdown architecture map
 
