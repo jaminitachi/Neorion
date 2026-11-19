@@ -1,0 +1,576 @@
+[
+ {
+  "repo": "dub",
+  "type": "T1",
+  "band": "easy",
+  "subject": "ui/shared/country-combobox.tsx#CountryCombobox",
+  "order": "01e7b33de63f79b70e5fb63816c2e8fb0f4acac19d74dc875d788f7302cdefbf",
+  "rankInPool": 0,
+  "poolSize": 74,
+  "data": {
+   "key": "ui/shared/country-combobox.tsx#CountryCombobox",
+   "name": "CountryCombobox",
+   "file": "ui/shared/country-combobox.tsx",
+   "directRenderers": 1,
+   "routes": [
+    "/app.dub.co/[slug]/links/customers/[customerId]/sales"
+   ],
+   "pageFiles": [
+    "app/app.dub.co/(dashboard)/[slug]/(ee)/links/customers/[customerId]/sales/page.tsx"
+   ],
+   "viaWrapper": [
+    "/app.dub.co/[slug]/links/customers/[customerId]/sales"
+   ],
+   "roots": {
+    "/app.dub.co/[slug]/links/customers/[customerId]/sales": "app/app.dub.co/(dashboard)/[slug]/(ee)/links/customers/[customerId]/layout.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 3,
+   "maxDepth": 3,
+   "evidence": {
+    "/app.dub.co/[slug]/links/customers/[customerId]/sales": [
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/links/customers/[customerId]/layout.tsx:69 <CustomerSelector>",
+     "ui/customers/customer-selector.tsx:82 <AddCustomerModal>",
+     "ui/modals/add-customer-modal.tsx:410 <CountryCombobox>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T1",
+  "band": "medium",
+  "subject": "ui/analytics/bar-list.tsx#LineItem",
+  "order": "154c97a71a6c1cddd446e972cbc095721eaab5f1fd80920008ffd19e4ce3e5ba",
+  "rankInPool": 0,
+  "poolSize": 14,
+  "data": {
+   "key": "ui/analytics/bar-list.tsx#LineItem",
+   "name": "LineItem",
+   "file": "ui/analytics/bar-list.tsx",
+   "directRenderers": 2,
+   "routes": [
+    "/app.dub.co/[slug]/links/analytics",
+    "/app.dub.co/[slug]/settings/billing",
+    "/app.dub.co/share/[dashboardId]"
+   ],
+   "pageFiles": [
+    "app/app.dub.co/(dashboard)/[slug]/links/analytics/page.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/page.tsx",
+    "app/app.dub.co/(share)/share/[dashboardId]/page.tsx"
+   ],
+   "viaWrapper": [],
+   "roots": {
+    "/app.dub.co/[slug]/links/analytics": "app/app.dub.co/(dashboard)/[slug]/links/analytics/page.tsx",
+    "/app.dub.co/[slug]/settings/billing": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/page.tsx",
+    "/app.dub.co/share/[dashboardId]": "app/app.dub.co/(share)/share/[dashboardId]/page.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 4,
+   "maxDepth": 5,
+   "evidence": {
+    "/app.dub.co/[slug]/links/analytics": [
+     "app/app.dub.co/(dashboard)/[slug]/links/analytics/page.tsx:12 <Analytics>",
+     "ui/analytics/index.tsx:44 <StatsGrid>",
+     "ui/analytics/index.tsx:67 <DeviceSection>",
+     "ui/analytics/device-section.tsx:82 <BarList>",
+     "ui/analytics/bar-list.tsx:224 <LineItem>"
+    ],
+    "/app.dub.co/[slug]/settings/billing": [
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/page.tsx:10 <PlanUsage>",
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/plan-usage.tsx:367 <UsageChart>",
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/usage-chart.tsx:573 <BarList>",
+     "ui/analytics/bar-list.tsx:224 <LineItem>"
+    ],
+    "/app.dub.co/share/[dashboardId]": [
+     "app/app.dub.co/(share)/share/[dashboardId]/page.tsx:103 <Analytics>",
+     "ui/analytics/index.tsx:44 <StatsGrid>",
+     "ui/analytics/index.tsx:67 <DeviceSection>",
+     "ui/analytics/device-section.tsx:82 <BarList>",
+     "ui/analytics/bar-list.tsx:224 <LineItem>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T1",
+  "band": "hard",
+  "subject": "ui/links/link-title-column.tsx#UserAvatarWithTooltip",
+  "order": "37d2c25ef80777d2c406bc08b36c2694ca9a3cedbb9220c2b890f526fafa6eb7",
+  "rankInPool": 0,
+  "poolSize": 3,
+  "data": {
+   "key": "ui/links/link-title-column.tsx#UserAvatarWithTooltip",
+   "name": "UserAvatarWithTooltip",
+   "file": "ui/links/link-title-column.tsx",
+   "directRenderers": 3,
+   "routes": [
+    "/app.dub.co/[slug]/links",
+    "/app.dub.co/[slug]/links/[...link]",
+    "/app.dub.co/[slug]/settings/tokens"
+   ],
+   "pageFiles": [
+    "app/app.dub.co/(dashboard)/[slug]/links/page.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/links/[...link]/page.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/tokens/page.tsx"
+   ],
+   "viaWrapper": [],
+   "roots": {
+    "/app.dub.co/[slug]/links": "app/app.dub.co/(dashboard)/[slug]/links/page.tsx",
+    "/app.dub.co/[slug]/links/[...link]": "app/app.dub.co/(dashboard)/[slug]/links/[...link]/page.tsx",
+    "/app.dub.co/[slug]/settings/tokens": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/tokens/page.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 1,
+   "maxDepth": 9,
+   "evidence": {
+    "/app.dub.co/[slug]/links": [
+     "app/app.dub.co/(dashboard)/[slug]/links/page.tsx:4 <WorkspaceLinksClient>",
+     "app/app.dub.co/(dashboard)/[slug]/links/page-client.tsx:69 <WorkspaceLinksList>",
+     "app/app.dub.co/(dashboard)/[slug]/links/page-client.tsx:266 <LinksContainer>",
+     "ui/links/links-container.tsx:56 <LinksList>",
+     "ui/links/links-container.tsx:120 <LinkCard>",
+     "ui/links/link-card.tsx:46 <LinkCardInner>",
+     "ui/links/link-card.tsx:137 <LinkTitleColumn>",
+     "ui/links/link-title-column.tsx:163 <Details>",
+     "ui/links/link-title-column.tsx:390 <UserAvatarWithTooltip>"
+    ],
+    "/app.dub.co/[slug]/links/[...link]": [
+     "app/app.dub.co/(dashboard)/[slug]/links/[...link]/page.tsx:10 <LinkPageClient>",
+     "app/app.dub.co/(dashboard)/[slug]/links/[...link]/page-client.tsx:84 <LinkBuilder>",
+     "app/app.dub.co/(dashboard)/[slug]/links/[...link]/page-client.tsx:233 <LinkCreatorInfo>",
+     "ui/links/link-builder/link-creator-info.tsx:15 <UserAvatarWithTooltip>"
+    ],
+    "/app.dub.co/[slug]/settings/tokens": [
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/tokens/page.tsx:125 <UserAvatarWithTooltip>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T2",
+  "band": "medium",
+  "subject": "/app.dub.co/workspaces",
+  "order": "188f2deba8199d6d28637f4d790edf9d3ad8dd17d2b07c7fbb98caa879e39887",
+  "rankInPool": 0,
+  "poolSize": 24,
+  "data": {
+   "route": "/app.dub.co/workspaces",
+   "pageFile": "app/app.dub.co/(onboarding)/workspaces/page.tsx",
+   "files": [
+    "app/layout.tsx",
+    "app/providers.tsx",
+    "app/app.dub.co/layout.tsx",
+    "app/app.dub.co/(onboarding)/layout.tsx"
+   ],
+   "steps": [
+    {
+     "file": "app/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "app/providers.tsx",
+     "component": "RootProviders",
+     "via": "app/layout.tsx:19 <RootProviders>"
+    },
+    {
+     "file": "app/app.dub.co/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "app/app.dub.co/(onboarding)/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    }
+   ],
+   "notes": []
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T2",
+  "band": "hard",
+  "subject": "/app.dub.co/[slug]/settings/webhooks/new",
+  "order": "00dc41392bcb67cabbe066e409d57d742e314e48130e4e689050f81e52669457",
+  "rankInPool": 0,
+  "poolSize": 20,
+  "data": {
+   "route": "/app.dub.co/[slug]/settings/webhooks/new",
+   "pageFile": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/new/page.tsx",
+   "files": [
+    "app/layout.tsx",
+    "app/providers.tsx",
+    "app/app.dub.co/layout.tsx",
+    "app/app.dub.co/(dashboard)/layout.tsx",
+    "ui/modals/modal-provider.tsx",
+    "ui/layout/main-nav.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/layout.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/auth.tsx",
+    "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/layout.tsx",
+    "ui/layout/page-content/index.tsx",
+    "ui/layout/page-width-wrapper.tsx"
+   ],
+   "steps": [
+    {
+     "file": "app/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "app/providers.tsx",
+     "component": "RootProviders",
+     "via": "app/layout.tsx:19 <RootProviders>"
+    },
+    {
+     "file": "app/app.dub.co/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "app/app.dub.co/(dashboard)/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "ui/modals/modal-provider.tsx",
+     "component": "ModalProvider",
+     "via": "app/app.dub.co/(dashboard)/layout.tsx:16 <ModalProvider>"
+    },
+    {
+     "file": "ui/modals/modal-provider.tsx",
+     "component": "ModalProviderClient",
+     "via": "ui/modals/modal-provider.tsx:54 <ModalProviderClient>"
+    },
+    {
+     "file": "ui/layout/main-nav.tsx",
+     "component": "MainNav",
+     "via": "app/app.dub.co/(dashboard)/layout.tsx:19 <MainNav>"
+    },
+    {
+     "file": "app/app.dub.co/(dashboard)/[slug]/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "app/app.dub.co/(dashboard)/[slug]/auth.tsx",
+     "component": "WorkspaceAuth",
+     "via": "app/app.dub.co/(dashboard)/[slug]/layout.tsx:5 <WorkspaceAuth>"
+    },
+    {
+     "file": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "ui/layout/page-content/index.tsx",
+     "component": "PageContent",
+     "via": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/layout.tsx:8 <PageContent>"
+    },
+    {
+     "file": "ui/layout/page-width-wrapper.tsx",
+     "component": "PageWidthWrapper",
+     "via": "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/layout.tsx:17 <PageWidthWrapper>"
+    }
+   ],
+   "notes": []
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T3",
+  "band": "easy",
+  "subject": "app/app.dub.co/(onboarding)/onboarding/use-onboarding-progress.ts#useOnboardingProgress",
+  "order": "0c36af43307950c099fbdbee7be4ef5a9561d231b61058bec824c8f5a967ea24",
+  "rankInPool": 0,
+  "poolSize": 14,
+  "data": {
+   "key": "app/app.dub.co/(onboarding)/onboarding/use-onboarding-progress.ts#useOnboardingProgress",
+   "name": "useOnboardingProgress",
+   "file": "app/app.dub.co/(onboarding)/onboarding/use-onboarding-progress.ts",
+   "order": "e81408dd7195f8a35d9fda94f6c2b80c87fa06171dd11cc423f721fa8be39c6b",
+   "files": [
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/custom/form.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/default-domain-selector.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/register/form.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/plan/free-plan-button.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/success/page-client.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/workspace/form.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/later-button.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/next-button.tsx",
+    "app/app.dub.co/(onboarding)/onboarding/use-onboarding-progress.ts"
+   ],
+   "lines": {
+    "app/app.dub.co/(onboarding)/onboarding/use-onboarding-progress.ts": [
+     11
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/custom/form.tsx": [
+     6,
+     11
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/later-button.tsx": [
+     7,
+     19
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/default-domain-selector.tsx": [
+     18,
+     101
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/domain/register/form.tsx": [
+     4,
+     7
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/plan/free-plan-button.tsx": [
+     6,
+     13
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/success/page-client.tsx": [
+     30,
+     49
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/next-button.tsx": [
+     5,
+     11
+    ],
+    "app/app.dub.co/(onboarding)/onboarding/(steps)/workspace/form.tsx": [
+     4,
+     7
+    ]
+   },
+   "aliasFiles": [],
+   "barrelFiles": [],
+   "viaBarrelImporters": [],
+   "grepOnly": [],
+   "grepOnlyTests": [],
+   "renameOnly": []
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T3",
+  "band": "hard",
+  "subject": "lib/api/links/create-link.ts#createLink",
+  "order": "0356b818f8d0f8353872b704b634a5b80cbc2d13a831d960cccec25569f3ab6a",
+  "rankInPool": 0,
+  "poolSize": 5,
+  "data": {
+   "key": "lib/api/links/create-link.ts#createLink",
+   "name": "createLink",
+   "file": "lib/api/links/create-link.ts",
+   "order": "2b860142bbebcc09ed345be6b3a7d858f11196eec52e2617fd77276619339651",
+   "files": [
+    "app/(ee)/api/cron/import/csv/route.ts",
+    "app/api/domains/route.ts",
+    "app/api/links/route.ts",
+    "app/api/links/upsert/route.ts",
+    "lib/api/domains/claim-dot-link-domain.ts",
+    "lib/api/domains/finalize-premium-domain-registration.ts",
+    "lib/api/links/create-link.ts",
+    "lib/integrations/slack/commands.ts"
+   ],
+   "lines": {
+    "lib/api/links/create-link.ts": [
+     25
+    ],
+    "app/(ee)/api/cron/import/csv/route.ts": [
+     5,
+     350
+    ],
+    "lib/api/domains/claim-dot-link-domain.ts": [
+     2,
+     129
+    ],
+    "lib/api/domains/finalize-premium-domain-registration.ts": [
+     1,
+     95
+    ],
+    "app/api/domains/route.ts": [
+     7,
+     243
+    ],
+    "app/api/links/route.ts": [
+     2,
+     88
+    ],
+    "app/api/links/upsert/route.ts": [
+     3,
+     189
+    ],
+    "lib/integrations/slack/commands.ts": [
+     1,
+     205
+    ]
+   },
+   "aliasFiles": [],
+   "barrelFiles": [],
+   "viaBarrelImporters": [
+    "app/(ee)/api/cron/import/csv/route.ts <- lib/api/links/index.ts",
+    "app/api/domains/route.ts <- lib/api/links/index.ts",
+    "app/api/links/route.ts <- lib/api/links/index.ts",
+    "app/api/links/upsert/route.ts <- lib/api/links/index.ts",
+    "lib/api/domains/claim-dot-link-domain.ts <- lib/api/links/index.ts",
+    "lib/api/domains/finalize-premium-domain-registration.ts <- lib/api/links/index.ts",
+    "lib/integrations/slack/commands.ts <- lib/api/links/index.ts"
+   ],
+   "grepOnly": [
+    "lib/openapi/links/create-link.ts",
+    "lib/openapi/links/index.ts"
+   ],
+   "grepOnlyTests": [],
+   "renameOnly": []
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T4",
+  "band": "medium",
+  "subject": "/api/workspaces/[idOrSlug]/billing/usage",
+  "order": "09e1edf71094296941800cf16c551fb061a6f5d1e5ecf79837cfdcd0a9581823",
+  "rankInPool": 0,
+  "poolSize": 11,
+  "data": {
+   "url": "/api/workspaces/[idOrSlug]/billing/usage",
+   "routeFile": "app/api/workspaces/[idOrSlug]/billing/usage/route.ts",
+   "files": [
+    "lib/swr/use-usage-timeseries.ts"
+   ],
+   "testFiles": [],
+   "occurrences": [
+    {
+     "file": "lib/swr/use-usage-timeseries.ts",
+     "line": 87,
+     "literal": "/api/workspaces/${…}/billing/usage?${…}",
+     "segs": "api/workspaces/*/billing/usage",
+     "context": "CallExpression:useSWR",
+     "topDecl": "useUsageTimeseries",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    }
+   ],
+   "anyAmbiguous": false,
+   "selfMentions": 0,
+   "v4": {
+    "requestFunctions": [
+     "lib/swr/use-usage-timeseries.ts#useUsageTimeseries"
+    ],
+    "nonFunctionSites": [],
+    "callerEvidence": {
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/usage-chart.tsx": [
+      "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/usage-chart.tsx#UsageChart -> lib/swr/use-usage-timeseries.ts#useUsageTimeseries"
+     ],
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/plan-usage.tsx": [
+      "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/plan-usage.tsx#UsageTabCard -> lib/swr/use-usage-timeseries.ts#useUsageTimeseries"
+     ]
+    },
+    "files": [
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/plan-usage.tsx",
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/billing/usage-chart.tsx",
+     "lib/swr/use-usage-timeseries.ts"
+    ]
+   },
+   "wildcardRisk": []
+  }
+ },
+ {
+  "repo": "dub",
+  "type": "T4",
+  "band": "hard",
+  "subject": "/api/webhooks/[webhookId]/folders",
+  "order": "27d5004e3ddc4dd705760e342d9fdec79afc086789664cb61d90fd6b5c24480c",
+  "rankInPool": 0,
+  "poolSize": 6,
+  "data": {
+   "url": "/api/webhooks/[webhookId]/folders",
+   "routeFile": "app/api/webhooks/[webhookId]/folders/route.ts",
+   "files": [
+    "lib/integrations/common/ui/configure-webhook.tsx",
+    "ui/webhooks/add-edit-webhook-form.tsx",
+    "ui/webhooks/webhook-trigger-selector.tsx"
+   ],
+   "testFiles": [],
+   "occurrences": [
+    {
+     "file": "ui/webhooks/webhook-trigger-selector.tsx",
+     "line": 90,
+     "literal": "/api/webhooks/${…}/folders?workspaceId=${…}",
+     "segs": "api/webhooks/*/folders",
+     "context": "ConditionalExpression",
+     "topDecl": "WebhookTriggerSelector",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "lib/integrations/common/ui/configure-webhook.tsx",
+     "line": 102,
+     "literal": "/api/webhooks/${…}/folders?workspaceId=${…}",
+     "segs": "api/webhooks/*/folders",
+     "context": "CallExpression:mutate",
+     "topDecl": "ConfigureWebhook",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "ui/webhooks/add-edit-webhook-form.tsx",
+     "line": 118,
+     "literal": "/api/webhooks/${…}/folders?workspaceId=${…}",
+     "segs": "api/webhooks/*/folders",
+     "context": "CallExpression:mutate",
+     "topDecl": "AddEditWebhookForm",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    }
+   ],
+   "anyAmbiguous": false,
+   "selfMentions": 0,
+   "v4": {
+    "requestFunctions": [
+     "ui/webhooks/webhook-trigger-selector.tsx#WebhookTriggerSelector",
+     "lib/integrations/common/ui/configure-webhook.tsx#ConfigureWebhook",
+     "ui/webhooks/add-edit-webhook-form.tsx#AddEditWebhookForm"
+    ],
+    "nonFunctionSites": [],
+    "callerEvidence": {
+     "lib/integrations/common/ui/configure-webhook.tsx": [
+      "lib/integrations/common/ui/configure-webhook.tsx#ConfigureWebhook -> ui/webhooks/webhook-trigger-selector.tsx#WebhookTriggerSelector"
+     ],
+     "ui/webhooks/add-edit-webhook-form.tsx": [
+      "ui/webhooks/add-edit-webhook-form.tsx#AddEditWebhookForm -> ui/webhooks/webhook-trigger-selector.tsx#WebhookTriggerSelector"
+     ],
+     "lib/integrations/segment/ui/settings.tsx": [
+      "lib/integrations/segment/ui/settings.tsx#SegmentSettings -> lib/integrations/common/ui/configure-webhook.tsx#ConfigureWebhook"
+     ],
+     "lib/integrations/slack/ui/settings.tsx": [
+      "lib/integrations/slack/ui/settings.tsx#SlackSettings -> lib/integrations/common/ui/configure-webhook.tsx#ConfigureWebhook"
+     ],
+     "lib/integrations/zapier/ui/settings.tsx": [
+      "lib/integrations/zapier/ui/settings.tsx#ZapierSettings -> lib/integrations/common/ui/configure-webhook.tsx#ConfigureWebhook"
+     ],
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/[webhookId]/edit/page-client.tsx": [
+      "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/[webhookId]/edit/page-client.tsx#UpdateWebhookPageClient -> ui/webhooks/add-edit-webhook-form.tsx#AddEditWebhookForm"
+     ],
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/new/page-client.tsx": [
+      "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/new/page-client.tsx#NewWebhookPageClient -> ui/webhooks/add-edit-webhook-form.tsx#AddEditWebhookForm"
+     ]
+    },
+    "files": [
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/[webhookId]/edit/page-client.tsx",
+     "app/app.dub.co/(dashboard)/[slug]/(ee)/settings/webhooks/new/page-client.tsx",
+     "lib/integrations/common/ui/configure-webhook.tsx",
+     "lib/integrations/segment/ui/settings.tsx",
+     "lib/integrations/slack/ui/settings.tsx",
+     "lib/integrations/zapier/ui/settings.tsx",
+     "ui/webhooks/add-edit-webhook-form.tsx",
+     "ui/webhooks/webhook-trigger-selector.tsx"
+    ]
+   },
+   "wildcardRisk": []
+  }
+ }
+]

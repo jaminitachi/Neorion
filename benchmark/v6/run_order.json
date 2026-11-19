@@ -1,0 +1,332 @@
+[
+ {
+  "id": "v6-dub-08",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-08",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-08",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-03",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-04",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-05",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-07",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-10",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-09",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-02",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-11",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-08",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-08",
+  "model": "sonnet",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-08",
+  "model": "sonnet",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "haiku",
+  "variant": "E2"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-06",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "haiku",
+  "variant": "E3"
+ },
+ {
+  "id": "v6-dub-01",
+  "model": "haiku",
+  "variant": "E2"
+ }
+]

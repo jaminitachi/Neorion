@@ -1,0 +1,97 @@
+{
+ "t7": {
+  "signFile": "lib/webhook/signature.ts",
+  "signFn": "createWebhookSignature",
+  "signRefs": {
+   "lib/webhook/signature.ts": [
+    2
+   ],
+   "lib/webhook/qstash.ts": [
+    9,
+    90
+   ]
+  },
+  "attachFile": "lib/webhook/qstash.ts",
+  "attachExports": [
+   "sendWebhooks"
+  ],
+  "callerRefs": {
+   "sendWebhooks": {
+    "lib/webhook/qstash.ts": [
+     23
+    ],
+    "lib/webhook/publish.ts": [
+     4,
+     40
+    ],
+    "app/(ee)/api/cron/streams/send-link-clicked-webhooks/route.ts": [
+     9,
+     264
+    ],
+    "lib/actions/send-test-webhook.ts": [
+     6,
+     41
+    ],
+    "tests/webhooks/index.test.ts": [
+     3,
+     54
+    ]
+   }
+  },
+  "testCallersExcluded": [
+   "tests/webhooks/index.test.ts"
+  ],
+  "files": [
+   "app/(ee)/api/cron/streams/send-link-clicked-webhooks/route.ts",
+   "lib/actions/send-test-webhook.ts",
+   "lib/webhook/publish.ts",
+   "lib/webhook/qstash.ts",
+   "lib/webhook/signature.ts"
+  ]
+ },
+ "t6": {
+  "env": "VERCEL_API_KEY",
+  "reads": {
+   "lib/edge-config/update.ts": [
+    32
+   ],
+   "lib/api/domains/remove-domain-vercel.ts": [
+    33,
+    45
+   ],
+   "lib/api/domains/get-config-response.ts": [
+    11
+   ],
+   "lib/api/domains/get-domain-response.ts": [
+    11
+   ],
+   "lib/api/domains/verify-domain.ts": [
+    11
+   ],
+   "lib/api/domains/add-domain-vercel.ts": [
+    29
+   ],
+   "lib/api/domains/configure-vercel-nameservers.ts": [
+    12
+   ]
+  },
+  "files": [
+   "lib/api/domains/add-domain-vercel.ts",
+   "lib/api/domains/configure-vercel-nameservers.ts",
+   "lib/api/domains/get-config-response.ts",
+   "lib/api/domains/get-domain-response.ts",
+   "lib/api/domains/remove-domain-vercel.ts",
+   "lib/api/domains/verify-domain.ts",
+   "lib/edge-config/update.ts"
+  ],
+  "textHits": [
+   "lib/api/domains/add-domain-vercel.ts",
+   "lib/api/domains/configure-vercel-nameservers.ts",
+   "lib/api/domains/get-config-response.ts",
+   "lib/api/domains/get-domain-response.ts",
+   "lib/api/domains/remove-domain-vercel.ts",
+   "lib/api/domains/verify-domain.ts",
+   "lib/edge-config/update.ts"
+  ]
+ }
+}
