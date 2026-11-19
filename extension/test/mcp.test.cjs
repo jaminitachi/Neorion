@@ -424,7 +424,7 @@ test('conditional API path slots widen only for resolved slash-containing branch
   write(root, 'tsconfig.json', '{}');
   for (const route of [
     'paths/folders/manage', 'paths/rooms/[room]/folders/manage', 'paths/other/manage',
-    'orders/[order]', 'orders/[order]/items', 'orders/[order]/items/extra'
+    'orders', 'orders/[order]', 'orders/[order]/items', 'orders/[order]/items/extra'
   ]) {
     write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
   }
@@ -465,5 +465,32 @@ test('conditional API path slots widen only for resolved slash-containing branch
   assert.match(order, /^send +calls\.ts:12 GET fetch$/m);
   assert.doesNotMatch(order, /^send +calls\.ts:13 /m);
   assert.match(order, /^# complete:/m);
+  const orders = await query('orders');
+  assert.match(orders, /^send +calls\.ts:12 GET fetch \[partial url\]$/m);
+  assert.match(orders, /^send +calls\.ts:13 GET fetch \[partial url\]$/m);
   assert.doesNotMatch(await query('orders/[order]/items/extra'), /^send/m);
+});
+
+test('empty conditional URL fragments preserve routes with and without optional segments', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  const routes = ['teams/[teamId]/views', 'teams/[teamId]/groups/[groupId]/views'];
+  for (const route of routes) {
+    write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
+  }
+  write(root, 'calls.ts', [
+    'declare const teamId: string, groupId: string | undefined;',
+    'fetch(`/api/teams/${teamId}${groupId ? `/groups/${groupId}` : ""}/views`);',
+    'fetch("/api/teams/" + teamId + (groupId ? "/groups/" + groupId : "") + "/views");',
+    'const groupPath = groupId ? `/groups/${groupId}` : "";',
+    'fetch(`/api/teams/${teamId}${groupPath}/views`);'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const route of routes) {
+    const result = await client.text('api_consumers', { route: '/api/' + route });
+    for (const line of [2, 3, 5]) {
+      assert.match(result, new RegExp(`^send +calls\\.ts:${line} GET fetch \\[partial url\\]$`, 'm'));
+    }
+  }
 });

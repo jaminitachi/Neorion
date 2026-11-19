@@ -362,10 +362,10 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true): UrlText[] | undefined {
+function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
   if (seen.has(node)) return;
   seen.add(node);
-  const resolve = (expression: Node) => urlTexts(expression, seen, expandConditional);
+  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
   // An unresolved expression gets a slot. An empty set has no viable URL.
   const fallback = (values: UrlText[] | undefined): UrlText[] => values ?? [{ text: slot }];
   try {
@@ -377,11 +377,15 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
     if (node.getKind() === SyntaxKind.NullKeyword) return [];
     if (Node.isConditionalExpression(node)) {
       const branches = [node.getWhenTrue(), node.getWhenFalse()]
-        .flatMap(branch => fallback(urlTexts(branch, seen)))
-        .filter(value => value.text !== '');
+        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl)))
+        .filter(value => !wholeUrl || value.text !== '');
       if (!branches.length) return [];
       const hasSlash = branches.some(value => value.text.includes('/'));
-      if (!expandConditional) return [{ text: hasSlash ? spanningSlot : slot }];
+      if (!expandConditional) {
+        const values = branches.filter(value => value.text === '');
+        if (values.length < branches.length) values.push({ text: hasSlash ? spanningSlot : slot });
+        return values;
+      }
       return branches.map(value => {
         if (value.text === slot) return value;
         const text = value.text.includes('/') && !apiSegments(value)
@@ -396,7 +400,7 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
         const constant = Node.isVariableDeclaration(declaration) &&
           declaration.getVariableStatement()?.getDeclarationKind() === 'const';
         if (initializer) {
-          return urlTexts(initializer, seen, expandConditional && constant)
+          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl)
             ?.map(value => value.text === slot ? value : { ...value, partial: value.partial || !constant });
         }
       }
@@ -405,8 +409,8 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
     }
     const plus = addition(node);
     if (plus) {
-      const left = resolve(plus.getLeft());
-      const right = resolve(plus.getRight());
+      const left = resolve(plus.getLeft(), false);
+      const right = resolve(plus.getRight(), false);
       if (!left && !right) return;
       return fallback(left).flatMap(prefix => fallback(right).map(suffix => {
         const text = prefix.text + suffix.text;
@@ -417,7 +421,7 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
     if (Node.isTemplateExpression(node)) {
       let values: UrlText[] = [{ text: node.getHead().getLiteralText() }];
       for (const span of node.getTemplateSpans()) {
-        const substitutions = resolve(span.getExpression());
+        const substitutions = resolve(span.getExpression(), false);
         const tail = span.getLiteral().getLiteralText();
         values = values.flatMap(prefix => fallback(substitutions).map(value => {
           const text = prefix.text + value.text + tail;
@@ -433,7 +437,7 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
       const callee = node.getExpression();
       const [separator] = node.getArguments();
       if (separator && Node.isPropertyAccessExpression(callee) && callee.getName() === 'join') {
-        const values = resolve(separator);
+        const values = resolve(separator, false);
         if (!values || values.some(({ text }) => unknownSlot.test(text) || text.includes('/'))) {
           return [{ text: spanningSlot }];
         }
