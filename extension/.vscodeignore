@@ -5,5 +5,7 @@
 !THIRD_PARTY_NOTICES.txt
 !out/extension.js
 !out/extension.js.LEGAL.txt
+!out/mcp.cjs
+!out/mcp.cjs.LEGAL.txt
 !media/vis-network.min.js
 !resources/icon.png

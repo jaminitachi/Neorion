@@ -1,3 +1,5 @@
+import type { QueryIndex } from '../../mcp/Index';
+
 export interface DirectoryMetadata {
   path: string;
   role: 'routes' | 'ui_components' | 'react_hooks' | 'other';
@@ -25,6 +27,7 @@ export interface ComponentNode {
   props: string[];
   hooks: string[];
   description?: string;
+  aliasOf?: string;
 }
 
 export interface HookNode {
@@ -60,6 +63,7 @@ export interface CodebaseGraph {
     directories: DirectoryMetadata[];
   };
   routes: RouteNode[];
+  index?: QueryIndex;
   sourceFileCount: number;
   facts: DetailFacts;
   components: ComponentNode[];

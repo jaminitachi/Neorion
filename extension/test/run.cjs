@@ -25,6 +25,7 @@ function register(root, entry = require.resolve('../out/extension.js'), configs 
       showErrorMessage: message => { throw new Error(message); },
     },
     ProgressLocation: { Notification: 1 },
+    env: { clipboard: { writeText: options.clipboard ?? (() => {}) } },
   };
   const load = Module._load;
   Module._load = function (name, ...args) {
@@ -32,7 +33,7 @@ function register(root, entry = require.resolve('../out/extension.js'), configs 
   };
   try {
     delete require.cache[entry];
-    require(entry).activate({ subscriptions: [], extensionUri: root, workspaceState: options.workspaceState });
+    require(entry).activate({ extensionPath: path.dirname(path.dirname(entry)), subscriptions: [], extensionUri: root, workspaceState: options.workspaceState });
   } finally {
     Module._load = load;
   }

@@ -1,3 +1,5 @@
+import type { QueryIndexBuilder } from './QueryIndexBuilder';
+import type { Wrapper } from '../../mcp/Index';
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
@@ -95,10 +97,11 @@ export function collectRenameFacts(
 
 interface WrapperChain {
   path: string[];
+  locations: Wrapper[];
   conditional?: boolean;
 }
 
-const emptyChain: WrapperChain = { path: [] };
+const emptyChain: WrapperChain = { path: [], locations: [] };
 
 function returnsFromBranch(node: Node): boolean {
   if (Node.isReturnStatement(node)) return true;
@@ -117,6 +120,22 @@ function followsEarlyReturn(node: Node, block: Node): boolean {
     if (returnsFromBranch(statement.getThenStatement()) || (otherwise && returnsFromBranch(otherwise))) return true;
   }
   return false;
+}
+
+function conditionalChild(node: Node, parent: Node) {
+  return (Node.isConditionalExpression(parent) && parent.getCondition() !== node) ||
+    (Node.isIfStatement(parent) && parent.getExpression() !== node) ||
+    Node.isCaseClause(parent) || Node.isDefaultClause(parent) || followsEarlyReturn(node, parent) ||
+    (Node.isBinaryExpression(parent) && parent.getRight() === node &&
+      [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken]
+        .includes(parent.getOperatorToken().getKind()));
+}
+
+export function conditionalAt(node: Node, boundary?: Node): number {
+  for (let parent = node.getParent(); parent && node !== boundary; node = parent, parent = parent.getParent()) {
+    if (conditionalChild(node, parent)) return 1;
+  }
+  return 0;
 }
 
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
@@ -149,16 +168,11 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
     let conditional = false;
     for (let child = node; child !== body;) {
       const parent = child.getParentOrThrow();
-      if ((Node.isConditionalExpression(parent) && parent.getCondition() !== child) ||
-          (Node.isIfStatement(parent) && parent.getExpression() !== child) ||
-          Node.isCaseClause(parent) || Node.isDefaultClause(parent) || followsEarlyReturn(child, parent) ||
-          (Node.isBinaryExpression(parent) && parent.getRight() === child &&
-            [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken]
-              .includes(parent.getOperatorToken().getKind()))) conditional = true;
+      conditional ||= conditionalChild(child, parent);
       ancestors.push(parent);
       child = parent;
     }
-    let chain: WrapperChain[] = [{ path: [], conditional }];
+    let chain: WrapperChain[] = [{ path: [], locations: [], conditional }];
     for (const element of ancestors.reverse().filter(Node.isJsxElement)) {
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
@@ -173,9 +187,15 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         Node.isVariableDeclaration(definition) ? definition.getName() ?? name : name;
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
+      const location: Wrapper = {
+        file: relativePath((definition ?? tag).getSourceFile()),
+        symbol: exportedName, line: (definition ?? tag).getStartLineNumber(), conditional,
+        external: definition ? undefined : module
+      };
       const nested = local ? wrappedChains(local, false, relativePath, bodies, seen) : [];
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => ({
         path: [...prefix.path, label, ...next.path],
+        locations: [...prefix.locations, location, ...next.locations],
         conditional: prefix.conditional || next.conditional
       })));
     }
@@ -211,7 +231,7 @@ function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, 
 
 export function collectRenderFacts(
   routes: RouteNode[], components: ComponentNode[], edges: ComponentEdge[],
-  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts
+  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder
 ) {
   const outgoing = new Map<string, string[]>();
   for (const edge of edges) {
@@ -237,6 +257,7 @@ export function collectRenderFacts(
     const id = `cmp:${relativePath(node.getSourceFile())}#${suffix}`;
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
+  const wrapperLocations = new Map<string, Wrapper>();
   const wrapperRoots = new Map<string, string>();
   const wrapperChains = new Map<string, WrapperChain[]>();
   const reached = new Map<string, { page: RouteNode; viaLayout: boolean; depth: number }[]>();
@@ -255,12 +276,18 @@ export function collectRenderFacts(
         const body = exported.map(node => bodies.get(node)).find(Boolean);
         const component = routesByFile.get(wrapper)?.componentId ?? (body && componentByBody.get(body));
         if (component) wrapperRoots.set(wrapper, component);
+        const definition = exported[0];
+        wrapperLocations.set(wrapper, {
+          file: wrapper, symbol: component && componentsById.get(component)?.name || 'default',
+          line: definition?.getSourceFile() === source ? definition?.getStartLineNumber() ?? 1 : 1, conditional: false
+        });
         wrapperChains.set(wrapper, body ? wrappedChains(body, !!app, relativePath, bodies) : []);
       }
       layoutSeeds.push(wrapperRoots.get(wrapper), `file:${wrapper}`);
       const paths = wrapperChains.get(wrapper)!;
       chains = chains.flatMap(prefix => (paths.length ? paths : [emptyChain]).map(next => ({
         path: [...prefix.path, wrapper, ...next.path],
+        locations: [...prefix.locations, wrapperLocations.get(wrapper)!, ...next.locations],
         conditional: prefix.conditional || next.conditional
       })));
     }
@@ -268,9 +295,11 @@ export function collectRenderFacts(
       const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies);
       if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => ({
         path: [...prefix.path, ...chain.path],
+        locations: [...prefix.locations, ...chain.locations],
         conditional: prefix.conditional || chain.conditional
       })));
     }
+    index?.page(route.id, layoutSeeds, chains.map(chain => chain.locations));
     for (const { path, conditional } of chains) {
       if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`, path.length);
     }
@@ -314,14 +343,19 @@ export function collectRenderFacts(
   }
 }
 
-function apiSegments(argument: Node | undefined): string[] | undefined {
+function apiSegments(argument: Node | undefined) {
   let url: string;
   if (Node.isStringLiteral(argument) || Node.isNoSubstitutionTemplateLiteral(argument)) url = argument.getLiteralText();
   else if (Node.isTemplateExpression(argument)) {
     url = argument.getHead().getLiteralText() +
       argument.getTemplateSpans().map(span => '{}' + span.getLiteral().getLiteralText()).join('');
   } else return;
-  if (url.startsWith('/api/')) return url.split(/[?#]/, 1)[0].replace(/\/$/, '').slice(1).split('/');
+  const partial = url.startsWith('{}/api/');
+  const local = partial ? url.slice(2) : url;
+  if (local.startsWith('/api/')) {
+    const segments = local.split(/[?#]/, 1)[0].replace(/\/$/, '').slice(1).split('/');
+    return { segments, partial: partial || segments.some(segment => segment.includes('{}') && segment !== '{}') };
+  }
 }
 
 function swrUrls(key: Node | undefined, seen = new Set<Node>()): Node[] {
@@ -356,7 +390,7 @@ function importOrigin(expression: Node) {
 }
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: route.path.slice(1).split('/')
@@ -391,8 +425,9 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const method = isFetch ? fetchMethod : axiosMethod;
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
       for (const url of isSwr ? swrUrls(argument) : [argument]) {
-        const segments = apiSegments(url);
-        if (!segments) continue;
+        const parsed = apiSegments(url);
+        if (!parsed) continue;
+        const { segments, partial } = parsed;
         const compatible = endpoints.filter(({ segments: pattern }) => pattern.every((part, i) => {
           if (part.startsWith('[[...')) return true;
           if (!segments[i]) return false;
@@ -412,6 +447,11 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
           const kind = isSwr ? ' (SWR key)' : axiosMethod ? ' (axios)' : '';
           addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+          index?.fetch({
+            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr ? 'GET' : '?'),
+            url: route.path, via: isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
+            partial: partial || undefined
+          });
           if (isSwr) continue;
           const targets = endpointsByCall.get(node) ?? [];
           targets.push({ route, kind });

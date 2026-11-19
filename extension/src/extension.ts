@@ -6,6 +6,7 @@ import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
 import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
+import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { writeGraph } from './core/serializers/GraphOutput';
 import { CodebaseGraph, DirectoryMetadata, LibraryInfo } from './core/types/GraphTypes';
 
@@ -27,7 +28,7 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
             const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (!root) return vscode.window.showErrorMessage('No workspace folder open');
-            await configureAgents(root, connect ? await findProject(root) ?? root : root, connect);
+            await configureAgents(root, connect ? await findProject(root) ?? root : root, connect, context);
         }));
     }
 
@@ -62,20 +63,53 @@ async function findProject(root: string) {
     return candidates.length ? path.dirname(candidates[0]) : undefined;
 }
 
-async function configureAgents(root: string, project: string, connect: boolean) {
+async function configureAgents(root: string, project: string, connect: boolean, context: vscode.ExtensionContext) {
     try {
-        const targets = connect ? await vscode.window.showQuickPick(AGENT_FILES.map(label => ({
-            label,
-            picked: fs.existsSync(path.join(root, label))
-        })), { canPickMany: true, placeHolder: 'Choose AI instruction files to update' }) : AGENT_FILES.map(label => ({ label }));
-        if (!targets?.length) return;
-        const selectedPaths = new Set(targets.map(target => path.join(root, target.label)));
+        const choices = connect ? await vscode.window.showQuickPick([
+            ...AGENT_FILES.map(label => ({ label, picked: fs.existsSync(path.join(root, label)) })),
+            { label: REGISTER_MCP, picked: false },
+            { label: COPY_MCP, picked: false }
+        ], { canPickMany: true, placeHolder: 'Choose AI instruction files and optional MCP registration' }) :
+            AGENT_FILES.map(label => ({ label }));
+        if (!choices?.length) return;
+        const selected = choices.map(choice => choice.label);
+        let mcpTargets: McpTarget[] = [];
+        let bundled = false;
+        if (selected.includes(REGISTER_MCP)) {
+            const targets = await vscode.window.showQuickPick(Object.entries(MCP_TARGETS).map(([label, target]) => ({
+                label, description: target.file
+            })), { canPickMany: true, placeHolder: 'Choose AI tools for workspace MCP registration' });
+            if (targets === undefined) return;
+            mcpTargets = targets.map(target => target.label as McpTarget);
+            if (mcpTargets.length) {
+                const mode = await vscode.window.showQuickPick(['Use pinned npm package', 'Use bundled server'], {
+                    placeHolder: 'Choose how to launch the Neorion MCP server'
+                });
+                if (!mode) return;
+                bundled = mode === 'Use bundled server';
+            }
+        }
+        if (selected.includes(COPY_MCP)) {
+            const formats = ['Codex CLI', 'Windsurf', 'Gemini CLI'] as const;
+            const format = await vscode.window.showQuickPick([...formats], { placeHolder: 'Choose a global MCP config format' });
+            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project));
+        }
+        const instructions = selected.filter(label => AGENT_FILES.includes(label));
+        const configFiles = (connect ? mcpTargets : Object.keys(MCP_TARGETS) as McpTarget[])
+            .map(target => MCP_TARGETS[target].file);
+        const selectedPaths = new Set([...instructions, ...configFiles].map(file => path.join(root, file)));
         const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
-        if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI instructions`);
-        const count = updateAgentFiles(root, project, targets.map(target => target.label), connect);
-        vscode.window.showInformationMessage(`Neorion updated ${count} AI instruction file(s).`);
+        if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
+        const mcp = planMcp(root, project, mcpTargets, bundled,
+            path.join(context.extensionPath ?? path.dirname(__dirname), 'out/mcp.cjs'), connect);
+        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
+        mcp.commit();
+        const approval = mcpTargets.includes('Claude Code') ?
+            ' Claude Code asks for approval before using a project MCP server for the first time.' : '';
+        const registration = mcp.count ? ` Updated MCP registration for ${mcp.count} tool(s).` : '';
+        vscode.window.showInformationMessage(`Neorion updated ${count} AI instruction file(s).${registration}${approval}`);
     } catch (error) {
-        vscode.window.showErrorMessage(`Could not update AI instructions: ${error}`);
+        vscode.window.showErrorMessage(`Could not update AI tools: ${error}`);
     }
 }
 
@@ -179,7 +213,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                     void Promise.resolve(saved).then(async () => {
                         const answer = await vscode.window.showInformationMessage(
                             'Connect AI tools to the Neorion architecture map?', 'Yes');
-                        if (answer === 'Yes') await configureAgents(workspaceRoot, projectPath, true);
+                        if (answer === 'Yes') await configureAgents(workspaceRoot, projectPath, true, context);
                     }).catch(error => console.error(error));
                 }
 

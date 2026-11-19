@@ -1,7 +1,8 @@
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
-import { collectApiFacts, collectRenameFacts, collectRenderFacts, declarationsOf } from './ArchitectureFacts';
+import { collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf } from './ArchitectureFacts';
+import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
 
@@ -19,12 +20,18 @@ function isPackageSpecifier(specifier: string): boolean {
     !path.isAbsolute(specifier) && !path.win32.isAbsolute(specifier);
 }
 
-function isRadixAlias(node: Node | undefined): node is import('ts-morph').PropertyAccessExpression {
-  if (!Node.isPropertyAccessExpression(node)) return false;
-  return (rootBinding(node).getSymbol()?.getDeclarations() ?? []).some(binding => {
-    const specifier = binding.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
-    return specifier === 'radix-ui' || specifier?.startsWith('@radix-ui/react-');
-  });
+function externalAlias(node: Node | undefined, files: Set<SourceFile>): string | undefined {
+  if (!Node.isIdentifier(node) && !Node.isPropertyAccessExpression(node)) return;
+  const root = rootBinding(node);
+  const binding = root.getSymbol()?.getDeclarations()[0];
+  const imported = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+  const module = imported?.getModuleSpecifierValue();
+  if (!module || !isPackageSpecifier(module) || declarationsOf(root).some(target => files.has(target.getSourceFile()))) return;
+  const name = Node.isImportSpecifier(binding) ? binding.getName() :
+    Node.isNamespaceImport(binding) ? '' : 'default';
+  const member = node.getText().slice(root.getText().length).replace(/^\./, '');
+  if (!/^[A-Z]/.test(member || (name === 'default' ? root.getText() : name))) return;
+  return module + '#' + [name, member].filter(Boolean).join('.');
 }
 
 function unwrapComponent(node: Node | undefined): Node | undefined {
@@ -94,6 +101,7 @@ export class ComponentAnalyzer {
 
   public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
     const components = new Map<Node, ComponentNode>();
+    const index = includeFacts ? new QueryIndexBuilder() : undefined;
     const bodies = new Map<Node, Node>();
     const aliases = new Map<Node, Node[]>();
     const hooks = new Map<string, HookNode>();
@@ -157,17 +165,17 @@ export class ComponentAnalyzer {
         aliases.set(assignment, targets);
         for (const target of targets) defaultDeclarations.add(target);
       }
+      const exported = new Set<Node>([...file.getExportedDeclarations().values()].flat());
       const candidates = [
         ...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getExportAssignments().filter(node => !node.isExportEquals())
       ];
-      const exported = new Set<Node>([...file.getExportedDeclarations().values()].flat());
-      for (const node of candidates) {
+        for (const node of candidates) {
         if (aliases.has(node)) continue;
         const fn = callable(node);
-        const initializer = Node.isVariableDeclaration(node) && exported.has(node) ? node.getInitializer() : undefined;
-        const radixAlias = isRadixAlias(initializer) ? initializer : undefined;
-        const body = fn ? fn.getBody() : radixAlias ??
+        const initializer = Node.isVariableDeclaration(node) ? node.getInitializer() : undefined;
+        const aliasOf = externalAlias(initializer, projectFiles);
+        const body = fn ? fn.getBody() : (aliasOf ? initializer : undefined) ??
           (Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined);
         if (!body) continue;
         const name = (Node.isFunctionDeclaration(node) || Node.isVariableDeclaration(node) ||
@@ -180,7 +188,7 @@ export class ComponentAnalyzer {
         }
         const isDefault = defaultDeclarations.has(node);
         if (HTTP_METHODS.includes(name) || (!isDefault && !/^[A-Z]/.test(name))) continue;
-        if (!radixAlias && !(route && isDefault) && !hasRender(body)) continue;
+        if (!aliasOf && !(route && isDefault) && !hasRender(body)) continue;
 
         const id = `cmp:${relative}#${name}`;
         const parameter = fn?.getParameters()[0];
@@ -193,7 +201,7 @@ export class ComponentAnalyzer {
         const description = docs && Node.isJSDocable(docs) ? docs.getJsDocs()[0]?.getDescription().trim() : undefined;
         components.set(node, {
           id, name, path: relative, isClient: isClientFile(file),
-          domain: DomainExtractor.extract('/' + relative), props, hooks: [], description
+          domain: DomainExtractor.extract('/' + relative), props, hooks: [], description, aliasOf
         });
         bodies.set(node, body);
         if (route && isDefault) route.componentId = id;
@@ -281,7 +289,7 @@ export class ComponentAnalyzer {
       if (!to || to === from) return;
       edges.set(JSON.stringify([type, from, to]), { from, to, type });
     };
-    const render = (tag: Node, from: string) => {
+    const render = (tag: Node, from: string, body?: Node) => {
       const binding = rootBinding(tag);
       const targets = declarationsOf(tag).flatMap(declaration => {
         const assignment = declaration.getParent();
@@ -294,7 +302,10 @@ export class ComponentAnalyzer {
       if (!targets.length && binding !== tag) {
         targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
       }
-      for (const target of targets) addEdge(from, target?.id, 'renders');
+      for (const target of targets) {
+        addEdge(from, target?.id, 'renders');
+        if (target && index && from !== target.id) index.render(from, target.id, tag.getStartLineNumber(), conditionalAt(tag, body));
+      }
     };
     const componentTags = new Set<Node>();
     for (const [node, component] of components) {
@@ -313,7 +324,7 @@ export class ComponentAnalyzer {
         }
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
           componentTags.add(child);
-          render(child.getTagNameNode(), component.id);
+          render(child.getTagNameNode(), component.id, body);
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
@@ -325,7 +336,7 @@ export class ComponentAnalyzer {
         componentCalls.add(child);
         const expression = child.getExpression();
         const [argument] = child.getArguments();
-        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id);
+        if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id, body);
         const hook = resolveHook(expression, imports);
         if (hook) usedHooks.add(hook);
       };
@@ -377,9 +388,9 @@ export class ComponentAnalyzer {
         if (body) bodies.set(node, body);
       }
       collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
     }
-    return { facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
   }
 }

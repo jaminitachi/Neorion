@@ -1,3 +1,5 @@
+import { INDEX_PATH } from '../../mcp/Index';
+import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -6,7 +8,7 @@ import type { CodebaseGraph } from '../types/GraphTypes';
 
 function fileList(root: string): string {
   const generated = (file: string) => file === 'codebase_graph.md' ||
-    file.startsWith(DETAIL_DIRECTORY + '/') || file.startsWith('.neorion/graph/');
+    file.startsWith(DETAIL_DIRECTORY + '/') || file.startsWith('.neorion/');
   try {
     return execFileSync('git', ['ls-files', '-z'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000
@@ -58,6 +60,21 @@ export function writeGraph(root: string, graph: CodebaseGraph): string {
       if (!entry.isFile() || !entry.name.endsWith('.md')) continue;
       const file = path.join(legacy, entry.name);
       if (fs.readFileSync(file, 'utf8').startsWith(DETAIL_MARKER)) fs.unlinkSync(file);
+    }
+  }
+  if (graph.index) {
+    const target = path.join(root, INDEX_PATH);
+    const parent = path.dirname(target);
+    if ([parent, target].some(file => fs.lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())) {
+      throw new Error(`Index path is a symbolic link: ${INDEX_PATH}`);
+    }
+    fs.mkdirSync(parent, { recursive: true });
+    const temporary = target + '.' + randomUUID();
+    try {
+      fs.writeFileSync(temporary, JSON.stringify(graph.index), { flag: 'wx' });
+      fs.renameSync(temporary, target);
+    } finally {
+      fs.rmSync(temporary, { force: true });
     }
   }
   return output;

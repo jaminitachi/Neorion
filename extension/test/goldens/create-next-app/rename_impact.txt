@@ -1,0 +1,8 @@
+# rename_impact fixture/client.tsx#writeData : 6 files (index 2026-11-19T06:00Z, fresh)
+decl fixture/client.tsx:4
+use  fixture/dynamic.ts:1
+use  fixture/reexports.ts:1  re-export
+use  fixture/use-client.ts:1,2  import as send
+use  fixture/client.test.ts:1,2,3 [test]  vi.mock key
+use  fixture/destructure.test.ts:1,2 [test]  import as run
+# not affected: fixture/other.ts:1 writeData (comment), fixture/other.ts:2 writeData (different symbol)

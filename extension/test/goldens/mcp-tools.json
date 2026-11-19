@@ -1,0 +1,184 @@
+[
+  {
+    "name": "neorion_who_renders",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "component": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Component name or path#Name"
+        },
+        "direct": {
+          "type": "boolean",
+          "default": false,
+          "description": "Also list the components that render it directly"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 40
+        }
+      },
+      "required": [
+        "component"
+      ],
+      "additionalProperties": false
+    },
+    "description": "List the page routes that can render a React component through any chain of JSX, including layouts. Use instead of grepping for usages when asked which routes or pages show a component.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "neorion_wrappers",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "route": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Route URL pattern or page file path"
+        },
+        "includeExternal": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include providers from packages such as @tanstack/react-query"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 40
+        }
+      },
+      "required": [
+        "route"
+      ],
+      "additionalProperties": false
+    },
+    "description": "List, outermost first, the layouts, providers and wrapper components around a page route.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "neorion_rename_impact",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "Symbol name or path#Name"
+        },
+        "includeTests": {
+          "type": "boolean",
+          "default": true
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 40
+        }
+      },
+      "required": [
+        "symbol"
+      ],
+      "additionalProperties": false
+    },
+    "description": "List every file that must change if a symbol is renamed: declaration, imports, re-exports and uses, resolved by the TypeScript checker. Also lists same-name symbols and text mentions that are NOT affected.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "neorion_api_consumers",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "route": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 300,
+          "description": "API URL pattern such as /api/v3/surveys/[surveyId]/visibility, or the route.ts path"
+        },
+        "callers": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 1,
+          "description": "Caller levels to follow from the sending function"
+        },
+        "includeTests": {
+          "type": "boolean",
+          "default": false
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "default": 40
+        }
+      },
+      "required": [
+        "route"
+      ],
+      "additionalProperties": false
+    },
+    "description": "List the files that send requests to an API route, and the files that call the exported client function that sends them.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "neorion_search",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 200
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "any",
+            "component",
+            "hook",
+            "function",
+            "constant",
+            "route",
+            "api"
+          ],
+          "default": "any"
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 50,
+          "default": 20
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "additionalProperties": false
+    },
+    "description": "Find components, hooks, functions, routes and API routes by name or path fragment. Use to get the exact path#Name before calling the other tools.",
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  }
+]

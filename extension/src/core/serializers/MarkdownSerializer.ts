@@ -17,7 +17,8 @@ function detailStem(area: string): string {
     createHash('sha256').update(area).digest('hex') : stem;
 }
 let tokenizer: Tiktoken | undefined;
-const count = (text: string) => (tokenizer ??= new Tiktoken(ranks)).encode(text, [], []).length;
+// Path-heavy maps measured about 1.85× o200k_base in Claude before Read metadata.
+const count = (text: string) => 2 * (tokenizer ??= new Tiktoken(ranks)).encode(text, [], []).length;
 
 function add<K, V>(map: Map<K, V[]>, key: K, value: V) {
   const items = map.get(key);
@@ -79,13 +80,13 @@ function routeTree(routes: RouteNode[], names: Map<string, string>) {
 export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph, fileList: string) {
     const fileListTokens = count(fileList);
-    const budget = Math.min(6000, Math.max(1500, Math.floor(fileListTokens / 4)));
+    const budget = Math.min(6000, Math.max(3000, Math.floor(fileListTokens / 4)));
     const details = new Map<string, string>();
     // Keep small-project detail maps within the original aggregate limits.
     // Larger projects also bound the extra space used by architecture facts.
     const compact = graph.sourceFileCount <= 128;
-    const aggregateAreaBudget = 4500;
-    const aggregateDetailBudget = 5000;
+    const aggregateAreaBudget = 9000;
+    const aggregateDetailBudget = 10000;
     const omittedFactKinds = new Set<string>();
     const index: { text: string; fileCount: number }[] = [];
     const byArea = new Map<string, Map<string, string[]>>();
@@ -271,7 +272,7 @@ export class MarkdownSerializer {
 
     const areaParts = new Map(orderedAreas.map(([area, files]) => [area, detailParts(area, areaRows(files))]));
     let remaining = compact ? aggregateAreaBudget - dependencies.tokens - [...areaParts.values()]
-      .reduce((sum, detail) => sum + detail.tokens, 0) : Math.max(12_000, 2 * fileListTokens);
+      .reduce((sum, detail) => sum + detail.tokens, 0) : Math.max(24_000, 2 * fileListTokens);
     // Keep each subject's full results together. Shared chains and their route references are atomic.
     type FactRow = { file: string; text: string };
     type FactGroup = FactValue & { key: string; kind: string; rows: FactRow[] };
@@ -402,8 +403,8 @@ export class MarkdownSerializer {
     for (const [area, files] of orderedAreas) publish(area, areaParts.get(area)!.parts, files.size);
     const areaSize = [...details.values()].reduce((sum, detail) => sum + count(detail), 0);
     const reverseBudget = compact && areaSize <= aggregateAreaBudget
-      ? Math.min(DETAIL_BUDGET, Math.floor((aggregateDetailBudget - areaSize) / 3))
-      : DETAIL_BUDGET;
+      ? Math.min(6000, Math.floor((aggregateDetailBudget - areaSize) / 3))
+      : 6000;
 
     const reverseLinks: string[] = [];
     for (const [kind, definitions] of [
@@ -442,7 +443,7 @@ export class MarkdownSerializer {
       'Unmarked targets render and import. [render], [import] and [action] mark other relationships. UI/icon targets are counted.\n' +
       'Unmarked files use the server default. (c) marks a client boundary, (L) a layout wrapping pages below it, and [*] unknown Pages API methods.\n' +
       (reverseLinks.length ? `Reverse usage for selected project symbols: ${reverseLinks.join(', ')}.\n` : '') +
-      (omittedFactKinds.size ? `Detail budget abbreviates ${[...omittedFactKinds].join(', ')} lists. Search source for missing results.\n` : '') +
+      (omittedFactKinds.size ? `Detail budget abbreviates ${[...omittedFactKinds].join(', ')} lists. MCP tools return complete lists.\n` : '') +
       'Routes follow the tree. Drop App Router groups and slots, or the Pages filename extension and trailing index. A dot continues the parent route row. Explicit URL overrides follow →.\n';
     const actionRows = [
       ...graph.actions.map(id => ({ text: label(id), weight: usage(id) })),
