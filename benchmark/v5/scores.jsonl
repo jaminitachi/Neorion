@@ -1,0 +1,20 @@
+{"id": "v4-fb-09", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-09", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-03", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-03", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 5, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-07", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-02", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-08", "type": "T4", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-04", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 10, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-10", "type": "T6", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-07", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 3, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-06", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "haiku"}
+{"id": "v4-fb-04", "type": "T2", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 10, "false_positives": [], "false_negatives": [], "kendall_tau": 1.0, "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-01", "type": "T1", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 5, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}
+{"id": "v4-fb-05", "type": "T3", "parsed": true, "precision": 1.0, "recall": 1.0, "f1": 1.0, "exact": true, "tp": 4, "false_positives": [], "false_negatives": [], "variant": "E2", "model": "sonnet"}

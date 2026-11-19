@@ -1,0 +1,202 @@
+[
+ {
+  "id": "v4-fb-09",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-09",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-06",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-06",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-09",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-09",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-02",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-02",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-03",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-03",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-03",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-03",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-01",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-01",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-07",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-07",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-08",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-08",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-02",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-02",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-08",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-08",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-10",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-10",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-04",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-04",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-10",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-10",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-07",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-07",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-05",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-05",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-06",
+  "model": "haiku",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-06",
+  "model": "haiku",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-04",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-04",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-01",
+  "model": "sonnet",
+  "variant": "E1"
+ },
+ {
+  "id": "v4-fb-01",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-05",
+  "model": "sonnet",
+  "variant": "E0"
+ },
+ {
+  "id": "v4-fb-05",
+  "model": "sonnet",
+  "variant": "E1"
+ }
+]

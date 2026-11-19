@@ -1,0 +1,156 @@
+[
+  {
+    "model": "sonnet",
+    "model_id": "claude-sonnet-5-5",
+    "tools": [
+      "mcp__neorion__neorion_who_renders",
+      "mcp__neorion__neorion_wrappers",
+      "mcp__neorion__neorion_rename_impact",
+      "mcp__neorion__neorion_api_consumers",
+      "mcp__neorion__neorion_search"
+    ],
+    "replies": [
+      {
+        "tool_use_id": "toolu_0116fJd8VTUWxYv3RAbW1YcX",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# who_renders modules/ui/components/sheet/index.tsx#SheetDescription : 5 routes (index 2026-11-19T08:36Z, fresh)\n/workspaces/[workspaceId]/surveys/[surveyId]/responses  app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/responses/page.tsx:33  depth 5 via ShareView > Sidebar [cond]\n/workspaces/[workspaceId]/surveys/[surveyId]/summary  app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/summary/page.tsx:32  depth 5 via ShareView > Sidebar [cond]\n/workspaces/[workspaceId]/unify/feedback-records  app/(app)/workspaces/[workspaceId]/unify/feedback-records/page.tsx:1  depth 4 via FeedbackRecordsTable > FeedbackRecordFormDrawer [cond]\n/workspaces/[workspaceId]/workflows/[workflowId]/runs  app/(app)/workspaces/[workspaceId]/workflows/[workflowId]/(detail)/runs/page.tsx:3  depth 4 via WorkflowRunsTable > WorkflowRunDetailDrawer [cond]\n/workspaces/[workspaceId]/workflows/runs  app/(app)/workspaces/[workspaceId]/workflows/(list)/runs/page.tsx:3  depth 4 via WorkflowRunsTable > WorkflowRunDetailDrawer [cond]"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01BAuQCGZo1WVij8zALdnDYe",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# wrappers /workspaces/[workspaceId]/contacts/[contactId] : 10 files, 1 page (index 2026-11-19T08:36Z, fresh)\n# not wrappers: rendered inside the page\n1 app/layout.tsx:18 RootLayout\n2 lingodotdev/client.tsx:18 I18nProvider\n3 app/(app)/layout.tsx:25 AppLayout\n4 app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/components/export-manager.tsx:195 ExportManagerProvider, ExportManager, ExportManagerContext.Provider [cond]\n5 app/(app)/workspaces/[workspaceId]/layout.tsx:11 WorkspaceLayout\n6 app/(app)/workspaces/[workspaceId]/context/workspace-context.tsx:61 WorkspaceContextWrapper, WorkspaceContext.Provider [cond]\n7 app/(app)/workspaces/[workspaceId]/components/WorkspaceLayout.tsx:62 WorkspaceLayout [cond]\n8 modules/ee/creatives/components/creatives-access-provider.tsx:13 CreativesAccessProvider, CreativesAccessContext.Provider\n9 app/(app)/workspaces/[workspaceId]/(contacts)/layout.tsx:4 ContactsLayout\n10 modules/ee/contacts/components/contacts-query-client-provider.tsx:7 ContactsQueryClientProvider\npage app/(app)/workspaces/[workspaceId]/(contacts)/contacts/[contactId]/page.tsx:3 -> modules/ee/contacts/[contactId]/page.tsx:17 (re-export)"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01VJhQvTrGMQxvzhE1Hc8dQp",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# rename_impact lib/googleSheet/service.ts#writeData : 4 files (index 2026-11-19T08:36Z, fresh)\ndecl lib/googleSheet/service.ts:49\nuse  modules/response-pipeline/lib/handle-integrations.ts:15,263\nuse  lib/googleSheet/service.test.ts:37,163,171,182 [test]\nuse  modules/response-pipeline/lib/handle-integrations.test.ts:30,311,318,342,409 +8 [test]  import as googleSheetWriteData\n# not affected: lib/airtable/service.ts:212 writeData (different symbol), lib/googleSheet/service.test.ts:133 writeData (comment) [test], lib/googleSheet/service.test.ts:138 writeData (comment) [test], lib/notion/service.ts:30 writeData (different symbol)"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01Q9g2ipRkR7qSBQ34efHmoy",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# api_consumers /api/unify-feedback/sources/csv/import -> app/api/(internal)/unify-feedback/sources/csv/import/route.ts:90 : 1 sender, 2 callers (index 2026-11-19T08:36Z, fresh)\nsend   modules/ee/unify-feedback/sources/csv-import-client.ts:43 importCsvFile POST fetch\ncall1  modules/ee/unify-feedback/sources/components/create-feedback-source-modal.tsx:386 importCsvFile\ncall1  modules/ee/unify-feedback/sources/components/csv-import-modal.tsx:114 importCsvFile"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01H6xF36cDSsKfzs6aDwstiG",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# search \"SheetDescription\" kind=any : 1 results (index 2026-11-19T08:36Z, fresh)\ncomponent modules/ui/components/sheet/index.tsx:95#SheetDescription  rendered by 3 components"
+          }
+        ]
+      }
+    ],
+    "claude_md_loaded": true,
+    "request_tool_schemas": [
+      [
+        "DeferredToolPlaceholder",
+        "Glob",
+        "Grep",
+        "Read",
+        "mcp__neorion__neorion_api_consumers",
+        "mcp__neorion__neorion_rename_impact",
+        "mcp__neorion__neorion_search",
+        "mcp__neorion__neorion_who_renders",
+        "mcp__neorion__neorion_wrappers"
+      ]
+    ]
+  },
+  {
+    "model": "haiku",
+    "model_id": "claude-haiku-5-5",
+    "tools": [
+      "mcp__neorion__neorion_who_renders",
+      "mcp__neorion__neorion_wrappers",
+      "mcp__neorion__neorion_rename_impact",
+      "mcp__neorion__neorion_api_consumers",
+      "mcp__neorion__neorion_search"
+    ],
+    "replies": [
+      {
+        "tool_use_id": "toolu_01V1542o2gvXpkCGTqrpJhBn",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# who_renders modules/ui/components/sheet/index.tsx#SheetDescription : 5 routes (index 2026-11-19T08:36Z, fresh)\n/workspaces/[workspaceId]/surveys/[surveyId]/responses  app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/responses/page.tsx:33  depth 5 via ShareView > Sidebar [cond]\n/workspaces/[workspaceId]/surveys/[surveyId]/summary  app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/summary/page.tsx:32  depth 5 via ShareView > Sidebar [cond]\n/workspaces/[workspaceId]/unify/feedback-records  app/(app)/workspaces/[workspaceId]/unify/feedback-records/page.tsx:1  depth 4 via FeedbackRecordsTable > FeedbackRecordFormDrawer [cond]\n/workspaces/[workspaceId]/workflows/[workflowId]/runs  app/(app)/workspaces/[workspaceId]/workflows/[workflowId]/(detail)/runs/page.tsx:3  depth 4 via WorkflowRunsTable > WorkflowRunDetailDrawer [cond]\n/workspaces/[workspaceId]/workflows/runs  app/(app)/workspaces/[workspaceId]/workflows/(list)/runs/page.tsx:3  depth 4 via WorkflowRunsTable > WorkflowRunDetailDrawer [cond]"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01HEHr94u3GDWbZ7CKUUMZ96",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# wrappers /workspaces/[workspaceId]/contacts/[contactId] : 10 files, 1 page (index 2026-11-19T08:36Z, fresh)\n# not wrappers: rendered inside the page\n1 app/layout.tsx:18 RootLayout\n2 lingodotdev/client.tsx:18 I18nProvider\n3 app/(app)/layout.tsx:25 AppLayout\n4 app/(app)/workspaces/[workspaceId]/surveys/[surveyId]/(analysis)/components/export-manager.tsx:195 ExportManagerProvider, ExportManager, ExportManagerContext.Provider [cond]\n5 app/(app)/workspaces/[workspaceId]/layout.tsx:11 WorkspaceLayout\n6 app/(app)/workspaces/[workspaceId]/context/workspace-context.tsx:61 WorkspaceContextWrapper, WorkspaceContext.Provider [cond]\n7 app/(app)/workspaces/[workspaceId]/components/WorkspaceLayout.tsx:62 WorkspaceLayout [cond]\n8 modules/ee/creatives/components/creatives-access-provider.tsx:13 CreativesAccessProvider, CreativesAccessContext.Provider\n9 app/(app)/workspaces/[workspaceId]/(contacts)/layout.tsx:4 ContactsLayout\n10 modules/ee/contacts/components/contacts-query-client-provider.tsx:7 ContactsQueryClientProvider\npage app/(app)/workspaces/[workspaceId]/(contacts)/contacts/[contactId]/page.tsx:3 -> modules/ee/contacts/[contactId]/page.tsx:17 (re-export)"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01BMERVWCeU3oMhfUe9PBTHK",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# rename_impact lib/googleSheet/service.ts#writeData : 4 files (index 2026-11-19T08:36Z, fresh)\ndecl lib/googleSheet/service.ts:49\nuse  modules/response-pipeline/lib/handle-integrations.ts:15,263\nuse  lib/googleSheet/service.test.ts:37,163,171,182 [test]\nuse  modules/response-pipeline/lib/handle-integrations.test.ts:30,311,318,342,409 +8 [test]  import as googleSheetWriteData\n# not affected: lib/airtable/service.ts:212 writeData (different symbol), lib/googleSheet/service.test.ts:133 writeData (comment) [test], lib/googleSheet/service.test.ts:138 writeData (comment) [test], lib/notion/service.ts:30 writeData (different symbol)"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_01LVQUNv2ezDUnwzNm7MxJbV",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# api_consumers /api/unify-feedback/sources/csv/import -> app/api/(internal)/unify-feedback/sources/csv/import/route.ts:90 : 1 sender, 2 callers (index 2026-11-19T08:36Z, fresh)\nsend   modules/ee/unify-feedback/sources/csv-import-client.ts:43 importCsvFile POST fetch\ncall1  modules/ee/unify-feedback/sources/components/create-feedback-source-modal.tsx:386 importCsvFile\ncall1  modules/ee/unify-feedback/sources/components/csv-import-modal.tsx:114 importCsvFile"
+          }
+        ]
+      },
+      {
+        "tool_use_id": "toolu_011FeWYpG3JefspeUhx8DAq5",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "# search \"SheetDescription\" kind=any : 1 results (index 2026-11-19T08:36Z, fresh)\ncomponent modules/ui/components/sheet/index.tsx:95#SheetDescription  rendered by 3 components"
+          }
+        ]
+      }
+    ],
+    "claude_md_loaded": true,
+    "request_tool_schemas": [
+      [
+        "DeferredToolPlaceholder",
+        "Glob",
+        "Grep",
+        "Read",
+        "mcp__neorion__neorion_api_consumers",
+        "mcp__neorion__neorion_rename_impact",
+        "mcp__neorion__neorion_search",
+        "mcp__neorion__neorion_who_renders",
+        "mcp__neorion__neorion_wrappers"
+      ]
+    ]
+  }
+]
