@@ -1,7 +1,7 @@
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
-import type { ComponentEdge, ComponentNode, HookNode, RouteNode } from '../types/GraphTypes';
-import { collectApiFacts, collectRenameFacts, collectRenderFacts, declarationsOf, DetailFacts } from './ArchitectureFacts';
+import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
+import { collectApiFacts, collectRenameFacts, collectRenderFacts, declarationsOf } from './ArchitectureFacts';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
 

@@ -32,7 +32,9 @@ Search the area details for lines starting with `rendered`, `wrap`, `rename`,
 or `fetch`. Render reachability follows static JSX and marks pages reached only
 through their layout or custom App. A component reached by more than eight
 pages lists the count. Wrapper chains run from outermost to innermost, and
-conditional chains indicate possible branches. Rename impact follows
+conditional chains indicate possible branches. When routes share a chain, each
+route references the same ID. Search for `wrap @ID` to find its definition.
+Rename impact follows
 TypeScript-resolved imports and named re-exports, skips UI and icon primitives,
 and shows a count when more than eight files reference a symbol. Fetch lines
 link recognized local `fetch` URLs, SWR keys, and axios method URLs to routes
@@ -45,8 +47,13 @@ The overview is capped at 25% of the tracked file-list token count, with a
 list from local files, skipping common generated directories. Individual
 detail parts are capped at 3,000 tokens. For projects with at most 128 analyzed
 files, new facts use available space within 4,500 area-detail tokens and 5,000
-total detail tokens. Larger projects allow up to 5,000 additional tokens for
-architecture facts. All limits use `o200k_base`.
+total detail tokens. For larger projects, the additional architecture-fact
+budget is `max(12,000, 2 × file-list tokens)`, including any extra detail
+headings and shards. Fact kinds take turns. Each queue ranks subjects by chain
+depth plus the base-2 logarithm of fan-out (affected pages, importer files, or
+endpoints). Page-driven render facts weight depth fourfold and take two
+transitive entries per direct entry while both are available. Layout-only
+renders take a separate turn. Ties among fetch facts favor page entry points. All limits use `o200k_base`.
 
 ## Build and install locally
 

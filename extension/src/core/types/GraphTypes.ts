@@ -45,6 +45,14 @@ export interface LibraryInfo {
   version: string;
 }
 
+export interface FactValue {
+  depth: number;
+  fanOut: number;
+  layoutOnly?: boolean;
+}
+
+export type DetailFacts = Map<string, Map<string, FactValue>>;
+
 export interface CodebaseGraph {
   metadata: {
     name: string;
@@ -53,7 +61,7 @@ export interface CodebaseGraph {
   };
   routes: RouteNode[];
   sourceFileCount: number;
-  facts: Map<string, Set<string>>;
+  facts: DetailFacts;
   components: ComponentNode[];
   hooks: HookNode[];
   edges: ComponentEdge[];

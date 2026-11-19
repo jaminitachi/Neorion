@@ -1,16 +1,15 @@
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import { UI_TARGET } from '../types/GraphPaths';
-import type { ComponentEdge, ComponentNode, RouteNode } from '../types/GraphTypes';
+import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
   return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
 }
 
-export type DetailFacts = Map<string, Set<string>>;
-export function addFact(facts: DetailFacts, file: string, fact: string) {
-  const rows = facts.get(file) ?? new Set<string>();
-  rows.add(fact);
+function addFact(facts: DetailFacts, file: string, fact: string, depth = 1, fanOut = 1, layoutOnly = false) {
+  const rows = facts.get(file) ?? new Map();
+  rows.set(fact, { depth: Math.max(rows.get(fact)?.depth ?? 0, depth), fanOut, layoutOnly });
   facts.set(file, rows);
 }
 
@@ -32,13 +31,18 @@ export function collectRenameFacts(
       }
     }
   }
-  const impacts: DetailFacts = new Map();
+  const impacts = new Map<string, Set<string>>();
+  const reExported = new Set<string>();
   for (const file of files) {
     const importer = relativePath(file);
-    const record = (declarations: Node[]) => {
+    const record = (declarations: Node[], reExport = false) => {
       for (const declaration of declarations) {
         const id = symbols.get(declaration);
-        if (id && exported.has(id) && exported.get(id) !== importer) addFact(impacts, id, importer);
+        if (!id || !exported.has(id) || exported.get(id) === importer) continue;
+        const importers = impacts.get(id) ?? new Set<string>();
+        importers.add(importer);
+        if (reExport) reExported.add(id);
+        impacts.set(id, importers);
       }
     };
     const namespaces = new Set<Node>();
@@ -59,7 +63,7 @@ export function collectRenameFacts(
     for (const declaration of file.getExportDeclarations()) {
       if (!declaration.getModuleSpecifier()) continue;
       for (const specifier of declaration.getNamedExports()) {
-        record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()));
+        record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()), true);
       }
     }
     if (namespaces.size) file.forEachDescendant(node => {
@@ -80,10 +84,11 @@ export function collectRenameFacts(
   for (const [id, file] of exported) {
     const importers = impacts.get(id);
     if (!importers?.size) continue;
+    const depth = reExported.has(id) ? 2 : 1;
     if (importers.size > MAX_LISTED_IMPORTERS) {
-      addFact(facts, file, `rename ${id} <- ${importers.size} files (list omitted)`);
+      addFact(facts, file, `rename ${id} <- ${importers.size} files (list omitted)`, depth, importers.size);
     } else {
-      for (const importer of importers) addFact(facts, file, `rename ${id} <- ${importer}`);
+      for (const importer of importers) addFact(facts, file, `rename ${id} <- ${importer}`, depth, importers.size);
     }
   }
 }
@@ -94,6 +99,25 @@ interface WrapperChain {
 }
 
 const emptyChain: WrapperChain = { path: [] };
+
+function returnsFromBranch(node: Node): boolean {
+  if (Node.isReturnStatement(node)) return true;
+  if (Node.isBlock(node)) return node.getStatements().some(returnsFromBranch);
+  if (!Node.isIfStatement(node)) return false;
+  const otherwise = node.getElseStatement();
+  return !!otherwise && returnsFromBranch(node.getThenStatement()) && returnsFromBranch(otherwise);
+}
+
+function followsEarlyReturn(node: Node, block: Node): boolean {
+  if (!Node.isBlock(block)) return false;
+  for (const statement of block.getStatements()) {
+    if (statement === node) break;
+    if (!Node.isIfStatement(statement)) continue;
+    const otherwise = statement.getElseStatement();
+    if (returnsFromBranch(statement.getThenStatement()) || (otherwise && returnsFromBranch(otherwise))) return true;
+  }
+  return false;
+}
 
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
   bodies: Map<Node, Node>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
@@ -127,6 +151,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const parent = child.getParentOrThrow();
       if ((Node.isConditionalExpression(parent) && parent.getCondition() !== child) ||
           (Node.isIfStatement(parent) && parent.getExpression() !== child) ||
+          Node.isCaseClause(parent) || Node.isDefaultClause(parent) || followsEarlyReturn(child, parent) ||
           (Node.isBinaryExpression(parent) && parent.getRight() === child &&
             [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken]
               .includes(parent.getOperatorToken().getKind()))) conditional = true;
@@ -214,7 +239,7 @@ export function collectRenderFacts(
   }));
   const wrapperRoots = new Map<string, string>();
   const wrapperChains = new Map<string, WrapperChain[]>();
-  const reached = new Map<string, { page: RouteNode; viaLayout: boolean }[]>();
+  const reached = new Map<string, { page: RouteNode; viaLayout: boolean; depth: number }[]>();
   for (const route of routes.filter(route => route.type === 'page')) {
     const pagesRoot = /^(?:src\/)?pages\//.exec(route.file)?.[0];
     const layouts = layoutsByPage.get(route.id) ?? [];
@@ -247,21 +272,24 @@ export function collectRenderFacts(
       })));
     }
     for (const { path, conditional } of chains) {
-      if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`);
+      if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`, path.length);
     }
     const visited = new Set<string>();
+    const layoutRoots = new Set(layoutSeeds);
     const traverse = (seeds: (string | undefined)[], viaLayout: boolean) => {
-      while (seeds.length) {
-        const id = seeds.pop();
+      const queue = seeds.map(id => ({ id, depth: 0 }));
+      for (let i = 0; i < queue.length; i++) {
+        const { id, depth } = queue[i];
         if (!id || visited.has(id)) continue;
         visited.add(id);
         const component = componentsById.get(id);
-        if (component && !(id === route.componentId && component.path === route.file)) {
+        if (component && !(id === route.componentId && component.path === route.file) &&
+            !(viaLayout && layoutRoots.has(id))) {
           const pages = reached.get(id) ?? [];
-          pages.push({ page: route, viaLayout });
+          pages.push({ page: route, viaLayout, depth });
           reached.set(id, pages);
         }
-        for (const target of outgoing.get(id) ?? []) seeds.push(target);
+        for (const target of outgoing.get(id) ?? []) queue.push({ id: target, depth: depth + 1 });
       }
     };
     traverse([route.componentId, `file:${route.file}`], false);
@@ -271,12 +299,16 @@ export function collectRenderFacts(
   for (const [id, pages] of reached) {
     const component = componentsById.get(id)!;
     const subject = `${component.path}#${component.name}`;
+    // Reachability confined to the page's own file is readily visible in source.
+    const depth = pages.reduce((max, entry) => entry.page.file === component.path
+      ? max : Math.max(max, entry.depth), 0);
+    const layoutOnly = pages.every(entry => entry.viaLayout);
     if (pages.length > 8) {
       const viaLayout = pages.filter(entry => entry.viaLayout).length;
-      addFact(facts, component.path, `rendered ${subject} <- ${pages.length} pages (list omitted${viaLayout ? `; ${viaLayout} via layout` : ''})`);
+      addFact(facts, component.path, `rendered ${subject} <- ${pages.length} pages (list omitted${viaLayout ? `; ${viaLayout} via layout` : ''})`, depth, pages.length, layoutOnly);
     } else {
       for (const { page, viaLayout } of pages) {
-        addFact(facts, component.path, `rendered ${subject} <- ${page.file} ${page.path}${viaLayout ? ' (via layout)' : ''}`);
+        addFact(facts, component.path, `rendered ${subject} <- ${page.file} ${page.path}${viaLayout ? ' (via layout)' : ''}`, depth, pages.length, layoutOnly);
       }
     }
   }
@@ -420,15 +452,16 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     const subject = id.slice('action:'.length);
     const source = subject.slice(0, subject.lastIndexOf('#'));
     const visited = new Set<Node>();
-    const pending: Node[] = [fn];
-    while (pending.length) {
-      const current = pending.pop()!;
-      if (visited.has(current)) continue;
-      visited.add(current);
-      const { direct, callees } = inspect(current);
-      for (const { route, kind } of direct) addFact(facts, source, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
-      for (const callee of callees) pending.push(callee);
+    const pending: { node: Node; depth: number }[] = [{ node: fn, depth: 1 }];
+    for (let i = 0; i < pending.length; i++) {
+      const { node, depth } = pending[i];
+      if (visited.has(node)) continue;
+      visited.add(node);
+      const { direct, callees } = inspect(node);
+      for (const { route, kind } of direct) {
+        addFact(facts, source, `fetch ${subject} -> ${route.file} ${route.path}${kind}`, depth);
+      }
+      for (const callee of callees) pending.push({ node: callee, depth: depth + 1 });
     }
   }
-
 }

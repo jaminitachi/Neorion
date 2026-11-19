@@ -449,11 +449,45 @@ for (const name of ['ai-chatbot', 'papermark']) {
       assert.ok(tokens <= 3000, file);
       detailTotal += tokens;
     }
+    const lines = fs.readdirSync(directory).flatMap(file => fs.readFileSync(path.join(directory, file), 'utf8').split('\n'));
+    if (name === 'ai-chatbot') {
+      assert.doesNotMatch(lines.join('\n'), /^rendered app\/\(auth\)\/layout\.tsx#AuthLayout <-/m);
+      for (const fact of [
+        'rendered components/ai-elements/shimmer.tsx#Shimmer <- app/(chat)/page.tsx / (via layout)',
+        'rendered components/chat/artifact-close-button.tsx#ArtifactCloseButton <- app/(chat)/page.tsx / (via layout)',
+        'rename app/(chat)/actions.ts#deleteTrailingMessages <- components/chat/message-editor.tsx',
+        'rename components/chat/data-stream-provider.tsx#DataStreamProvider <- app/(chat)/layout.tsx'
+      ]) assert.ok(lines.includes(fact), `Missing ${fact}`);
+    }
     if (name === 'papermark') {
-      assert.ok(detailTotal <= 52_000, `Papermark detail tokens: ${detailTotal}`);
-      const details = fs.readdirSync(directory).map(file => fs.readFileSync(path.join(directory, file), 'utf8')).join('\n');
-      assert.match(details, /^wrap pages\/.*_app\.tsx.* \(conditional\)$/m);
-      assert.match(details, /^fetch .* \(SWR key\)$/m);
+      assert.ok(detailTotal <= 90_000, `Papermark detail tokens: ${detailTotal}`);
+      const chains = [...lines.join('\n').matchAll(/^wrap (@[a-f0-9]+) \(80 pages\) <- pages\/_app\.tsx .* \(conditional\)$/gm)];
+      assert.equal(chains.length, 2);
+      for (const [, id] of chains) {
+        assert.equal(lines.filter(line => line.startsWith('wrap pages/') && line.endsWith(` <- ${id}`)).length, 80);
+        assert.ok(lines.includes(`wrap pages/branding.tsx <- ${id}`));
+      }
+      const expectedSubjects = [
+        ['rendered components/ai-elements/message.tsx#MessageResponse <- ', 6],
+        ['rendered components/datarooms/actions/generate-index-button.tsx#GenerateIndexButton <- ', 2],
+        ['fetch components/welcome/dataroom-ai-generate.tsx -> ', 2],
+        ['fetch components/view/dataroom/viewer-download-progress-modal.tsx -> ', 2],
+        ['rename ee/features/workflows/components/workflow-list.tsx#WorkflowList <- ', 2]
+      ];
+      for (const [prefix, expected] of expectedSubjects) {
+        assert.equal(lines.filter(line => line.startsWith(prefix)).length, expected, prefix);
+      }
+      for (const fact of [
+        'rendered components/ai-elements/message.tsx#MessageResponse <- pages/view/[linkId]/embed.tsx /view/[linkId]/embed',
+        'rename context/team-context.tsx#useTeam <- 178 files (list omitted)',
+        'fetch pages/account/general.tsx -> pages/api/account/index.ts /api/account',
+        'fetch components/analytics/documents-table.tsx -> pages/api/analytics/index.ts /api/analytics (SWR key)',
+        'fetch components/analytics/views-table.tsx -> pages/api/analytics/index.ts /api/analytics (SWR key)',
+        'fetch components/datarooms/groups/group-card.tsx -> pages/api/teams/[teamId]/datarooms/[id]/groups/[groupId]/duplicate.ts /api/teams/[teamId]/datarooms/[id]/groups/[groupId]/duplicate',
+        'rendered components/agreements/signing-template-authoring.tsx#SigningTemplateAuthoring <- 62 pages (list omitted)',
+        'rendered components/analytics/analytics-card.tsx#AnalyticsCard <- pages/dashboard.tsx /dashboard'
+      ]) assert.ok(lines.includes(fact), `Missing ${fact}`);
+      assert.match(lines.join('\n'), /^fetch .* \(SWR key\)$/m);
       assert.match(overview, /context\/team-context.tsx: useTeam/);
       assert.match(overview, /\[\[\.\.\.file\]\].ts\[\*\]/);
       assert.match(overview, /members.ts\[GET DELETE\]/);
@@ -642,6 +676,29 @@ test('emits transitive render, App and Pages wrapping, rename and API facts with
   assert.doesNotMatch(details, /^rendered src\/app\/help\/page\.tsx#Help <- src\/app\/help\/page\.tsx /m);
   assert.doesNotMatch(details, /\/api\/unmapped/);
   assert.doesNotMatch(details, /rendered src\/components\/architecture\.tsx#Leaf <- src\/app\/\(account\)\/page/);
+});
+
+test('marks early-return fallbacks and switch branches in wrapper chains', async t => {
+  const project = reviewFixture(t);
+  fs.writeFileSync(path.join(project, 'src/pages/index.tsx'), 'export default function Home() { return null }');
+  fs.writeFileSync(path.join(project, 'src/pages/_app.tsx'), `
+    export default function App({ Component, pageProps }) {
+      switch (pageProps.team) {
+        case true: return <Shell><TeamProvider><Component /></TeamProvider></Shell>;
+        default: break;
+      }
+      if (pageProps.minimal) return <Shell><Component /></Shell>;
+      return <Shell><FallbackProvider><Component /></FallbackProvider></Shell>;
+    }
+  `);
+  const overview = await generate(project);
+  const details = Object.values(readMap(project, overview, 'review-fixture')).join('\n');
+  for (const chain of ['#Shell', '#Shell > src/pages/_app.tsx#TeamProvider',
+    '#Shell > src/pages/_app.tsx#FallbackProvider']) {
+    assert.ok(details.split('\n').some(line => line.startsWith('wrap ') &&
+      line.endsWith(`src/pages/_app.tsx${chain} (conditional)`)), chain);
+  }
+  assert.doesNotMatch(details, /^wrap .* <- .*#FallbackProvider$/m);
 });
 
 test('moves generated details into a visible directory and preserves handwritten legacy files', async t => {
