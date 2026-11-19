@@ -3,6 +3,7 @@ import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
 import { collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf } from './ArchitectureFacts';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
+import { renderBindings } from './RenderBindings';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
 
@@ -290,22 +291,69 @@ export class ComponentAnalyzer {
       if (!to || to === from) return;
       edges.set(JSON.stringify([type, from, to]), { from, to, type });
     };
+    const declaredRenderTargets = (declarations: Node[]) => declarations.flatMap(declaration => {
+      const assignment = declaration.getParent();
+      if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
+          assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken && assignment.getLeft() === declaration) {
+        return declarationsOf(assignment.getRight());
+      }
+      return [declaration];
+    }).flatMap(node => resolveComponent(node) ?? []);
+    // Discover component-valued bindings before assigning JSX to its owning body.
+    const renderTargets = new Map<Node, ComponentNode[]>();
+    const callbackBodies = new Set<Node>();
+    for (const file of files) {
+      file.forEachDescendant(node => {
+        let tag: Node | undefined;
+        if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) {
+          tag = node.getTagNameNode();
+          if (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) return;
+        } else if (Node.isCallExpression(node) && /(?:^|\.)createElement$/.test(node.getExpression().getText())) {
+          tag = node.getArguments()[0];
+        }
+        if (!tag) return;
+        const targets = declarationsOf(tag);
+        const resolved = declaredRenderTargets(targets);
+        renderTargets.set(tag, resolved);
+        if (resolved.length) return;
+        if (!targets.length && Node.isPropertyAccessExpression(tag)) targets.push(tag);
+
+        for (const fn of renderBindings(targets, projectFiles)) {
+          let binding: Node = fn;
+          while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
+                 Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
+          const parent = binding.getParent();
+          if (Node.isVariableDeclaration(parent)) binding = parent;
+          const existing = resolveComponent(binding);
+          if (existing) {
+            resolved.push(existing);
+            continue;
+          }
+          const body = fn.getBody();
+          if (!body || !hasRender(body)) continue;
+          const source = fn.getSourceFile();
+          const relative = relativePath(source);
+          const name = lexicalName(binding) ?? tag.getText();
+          const component = {
+            id: `cmp:${relative}#${name}~${binding.getStart()}`, name, path: relative,
+            isClient: isClientFile(source), domain: DomainExtractor.extract('/' + relative), props: [], hooks: []
+          };
+          components.set(binding, component);
+          bodies.set(binding, body);
+          callbackBodies.add(body);
+          resolved.push(component);
+        }
+      });
+    }
     const render = (tag: Node, from: string, body?: Node) => {
       const binding = rootBinding(tag);
-      const targets = declarationsOf(tag).flatMap(declaration => {
-        const assignment = declaration.getParent();
-        if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
-            assignment.getOperatorToken().getKind() === SyntaxKind.EqualsToken && assignment.getLeft() === declaration) {
-          return declarationsOf(assignment.getRight());
-        }
-        return [declaration];
-      }).map(node => resolveComponent(node)).filter(Boolean);
+      const targets = renderTargets.get(tag) ?? [];
       if (!targets.length && binding !== tag) {
-        targets.push(...declarationsOf(binding).map(node => resolveComponent(node)).filter(Boolean));
+        targets.push(...declarationsOf(binding).flatMap(node => resolveComponent(node) ?? []));
       }
-      for (const target of targets) {
-        addEdge(from, target?.id, 'renders');
-        if (target && index && from !== target.id) index.render(from, target.id, tag.getStartLineNumber(), conditionalAt(tag, body));
+      for (const target of new Set(targets)) {
+        addEdge(from, target.id, 'renders');
+        if (index && from !== target.id) index.render(from, target.id, tag.getStartLineNumber(), conditionalAt(tag, body));
       }
     };
     const componentTags = new Set<Node>();
@@ -342,7 +390,10 @@ export class ComponentAnalyzer {
         if (hook) usedHooks.add(hook);
       };
       inspect(body);
-      body.forEachDescendant(inspect);
+      body.forEachDescendant((child, traversal) => {
+        if (callbackBodies.has(child)) traversal.skip();
+        else inspect(child);
+      });
       component.hooks = [...usedHooks];
     }
 

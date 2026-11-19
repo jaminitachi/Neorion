@@ -208,3 +208,23 @@ test('U11 returns tool errors for absent or invalid indexes and escaping or inva
   }
   assert.match(await client.text('search', { text: 'thing' }), /0 results/);
 });
+
+test('who_renders follows a JSX callback returned by a hook to the page route', async t => {
+  const root = temporary(t);
+  fs.cpSync(path.join(__dirname, 'fixtures/render-factory'), root, { recursive: true });
+  await generate(root);
+
+  const client = await openMcp(t, root);
+  const component = 'ui/editor.tsx#Editor';
+  const routes = await client.text('who_renders', { component });
+  assert.match(routes, /2 routes/);
+  assert.match(routes, /^\/  app\/page\.tsx:3  depth 3 via DialogCallback > EditorDialog$/m);
+  assert.match(routes, /^\/preview  app\/preview\/page\.tsx:3  depth 3 via DialogCallback > EditorDialog$/m);
+
+  const direct = await client.text('who_renders', { component, direct: true });
+  assert.match(direct, /^direct ui\/editor-dialog\.tsx:5#EditorDialog$/m);
+
+  const dialog = await client.text('who_renders', { component: 'EditorDialog', direct: true });
+  assert.match(dialog, /^direct ui\/editor-dialog\.tsx:9#DialogCallback$/m);
+  assert.doesNotMatch(dialog, /UnusedCallback/);
+});
