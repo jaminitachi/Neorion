@@ -1,4 +1,5 @@
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, RouteNode } from '../types/GraphTypes';
 
 export function declarationsOf(node: Node): Node[] {
@@ -13,6 +14,8 @@ export function addFact(facts: DetailFacts, file: string, fact: string) {
   facts.set(file, rows);
 }
 
+const MAX_LISTED_IMPORTERS = 8;
+
 type RelativePath = (source: SourceFile) => string;
 
 export function collectRenameFacts(
@@ -25,7 +28,7 @@ export function collectRenameFacts(
     for (const declarations of file.getExportedDeclarations().values()) {
       for (const declaration of declarations) {
         const id = symbols.get(declaration);
-        if (id) exported.set(id, id.slice(0, id.lastIndexOf('#')));
+        if (id && !UI_TARGET.test(id)) exported.set(id, id.slice(0, id.lastIndexOf('#')));
       }
     }
   }
@@ -55,13 +58,8 @@ export function collectRenameFacts(
     }
     for (const declaration of file.getExportDeclarations()) {
       if (!declaration.getModuleSpecifier()) continue;
-      const named = declaration.getNamedExports();
-      if (named.length) {
-        for (const specifier of named) record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()));
-      } else {
-        for (const symbol of declaration.getModuleSpecifierSourceFile()?.getExportSymbols() ?? []) {
-          if (symbol.getName() !== 'default' || declaration.getNamespaceExport()) record((symbol.getAliasedSymbol() ?? symbol).getDeclarations());
-        }
+      for (const specifier of declaration.getNamedExports()) {
+        record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()));
       }
     }
     if (namespaces.size) file.forEachDescendant(node => {
@@ -81,17 +79,27 @@ export function collectRenameFacts(
   }
   for (const [id, file] of exported) {
     const importers = impacts.get(id);
-    if (importers?.size) {
+    if (!importers?.size) continue;
+    if (importers.size > MAX_LISTED_IMPORTERS) {
+      addFact(facts, file, `rename ${id} <- ${importers.size} files (list omitted)`);
+    } else {
       for (const importer of importers) addFact(facts, file, `rename ${id} <- ${importer}`);
     }
   }
 }
 
+interface WrapperChain {
+  path: string[];
+  conditional?: boolean;
+}
+
+const emptyChain: WrapperChain = { path: [] };
+
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
-  bodies: Map<Node, Node>, seen = new Set<Node>(), pageParameter?: string): string[][] {
+  bodies: Map<Node, Node>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
   if (seen.has(body)) return [];
   seen = new Set(seen).add(body);
-  const chains = new Map<string, string[]>();
+  const chains = new Map<string, WrapperChain>();
   const slots = new Set([pageParameter ?? (pagesApp ? 'Component' : 'children')]);
   const parameter = body.getParentIfKind(SyntaxKind.ArrowFunction) ??
     body.getParentIfKind(SyntaxKind.FunctionDeclaration) ?? body.getParentIfKind(SyntaxKind.FunctionExpression);
@@ -113,9 +121,20 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         isSlot(node.getTagNameNode())
       : Node.isJsxExpression(node) && isSlot(node.getExpression());
     if (!slot) return;
-    let chain: string[][] = [[]];
-    for (const element of node.getAncestors().reverse().filter(Node.isJsxElement)) {
-      if (!element.getAncestors().includes(body) && element !== body) continue;
+    const ancestors: Node[] = [];
+    let conditional = false;
+    for (let child = node; child !== body;) {
+      const parent = child.getParentOrThrow();
+      if ((Node.isConditionalExpression(parent) && parent.getCondition() !== child) ||
+          (Node.isIfStatement(parent) && parent.getExpression() !== child) ||
+          (Node.isBinaryExpression(parent) && parent.getRight() === child &&
+            [SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken]
+              .includes(parent.getOperatorToken().getKind()))) conditional = true;
+      ancestors.push(parent);
+      child = parent;
+    }
+    let chain: WrapperChain[] = [{ path: [], conditional }];
+    for (const element of ancestors.reverse().filter(Node.isJsxElement)) {
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
       const name = tag.getText();
@@ -130,9 +149,12 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
       const nested = local ? wrappedChains(local, false, relativePath, bodies, seen) : [];
-      chain = chain.flatMap(prefix => (nested.length ? nested : [[]]).map(next => [...prefix, label, ...next]));
+      chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => ({
+        path: [...prefix.path, label, ...next.path],
+        conditional: prefix.conditional || next.conditional
+      })));
     }
-    for (const path of chain) chains.set(path.join(' > '), path);
+    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional]), entry);
   };
   visit(body);
   body.forEachDescendant(visit);
@@ -143,7 +165,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
 function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, bodies: Map<Node, Node>) {
   if (!source || !source.getFullText().includes('getLayout')) return [];
   const page = new Set<Node>(source.getExportedDeclarations().get('default') ?? []);
-  const chains: string[][] = [];
+  const chains: WrapperChain[] = [];
   for (const statement of source.getStatements()) {
     if (!Node.isExpressionStatement(statement)) continue;
     const expression = statement.getExpression();
@@ -191,16 +213,16 @@ export function collectRenderFacts(
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
   const wrapperRoots = new Map<string, string>();
-  const wrapperChains = new Map<string, string[][]>();
-  const reached = new Map<string, RouteNode[]>();
+  const wrapperChains = new Map<string, WrapperChain[]>();
+  const reached = new Map<string, { page: RouteNode; viaLayout: boolean }[]>();
   for (const route of routes.filter(route => route.type === 'page')) {
     const pagesRoot = /^(?:src\/)?pages\//.exec(route.file)?.[0];
     const layouts = layoutsByPage.get(route.id) ?? [];
     const app = pagesRoot && ['tsx', 'ts', 'jsx', 'js'].map(ext => pagesRoot + '_app.' + ext)
       .find(file => filesByPath.has(file));
     const wrappers = app ? [app] : layouts;
-    let chains: string[][] = [[]];
-    const seeds = [route.componentId, `file:${route.file}`];
+    let chains = [emptyChain];
+    const layoutSeeds: (string | undefined)[] = [];
     for (const wrapper of wrappers) {
       if (!wrapperChains.has(wrapper)) {
         const source = filesByPath.get(wrapper);
@@ -210,35 +232,53 @@ export function collectRenderFacts(
         if (component) wrapperRoots.set(wrapper, component);
         wrapperChains.set(wrapper, body ? wrappedChains(body, !!app, relativePath, bodies) : []);
       }
-      seeds.push(wrapperRoots.get(wrapper), `file:${wrapper}`);
+      layoutSeeds.push(wrapperRoots.get(wrapper), `file:${wrapper}`);
       const paths = wrapperChains.get(wrapper)!;
-      chains = chains.flatMap(prefix => (paths.length ? paths : [[]]).map(next => [...prefix, wrapper, ...next]));
+      chains = chains.flatMap(prefix => (paths.length ? paths : [emptyChain]).map(next => ({
+        path: [...prefix.path, wrapper, ...next.path],
+        conditional: prefix.conditional || next.conditional
+      })));
     }
     if (app && filesByPath.get(app)?.getFullText().includes('getLayout')) {
       const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies);
-      if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => [...prefix, ...chain]));
+      if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => ({
+        path: [...prefix.path, ...chain.path],
+        conditional: prefix.conditional || chain.conditional
+      })));
     }
-    for (const chain of chains) {
-      if (chain.length) addFact(facts, route.file, `wrap ${route.file} <- ${chain.join(' > ')}`);
+    for (const { path, conditional } of chains) {
+      if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`);
     }
     const visited = new Set<string>();
-    while (seeds.length) {
-      const id = seeds.pop();
-      if (!id || visited.has(id)) continue;
-      visited.add(id);
-      const pages = reached.get(id) ?? [];
-      pages.push(route);
-      reached.set(id, pages);
-      for (const target of outgoing.get(id) ?? []) seeds.push(target);
-    }
+    const traverse = (seeds: (string | undefined)[], viaLayout: boolean) => {
+      while (seeds.length) {
+        const id = seeds.pop();
+        if (!id || visited.has(id)) continue;
+        visited.add(id);
+        const component = componentsById.get(id);
+        if (component && !(id === route.componentId && component.path === route.file)) {
+          const pages = reached.get(id) ?? [];
+          pages.push({ page: route, viaLayout });
+          reached.set(id, pages);
+        }
+        for (const target of outgoing.get(id) ?? []) seeds.push(target);
+      }
+    };
+    traverse([route.componentId, `file:${route.file}`], false);
+    traverse(layoutSeeds, true);
   }
-  // A shared layout can make one component reachable from hundreds of pages.
+  // Keep layout-only reachability distinct from rendering by the page.
   for (const [id, pages] of reached) {
-    const component = componentsById.get(id);
-    if (!component) continue;
+    const component = componentsById.get(id)!;
     const subject = `${component.path}#${component.name}`;
-    if (pages.length > 8) addFact(facts, component.path, `rendered ${subject} <- ${pages.length} pages (list omitted)`);
-    else for (const page of pages) addFact(facts, component.path, `rendered ${subject} <- ${page.file} ${page.path}`);
+    if (pages.length > 8) {
+      const viaLayout = pages.filter(entry => entry.viaLayout).length;
+      addFact(facts, component.path, `rendered ${subject} <- ${pages.length} pages (list omitted${viaLayout ? `; ${viaLayout} via layout` : ''})`);
+    } else {
+      for (const { page, viaLayout } of pages) {
+        addFact(facts, component.path, `rendered ${subject} <- ${page.file} ${page.path}${viaLayout ? ' (via layout)' : ''}`);
+      }
+    }
   }
 }
 
@@ -252,6 +292,37 @@ function apiSegments(argument: Node | undefined): string[] | undefined {
   if (url.startsWith('/api/')) return url.split(/[?#]/, 1)[0].replace(/\/$/, '').slice(1).split('/');
 }
 
+function swrUrls(key: Node | undefined, seen = new Set<Node>()): Node[] {
+  if (!key || seen.has(key)) return [];
+  seen = new Set(seen).add(key);
+  if (Node.isConditionalExpression(key)) {
+    return [...swrUrls(key.getWhenTrue(), seen), ...swrUrls(key.getWhenFalse(), seen)];
+  }
+  if (Node.isBinaryExpression(key) && key.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken) {
+    return swrUrls(key.getRight(), seen);
+  }
+  if (Node.isArrayLiteralExpression(key)) return swrUrls(key.getElements()[0], seen);
+  if (Node.isParenthesizedExpression(key) || Node.isAsExpression(key)) return swrUrls(key.getExpression(), seen);
+  if (Node.isIdentifier(key)) {
+    return declarationsOf(key).flatMap(declaration =>
+      Node.isVariableDeclaration(declaration) && declaration.getSourceFile() === key.getSourceFile() &&
+      declaration.getVariableStatement()?.getDeclarationKind() === 'const'
+        ? swrUrls(declaration.getInitializer(), seen) : []);
+  }
+  return [key];
+}
+
+function importOrigin(expression: Node) {
+  const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
+  const declaration = binding.getSymbol()?.getDeclarations()[0];
+  const imported = declaration?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
+  return {
+    module: imported?.getModuleSpecifierValue(),
+    name: Node.isImportSpecifier(declaration) ? declaration.getName() :
+      Node.isPropertyAccessExpression(expression) ? expression.getName() : 'default'
+  };
+}
+
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
   actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
@@ -259,54 +330,71 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     segments: route.path.slice(1).split('/')
   }));
   if (!endpoints.length) return;
-  const endpointsByCall = new Map<Node, RouteNode[]>();
+  type Endpoint = { route: RouteNode; kind: string };
+  const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
   for (const file of files) {
     if (!file.getFullText().includes('/api/')) continue;
     const source = relativePath(file);
+    const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
+      ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
     file.forEachDescendant(node => {
-      if (!Node.isCallExpression(node) || !/^(?:(?:globalThis|window)\.)?fetch$/.test(node.getExpression().getText())) return;
-      if (declarationsOf(node.getExpression()).some(declaration => !declaration.getSourceFile().isDeclarationFile())) return;
+      if (!Node.isCallExpression(node)) return;
+      const expression = node.getExpression();
+      const isFetch = /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+        !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
+      const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
+      const isSwr = (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
+        ['default', 'useSWR'].includes(origin.name);
+      const axiosMethod = origin?.module === 'axios' &&
+        ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
+        ? origin.name.toUpperCase() : undefined;
+      if (!isFetch && !isSwr && !axiosMethod) return;
       const [argument, options] = node.getArguments();
-      const segments = apiSegments(argument);
-      if (!segments) return;
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
-      const method = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
+      const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
         options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
           options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
-      const compatible = endpoints.filter(({ segments: pattern }) => pattern.every((part, i) => {
-        if (part.startsWith('[[...')) return true;
-        if (!segments[i]) return false;
-        if (part.startsWith('[...')) return true;
-        return part.startsWith('[') || part === segments[i];
-      }) && (pattern[pattern.length - 1]?.includes('...') || pattern.length === segments.length));
-      const specificity = ({ segments }: typeof endpoints[number]) =>
-        segments.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
-          part.startsWith('[') ? '2' : '3').join('');
-      compatible.sort((a, b) => specificity(b).localeCompare(specificity(a)));
+      const method = isFetch ? fetchMethod : axiosMethod;
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
-      for (const candidate of compatible) {
-        if (specificity(candidate) !== specificity(compatible[0])) break;
-        const { route } = candidate;
-        if (method && route.methods?.length && !route.methods.some(value => value === method || value === 'ALL' ||
-          (method === 'HEAD' && value === 'GET'))) continue;
-        const subject = action ? action.slice('action:'.length) : source;
-        const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
-        addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}`);
-        const targets = endpointsByCall.get(node) ?? [];
-        targets.push(route);
-        endpointsByCall.set(node, targets);
+      for (const url of isSwr ? swrUrls(argument) : [argument]) {
+        const segments = apiSegments(url);
+        if (!segments) continue;
+        const compatible = endpoints.filter(({ segments: pattern }) => pattern.every((part, i) => {
+          if (part.startsWith('[[...')) return true;
+          if (!segments[i]) return false;
+          if (part.startsWith('[...')) return true;
+          return part.startsWith('[') || part === segments[i];
+        }) && (pattern[pattern.length - 1]?.includes('...') || pattern.length === segments.length));
+        const specificity = ({ segments }: typeof endpoints[number]) =>
+          segments.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
+            part.startsWith('[') ? '2' : '3').join('');
+        compatible.sort((a, b) => specificity(b).localeCompare(specificity(a)));
+        for (const candidate of compatible) {
+          if (specificity(candidate) !== specificity(compatible[0])) break;
+          const { route } = candidate;
+          if (method && route.methods?.length && !route.methods.some(value => value === method || value === 'ALL' ||
+            (method === 'HEAD' && value === 'GET'))) continue;
+          const subject = action ? action.slice('action:'.length) : source;
+          const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
+          const kind = isSwr ? ' (SWR key)' : axiosMethod ? ' (axios)' : '';
+          addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+          if (isSwr) continue;
+          const targets = endpointsByCall.get(node) ?? [];
+          targets.push({ route, kind });
+          endpointsByCall.set(node, targets);
+        }
       }
     });
   }
 
   if (!endpointsByCall.size) return;
-  const callsByBody = new Map<Node, { direct: Set<RouteNode>; callees: Set<Node> }>();
+  const callsByBody = new Map<Node, { direct: Set<Endpoint>; callees: Set<Node> }>();
   const inspect = (root: Node) => {
     const cached = callsByBody.get(root);
     if (cached) return cached;
-    const direct = new Set<RouteNode>();
+    const direct = new Set<Endpoint>();
     const callees = new Set<Node>();
     const visit = (node: Node) => {
       if (!Node.isCallExpression(node)) return;
@@ -338,7 +426,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       if (visited.has(current)) continue;
       visited.add(current);
       const { direct, callees } = inspect(current);
-      for (const route of direct) addFact(facts, source, `fetch ${subject} -> ${route.file} ${route.path}`);
+      for (const { route, kind } of direct) addFact(facts, source, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
       for (const callee of callees) pending.push(callee);
     }
   }

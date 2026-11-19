@@ -36,7 +36,7 @@ function readMap(project, overview, name) {
     assert.ok(count(detail) <= 3000, file);
     assert.ok(!detail.includes(project));
     assert.doesNotMatch(detail, /:\s+(?:GET|HEAD|POST|PUT|DELETE|PATCH|OPTIONS)\(/);
-    if (file === '+dependencies.md' || file.startsWith('+reverse-')) continue;
+    if (/^\+(?:dependencies|areas)(?:\+\d+)?\.md$/.test(file) || file.startsWith('+reverse-')) continue;
     let directory;
     for (const line of detail.split('\n')) {
       if (/^(rendered|rename|wrap|fetch) /.test(line)) continue;
@@ -381,6 +381,23 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
 });
 
 
+test('links every area through a paginated index when direct links exceed the overview budget', async t => {
+  const project = reviewFixture(t);
+  for (let i = 0; i < 180; i++) {
+    const dir = path.join(project, 'src/app', `(long-generated-area-name-${i})`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'page.tsx'), 'export default function Page() { return null; }');
+  }
+  const overview = await generate(project);
+  assert.match(overview, /\[Area index\]/);
+  assert.ok(count(overview) <= 1500);
+  assertOverviewLinks(project, overview);
+  const dir = path.join(project, 'neorion/graph');
+  const indexes = fs.readdirSync(dir).filter(file => file.startsWith('+areas'));
+  assert.ok(indexes.length > 1);
+  for (const index of indexes) assert.ok(count(fs.readFileSync(path.join(dir, index), 'utf8')) <= 3000);
+});
+
 test('keeps the most used hook when the overview truncates hook definitions', async t => {
   const project = reviewFixture(t);
   const hooks = path.join(project, 'src/lib');
@@ -426,10 +443,17 @@ for (const name of ['ai-chatbot', 'papermark']) {
     assertOverviewLinks(project, overview);
     assert.ok(count(overview) <= overviewBudget(listing));
     const directory = path.join(project, 'neorion/graph');
+    let detailTotal = 0;
     for (const file of fs.readdirSync(directory)) {
-      assert.ok(count(fs.readFileSync(path.join(directory, file), 'utf8')) <= 3000, file);
+      const tokens = count(fs.readFileSync(path.join(directory, file), 'utf8'));
+      assert.ok(tokens <= 3000, file);
+      detailTotal += tokens;
     }
     if (name === 'papermark') {
+      assert.ok(detailTotal <= 52_000, `Papermark detail tokens: ${detailTotal}`);
+      const details = fs.readdirSync(directory).map(file => fs.readFileSync(path.join(directory, file), 'utf8')).join('\n');
+      assert.match(details, /^wrap pages\/.*_app\.tsx.* \(conditional\)$/m);
+      assert.match(details, /^fetch .* \(SWR key\)$/m);
       assert.match(overview, /context\/team-context.tsx: useTeam/);
       assert.match(overview, /\[\[\.\.\.file\]\].ts\[\*\]/);
       assert.match(overview, /members.ts\[GET DELETE\]/);
@@ -465,7 +489,7 @@ test('connects only selected AI instructions after consent, once per project, an
       async showQuickPick(items) {
         picks++;
         assert.deepEqual(items.filter(item => item.picked).map(item => item.label),
-          ['AGENTS.md', '.cursor/rules/neorion.mdc']);
+          fs.existsSync(cursorRule) ? ['AGENTS.md', '.cursor/rules/neorion.mdc'] : ['AGENTS.md']);
         return items.filter(item => selection.includes(item.label));
       }
     }
@@ -487,6 +511,7 @@ test('connects only selected AI instructions after consent, once per project, an
   const connected = fs.readFileSync(agentFile, 'utf8');
   assert.match(connected, /<!-- neorion:start -->\r\n.*codebase_graph\.md.*neorion\/graph\/.*grep/);
   assert.match(fs.readFileSync(cursorRule, 'utf8'), /^---\r\ndescription: Existing rule\r\nalwaysApply: true\r\n---/);
+  assert.match(connected, /`rendered`.*`wrap`.*`rename`.*`fetch`/);
   assert.ok(count(connected.slice(0, connected.indexOf(instructions))) <= 150);
   assert.ok(!fs.existsSync(claudeFile));
 
@@ -499,6 +524,20 @@ test('connects only selected AI instructions after consent, once per project, an
   assert.equal(fs.readFileSync(agentFile, 'utf8'), instructions);
   assert.equal(fs.readFileSync(cursorRule, 'utf8'), cursor);
   assert.ok(!fs.existsSync(claudeFile));
+  assert.ok(fs.existsSync(path.dirname(cursorRule)));
+
+  fs.rmSync(path.dirname(cursorRule), { recursive: true });
+  selection = ['.cursor/rules/neorion.mdc'];
+  await commands.get('neo.connectAITools')();
+  assert.match(fs.readFileSync(cursorRule, 'utf8'), /neorion:state \{.*"createdRulesDirectory":true/);
+  await commands.get('neo.disconnectAITools')();
+  assert.ok(!fs.existsSync(path.dirname(cursorRule)));
+
+  await commands.get('neo.connectAITools')();
+  const otherRule = path.join(path.dirname(cursorRule), 'other.mdc');
+  fs.writeFileSync(otherRule, 'keep');
+  await commands.get('neo.disconnectAITools')();
+  assert.equal(fs.readFileSync(otherRule, 'utf8'), 'keep');
 });
 
 test('emits transitive render, App and Pages wrapping, rename and API facts with project paths', async t => {
@@ -533,7 +572,7 @@ test('emits transitive render, App and Pages wrapping, rename and API facts with
     import { OuterProvider } from '@/components';
     export default function App({ Component: Screen }) {
       const getLayout = Screen.getLayout ?? (page => page);
-      return <OuterProvider>{getLayout(<Screen />)}</OuterProvider>;
+      return Screen.skip ? getLayout(<Screen />) : (Screen.ready && <OuterProvider>{getLayout(<Screen />)}</OuterProvider>);
     }
   `);
   write('src/pages/index.tsx', `
@@ -552,6 +591,21 @@ test('emits transitive render, App and Pages wrapping, rename and API facts with
     export const save = (id) => fetch(\`/api/report/\${id}\`, { method: 'POST' });
     export const missing = () => fetch('/api/unmapped');
   `);
+  write('src/components/requests.ts', `
+    import read from 'swr';
+    import axios from 'axios';
+    const key = ['/api/report/latest?format=json', 'json'] as const;
+    export const useReport = (ready) => read(ready ? key : null);
+    export const sendReport = () => axios.post('/api/report/123');
+  `);
+  write('src/components/ui/primitive.tsx', 'export function Primitive() { return null }');
+  for (let i = 0; i < 9; i++) {
+    write(`src/consumers/consumer-${i}.tsx`, `
+      import { useArchitecture } from '@/components';
+      import { Primitive } from '@/components/ui/primitive';
+      export const Consumer = () => <Primitive value={useArchitecture()} />;
+    `);
+  }
   write('src/app/report.ts', `
     'use server';
     import { save } from '../components/fetches';
@@ -560,25 +614,32 @@ test('emits transitive render, App and Pages wrapping, rename and API facts with
   `);
   const overview = await generate(project);
   const details = Object.values(readMap(project, overview, 'review-fixture')).join('\n');
+  const actualFacts = details.split('\n').filter(line => /^(rendered|wrap|rename|fetch) /.test(line));
   for (const fact of [
     'rendered src/components/architecture.tsx#Leaf <- src/app/help/page.tsx /help',
     'rendered src/components/architecture.tsx#Leaf <- src/pages/index.tsx /',
-    'rendered src/components/architecture.tsx#InnerProvider <- src/pages/index.tsx /',
+    'rendered src/components/architecture.tsx#InnerProvider <- src/pages/index.tsx / (via layout)',
     'wrap src/app/help/page.tsx <- src/app/layout.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider',
-    'wrap src/app/(account)/page.tsx <- src/app/layout.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/app/(account)/layout.tsx',
-    'wrap src/pages/index.tsx <- src/pages/_app.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/pages/index.tsx#PageProvider',
+    'wrap src/app/(account)/page.tsx <- src/app/layout.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/app/(account)/layout.tsx > src/components/panel.tsx#Panel > src/components/ui/button.tsx#Button > src/app/(account)/template.tsx',
+    'wrap src/pages/index.tsx <- src/pages/_app.tsx > src/components/architecture.tsx#OuterProvider > src/components/architecture.tsx#InnerProvider > src/components/architecture.tsx#Context.Provider > src/pages/index.tsx#PageProvider (conditional)',
+    'wrap src/pages/index.tsx <- src/pages/_app.tsx > src/pages/index.tsx#PageProvider (conditional)',
     'rename src/components/architecture.tsx#Leaf <- src/components/barrel.ts',
-    'rename src/components/architecture.tsx#Leaf <- src/components/index.ts',
     'rename src/components/architecture.tsx#Leaf <- src/app/help/page.tsx',
     'rename src/components/architecture.tsx#Middle <- src/pages/index.tsx',
-    'rename src/components/architecture.tsx#useArchitecture <- src/app/help/page.tsx',
+    'rename src/components/architecture.tsx#useArchitecture <- 11 files (list omitted)',
     'rename src/app/report.ts#report <- src/app/help/page.tsx',
     'fetch src/components/fetches.ts -> src/app/api/report/latest/route.ts /api/report/latest',
     'fetch src/components/fetches.ts -> src/app/api/report/[id]/route.ts /api/report/[id]',
     'fetch src/components/fetches.ts -> src/pages/api/optional/[[...slug]].ts /api/optional/[[...slug]]',
+    'fetch src/components/requests.ts -> src/app/api/report/latest/route.ts /api/report/latest (SWR key)',
+    'fetch src/components/requests.ts -> src/app/api/report/[id]/route.ts /api/report/[id] (axios)',
     'fetch src/app/report.ts#report -> src/app/api/report/[id]/route.ts /api/report/[id]',
     'fetch src/app/report.ts#inline -> src/app/api/report/[id]/route.ts /api/report/[id]'
-  ]) assert.ok(details.includes(fact), fact);
+  ]) assert.ok(actualFacts.includes(fact), `Missing ${fact}\n${actualFacts.join('\n')}`);
+  assert.doesNotMatch(details, /^rename .*#Primitive <-/m);
+  assert.doesNotMatch(details, /^rename .*#useArchitecture <- src\//m);
+  assert.doesNotMatch(details, /^rename .*#Leaf <- src\/components\/index\.ts$/m);
+  assert.doesNotMatch(details, /^rendered src\/app\/help\/page\.tsx#Help <- src\/app\/help\/page\.tsx /m);
   assert.doesNotMatch(details, /\/api\/unmapped/);
   assert.doesNotMatch(details, /rendered src\/components\/architecture\.tsx#Leaf <- src\/app\/\(account\)\/page/);
 });
