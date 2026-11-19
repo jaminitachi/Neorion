@@ -356,10 +356,23 @@ function wrappedExpression(node: Node) {
   }
 }
 
-type UrlText = { text: string; dynamic?: true; placeholders?: true };
+// Keep unresolved parts distinct from literal URL text and from expressions that can supply slashes.
+const slot = '\0';
+const spanningSlot = '\x01';
+const unknownSlot = /[\0\x01]/;
+type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-function urlText(node: Node | undefined, seen = new Set<Node>()): UrlText | undefined {
-  if (!node || seen.has(node)) return;
+function isSpanningJoin(node: Node, seen: Set<Node>): boolean {
+  if (!Node.isCallExpression(node)) return false;
+  const callee = node.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'join') return false;
+  const [separator] = node.getArguments();
+  const text = separator && urlText(separator, seen)?.text;
+  return !!separator && (text === undefined || unknownSlot.test(text) || text.includes('/'));
+}
+
+function urlText(node: Node, seen = new Set<Node>()): UrlText | undefined {
+  if (seen.has(node)) return;
   seen.add(node);
   try {
     if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
@@ -369,65 +382,76 @@ function urlText(node: Node | undefined, seen = new Set<Node>()): UrlText | unde
     if (wrapped) return urlText(wrapped, seen);
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
       const [declaration] = declarationsOf(node);
-      if (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === 'const') {
-        return urlText(declaration.getInitializer(), seen);
+      if (Node.isVariableDeclaration(declaration) || Node.isPropertyAssignment(declaration)) {
+        const initializer = declaration.getInitializer();
+        const value = initializer && urlText(initializer, seen);
+        if (value) return { ...value, partial: value.partial || Node.isPropertyAssignment(declaration) ||
+          declaration.getVariableStatement()?.getDeclarationKind() !== 'const' };
       }
     }
     const plus = addition(node);
     if (plus) {
       const left = urlText(plus.getLeft(), seen);
-      if (!left || left.dynamic) return left;
       const right = urlText(plus.getRight(), seen);
-      if (localApi.test(left.text) && (left.placeholders || !right || right.placeholders)) {
-        const known = left.placeholders ? left.text : left.text + (right?.text ?? '');
-        return { text: known.split('{}', 1)[0], dynamic: true };
-      }
-      if (right && !left.placeholders && !right.placeholders) {
-        return { text: left.text + right.text, dynamic: right.dynamic };
-      }
+      if (!left && !right) return;
+      const text = (left?.text ?? slot) + (right?.text ?? slot);
+      return { text, dynamic: left?.dynamic || right?.dynamic || unknownSlot.test(text),
+        partial: left?.partial || right?.partial };
     }
     if (Node.isTemplateExpression(node)) {
       let text = node.getHead().getLiteralText();
-      let placeholders: true | undefined;
-      let prefixSlot = false;
-      for (const [i, span] of node.getTemplateSpans().entries()) {
+      let startsWithLocalValue = false;
+      let dynamic = false;
+      let partial = false;
+      for (const span of node.getTemplateSpans()) {
         const expression = span.getExpression();
         const value = urlText(expression, seen);
-        if (i === 0 && !text && value && localApi.test(value.text)) {
-          prefixSlot = true;
-        }
-        if (value?.dynamic || (prefixSlot && (!value || value.placeholders))) {
-          return { text: text + (value?.text.split('{}', 1)[0] ?? ''), dynamic: true };
-        }
-        if (!value || value.placeholders) placeholders = true;
-        text += (value && !value.placeholders ? value.text : '{}') + span.getLiteral().getLiteralText();
+        startsWithLocalValue ||= !text && !!value && localApi.test(value.text);
+        dynamic ||= !!value?.dynamic || !!value && unknownSlot.test(value.text);
+        partial ||= !!value?.partial;
+        text += (value?.text ?? slot) + span.getLiteral().getLiteralText();
       }
-      return { text, placeholders };
+      return { text, dynamic: dynamic || startsWithLocalValue && unknownSlot.test(text), partial };
     }
+    if (isSpanningJoin(node, seen)) return { text: spanningSlot };
   } finally {
     seen.delete(node);
   }
 }
 
 function apiSegments(argument: Node | undefined) {
-  const url = urlText(argument);
+  const url = argument && urlText(argument);
   if (!url) return;
-  const prefix = /^(?:\{\}|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
+  const prefix = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
   const local = prefix ? url.text.slice(prefix.length) : url.text;
-  if (localApi.test(local)) {
-    const [pathname] = local.split(/[?#]/, 1);
-    const segments = (url.placeholders && !url.dynamic ? pathname.replace(/\/$/, '') : pathname).slice(1).split('/');
-    return { segments, dynamic: url.dynamic, pathFixed: pathname !== local,
-      partial: !!prefix, markdown: !prefix || prefix === '{}' };
-  }
+  if (!localApi.test(local)) return;
+  const [pathname] = local.split(/[?#]/, 1);
+  const spanning = pathname.indexOf(spanningSlot);
+  // A trailing unresolved expression can supply additional path segments.
+  const openAt = spanning >= 0 ? spanning :
+    url.dynamic && pathname === local && pathname.endsWith(slot) ? pathname.lastIndexOf(slot) : -1;
+  const trailingSlash = openAt < 0 && pathname.endsWith('/');
+  const path = openAt >= 0 ? pathname.slice(0, openAt) : trailingSlash ? pathname.slice(0, -1) : pathname;
+  return { segments: path.slice(1).split('/'), open: openAt >= 0, trailingSlash, dynamic: !!url.dynamic || spanning >= 0,
+    partial: !!prefix || !!url.partial || trailingSlash && !unknownSlot.test(pathname),
+    markdown: (!prefix || prefix === slot) && !url.partial };
 }
 
-function matchesDynamicPrefix(pattern: string[], segments: string[], pathFixed: boolean) {
+function matchesSegment(part: string, segment: string, bounded: boolean, open: boolean) {
+  if (part.startsWith('[')) return !!segment || open;
+  if (!segment.includes(slot)) return open ? part.startsWith(segment) : part === segment;
+  if (bounded && segment === slot) return false;
+  const regex = segment.split(slot).map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${regex}${open ? '' : '$'}`).test(part);
+}
+
+function matchesOpenPath(pattern: string[], segments: string[]) {
+  const last = pattern.length - 1;
+  const catchAll = pattern[last].startsWith('[...') || pattern[last].startsWith('[[...');
   return segments.every((segment, i) => {
-    if (pattern[i]?.startsWith('[')) return !!segment || !pathFixed;
-    if (pattern.slice(0, i).some(part => part.includes('...'))) return !!segment || !pathFixed;
-    return !pathFixed && i === segments.length - 1 ? pattern[i]?.startsWith(segment) : pattern[i] === segment;
-  }) && (!pathFixed || pattern.length === segments.length || !!pattern.at(-1)?.includes('...'));
+    if (i > last) return !!catchAll;
+    return matchesSegment(pattern[i], segment, i < segments.length - 1, i === segments.length - 1);
+  });
 }
 
 function swrUrls(key: Node | undefined, seen = new Set<Node>()): Node[] {
@@ -442,10 +466,11 @@ function swrUrls(key: Node | undefined, seen = new Set<Node>()): Node[] {
   if (Node.isArrayLiteralExpression(key)) return swrUrls(key.getElements()[0], seen);
   if (Node.isParenthesizedExpression(key) || Node.isAsExpression(key)) return swrUrls(key.getExpression(), seen);
   if (Node.isIdentifier(key)) {
-    return declarationsOf(key).flatMap(declaration =>
+    const resolved = declarationsOf(key).flatMap(declaration =>
       Node.isVariableDeclaration(declaration) && declaration.getSourceFile() === key.getSourceFile() &&
       declaration.getVariableStatement()?.getDeclarationKind() === 'const'
         ? swrUrls(declaration.getInitializer(), seen) : []);
+    return resolved.length ? resolved : [key];
   }
   return [key];
 }
@@ -472,8 +497,8 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
   const urlMatches = (parsed: NonNullable<ReturnType<typeof apiSegments>>) => {
     const { segments, partial } = parsed;
-    if (parsed.dynamic) {
-      return endpoints.filter(({ segments: pattern }) => matchesDynamicPrefix(pattern, segments, parsed.pathFixed))
+    if (parsed.open) {
+      return endpoints.filter(({ segments: pattern }) => matchesOpenPath(pattern, segments))
         .map(({ route }) => ({ route, partial: true, markdown: false, dynamic: true }));
     }
     const matches: { route: RouteNode; partial: boolean; markdown: boolean; dynamic?: boolean }[] = [];
@@ -487,18 +512,16 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
         if (part.startsWith('[[...')) return true;
         const segment = segments[i];
         if (!segment) return false;
-        if (part.startsWith('[') || part === segment) return true;
-        if (!segment.includes('{}')) return false;
-        const regex = segment.split('{}').map(text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
-        if (!new RegExp(`^${regex}$`).test(part)) return false;
-        uncertain = true;
+        if (!matchesSegment(part, segment, parsed.trailingSlash || i < segments.length - 1, false)) return false;
+        if (!part.startsWith('[') && segment.includes(slot)) uncertain = true;
         return true;
       }) && (pattern.at(-1)?.includes('...') || pattern.length === segments.length);
       if (!compatible) continue;
       if (!uncertain) bestCertain = rank;
       matches.push({ route,
-        partial: partial || uncertain || moreSpecificMatch || segments.some(segment => segment.includes('{}') && segment !== '{}'),
-        markdown: !uncertain && parsed.markdown });
+        partial: partial || parsed.dynamic || uncertain || moreSpecificMatch ||
+          segments.some(segment => segment.includes(slot) && segment !== slot),
+        markdown: !uncertain && !parsed.dynamic && parsed.markdown, dynamic: parsed.dynamic || undefined });
       moreSpecificMatch ||= uncertain;
     }
     return matches;

@@ -274,11 +274,11 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
   assert.match(await query('/api/ping'), /^# partial: stale index$/m);
 });
 
-test('concatenated URLs are candidates for descendants and trailing slashes do not match a list route', async t => {
+test('only static trailing-slash URLs match the list route', async t => {
   const root = temporary(t);
   write(root, 'tsconfig.json', '{}');
   for (const route of ['items', 'items/[id]', 'items/special', 'items-other', 'exact/[id]']) {
-    write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
+    write(root, `app/api/${route}/route.ts`, 'export function GET() {} export function POST() {}');
   }
   write(root, 'items.ts', [
     'declare const id: string;',
@@ -289,7 +289,9 @@ test('concatenated URLs are candidates for descendants and trailing slashes do n
     'const tail = "123";',
     'fetch("/api/exact/" + tail);',
     'declare function request(url: string): void;',
-    'request("/api/items/" + id);'
+    'request("/api/items/" + id);',
+    'fetch("/api/items/", { method: "POST" });',
+    'fetch("/api/items?" + id);'
   ].join('\n'));
   await generate(root);
   const client = await openMcp(t, root);
@@ -300,8 +302,14 @@ test('concatenated URLs are candidates for descendants and trailing slashes do n
     assert.match(output, /^# partial: dynamic URL$/m);
   }
   const list = await client.text('api_consumers', { route: '/api/items' });
-  assert.deepEqual(list.match(/^send.*$/gm), ['send   items.ts:5 GET fetch']);
-  assert.match(list, /^# complete:/m);
+  assert.deepEqual(list.match(/^send.*$/gm), [
+    'send   items.ts:3 GET fetch [partial url]',
+    'send   items.ts:4 GET fetch [partial url]',
+    'send   items.ts:5 GET fetch',
+    'send   items.ts:10 POST fetch [partial url]',
+    'send   items.ts:11 GET fetch [partial url]'
+  ]);
+  assert.match(list, /^# partial: dynamic URL$/m);
   assert.doesNotMatch(await client.text('api_consumers', { route: '/api/items-other' }), /^send/m);
   const exact = await client.text('api_consumers', { route: '/api/exact/[id]' });
   assert.match(exact, /^send +items\.ts:7 GET fetch$/m);
@@ -316,8 +324,9 @@ test('template URLs resolve local and imported string constants and report unres
   }
   write(root, 'paths.ts', 'export const remote = "/api/imported/"; export const exact = "/api/exact-imported"; export const key = "123";');
   write(root, 'barrel.ts', 'export { remote as prefix, exact, key } from "./paths";');
+  write(root, 'public.ts', 'export * from "./barrel";');
   write(root, 'imported.ts', [
-    'import { prefix, exact, key } from "./barrel";',
+    'import { prefix, exact, key } from "./public";',
     'declare const id: string;',
     'fetch(`${prefix}${id}`, { method: "DELETE" });',
     'fetch(`${exact}/${key}`, { method: "DELETE" });'
@@ -339,4 +348,52 @@ test('template URLs resolve local and imported string constants and report unres
     assert.ok(exact.includes(`send   ${source}.ts:${exactLine} DELETE fetch\n`), exact);
     assert.match(exact, /^# complete:/m);
   }
+});
+
+test('API URL patterns retain literal segments after unknown path parameters', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const route of [
+    'groups/[group]/files/[file]/rotate', 'groups/[group]/files/[file]/rename',
+    'groups/[group]/stores/[store]/files', 'groups/[group]/stores/[store]/members',
+    'groups/static/files/[file]/rotate', 'groups/[group]/branding',
+    'spanning/[...path]', 'orders', 'orders/[order]'
+  ]) {
+    write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
+  }
+  write(root, 'patterns.ts', [
+    "import { mutate } from 'swr';",
+    'declare const group: string, id: string, pieces: string[];',
+    'fetch("/api/groups/" + group + "/files/" + id + "/rotate");',
+    'const key = `/api/groups/${group}/stores/${id}`;',
+    'mutate(`${key}/files`);',
+    'const joined = pieces.join("/"); fetch("/api/spanning/" + joined + "/tail");',
+    'fetch("https://example.com/api/orders/" + id);',
+    'fetch(process.env.API + "/api/orders/" + id);',
+    'let base = "/api/orders";',
+    'fetch(base + "/" + id);',
+    'const urls = { orders: "/api/orders" };',
+    'fetch(`${urls.orders}/${id}`);',
+    'fetch(`https://example.com/api/orders/${id}`);',
+    'fetch(`${process.env.API}/api/orders/${id}`);',
+    'fetch(`/api/groups/${group}/files/${id}/rotate`);'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = route => client.text('api_consumers', { route: '/api/' + route });
+  const rotate = await query('groups/[group]/files/[file]/rotate');
+  assert.match(rotate, /^send +patterns\.ts:3 GET fetch \[partial url\]$/m);
+  assert.match(rotate, /^send +patterns\.ts:15 GET fetch$/m);
+  assert.match(await query('groups/[group]/stores/[store]/files'), /^send +patterns\.ts:5 \? SWR key \[partial url\]$/m);
+  assert.match(await query('spanning/[...path]'), /^send +patterns\.ts:6 GET fetch \[partial url\]$/m);
+  for (const route of ['groups/[group]/files/[file]/rename', 'groups/static/files/[file]/rotate',
+    'groups/[group]/stores/[store]/members', 'groups/[group]/branding']) {
+    assert.doesNotMatch(await query(route), /^send/m);
+  }
+  const orders = await query('orders/[order]');
+  for (const line of [7, 8, 10, 12, 13, 14]) {
+    assert.match(orders, new RegExp(`^send +patterns\\.ts:${line} GET fetch \\[partial url\\]$`, 'm'));
+  }
+  assert.match(orders, /^# partial:/m);
+  assert.doesNotMatch(await query('orders'), /^send .*fetch/m);
 });
