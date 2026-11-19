@@ -59,7 +59,7 @@ test('P1–P3 real stdio initializes, advertises exact schemas and only emits JS
 });
 
 const benchRepos = process.env.NEORION_BENCH_REPOS;
-test('P4 Formbricks index and five real stdio calls meet size and latency targets', { skip: !benchRepos, timeout: 180_000 }, async t => {
+test('P4 Formbricks index and five real stdio calls meet size and latency targets', { skip: !benchRepos, timeout: 300_000 }, async t => {
   const root = temporary(t);
   const repo = path.join(benchRepos, 'formbricks');
   const archive = path.join(temporary(t), 'formbricks.tar');

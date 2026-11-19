@@ -418,3 +418,52 @@ test('API URL patterns retain literal segments after unknown path parameters', a
   assert.match(orders, /^# partial:/m);
   assert.doesNotMatch(await query('orders'), /^send .*fetch/m);
 });
+
+test('conditional API path slots widen only for resolved slash-containing branches', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const route of [
+    'paths/folders/manage', 'paths/rooms/[room]/folders/manage', 'paths/other/manage',
+    'orders/[order]', 'orders/[order]/items', 'orders/[order]/items/extra'
+  ]) {
+    write(root, `app/api/${route}/route.ts`, 'export function GET() {}');
+  }
+  write(root, 'paths.ts', [
+    'declare const condition: boolean, id: string;',
+    'export const target = condition ? `rooms/${id}/folders` : "folders";'
+  ].join('\n'));
+  write(root, 'calls.ts', [
+    'import { target } from "./paths";',
+    'declare const condition: boolean, id: string, input: { id: string };',
+    'fetch(`/api/paths/${target}/manage`);',
+    'let mutable = condition ? `rooms/${id}/folders` : "folders";',
+    'fetch(`/api/paths/${mutable}/manage`);',
+    'const paths = { target: condition ? `rooms/${id}/folders` : "folders" };',
+    'fetch(`/api/paths/${paths.target}/manage`);',
+    'const nullable = condition ? id : null;',
+    'fetch(`/api/orders/${nullable}/items`);',
+    'const optional = condition ? input.id : undefined;',
+    'fetch(`/api/orders/${optional}`);',
+    'fetch(`/api/orders/${condition ? id : ""}`);',
+    'fetch(`/api/orders/${condition ? null : ""}`);'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = route => client.text('api_consumers', { route: '/api/' + route });
+  for (const route of ['paths/folders/manage', 'paths/rooms/[room]/folders/manage']) {
+    const result = await query(route);
+    for (const line of [3, 5, 7]) {
+      assert.match(result, new RegExp(`^send +calls\\.ts:${line} GET fetch \\[partial url\\]$`, 'm'));
+    }
+  }
+  assert.doesNotMatch(await query('paths/other/manage'), /^send +calls\.ts:3 /m);
+  const items = await query('orders/[order]/items');
+  assert.match(items, /^send +calls\.ts:9 GET fetch$/m);
+  assert.match(items, /^# complete:/m);
+  const order = await query('orders/[order]');
+  assert.match(order, /^send +calls\.ts:11 GET fetch$/m);
+  assert.match(order, /^send +calls\.ts:12 GET fetch$/m);
+  assert.doesNotMatch(order, /^send +calls\.ts:13 /m);
+  assert.match(order, /^# complete:/m);
+  assert.doesNotMatch(await query('orders/[order]/items/extra'), /^send/m);
+});

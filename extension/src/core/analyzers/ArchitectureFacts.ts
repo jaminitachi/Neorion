@@ -362,22 +362,32 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true): UrlText[] {
-  if (seen.has(node)) return [];
+function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true): UrlText[] | undefined {
+  if (seen.has(node)) return;
   seen.add(node);
   const resolve = (expression: Node) => urlTexts(expression, seen, expandConditional);
-  const fallback = (values: UrlText[], text = slot): UrlText[] => values.length ? values : [{ text }];
+  // An unresolved expression gets a slot. An empty set has no viable URL.
+  const fallback = (values: UrlText[] | undefined): UrlText[] => values ?? [{ text: slot }];
   try {
     if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
       return [{ text: node.getLiteralText() }];
     }
     const wrapped = wrappedExpression(node);
     if (wrapped) return resolve(wrapped);
-    if (expandConditional && Node.isConditionalExpression(node)) {
-      return [node.getWhenTrue(), node.getWhenFalse()].flatMap(branch =>
-        fallback(resolve(branch), spanningSlot).map(value => ({
-          ...value, text: apiSegments(value) ? value.text : value.text.split(slot).join(spanningSlot), partial: true
-        })));
+    if (node.getKind() === SyntaxKind.NullKeyword) return [];
+    if (Node.isConditionalExpression(node)) {
+      const branches = [node.getWhenTrue(), node.getWhenFalse()]
+        .flatMap(branch => fallback(urlTexts(branch, seen)))
+        .filter(value => value.text !== '');
+      if (!branches.length) return [];
+      const hasSlash = branches.some(value => value.text.includes('/'));
+      if (!expandConditional) return [{ text: hasSlash ? spanningSlot : slot }];
+      return branches.map(value => {
+        if (value.text === slot) return value;
+        const text = value.text.includes('/') && !apiSegments(value)
+          ? value.text.split(slot).join(spanningSlot) : value.text;
+        return { ...value, text, partial: value.partial || branches.length > 1 };
+      });
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
       const [declaration] = declarationsOf(node);
@@ -386,17 +396,18 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
         const constant = Node.isVariableDeclaration(declaration) &&
           declaration.getVariableStatement()?.getDeclarationKind() === 'const';
         if (initializer) {
-          return urlTexts(initializer, seen, expandConditional && constant &&
-            declaration.getSourceFile() === node.getSourceFile())
-            .map(value => ({ ...value, partial: value.partial || !constant }));
+          return urlTexts(initializer, seen, expandConditional && constant)
+            ?.map(value => value.text === slot ? value : { ...value, partial: value.partial || !constant });
         }
       }
+      if (Node.isIdentifier(node) && node.getText() === 'undefined' &&
+          (!declaration || declaration.getSourceFile().isDeclarationFile())) return [];
     }
     const plus = addition(node);
     if (plus) {
       const left = resolve(plus.getLeft());
       const right = resolve(plus.getRight());
-      if (!left.length && !right.length) return [];
+      if (!left && !right) return;
       return fallback(left).flatMap(prefix => fallback(right).map(suffix => {
         const text = prefix.text + suffix.text;
         return { text, dynamic: prefix.dynamic || suffix.dynamic || unknownSlot.test(text),
@@ -411,7 +422,7 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
         values = values.flatMap(prefix => fallback(substitutions).map(value => {
           const text = prefix.text + value.text + tail;
           if (/[?#]/.test(prefix.text)) return { ...prefix, text };
-          return { text, dynamic: prefix.dynamic || value.dynamic || substitutions.length > 0 &&
+          return { text, dynamic: prefix.dynamic || value.dynamic || value.text !== slot &&
             unknownSlot.test(value.text) || !prefix.text && localApi.test(value.text) && unknownSlot.test(text),
             partial: prefix.partial || value.partial };
         }));
@@ -423,12 +434,12 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true):
       const [separator] = node.getArguments();
       if (separator && Node.isPropertyAccessExpression(callee) && callee.getName() === 'join') {
         const values = resolve(separator);
-        if (!values.length || values.some(({ text }) => unknownSlot.test(text) || text.includes('/'))) {
+        if (!values || values.some(({ text }) => unknownSlot.test(text) || text.includes('/'))) {
           return [{ text: spanningSlot }];
         }
       }
     }
-    return [];
+    return;
   } finally {
     seen.delete(node);
   }
@@ -554,7 +565,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   };
   const matchesFor = (node: Node) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
-    for (const value of urlTexts(node)) {
+    for (const value of urlTexts(node) ?? []) {
       const parsed = apiSegments(value);
       if (!parsed) continue;
       matches ??= new Map();
