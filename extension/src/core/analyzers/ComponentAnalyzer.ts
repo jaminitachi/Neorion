@@ -30,7 +30,8 @@ function externalAlias(node: Node | undefined, files: Set<SourceFile>): string |
   const name = Node.isImportSpecifier(binding) ? binding.getName() :
     Node.isNamespaceImport(binding) ? '' : 'default';
   const member = node.getText().slice(root.getText().length).replace(/^\./, '');
-  if (!/^[A-Z]/.test(member || (name === 'default' ? root.getText() : name))) return;
+  const importedName = member || (name === 'default' ? root.getText() : name);
+  if (!/^[A-Z]/.test(importedName) || /^[A-Z][A-Z0-9_]+$/.test(importedName)) return;
   return module + '#' + [name, member].filter(Boolean).join('.');
 }
 

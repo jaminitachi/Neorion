@@ -11,7 +11,7 @@ import { tools } from './Tools';
 
 type Call = { id: number; name: string; args: unknown };
 type Response = { id: number; text: string; isError?: true };
-const missing = 'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Graph" in VS Code.';
+const missing = 'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Architecture Map" in VS Code.';
 
 function runQueries(root: string) {
   const file = resolve(root, INDEX_PATH);

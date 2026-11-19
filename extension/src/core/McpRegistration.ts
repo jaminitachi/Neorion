@@ -88,8 +88,8 @@ function insert(original: string, bom: number, node: Node, key: string, value: u
   return { written: original.slice(0, offset) + insertion + original.slice(offset), insertion };
 }
 
-export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', project: string) {
-  const command: Command = { command: 'npx', args: ['-y', `neorion-mcp@${VERSION}`, '--root', project] };
+export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', project: string, bundleSource: string) {
+  const command: Command = { command: 'node', args: [bundleSource, '--root', project] };
   return tool === 'Codex CLI'
     ? `[mcp_servers.neorion]\ncommand = ${JSON.stringify(command.command)}\nargs = ${JSON.stringify(command.args)}\n`
     : json({ mcpServers: { neorion: command } });
@@ -146,12 +146,28 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     }
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
-      ? { command: 'node', args: [BUNDLE, '--root', projectArgument] }
+      ? { command: 'node', args: [variable ? '${workspaceFolder}/' + BUNDLE : BUNDLE, '--root', scopedProject] }
       : { command: 'npx', args: ['-y', `neorion-mcp@${VERSION}`, '--root', scopedProject] };
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     if (parsed.entry && !equal(getNodeValue(parsed.entry), entry)) {
-      throw new Error(`Neorion MCP server conflicts with an existing entry in ${configFile}`);
+      if (!previous || previous.hadNeorion || !equal(getNodeValue(parsed.entry), previous.entry)) {
+        throw new Error(`Neorion MCP server conflicts with an existing entry in ${configFile}`);
+      }
+      const source = original!;
+      const start = parsed.bom + parsed.entry.offset;
+      const end = start + parsed.entry.length;
+      const indent = /^[\t ]*/.exec(source.slice(source.lastIndexOf('\n', start - 1) + 1))![0];
+      const newline = source.includes('\r\n') ? '\r\n' : '\n';
+      const replacement = json(entry).replace(/\n/g, newline + indent);
+      const offset = previous.insertion ? source.indexOf(previous.insertion) : -1;
+      const insertion = previous.insertion;
+      const nextInsertion = insertion && offset >= 0 && start >= offset && end <= offset + insertion.length
+        ? insertion.slice(0, start - offset) + replacement + insertion.slice(end - offset) : undefined;
+      state.configs[target] = { ...previous, entry, insertion: nextInsertion };
+      changes.push({ file, content: source.slice(0, start) + replacement + source.slice(end) });
+      updated.add(target);
+      continue;
     }
     if (parsed.entry && previous) continue;
     const edit = parsed.entry ? undefined : insert(original ?? '{}', parsed.bom,

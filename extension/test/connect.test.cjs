@@ -10,7 +10,9 @@ const COPY = 'Other tools: copy configuration snippet';
 const files = { 'Claude Code': '.mcp.json', Cursor: '.cursor/mcp.json', 'VS Code (Copilot agent)': '.vscode/mcp.json' };
 const original = '{\r\n\t"mcpServers" : { "other" : {"command":"keep"} },\r\n\t"notes" : [1, 2]\r\n}\r\n';
 const key = target => target === 'VS Code (Copilot agent)' ? 'servers' : 'mcpServers';
-function setup(t) {
+const npmMode = 'Use pinned npm package (requires publishing)';
+const bundledMode = 'Use bundled server';
+function setup(t, project = '.') {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-connect-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const file = name => path.join(root, name);
@@ -19,16 +21,18 @@ function setup(t) {
     fs.mkdirSync(path.dirname(file(name)), { recursive: true });
     fs.writeFileSync(file(name), value);
   };
-  const selections = { instructions: ['CLAUDE.md', REGISTER], targets: Object.keys(files), mode: 'Use pinned npm package' };
+  const selections = { instructions: ['CLAUDE.md', REGISTER], targets: Object.keys(files), mode: npmMode };
   let snippet;
   const messages = [];
-  const { commands } = register(root, undefined, [], {
+  const { commands } = register(root, undefined, [file(path.join(project, 'tsconfig.json'))], {
     clipboard: text => { snippet = text; },
     window: {
       showInformationMessage(message) { messages.push(message); },
       async showQuickPick(items, options) {
         if (typeof items[0] === 'string') {
-          return options.placeHolder.includes('global') ? selections.format : selections.mode;
+          if (options.placeHolder.includes('global')) return selections.format;
+          assert.deepEqual(items, [bundledMode, npmMode]);
+          return selections.mode ?? items[0];
         }
         assert.equal(items.find(item => item.label === REGISTER)?.picked ?? false, false);
         const chosen = items.find(item => item.label === REGISTER) ? selections.instructions : selections.targets;
@@ -47,9 +51,12 @@ test('R1 and R6 opt-in is off, legacy instructions persist, and global configura
     env.selections.format = format;
     await env.connect();
     const snippet = env.snippet();
-    if (format === 'Codex CLI') assert.match(snippet, /^\[mcp_servers\.neorion\]/);
-    else assert.equal(JSON.parse(snippet).mcpServers.neorion.command, 'npx');
-    assert.match(snippet, /neorion-mcp@0.4.0/);
+    const args = [path.resolve(__dirname, '../out/mcp.cjs'), '--root', env.file('.')];
+    if (format === 'Codex CLI') {
+      assert.equal(snippet, `[mcp_servers.neorion]\ncommand = "node"\nargs = ${JSON.stringify(args)}\n`);
+    } else {
+      assert.deepEqual(JSON.parse(snippet).mcpServers.neorion, { command: 'node', args });
+    }
   }
   assert.match(env.read('CLAUDE.md'), /read .*codebase_graph\.md.*first/);
   for (const file of Object.values(files)) assert.ok(!fs.existsSync(env.file(file)));
@@ -72,6 +79,12 @@ test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and rever
   assert.doesNotMatch(env.read('CLAUDE.md'), /read .*codebase_graph\.md.*first/);
   assert.ok(env.messages.some(message => message.includes('Claude Code asks for approval')));
   await env.connect();
+  env.selections.mode = bundledMode;
+  await env.connect();
+  assert.equal(JSON.parse(env.read('.mcp.json')).mcpServers.neorion.command, 'node');
+  env.selections.mode = npmMode;
+  await env.connect();
+  assert.equal(env.read('.mcp.json'), edited);
   await env.disconnect();
   await env.disconnect();
   assert.equal(env.read('.mcp.json'), original);
@@ -87,7 +100,7 @@ test('R3 preserves user edits and existing matching servers, and reverses bundle
   await env.disconnect();
   assert.equal(env.read('.mcp.json'), matching);
   env.selections.targets = ['VS Code (Copilot agent)'];
-  env.selections.mode = 'Use bundled server';
+  env.selections.mode = bundledMode;
   const jsonc = '{\n  // keep\n  "servers": { "other": {"command":"foo"}, },\n}\n';
   env.write('.vscode/mcp.json', jsonc);
   await env.connect();
@@ -119,4 +132,17 @@ test('R4 rejects conflicts, malformed files, JSONC for strict clients, and symli
   await assert.rejects(env.connect(), /symbolic link/);
   assert.equal(env.read('.mcp.json'), '{}');
   assert.ok(!fs.existsSync(env.file('CLAUDE.md')));
+});
+
+test('R5 bundled registration resolves the server and monorepo root for each client', async t => {
+  const env = setup(t, 'apps/web');
+  env.selections.mode = undefined;
+  await env.connect();
+  for (const [target, file] of Object.entries(files)) {
+    const entry = JSON.parse(env.read(file))[key(target)].neorion;
+    const prefix = target === 'Claude Code' ? '' : '${workspaceFolder}/';
+    assert.equal(entry.command, 'node');
+    assert.deepEqual(entry.args, [prefix + '.neorion/mcp/server.cjs', '--root', prefix + 'apps/web']);
+    assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
+  }
 });

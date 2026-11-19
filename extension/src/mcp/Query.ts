@@ -1,4 +1,5 @@
-import { lstatSync, realpathSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type SymbolEntry } from './Index';
@@ -270,7 +271,7 @@ export class QueryEngine {
       return { ...row(`${label}  depth ${depth}${via.length ? ' via ' + via.join(' > ') : ''}` +
         (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
     });
-    const count = `${rows.length} routes`;
+    const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
       const parents = new Map<number, { symbol: SymbolEntry; line: number; conditional: number }>();
       for (const [from, , line, conditional] of this.incoming.get(symbol.id) ?? []) {
@@ -284,7 +285,9 @@ export class QueryEngine {
         rows.push({ ...row(label + flagTest(symbol.file) + (conditional ? ' [cond]' : ''), symbol.file), pathEnd: label.length });
       }
     }
-    return { rows, count: !rows.length ? undefined : count };
+    const directCount = rows.length - reached.size;
+    const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
+    return { rows, count: rows.length ? count + directLabel : undefined };
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
@@ -445,8 +448,11 @@ export class QueryEngine {
       if (!status.has(file) && Object.prototype.hasOwnProperty.call(this.index.files, file)) {
         const indexed = this.index.files[file];
         try {
-          const current = statSync(this.checkPath(file));
-          status.set(file, current.size !== indexed.size || current.mtimeMs !== indexed.mtimeMs);
+          const absolute = this.checkPath(file);
+          const current = statSync(absolute);
+          status.set(file, !current.isFile() || current.size !== indexed.size ||
+            (current.mtimeMs !== indexed.mtimeMs &&
+              createHash('sha1').update(readFileSync(absolute)).digest('hex') !== indexed.sha1));
         } catch {
           status.set(file, true);
         }

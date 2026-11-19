@@ -75,6 +75,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         const selected = choices.map(choice => choice.label);
         let mcpTargets: McpTarget[] = [];
         let bundled = false;
+        const bundleSource = path.resolve(context.extensionPath ?? path.dirname(__dirname), 'out/mcp.cjs');
         if (selected.includes(REGISTER_MCP)) {
             const targets = await vscode.window.showQuickPick(Object.entries(MCP_TARGETS).map(([label, target]) => ({
                 label, description: target.file
@@ -82,7 +83,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
             if (targets === undefined) return;
             mcpTargets = targets.map(target => target.label as McpTarget);
             if (mcpTargets.length) {
-                const mode = await vscode.window.showQuickPick(['Use pinned npm package', 'Use bundled server'], {
+                const mode = await vscode.window.showQuickPick(['Use bundled server', 'Use pinned npm package (requires publishing)'], {
                     placeHolder: 'Choose how to launch the Neorion MCP server'
                 });
                 if (!mode) return;
@@ -92,7 +93,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         if (selected.includes(COPY_MCP)) {
             const formats = ['Codex CLI', 'Windsurf', 'Gemini CLI'] as const;
             const format = await vscode.window.showQuickPick([...formats], { placeHolder: 'Choose a global MCP config format' });
-            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project));
+            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project, bundleSource));
         }
         const instructions = selected.filter(label => AGENT_FILES.includes(label));
         const configFiles = (connect ? mcpTargets : Object.keys(MCP_TARGETS) as McpTarget[])
@@ -101,7 +102,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
         if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
         const mcp = planMcp(root, project, mcpTargets, bundled,
-            path.join(context.extensionPath ?? path.dirname(__dirname), 'out/mcp.cjs'), connect);
+            bundleSource, connect);
         const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
         mcp.commit();
         const approval = mcpTargets.includes('Claude Code') ?

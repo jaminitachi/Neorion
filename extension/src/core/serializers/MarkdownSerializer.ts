@@ -443,7 +443,7 @@ export class MarkdownSerializer {
       'Unmarked targets render and import. [render], [import] and [action] mark other relationships. UI/icon targets are counted.\n' +
       'Unmarked files use the server default. (c) marks a client boundary, (L) a layout wrapping pages below it, and [*] unknown Pages API methods.\n' +
       (reverseLinks.length ? `Reverse usage for selected project symbols: ${reverseLinks.join(', ')}.\n` : '') +
-      (omittedFactKinds.size ? `Detail budget abbreviates ${[...omittedFactKinds].join(', ')} lists. MCP tools return complete lists.\n` : '') +
+      (omittedFactKinds.size ? `Detail budget abbreviates ${[...omittedFactKinds].join(', ')} lists. Search source for missing results.\n` : '') +
       'Routes follow the tree. Drop App Router groups and slots, or the Pages filename extension and trailing index. A dot continues the parent route row. Explicit URL overrides follow →.\n';
     const actionRows = [
       ...graph.actions.map(id => ({ text: label(id), weight: usage(id) })),

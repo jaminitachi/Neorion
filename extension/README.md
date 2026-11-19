@@ -19,12 +19,15 @@ blocks, restores any Cursor setting changed by Neorion, and removes MCP entries 
 ### Query tools (MCP)
 
 In **Connect AI tools**, select **Register Neorion query tools (MCP)** to opt in.
-Choose Claude Code, Cursor, or VS Code (Copilot agent), then choose the pinned
-`neorion-mcp@0.4.0` npm package or **Use bundled server**. The bundled option
-copies the server into `.neorion/mcp/server.cjs` and works offline with Node.js
-18 or later. Claude Code asks for approval before first using a project MCP
-server. **Other tools: copy configuration snippet** supports Codex CLI,
-Windsurf, and Gemini CLI. Paste the snippet into your client’s global config.
+Choose Claude Code, Cursor, or VS Code (Copilot agent). **Use bundled server**
+is the default. It copies the server into `.neorion/mcp/server.cjs` and works
+offline with Node.js 18 or later. The optional pinned npm mode requires
+`neorion-mcp@0.4.0` to be published before it can run. Claude Code asks for
+approval before first using a project MCP server.
+**Other tools: copy configuration snippet** uses absolute paths to the
+installed bundle and the project. Paste it into the global configuration for
+Codex CLI, Windsurf, or Gemini CLI. Copy a fresh snippet if the extension
+installation moves.
 
 | Tool | Answers |
 | --- | --- |

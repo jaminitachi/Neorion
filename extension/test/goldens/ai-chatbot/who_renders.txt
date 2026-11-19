@@ -1,4 +1,4 @@
-# who_renders components/chat/data-stream-provider.tsx#DataStreamProvider : 2 routes (index 2026-11-19T06:00Z, fresh)
+# who_renders components/chat/data-stream-provider.tsx#DataStreamProvider : 2 routes, 1 direct entry (index 2026-11-19T06:00Z, fresh)
 /  app/(chat)/page.tsx:1  depth 1 [via layout]
 /chat/[id]  app/(chat)/chat/[id]/page.tsx:1  depth 1 [via layout]
 direct app/(chat)/layout.tsx:19#Layout

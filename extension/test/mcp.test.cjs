@@ -40,7 +40,7 @@ async function program(t, base) {
     'app/structure/layout.tsx': "import { Provider } from '../../fixture/providers';\nexport default function Layout({children}) { return Date.now() ? <Provider>{children}</Provider> : <main>{children}</main>; }",
     'app/api/neorion-test/route.ts': 'export function GET() {}',
     'app/api/neorion-test/[id]/route.ts': 'export function GET() {}',
-    'fixture/client.tsx': "import { Tooltip as Imported } from 'recharts'; import * as External from 'widgets';\nexport const X = Imported;\nexport const Y = External.Sub;\nexport function writeData() { return fetch('/api/neorion-test'); }",
+    'fixture/client.tsx': "import { Tooltip as Imported } from 'recharts'; import * as External from 'widgets'; import { TIMEOUT_MS } from 'widgets';\nexport const Timeout = TIMEOUT_MS; export const X = Imported;\nexport const Y = External.Sub;\nexport function writeData() { return fetch('/api/neorion-test'); }",
     'fixture/providers.tsx': "import { QueryProvider } from 'widgets';\nexport function Provider({children}) { return <QueryProvider>{children}</QueryProvider>; }\nexport function WrapperInside({children}) { return <div>{children}</div>; }",
     'fixture/use-client.ts': "import { writeData as send } from './client';\nexport function useClient() { return send(); }",
     'fixture/entry.ts': "import { useClient } from './use-client';\nexport function start() { return useClient(); }",
@@ -158,6 +158,7 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1$/m);
   assert.match(await client.text('who_renders', { component: 'Y' }), /^\/structure/m);
   assert.match(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /alias of widgets#Sub/);
+  assert.doesNotMatch(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /#Timeout/);
   assert.doesNotMatch(await client.text('api_consumers', { route: '/api/neorion-test', callers: 0 }), /^call/m);
   const callers = await client.text('api_consumers', { route: '/api/neorion-test', callers: 1 });
   assert.match(callers, /^call1 .*use-client.ts:2 writeData$/m);
@@ -176,7 +177,13 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.doesNotMatch(outputs.wrappers, /WrapperInside|QueryProvider/);
   assert.match(await client.text('wrappers', { route: '/structure', includeExternal: true }), /fixture\/providers.tsx:2 Provider, widgets#QueryProvider/);
 
-  fs.utimesSync(path.join(root, 'app/structure/page.tsx'), 1, 1);
+  const page = path.join(root, 'app/structure/page.tsx');
+  fs.utimesSync(page, 1, 1);
+  assert.equal(await client.text('who_renders', requests.who_renders), outputs.who_renders);
+  const source = fs.readFileSync(page, 'utf8');
+  fs.writeFileSync(page, source.replace('function Page', 'function Test'));
+  assert.equal(fs.statSync(page).size, index.files['app/structure/page.tsx'].size);
+  fs.utimesSync(page, 1, 1);
   const stale = await client.text('who_renders', requests.who_renders);
   assert.match(stale, /stale 1 files; regenerate the index/);
   assert.match(stale, /^\/structure .* \[stale\]$/m);
@@ -188,7 +195,7 @@ test('U11 returns tool errors for absent or invalid indexes and escaping or inva
   const missing = await client.call('search', { text: 'thing' });
   assert.equal(missing.isError, true);
   assert.equal(missing.content[0].text,
-    'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Graph" in VS Code.');
+    'Neorion index not found at .neorion/index.v1.json. Run "Neorion: Generate Architecture Map" in VS Code.');
   saveIndex(root, { ...emptyIndex(), schema: 2 });
   assert.deepEqual(await client.call('search', { text: 'thing' }), missing);
   saveIndex(root, emptyIndex());
