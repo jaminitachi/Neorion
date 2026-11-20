@@ -3,5 +3,6 @@
   "version": "0.5.0",
   "description": "Architecture queries for Next.js and React TypeScript projects.",
   "repository": "https://github.com/jaminitachi/Neorion",
+  "author": { "name": "jaminitachi" },
   "license": "MIT"
 }

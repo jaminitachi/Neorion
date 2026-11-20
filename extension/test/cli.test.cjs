@@ -6,6 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const { openMcp } = require('./mcp-helpers.cjs');
 
+const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
 const entry = path.join(packageRoot, 'dist/neorion.cjs');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -28,10 +29,11 @@ function fixture(t) {
 }
 
 test('CLI, extension, plugin and marketplace versions agree', () => {
-  const { version } = readJson(path.join(packageRoot, 'package.json'));
   assert.equal(version, readJson(path.join(__dirname, '../package.json')).version);
   assert.equal(version, readJson(path.join(packageRoot, '.claude-plugin/plugin.json')).version);
-  assert.equal(version, readJson(path.join(packageRoot, '../.claude-plugin/marketplace.json')).plugins[0].source.version);
+  const { source } = readJson(path.join(packageRoot, '../.claude-plugin/marketplace.json')).plugins[0];
+  assert.equal(source.package, name);
+  assert.equal(source.version, version);
   assert.equal(spawnSync(process.execPath, [entry, '--version'], { encoding: 'utf8' }).stdout.trim(), version);
 });
 
@@ -65,7 +67,7 @@ test('Codex setup installs the skill and prints config when Codex is unavailable
   const setup = run(['setup', 'codex'], { PATH: home, Path: home });
   assert.equal(setup.status, 0, setup.stderr);
   assert.match(setup.stdout, /\[mcp_servers\.neorion\]/);
-  assert.match(setup.stdout, /args = \["-y","neorion@0\.5\.0","mcp"\]/);
+  assert.ok(setup.stdout.includes(`args = ${JSON.stringify(['-y', `${name}@${version}`, 'mcp'])}`));
   assert.equal(fs.readFileSync(path.join(home, '.agents/skills/neorion/SKILL.md'), 'utf8'),
     fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
 });

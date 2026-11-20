@@ -1,5 +1,5 @@
 export const INDEX_PATH = '.neorion/index.v1.json';
-export const VERSION = '0.5.0';
+export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
   /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e|playwright)(?:\/|$)|\.(?:test|spec)\.[^/]+$/.test(file);

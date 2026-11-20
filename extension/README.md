@@ -25,8 +25,8 @@ offline with Node.js 18 or later. The project config locates the bundle at
 launch using the current workspace and local cache settings. Claude Code uses
 the project working directory, and Cursor and VS Code expand
 `${workspaceFolder}`. Run **Connect AI tools** to populate the cache for a new
-checkout or after moving a project. The optional pinned npm mode requires
-`neorion@0.5.0` to be published before it can run. Claude Code asks for
+checkout or after moving a project. The optional pinned npm mode works once
+the matching CLI version is published on npm. Claude Code asks for
 approval before first using a project MCP server.
 **Other tools: copy configuration snippet** uses absolute paths to the
 installed bundle and the project. Paste it into the global configuration for

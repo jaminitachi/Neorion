@@ -21,7 +21,16 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" graph
 node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers /
 ```
 
-To install the CLI from a tarball, run `npm --prefix "$NEORION_DIR/extension" run pack:cli`, then `npm install -g "$NEORION_DIR/extension/neorion-0.5.0.tgz"`. The installed command is `neorion`.
+To install the CLI from a tarball built from the checkout, run:
+
+```sh
+(
+  cd "$NEORION_DIR/neorion" || exit 1
+  archive=$(npm pack --silent) && npm install -g "./$archive"
+)
+```
+
+The installed command is `neorion`.
 
 Start Claude Code with the local plugin from your TypeScript project.
 
@@ -47,7 +56,18 @@ These commands depend on the npm release and, for Claude Code, the marketplace m
 
 ```sh
 npx -y neorion@0.5.0 graph
-claude plugin marketplace add jaminitachi/Neorion && claude plugin install neorion@neorion
+```
+
+In a Claude Code session, add the marketplace and install the plugin.
+
+```text
+/plugin marketplace add jaminitachi/Neorion
+/plugin install neorion@neorion
+```
+
+For Codex, register the MCP server and install the skill, then start a new session in your project.
+
+```sh
 npx -y neorion@0.5.0 setup codex
 ```
 

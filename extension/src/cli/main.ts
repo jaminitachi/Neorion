@@ -7,6 +7,7 @@ import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { findProject, missingTsconfig } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
+import { name as packageName } from '../../../neorion/package.json';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
@@ -28,7 +29,7 @@ function setupCodex(local: boolean) {
 
   const [command, ...args] = local
     ? [process.execPath, __filename, 'mcp']
-    : ['npx', '-y', `neorion@${VERSION}`, 'mcp'];
+    : ['npx', '-y', `${packageName}@${VERSION}`, 'mcp'];
   const result = spawnSync('codex', ['mcp', 'add', 'neorion', '--', command, ...args], { encoding: 'utf8' });
   if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
     console.log(`Add to ~/.codex/config.toml:\n[mcp_servers.neorion]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}`);
@@ -65,7 +66,7 @@ async function main([command, ...args]: string[]) {
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
-  if (!engine) throw new Error(`Neorion index missing. Run "npx neorion graph" in ${project}.`);
+  if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
   const [kind, target] = positionals;
   const limit = values.limit === undefined ? undefined : Number(values.limit);
   console.log(projectText(project, engine.query(queryName, { kind, target, limit })));

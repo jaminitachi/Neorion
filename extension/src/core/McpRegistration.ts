@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { applyEdits, findNodeAtLocation, modify, parseTree, getNodeValue, type ParseError, type Node } from 'jsonc-parser';
 import { workspaceCache } from './WorkspaceCache';
+import { name as packageName } from '../../../neorion/package.json';
 import { VERSION } from '../mcp/Index';
 
 export const MCP_TARGETS = {
@@ -174,7 +175,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
       ? { command: 'node', args: ['-e', launchBundle, '--', variable ? '${workspaceFolder}' : '.', projectArgument] }
-      : { command: 'npx', args: ['-y', `neorion@${VERSION}`, 'mcp', '--root', scopedProject] };
+      : { command: 'npx', args: ['-y', `${packageName}@${VERSION}`, 'mcp', '--root', scopedProject] };
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     if (parsed.entry && !equal(getNodeValue(parsed.entry), entry)) {

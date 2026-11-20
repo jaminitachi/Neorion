@@ -2,10 +2,19 @@
   "name": "neorion",
   "version": "0.5.0",
   "description": "Architecture queries for Next.js and React TypeScript projects.",
-  "repository": "https://github.com/jaminitachi/Neorion",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jaminitachi/Neorion.git",
+    "directory": "neorion"
+  },
+  "homepage": "https://github.com/jaminitachi/Neorion#readme",
+  "bugs": { "url": "https://github.com/jaminitachi/Neorion/issues" },
+  "author": "jaminitachi",
+  "keywords": ["nextjs", "react", "typescript", "architecture", "mcp", "claude-code", "codex"],
+  "publishConfig": { "access": "public" },
   "license": "MIT",
   "bin": { "neorion": "dist/neorion.cjs" },
   "engines": { "node": ">=18" },
   "scripts": { "prepack": "npm --prefix ../extension ci --include=dev && npm --prefix ../extension run build:cli" },
-  "files": ["dist/", "skills/", ".claude-plugin/", ".mcp.json", "LICENSE", "THIRD_PARTY_NOTICES.txt"]
+  "files": ["dist/neorion.cjs", "dist/graph.cjs", "dist/*.LEGAL.txt", "skills/neorion/SKILL.md", ".claude-plugin/plugin.json", ".mcp.json", "LICENSE", "THIRD_PARTY_NOTICES.txt"]
 }

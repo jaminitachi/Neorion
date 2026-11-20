@@ -13,3 +13,5 @@ extension/test/.fixtures/
 
 /neorion/LICENSE
 /neorion/THIRD_PARTY_NOTICES.txt
+
+/neorion/*.tgz

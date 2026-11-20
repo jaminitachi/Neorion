@@ -3,6 +3,9 @@
   "owner": {
     "name": "jaminitachi"
   },
+  "metadata": {
+    "description": "Architecture queries for Next.js and React TypeScript projects."
+  },
   "plugins": [
     {
       "name": "neorion",
