@@ -7,7 +7,7 @@ import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { findProject, missingTsconfig } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
-import { name as packageName } from '../../../neorion/package.json';
+import { mcpCommand } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
@@ -27,9 +27,7 @@ function setupCodex(local: boolean) {
   copyFileSync(join(__dirname, '../skills/neorion/SKILL.md'), join(skills, 'SKILL.md'));
   console.log('✓ Skill installed: ~/.agents/skills/neorion');
 
-  const [command, ...args] = local
-    ? [process.execPath, __filename, 'mcp']
-    : ['npx', '-y', `${packageName}@${VERSION}`, 'mcp'];
+  const { command, args } = mcpCommand({ localEntry: local ? __filename : undefined });
   const result = spawnSync('codex', ['mcp', 'add', 'neorion', '--', command, ...args], { encoding: 'utf8' });
   if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
     console.log(`Add to ~/.codex/config.toml:\n[mcp_servers.neorion]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}`);

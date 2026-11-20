@@ -7,8 +7,7 @@ const { test } = require('node:test');
 const { generate, register } = require('./run.cjs');
 const { openMcp } = require('./mcp-helpers.cjs');
 
-const { name, version } = require('../../neorion/package.json');
-const packageSpec = `${name}@${version}`;
+const { mcpCommand } = require('./mcp-command.cjs');
 const REGISTER = 'Register Neorion query tools (MCP)';
 const COPY = 'Other tools: copy configuration snippet';
 const files = { 'Claude Code': '.mcp.json', Cursor: '.cursor/mcp.json', 'VS Code (Copilot agent)': '.vscode/mcp.json' };
@@ -75,8 +74,9 @@ test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and rever
   assert.equal(edited.replace(/,\r\n\s+"neorion": \{[\s\S]*?\r\n\s*\}/, ''), original);
   for (const [target, file] of Object.entries(files)) {
     const entry = JSON.parse(env.read(file))[key(target)].neorion;
-    assert.equal(entry.command, 'npx');
-    assert.deepEqual(entry.args, ['-y', packageSpec, 'mcp', '--root', target === 'Claude Code' ? '.' : '${workspaceFolder}']);
+    const expected = mcpCommand({ root: target === 'Claude Code' ? '.' : '${workspaceFolder}' });
+    assert.equal(entry.command, expected.command);
+    assert.deepEqual(entry.args, expected.args);
     assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
   }
   assert.match(env.read('CLAUDE.md'), /Use neorion_query/);
@@ -97,7 +97,7 @@ test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and rever
 
 test('R3 preserves user edits and existing matching servers, and reverses bundled installation', async t => {
   const env = setup(t);
-  const matching = `{"mcpServers":{"neorion":{"type":"stdio","command":"npx","args":["-y","${packageSpec}","mcp","--root","."]}}}`;
+  const matching = JSON.stringify({ mcpServers: { neorion: { type: 'stdio', ...mcpCommand({ root: '.' }) } } });
   env.write('.mcp.json', matching);
   env.selections.targets = ['Claude Code'];
   await env.connect();

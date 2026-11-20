@@ -1,7 +1,7 @@
 import { join, resolve } from 'node:path';
 import { findProject, generateGraph } from '../core/Generate';
 import { missingTsconfig } from '../core/FindProject';
-import { name as packageName } from '../../../neorion/package.json';
+import { mcpCommand } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
 
 export function run(root: string) {
@@ -12,9 +12,7 @@ export function run(root: string) {
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
   console.log(`Neorion ${VERSION} · ${graph.metadata.name} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s`);
   console.log(`Overview: ${outputPath}`);
-  const mcp = /[\\/]_npx[\\/][^\\/]+[\\/]node_modules[\\/]/.test(__dirname)
-    ? { command: 'npx', args: ['-y', `${packageName}@${VERSION}`, 'mcp'] }
-    : { command: process.execPath, args: [join(__dirname, 'neorion.cjs'), 'mcp'] };
+  const mcp = mcpCommand({ localEntry: join(__dirname, 'neorion.cjs'), detectCache: true });
   console.log(`MCP:      ${JSON.stringify(mcp)}`);
 }
 

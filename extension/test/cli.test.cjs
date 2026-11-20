@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { openMcp } = require('./mcp-helpers.cjs');
+const { mcpCommand } = require('./mcp-command.cjs');
 
 const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
@@ -67,7 +68,9 @@ test('Codex setup installs the skill and prints config when Codex is unavailable
   const setup = run(['setup', 'codex'], { PATH: home, Path: home });
   assert.equal(setup.status, 0, setup.stderr);
   assert.match(setup.stdout, /\[mcp_servers\.neorion\]/);
-  assert.ok(setup.stdout.includes(`args = ${JSON.stringify(['-y', `${name}@${version}`, 'mcp'])}`));
+  const { command, args } = mcpCommand();
+  assert.ok(setup.stdout.includes(`command = ${JSON.stringify(command)}`));
+  assert.ok(setup.stdout.includes(`args = ${JSON.stringify(args)}`));
   assert.equal(fs.readFileSync(path.join(home, '.agents/skills/neorion/SKILL.md'), 'utf8'),
     fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
 });
