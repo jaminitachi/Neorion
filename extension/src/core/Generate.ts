@@ -2,6 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
 import { Project } from 'ts-morph';
+import { projectSnapshot } from './ProjectSnapshot';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
 import { writeGraph } from './serializers/GraphOutput';
@@ -28,6 +29,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
 
     options.onProgress?.("Analyzing project structure...");
 
+    const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
     const project = new Project({
         tsConfigFilePath: tsConfigPath,
     });
@@ -44,6 +46,8 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes, !!options.markdown);
+
+    if (analysis.index) analysis.index.projectSnapshot = snapshot;
 
     const directories = new Map<string, DirectoryMetadata>();
     const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
@@ -87,7 +91,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
 
     if (!options.markdown) return { graph };
     options.onProgress?.("Generating Markdown...");
-    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy) };
+    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
 }
 
 function staticMetadataFiles(directory: string): string[] {

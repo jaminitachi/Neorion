@@ -66,7 +66,6 @@ export function runQueries(root: string) {
 
 export async function serve(root: string, { autoBuild }: { autoBuild: boolean }) {
   const project = autoBuild ? findProject(root) : root;
-  if (project && autoBuild) void ensureFresh(project);
   let worker: Worker | undefined;
   let nextId = 0;
   const pending = new Map<number, (response?: Response) => void>();
@@ -127,13 +126,11 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
     if (!project) return reply(missingTsconfig(root), true);
-    const pendingBuild = autoBuild ? ensureFresh(project) : undefined;
-    let response = await ask(name, args);
-    if (pendingBuild && response?.text === missing) {
-      const build = await waitForBuild(project, pendingBuild);
+    if (autoBuild) {
+      const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);
-      response = await ask(name, args);
     }
+    const response = await ask(name, args);
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const text = response?.text ?? `# timeout ${legacyKind(name) ?? args.kind ?? 'query'} ${label} : 0 results (partial: timed out)`;

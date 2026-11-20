@@ -23,8 +23,8 @@ async function main() {
   const outputs = Object.assign({}, ...results.map(result => result.metafile.outputs));
   fs.chmodSync('../neorion/dist/neorion.cjs', 0o755);
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.txt']) fs.copyFileSync(file, '../neorion/' + file);
-  if (cliOnly) return;
-  fs.writeFileSync('out/bundle-meta.json', JSON.stringify({ outputs }));
+  fs.mkdirSync('out', { recursive: true });
+  fs.writeFileSync(cliOnly ? 'out/cli-bundle-meta.json' : 'out/bundle-meta.json', JSON.stringify({ outputs }));
 }
 main().catch(error => {
   console.error(error);

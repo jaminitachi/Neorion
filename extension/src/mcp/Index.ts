@@ -42,6 +42,7 @@ export interface QueryIndex {
   coverage?: 1 | 2;
   generator?: string;
   generatedAt: string;
+  projectSnapshot?: string;
   root: '.';
   files: Record<string, { size: number; mtimeMs: number; sha1: string }>;
   symbols: SymbolEntry[];

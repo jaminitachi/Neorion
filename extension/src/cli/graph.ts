@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { findProject, generateGraph } from '../core/Generate';
 import { missingTsconfig } from '../core/FindProject';
 import { VERSION } from '../mcp/Index';
@@ -11,8 +11,7 @@ export function run(root: string) {
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
   console.log(`Neorion ${VERSION} · ${graph.metadata.name} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s`);
   console.log(`Overview: ${outputPath}`);
-  console.log('Try:      npx neorion query who_renders DashboardShell');
-  console.log(`MCP:      ${JSON.stringify({ command: 'npx', args: ['-y', `neorion@${VERSION}`, 'mcp'] })}   (Cursor, Windsurf, Gemini CLI, …)`);
+  console.log(`MCP:      ${JSON.stringify({ command: process.execPath, args: [join(__dirname, "neorion.cjs"), "mcp"] })}`);
 }
 
 if (require.main === module) {

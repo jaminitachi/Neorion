@@ -6,5 +6,6 @@
   "license": "MIT",
   "bin": { "neorion": "dist/neorion.cjs" },
   "engines": { "node": ">=18" },
+  "scripts": { "prepack": "npm --prefix ../extension ci --include=dev && npm --prefix ../extension run build:cli" },
   "files": ["dist/", "skills/", ".claude-plugin/", ".mcp.json", "LICENSE", "THIRD_PARTY_NOTICES.txt"]
 }

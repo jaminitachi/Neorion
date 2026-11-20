@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
-import { validRelative } from './Query';
+import { projectSnapshot } from '../core/ProjectSnapshot';
 
 type BuildResult = { error?: string; building?: boolean };
-const checks = new Map<string, { time: number; build: Promise<BuildResult> }>();
+const builds = new Map<string, Promise<BuildResult>>();
 const enabled = () => process.env.NEORION_AUTOBUILD !== '0';
 const firstLine = (message: string) => message.split(/\r?\n/, 1)[0];
 
@@ -19,18 +19,7 @@ async function fresh(root: string, indexPath: string) {
     return false;
   }
   if (index?.schema !== 1 || index.generator !== VERSION || !index.files) return false;
-  const generated = Date.parse(index.generatedAt);
-  if (!Number.isFinite(generated)) return false;
-  const files = new Set([...Object.keys(index.files), 'tsconfig.json', 'package.json']);
-  for (const file of files) {
-    if (!validRelative(file)) return false;
-    try {
-      if ((await stat(join(root, file))).mtimeMs > generated) return false;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || Object.prototype.hasOwnProperty.call(index.files, file)) return false;
-    }
-  }
-  return true;
+  return typeof index.projectSnapshot === 'string' && index.projectSnapshot === projectSnapshot(root);
 }
 
 function liveOwner(pid: number) {
@@ -60,7 +49,10 @@ async function build(root: string) {
     if (handle) {
       try {
         await handle.writeFile(String(process.pid));
-        if (!await fresh(root, index)) await runGenerator(root);
+        if (!await fresh(root, index)) {
+          await runGenerator(root);
+          if (!await fresh(root, index)) throw new Error('Project changed during the build. Retry the query');
+        }
       } finally {
         await handle.close();
         await unlink(lock);
@@ -101,17 +93,17 @@ function runGenerator(root: string) {
   });
 }
 
-export function ensureFresh(root: string) {
+export function ensureFresh(root: string): Promise<BuildResult> {
   if (!enabled()) return Promise.resolve<BuildResult>({});
-  const previous = checks.get(root);
-  if (previous && Date.now() - previous.time <= 60_000) return previous.build;
+  const previous = builds.get(root);
+  if (previous) return previous;
 
-  const entry = { time: Infinity, build: build(root).then(
+  const pending = build(root).then(
     () => ({}),
-    (error: Error) => ({ error: `Graph build failed: ${firstLine(error.message)}. Run "npx neorion graph" in ${root} to see details.` })
-  ).finally(() => { entry.time = Date.now(); }) };
-  checks.set(root, entry);
-  return entry.build;
+    (error: Error) => ({ error: `Graph build failed: ${firstLine(error.message)}.` })
+  ).finally(() => { builds.delete(root); });
+  builds.set(root, pending);
+  return pending;
 }
 
 export async function waitForBuild(root: string, pending: Promise<BuildResult>): Promise<BuildResult> {

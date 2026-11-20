@@ -67,8 +67,8 @@
     "bundle": "node test/bundle.cjs",
     "test": "node test/run-tests.cjs",
     "check:notices": "node test/check-notices.cjs",
-    "build:cli": "node test/bundle.cjs --cli",
-    "pack:cli": "npm run build:cli && npm pack ../neorion"
+    "build:cli": "tsc --noEmit && node test/bundle.cjs --cli && npm run check:notices -- --cli",
+    "pack:cli": "npm pack ../neorion"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",

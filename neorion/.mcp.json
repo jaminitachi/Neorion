@@ -2,6 +2,7 @@
   "mcpServers": {
     "neorion": {
       "command": "node",
+      "alwaysLoad": true,
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/dist/neorion.cjs",
         "mcp",

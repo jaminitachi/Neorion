@@ -1,10 +1,61 @@
 # Neorion
 
-Neorion is a VS Code extension that turns a Next.js project using the App Router, the Pages Router, or both into a local architecture map. Open the cached overview to browse components, hooks, dependencies, and file relationships. Use the `neorion_query` MCP tool for structural queries. The interactive graph lets you open source files from their nodes.
+Neorion turns a Next.js TypeScript project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
 
-## Build and install
+## Install before release
 
-```bash
+Build the PR branch with Node.js 22 or later. The built CLI runs on Node.js 18 or later. Keep the clone at a stable path for Claude Code and Codex.
+
+```sh
+git clone --branch feat/cli-and-skill https://github.com/jaminitachi/Neorion.git
+cd Neorion
+NEORION_DIR="$PWD"
+npm --prefix extension ci
+npm --prefix extension run build:cli
+```
+
+From your TypeScript project, run the CLI directly from the clone.
+
+```sh
+node "$NEORION_DIR/neorion/dist/neorion.cjs" graph
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers /
+```
+
+To install the CLI from a tarball, run `npm --prefix "$NEORION_DIR/extension" run pack:cli`, then `npm install -g "$NEORION_DIR/extension/neorion-0.5.0.tgz"`. The installed command is `neorion`.
+
+Start Claude Code with the local plugin from your TypeScript project.
+
+```sh
+claude --plugin-dir "$NEORION_DIR/neorion"
+```
+
+Ask a normal architecture question such as “Which layouts or providers wrap the / route?” Approve the Neorion MCP call if prompted. For headless use, allow the MCP tool explicitly. The prompt comes before `--allowedTools`.
+
+```sh
+claude -p --model haiku --plugin-dir "$NEORION_DIR/neorion" "Which layouts or providers wrap the / route?" --allowedTools mcp__plugin_neorion_neorion__neorion_query
+```
+
+To register the local MCP server and install the skill for Codex, run the following command, then start a new Codex session in your project.
+
+```sh
+node "$NEORION_DIR/neorion/dist/neorion.cjs" setup codex --local
+```
+
+## After release only
+
+These commands depend on the npm release and, for Claude Code, the marketplace manifest on the GitHub default branch.
+
+```sh
+npx -y neorion@0.5.0 graph
+claude plugin marketplace add jaminitachi/Neorion && claude plugin install neorion@neorion
+npx -y neorion@0.5.0 setup codex
+```
+
+For headless Claude Code with the installed marketplace plugin, use the same `--allowedTools mcp__plugin_neorion_neorion__neorion_query` flag and omit `--plugin-dir`.
+
+## VS Code extension
+
+```sh
 cd extension
 npm ci
 npx vsce package
