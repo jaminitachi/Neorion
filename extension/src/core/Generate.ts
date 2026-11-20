@@ -27,7 +27,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     const pagesDir = routerDirectory('pages');
 
     options.onProgress?.("Analyzing project structure...");
-    
+
     const project = new Project({
         tsConfigFilePath: tsConfigPath,
     });
