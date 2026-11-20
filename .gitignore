@@ -10,3 +10,6 @@ codebase_graph.md
 extension/test/.fixtures/
 
 **/.neorion/graph/
+
+/neorion/LICENSE
+/neorion/THIRD_PARTY_NOTICES.txt

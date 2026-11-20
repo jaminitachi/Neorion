@@ -16,7 +16,7 @@ try {
     if (fetch.error) throw fetch.error;
     if (fetch.status !== 0) throw new Error('Failed to provision integration fixtures');
   }
-  const tests = spawnSync(process.execPath, ['--test', ...['graph.test.cjs', 'mcp.test.cjs', 'mcp-protocol.test.cjs', 'connect.test.cjs'].map(file => path.join(__dirname, file))], { stdio: 'inherit', env });
+  const tests = spawnSync(process.execPath, ['--test', ...['graph.test.cjs', 'mcp.test.cjs', 'mcp-protocol.test.cjs', 'connect.test.cjs', 'cli.test.cjs'].map(file => path.join(__dirname, file))], { stdio: 'inherit', env });
   if (tests.error) throw tests.error;
   process.exitCode = tests.status ?? 1;
 } finally {

@@ -1,5 +1,5 @@
 export const INDEX_PATH = '.neorion/index.v1.json';
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 
 export const isTestFile = (file: string) =>
   /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e|playwright)(?:\/|$)|\.(?:test|spec)\.[^/]+$/.test(file);
@@ -40,7 +40,7 @@ export type Reference = [symbol: number, file: string, line: number, kind: strin
 export interface QueryIndex {
   schema: 1;
   coverage?: 1 | 2;
-  generator: string;
+  generator?: string;
   generatedAt: string;
   root: '.';
   files: Record<string, { size: number; mtimeMs: number; sha1: string }>;

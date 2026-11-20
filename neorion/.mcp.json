@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "neorion": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/neorion.cjs",
+        "mcp",
+        "--root",
+        "${CLAUDE_PROJECT_DIR}"
+      ]
+    }
+  }
+}

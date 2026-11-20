@@ -1,0 +1,10 @@
+{
+  "name": "neorion",
+  "version": "0.5.0",
+  "description": "Architecture queries for Next.js and React TypeScript projects.",
+  "repository": "https://github.com/jaminitachi/Neorion",
+  "license": "MIT",
+  "bin": { "neorion": "dist/neorion.cjs" },
+  "engines": { "node": ">=18" },
+  "files": ["dist/", "skills/", ".claude-plugin/", ".mcp.json", "LICENSE", "THIRD_PARTY_NOTICES.txt"]
+}

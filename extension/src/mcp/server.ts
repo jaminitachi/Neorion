@@ -1,20 +1,21 @@
-#!/usr/bin/env node
 import { readFileSync, realpathSync, statSync } from 'node:fs';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { resolve } from 'node:path';
-import { isMainThread, parentPort, Worker, workerData } from 'node:worker_threads';
+import { parentPort, Worker } from 'node:worker_threads';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
+import { findProject, missingTsconfig } from '../core/FindProject';
+import { ensureFresh, projectText, waitForBuild } from './Build';
 import { legacyKind, queryName, tools } from './Tools';
 
 type Call = { id: number; name: string; args: unknown };
 type Response = { id: number; text: string; isError?: true };
 const missing = 'Neorion index missing or invalid. Run "Neorion: Generate Architecture Map" in VS Code.';
 
-function runQueries(root: string) {
+export function indexReader(root: string) {
   let engine: QueryEngine | undefined;
   let loaded: string | undefined;
   function readIndex() {
@@ -42,6 +43,11 @@ function runQueries(root: string) {
     return engine;
   }
 
+  return readIndex;
+}
+
+export function runQueries(root: string) {
+  const readIndex = indexReader(root);
   const port = parentPort!;
   readIndex();
   port.postMessage('ready');
@@ -58,17 +64,14 @@ function runQueries(root: string) {
   });
 }
 
-async function serve() {
-  const rootFlag = process.argv.indexOf('--root', 2);
-  if (rootFlag >= 0 && (!process.argv[rootFlag + 1] || process.argv[rootFlag + 1].startsWith('--'))) {
-    throw new Error('Usage: neorion-mcp [--root <path>]');
-  }
-  const root = resolve(rootFlag >= 0 ? process.argv[rootFlag + 1] : process.env.NEORION_ROOT ?? process.cwd());
+export async function serve(root: string, { autoBuild }: { autoBuild: boolean }) {
+  const project = autoBuild ? findProject(root) : root;
+  if (project && autoBuild) void ensureFresh(project);
   let worker: Worker | undefined;
   let nextId = 0;
   const pending = new Map<number, (response?: Response) => void>();
   function start() {
-    const current = new Worker(__filename, { workerData: root });
+    const current = new Worker(__filename, { workerData: project });
     worker = current;
     current.on('message', (response: Response | 'ready') => {
       if (response !== 'ready' && worker === current) pending.get(response.id)?.(response);
@@ -79,24 +82,26 @@ async function serve() {
       worker = undefined;
       for (const settle of pending.values()) settle();
     });
+    if (autoBuild && process.stdin.readableEnded) current.unref();
     return current;
   }
 
-  const initial = start();
-  // Include initial index loading in initialize latency and release the process on EOF.
-  await new Promise<void>((ready, reject) => {
-    initial.once('message', () => ready());
-    initial.once('error', reject);
-    initial.once('exit', () => reject(new Error('Neorion query worker exited before initialization.')));
-  });
+  if (project) {
+    const initial = start();
+    // Include initial index loading in initialize latency.
+    await new Promise<void>((ready, reject) => {
+      initial.once('message', () => ready());
+      initial.once('error', reject);
+      initial.once('exit', () => reject(new Error('Neorion query worker exited before initialization.')));
+    });
+  }
   const server = new Server({ name: 'neorion-mcp', version: VERSION }, { capabilities: { tools: {} } });
   server.onclose = () => { void worker?.terminate(); };
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
-  server.setRequestHandler(CallToolRequestSchema, async request => {
-    const { name, arguments: args = {} } = request.params;
-    if (name !== queryName && !legacyKind(name)) {
-      return { isError: true, content: [{ type: 'text', text: 'Unknown Neorion tool.' }] };
-    }
+  const reply = (text: string, isError?: boolean) =>
+    ({ ...(isError === undefined ? {} : { isError }), content: [{ type: 'text' as const, text }] });
+
+  async function ask(name: string, args: unknown) {
     const id = ++nextId;
     const current = worker ?? start();
     const response = await new Promise<Response | undefined>(done => {
@@ -115,18 +120,29 @@ async function serve() {
       });
       current.postMessage({ id, name, args } satisfies Call);
     });
+    return response;
+  }
+
+  server.setRequestHandler(CallToolRequestSchema, async request => {
+    const { name, arguments: args = {} } = request.params;
+    if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
+    if (!project) return reply(missingTsconfig(root), true);
+    const pendingBuild = autoBuild ? ensureFresh(project) : undefined;
+    let response = await ask(name, args);
+    if (pendingBuild && response?.text === missing) {
+      const build = await waitForBuild(project, pendingBuild);
+      if (build.error) return reply(build.error, !build.building);
+      response = await ask(name, args);
+    }
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const text = response?.text ?? `# timeout ${legacyKind(name) ?? args.kind ?? 'query'} ${label} : 0 results (partial: timed out)`;
-    return { ...(response?.isError ? { isError: true } : {}), content: [{ type: 'text', text }] };
+    return reply(autoBuild && !response?.isError ? projectText(project, text) : text, response?.isError);
   });
-  process.stdin.once('end', () => { void server.close(); });
+  process.stdin.once('end', () => {
+    // Let a piped CLI request finish even after its input reaches EOF.
+    if (autoBuild) worker?.unref();
+    else void server.close();
+  });
   await server.connect(new StdioServerTransport());
 }
-
-if (isMainThread) {
-  serve().catch(error => {
-    console.error(error.message);
-    process.exitCode = 1;
-  });
-} else runQueries(workerData as string);
