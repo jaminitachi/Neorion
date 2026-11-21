@@ -178,9 +178,9 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.match(outputs.rename_impact, /# not affected: .*writeData \(comment\).*writeData \(different symbol\)/);
   assert.doesNotMatch(outputs.rename_impact, /^use .*other.ts/m);
   assert.match(outputs.wrappers, /branch A[\s\S]+branch B/);
-  assert.match(outputs.wrappers, /Provider \[cond\]/);
-  assert.doesNotMatch(outputs.wrappers, /WrapperInside|QueryProvider/);
-  assert.match(await client.text('wrappers', { route: '/structure', includeExternal: true }), /fixture\/providers.tsx:2 Provider, widgets#QueryProvider/);
+  assert.match(outputs.wrappers, /Provider providers: QueryProvider \[cond\]/);
+  assert.doesNotMatch(outputs.wrappers, /WrapperInside/);
+  assert.match(await client.text('wrappers', { route: '/structure', includeExternal: true }), /fixture\/providers.tsx:2 Provider providers: widgets#QueryProvider/);
 
   const page = path.join(root, 'app/structure/page.tsx');
   fs.utimesSync(page, 1, 1);
@@ -232,6 +232,61 @@ test('who_renders follows a JSX callback returned by a hook to the page route', 
   const dialog = await client.text('who_renders', { component: 'EditorDialog', direct: true });
   assert.match(dialog, /^direct ui\/editor-dialog\.tsx:9#DialogCallback$/m);
   assert.doesNotMatch(dialog, /UnusedCallback/);
+});
+
+test('wrappers list rendered providers in chain order for each branch', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'context.ts', 'export const ConfigContext = { Provider: null };');
+  write(root, 'app/page.tsx', 'export default function Page() { return <main />; }');
+  write(root, 'app/layout.tsx', [
+    "import { Suspense, ExternalProvider, FallbackProvider } from 'widgets';",
+    "import { ConfigContext } from '../context';",
+    "import { ChildProvider } from './child-provider';",
+    'function InlineProvider({children}) { return <ExternalProvider>{children}</ExternalProvider>; }',
+    'export default function RootProvider({children}) {',
+    '  return Date.now() ? <Suspense><ConfigContext.Provider><InlineProvider><ExternalProvider><ChildProvider>{children}</ChildProvider></ExternalProvider></InlineProvider></ConfigContext.Provider></Suspense>',
+    '    : <FallbackProvider>{children}</FallbackProvider>;',
+    '}'
+  ].join('\n'));
+  write(root, 'app/child-provider.tsx', [
+    "import { ExternalProvider } from 'other-widgets';",
+    'const ChildContext = { Provider: null };',
+    'export function ChildProvider({children}) { return <ChildContext.Provider><ExternalProvider><fooProvider>{children}</fooProvider></ExternalProvider></ChildContext.Provider>; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  const output = await client.text('wrappers', { route: '/' });
+  assert.match(output, /^# providers \(outermost first, branch A\): RootProvider, ConfigContext\.Provider, InlineProvider, ExternalProvider, ChildProvider, ChildContext\.Provider, ExternalProvider$/m);
+  assert.match(output, /^# providers \(outermost first, branch B\): RootProvider, FallbackProvider$/m);
+  assert.match(output, /^1 app\/layout.tsx:5 RootProvider providers: ConfigContext\.Provider, InlineProvider, ExternalProvider \[cond\]$/m);
+  assert.match(output, /^2 app\/child-provider.tsx:3 ChildProvider providers: ChildContext\.Provider, ExternalProvider \[cond\]$/m);
+  assert.doesNotMatch(output, /Suspense|widgets#|context\.ts:|fooProvider/);
+  assert.match(output, /^# complete: indexed wrapper chains$/m);
+  const external = await client.text('wrappers', { route: '/', includeExternal: true });
+  assert.match(external, /RootProvider, widgets#Suspense providers: context\.ts#ConfigContext\.Provider, InlineProvider, widgets#ExternalProvider/);
+});
+
+test('API consumers flag generated sends and count distinct generated sender files', async t => {
+  const root = temporary(t);
+  const index = emptyIndex();
+  index.routes = [{ id: 1, url: '/api/data', file: 'app/api/data/route.ts', kind: 'api' }];
+  const files = ['generated/a.ts', 'src/__generated__/a.tsx', 'a.generated.js', 'a.gen.ts', 'a.gen.tsx', 'a.gen.js', 'a.gen.mtsx', 'a.gen.cjs', 'a.d.ts', 'a.d.mts', 'a.d.cts'];
+  index.fetches = [...files, 'z.ts', 'generated/a.ts', 'not-generated/b.ts'].map((file, i) => ({
+    file, line: i + 1, route: 1, method: 'GET', via: 'fetch'
+  }));
+  saveIndex(root, index);
+  const client = await openMcp(t, root);
+  const output = await client.text('api_consumers', { route: '/api/data' });
+  assert.match(output, /13 senders \(11 generated\), 0 callers/);
+  const sends = output.split('\n').filter(line => line.startsWith('send'));
+  assert.deepEqual(sends.slice(0, 2), ['send   not-generated/b.ts:14 GET fetch', 'send   z.ts:12 GET fetch']);
+  assert.deepEqual(sends.slice(2).map(line => /^send +([^:]+):\d+ GET fetch \[generated\]$/.exec(line)?.[1]),
+    [...files, 'generated/a.ts'].sort());
+  index.fetches = index.fetches.slice(0, 1);
+  saveIndex(root, index);
+  const single = await openMcp(t, root);
+  assert.match(await single.text('api_consumers', { route: '/api/data' }), /1 sender \(1 generated\), 0 callers/);
 });
 
 test('compact API queries cover route literals, SWR keys, wrappers, and uncertainty', async t => {

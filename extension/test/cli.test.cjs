@@ -23,7 +23,7 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["app/**/*"],"compilerOptions":{"jsx":"preserve"}}');
   fs.writeFileSync(path.join(root, 'app/page.tsx'), 'function DashboardShell() { return <main />; }\nexport default function Page() { return <DashboardShell />; }\n');
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, HOME: home, USERPROFILE: home };
-  const run = (args, overrides = {}) => spawnSync(process.execPath, [entry, ...args], {
+  const run = (args, overrides = {}, cliEntry = entry) => spawnSync(process.execPath, [cliEntry, ...args], {
     cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
   });
   return { root, cache, home, env, run };
@@ -63,16 +63,145 @@ test('CLI MCP builds a missing index and gives the same answer as query', { time
   assert.equal(run(['query', args.kind, args.target]).stdout.trimEnd(), cold);
 });
 
+test('CLI MCP rebuilds an index without the wrapper revision', { timeout: 20_000 }, async t => {
+  const { root, env, run } = fixture(t);
+  fs.writeFileSync(path.join(root, 'app/layout.tsx'),
+    'function ShellProvider({children}) { return <main>{children}</main>; }\n' +
+    'export default function Layout({children}) { return <ShellProvider>{children}</ShellProvider>; }');
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  const overview = /^Overview: (.+)$/m.exec(graph.stdout)[1];
+  const file = path.join(path.dirname(overview), '.neorion/index.v1.json');
+  const index = readJson(file);
+  const revision = index.wrapperRevision;
+  assert.ok(Number.isInteger(revision));
+  delete index.wrapperRevision;
+  for (const chain of Object.values(index.wrapChains)) {
+    for (const wrapper of chain) delete wrapper.provider;
+  }
+  fs.writeFileSync(file, JSON.stringify(index));
+
+  const server = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '1' }
+  });
+  const result = await server.text('query', { kind: 'wrappers', target: '/' });
+  assert.match(result, / providers: ShellProvider$/m);
+  assert.equal(readJson(file).wrapperRevision, revision);
+});
+
 test('Codex setup installs the skill and prints config when Codex is unavailable', t => {
-  const { home, run } = fixture(t);
+  const { home, root, run } = fixture(t);
   const setup = run(['setup', 'codex'], { PATH: home, Path: home });
   assert.equal(setup.status, 0, setup.stderr);
   assert.match(setup.stdout, /\[mcp_servers\.neorion\]/);
-  const { command, args } = mcpCommand();
-  assert.ok(setup.stdout.includes(`command = ${JSON.stringify(command)}`));
-  assert.ok(setup.stdout.includes(`args = ${JSON.stringify(args)}`));
+  assert.ok(setup.stdout.includes(`command = ${JSON.stringify(process.execPath)}`));
+  assert.ok(setup.stdout.includes(`args = ${JSON.stringify([entry, 'mcp'])}`));
   assert.equal(fs.readFileSync(path.join(home, '.agents/skills/neorion/SKILL.md'), 'utf8'),
     fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
+  const agents = path.join(root, 'AGENTS.md');
+  const hint = fs.readFileSync(agents, 'utf8');
+  const hintEntry = /\s/.test(entry) ? `"${entry}"` : entry;
+  assert.ok(hint.includes(`run \`node ${hintEntry} query <kind> <target>\``));
+  assert.match(setup.stdout, /Next: start `codex` in this project/);
+  assert.ok(setup.stdout.includes(agents + ' (written)'));
+  assert.ok(run(['setup', 'codex'], { PATH: home, Path: home }).stdout.includes(agents + ' (unchanged)'));
+  assert.equal(fs.readFileSync(agents, 'utf8'), hint);
+});
+
+test('Codex setup uses bare neorion only when PATH resolves to this entry', { skip: process.platform === 'win32' }, t => {
+  const { home, root, run } = fixture(t);
+  const bin = path.join(home, 'bin');
+  fs.mkdirSync(bin);
+  const link = path.join(bin, 'neorion');
+  fs.symlinkSync(entry, link);
+  const earlier = path.join(home, 'neorion');
+  fs.symlinkSync(process.execPath, earlier);
+  const hint = () => fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
+  const matchingPath = { PATH: bin };
+  assert.equal(run(['setup', 'codex'], matchingPath).status, 0);
+  assert.ok(hint().includes('run `neorion query'));
+  assert.equal(run(['setup', 'codex', '--local'], matchingPath).status, 0);
+  assert.ok(hint().includes('run `node '));
+  assert.equal(run(['setup', 'codex'], { PATH: [home, bin].join(path.delimiter) }).status, 0);
+  assert.ok(hint().includes('run `node '));
+});
+
+test('Codex setup writes the hint before failed registration', { skip: process.platform === 'win32' }, t => {
+  const { home, root, run } = fixture(t);
+  fs.writeFileSync(path.join(home, 'codex'),
+    '#!/bin/sh\n[ -f AGENTS.md ] || exit 2\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
+  const setup = run(['setup', 'codex'], { PATH: home });
+  assert.equal(setup.status, 1);
+  assert.match(setup.stderr, /registration failed/);
+  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')));
+});
+
+test('Codex setup chooses a temporary npm command or a quoted local entry', t => {
+  const { home, root, run } = fixture(t);
+  const cachedPackage = path.join(home, 'cache with spaces', '_npx', 'abc', 'node_modules', 'neorion');
+  const cachedEntry = path.join(cachedPackage, 'dist/neorion.cjs');
+  fs.mkdirSync(path.dirname(cachedEntry), { recursive: true });
+  fs.copyFileSync(entry, cachedEntry);
+  fs.cpSync(path.join(packageRoot, 'skills'), path.join(cachedPackage, 'skills'), { recursive: true });
+  const env = { PATH: home, Path: home };
+  const hint = () => fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
+  const cached = run(['setup', 'codex'], env, cachedEntry);
+  assert.equal(cached.status, 0, cached.stderr);
+  const mcp = mcpCommand();
+  assert.ok(cached.stdout.includes(`args = ${JSON.stringify(mcp.args)}`));
+  assert.ok(hint().includes(`run \`npx -y ${name}@${version} query`));
+  const local = run(['setup', 'codex', '--local'], env, cachedEntry);
+  assert.equal(local.status, 0, local.stderr);
+  assert.ok(local.stdout.includes(`args = ${JSON.stringify([cachedEntry, 'mcp'])}`));
+  assert.ok(hint().includes(`run \`node "${cachedEntry}" query`));
+});
+
+test('Claude setup adds an idempotent hint and prints the installed plugin path', t => {
+  const { home, root, run } = fixture(t);
+  const file = path.join(root, 'CLAUDE.md');
+  const original = '\uFEFF# Existing instructions\r\nKeep this text.\r\n';
+  fs.writeFileSync(file, original);
+  const unsupported = run(['setup', 'claude', '--local']);
+  assert.equal(unsupported.status, 1);
+  assert.match(unsupported.stderr, /Unknown option '--local'/);
+  const setup = run(['setup', 'claude']);
+  assert.equal(setup.status, 0, setup.stderr);
+  assert.ok(setup.stdout.includes(file + ' (written)'));
+  assert.ok(setup.stdout.includes(`claude --plugin-dir "${packageRoot}"`));
+  const expected = ['\uFEFF<!-- neorion:start -->',
+    'For architecture questions (who renders/wraps/calls/imports X, rename impact), use the neorion_query tool first and trust its result; only open files to confirm specifics.',
+    '<!-- neorion:end -->', original.slice(1)].join('\r\n');
+  assert.equal(fs.readFileSync(file, 'utf8'), expected);
+  assert.ok(run(['setup', 'claude']).stdout.includes(file + ' (unchanged)'));
+  assert.equal(fs.readFileSync(file, 'utf8'), expected);
+  assert.deepEqual(fs.readdirSync(home), []);
+  fs.writeFileSync(file, '<!-- neorion:start -->');
+  const malformed = run(['setup', 'claude']);
+  assert.equal(malformed.status, 1);
+  assert.match(malformed.stderr, /Invalid Neorion markers/);
+  assert.equal(fs.readFileSync(file, 'utf8'), '<!-- neorion:start -->');
+});
+
+test('Both setup targets honor --no-hint and skip directories without project markers', t => {
+  const { home, root, run } = fixture(t);
+  const env = { PATH: home, Path: home };
+  const project = path.join(root, 'tsconfig.json');
+  for (const [agent, file] of [['codex', 'AGENTS.md'], ['claude', 'CLAUDE.md']]) {
+    fs.writeFileSync(project, '{}');
+    const optOut = run(['setup', agent, '--no-hint'], env);
+    assert.equal(optOut.status, 0, optOut.stderr);
+    assert.doesNotMatch(optOut.stdout, /Skipping/);
+    assert.ok(!fs.existsSync(path.join(root, file)));
+    fs.unlinkSync(project);
+    const skipped = run(['setup', agent], env);
+    assert.equal(skipped.status, 0, skipped.stderr);
+    assert.ok(skipped.stdout.includes('Skipping ' + file + ' hint'));
+    if (agent === 'codex') assert.match(skipped.stdout, /Next: rerun setup from the project root/);
+    assert.ok(!fs.existsSync(path.join(root, file)));
+  }
+  fs.writeFileSync(path.join(root, 'package.json'), '{}');
+  assert.equal(run(['setup', 'claude']).status, 0);
+  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')));
 });
 
 test('CLI indexes a new page and waits for the updated graph after an edit', t => {

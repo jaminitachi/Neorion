@@ -1,8 +1,8 @@
 import { name, version } from '../../../neorion/package.json';
 
-const packageSpec = `${name}@${version}`;
+export const packageSpec = `${name}@${version}`;
 
-function isTemporaryCliInstall(entry: string): boolean {
+export function isTemporaryCliInstall(entry: string): boolean {
   const location = entry.replace(/\\/g, '/');
   return /(?:^|\/)_npx\/[^/]+\/node_modules\//.test(location)
     || /(?:^|\/)dlx\/[a-f0-9]{16,}\/(?:(?:pkg|[a-f0-9]+-[a-f0-9]+)\/)?node_modules\//.test(location)

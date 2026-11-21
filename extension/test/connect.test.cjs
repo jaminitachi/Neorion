@@ -79,7 +79,7 @@ test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and rever
     assert.deepEqual(entry.args, expected.args);
     assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
   }
-  assert.match(env.read('CLAUDE.md'), /Use neorion_query/);
+  assert.match(env.read('CLAUDE.md'), /use the neorion_query tool first and trust its result/);
   assert.doesNotMatch(env.read('CLAUDE.md'), /read the Neorion overview .*codebase_graph\.md/);
   assert.ok(env.messages.some(message => message.includes('Claude Code asks for approval')));
   await env.connect();
@@ -180,7 +180,7 @@ test('Connect migrates a managed workspace bundle and old instructions to the ca
   assert.ok(fs.existsSync(cachePath(env.file('.'), '.neorion/mcp/server.cjs')));
   assert.ok(!fs.existsSync(env.file('.neorion/mcp/server.cjs')));
   assert.ok(!fs.existsSync(env.file('.neorion/connect-state.json')));
-  assert.match(env.read('CLAUDE.md'), /^<!-- neorion:start -->\nUse neorion_query[^\n]*\n<!-- neorion:end -->\n$/);
+  assert.match(env.read('CLAUDE.md'), /^<!-- neorion:start -->\nFor architecture questions[^\n]+use the neorion_query tool first[^\n]*\n<!-- neorion:end -->\n$/);
   await env.disconnect();
   assert.ok(!fs.existsSync(env.file('.mcp.json')));
 });

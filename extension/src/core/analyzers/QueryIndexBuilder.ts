@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
-import { VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type Wrapper } from '../../mcp/Index';
+import { WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type Wrapper } from '../../mcp/Index';
 import { declarationsOf } from './ArchitectureFacts';
 
 type RelativePath = (source: SourceFile) => string;
@@ -28,7 +28,7 @@ export class QueryIndexBuilder {
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
-      schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
+      schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.', wrapperRevision: WRAPPER_INDEX_REVISION,
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], mentions: Object.create(null)
     };
