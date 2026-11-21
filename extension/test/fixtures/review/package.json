@@ -1,0 +1,15 @@
+{
+  "name": "review-fixture",
+  "dependencies": {
+    "absolute": "file:/home/secretuser/private/local-lib",
+    "encoded": "file:..%2Fprivate%2Flocal-lib",
+    "home": "link:~/private/local-lib",
+    "relative": "link:../private/local-lib",
+    "windows": "file:C:\\Users\\secretuser\\local-lib",
+    "local": "file:./src/lib",
+    "symlink": "file:outside/local-lib"
+  },
+  "devDependencies": {
+    "dev-only": "1.0.0"
+  }
+}

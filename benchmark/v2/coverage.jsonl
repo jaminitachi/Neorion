@@ -1,0 +1,20 @@
+{"id": "q01", "coverage": "complete", "evidence": "+reverse-renders.md lists all five SparklesIcon caller files."}
+{"id": "q02", "coverage": "complete", "evidence": "+reverse-renders.md lists all three MessageIcon caller files."}
+{"id": "q03", "coverage": "complete", "evidence": "+reverse-renders.md lists all five CopyIcon caller files."}
+{"id": "q04", "coverage": "complete", "evidence": "+reverse-renders.md lists the four artifact client.tsx files that render RedoIcon."}
+{"id": "q05", "coverage": "complete", "evidence": "components~chat.md marks data-stream-handler.tsx and message.tsx as (c) and records useDataStream on both."}
+{"id": "q06", "coverage": "complete", "evidence": "components~chat.md identifies the three (c) files with useSidebar among the five chat caller files."}
+{"id": "q07", "coverage": "complete", "evidence": "+reverse-hooks.md lists console.tsx and shell.tsx under useArtifactSelector."}
+{"id": "q08", "coverage": "complete", "evidence": "+reverse-hooks.md lists artifact-messages.tsx and messages.tsx under useMessages."}
+{"id": "q09", "coverage": "complete", "evidence": "+reverse-hooks.md lists sidebar-history-item.tsx and visibility-selector.tsx under useChatVisibility."}
+{"id": "q10", "coverage": "complete", "evidence": "artifacts~text.md records getSuggestions[action] on artifacts/text/client.tsx, and +reverse-actions.md lists it as the sole caller."}
+{"id": "q11", "coverage": "complete", "evidence": "+reverse-renders.md lists all five ProBannerSection caller files, across three areas."}
+{"id": "q12", "coverage": "complete", "evidence": "components~datarooms.md, components~sidebar.md, and pages~settings.md record the three AddSeatModal render edges."}
+{"id": "q13", "coverage": "partial", "evidence": "components~layouts.md, components~settings.md, and components~sidebar.md show three useIsAdmin callers. The selector omitted pages~settings.md, which records the fourth caller pages/settings/security.tsx."}
+{"id": "q14", "coverage": "complete", "evidence": "components~layouts.md, components~sidebar.md, and pages~settings.md each show one useSlackIntegration caller."}
+{"id": "q15", "coverage": "complete", "evidence": "pages.md shows the dashboard render edges to all four tables. components~analytics.md shows each table renders DataTablePagination."}
+{"id": "q16", "coverage": "complete", "evidence": "pages~view.md shows the three relevant page render edges. components~view.md and ee~features.md show the three matching render edges to AccessForm."}
+{"id": "q17", "coverage": "complete", "evidence": "ee~features.md marks all three useFeatureFlags callers in scope with (c)."}
+{"id": "q18", "coverage": "complete", "evidence": "ee~features.md marks the three cancellation modals and permissions-sheet.tsx with (c) and records useTeam in all four. Complete coverage followed the post-freeze selector adjustment."}
+{"id": "q19", "coverage": "complete", "evidence": "pages~datarooms.md shows three routes rendering components/links/links-table.tsx#LinksTable. pages~documents.md shows the fourth route. components~links.md shows that LinksTable renders LinksVisitors. Complete coverage followed the post-freeze selector adjustment."}
+{"id": "q20", "coverage": "complete", "evidence": "+reverse-renders.md lists all six page caller files for ViewerNotFound. pages~view.md confirms the route rows and direct render edges."}

@@ -1,0 +1,6 @@
+# search "data-stream" kind=any : 5 results (index 2026-11-19T06:00Z, fresh)
+hook components/chat/data-stream-provider.tsx:43#useDataStream
+component components/chat/data-stream-provider.tsx:21#DataStreamProvider  rendered by 1 components
+function components/chat/data-stream-handler.tsx:11#DataStreamHandler
+constant components/chat/data-stream-provider.tsx:19#DataStreamContext
+constant components/chat/data-stream-provider.tsx:8#DataStreamContextValue

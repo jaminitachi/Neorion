@@ -1,0 +1,6 @@
+# api_consumers /api/neorion-test -> src/app/api/neorion-test/route.ts:1 : 1 sender, 3 callers (index 2026-11-19T06:00Z, fresh)
+send   fixture/client.tsx:4 writeData GET fetch
+call1  fixture/dynamic.ts:1 writeData
+call1  fixture/use-client.ts:2 writeData
+call2  fixture/entry.ts:2 useClient
+# similar routes not matched: /api/neorion-test/[id]

@@ -4,10 +4,10 @@
   "publisher": "neOriOn",
   "repository": {
     "type": "git",
-    "url": "https://github.com/neOriOn/neorion"
+    "url": "https://github.com/jaminitachi/Neorion"
   },
   "description": "Optimizes codebase context for LLM coding tools by generating an architectural graph.",
-  "version": "0.2.2",
+  "version": "0.4.0",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -16,7 +16,9 @@
   ],
   "activationEvents": [
     "onCommand:neo.generateGraph",
-    "onCommand:neo.showGraph"
+    "onCommand:neo.showGraph",
+    "onCommand:neo.connectAITools",
+    "onCommand:neo.disconnectAITools"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -28,6 +30,14 @@
       {
         "command": "neo.showGraph",
         "title": "Neorion: Show Architecture Graph (Beta)"
+      },
+      {
+        "command": "neo.connectAITools",
+        "title": "Neorion: Connect AI tools"
+      },
+      {
+        "command": "neo.disconnectAITools",
+        "title": "Neorion: Disconnect AI tools"
       }
     ],
     "viewsContainers": {
@@ -51,16 +61,26 @@
   },
   "icon": "resources/icon.png",
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
-  },
-  "dependencies": {
-    "ts-morph": "^21.0.0",
-    "typescript": "^5.0.0"
+    "vscode:prepublish": "npm run compile && npm run check:notices",
+    "compile": "tsc --noEmit && npm run bundle",
+    "watch": "npm run bundle -- --watch",
+    "bundle": "node test/bundle.cjs",
+    "test": "node test/run-tests.cjs",
+    "check:notices": "node test/check-notices.cjs",
+    "pack:mcp": "npm run compile && npm run check:notices && node test/pack-mcp.cjs"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@types/node": "^20.0.0",
-    "@types/vscode": "^1.80.0"
-  }
+    "@types/semver": "^7.8.0",
+    "@types/vscode": "^1.80.0",
+    "@vscode/vsce": "4.1.1",
+    "esbuild": "0.28.2",
+    "js-tiktoken": "1.0.21",
+    "jsonc-parser": "3.3.1",
+    "semver": "^7.8.6",
+    "ts-morph": "^21.0.1",
+    "typescript": "^5.9.3"
+  },
+  "license": "MIT"
 }

@@ -1,0 +1,812 @@
+[
+ {
+  "repo": "rallly",
+  "type": "T1",
+  "band": "easy",
+  "subject": "src/app/[locale]/(space)/settings/profile/components/change-email-dialog.tsx#VerifyEmailChangeForm",
+  "order": "02a9825d87573224f5477f68f88f4bd6d24f934fcef719331c9f0600deb2867e",
+  "rankInPool": 0,
+  "poolSize": 59,
+  "data": {
+   "key": "src/app/[locale]/(space)/settings/profile/components/change-email-dialog.tsx#VerifyEmailChangeForm",
+   "name": "VerifyEmailChangeForm",
+   "file": "src/app/[locale]/(space)/settings/profile/components/change-email-dialog.tsx",
+   "directRenderers": 1,
+   "routes": [
+    "/[locale]/settings/profile"
+   ],
+   "pageFiles": [
+    "src/app/[locale]/(space)/settings/profile/page.tsx"
+   ],
+   "viaWrapper": [],
+   "roots": {
+    "/[locale]/settings/profile": "src/app/[locale]/(space)/settings/profile/page.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 3,
+   "maxDepth": 3,
+   "evidence": {
+    "/[locale]/settings/profile": [
+     "src/app/[locale]/(space)/settings/profile/page.tsx:86 <EmailAddressSetting>",
+     "src/app/[locale]/(space)/settings/profile/components/email-address-setting.tsx:25 <ChangeEmailDialog>",
+     "src/app/[locale]/(space)/settings/profile/components/change-email-dialog.tsx:322 <VerifyEmailChangeForm>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T1",
+  "band": "medium",
+  "subject": "src/components/image-upload/image-upload.tsx#ImageUploadControl",
+  "order": "085f84c94be6d55db8ab8e095f43958b97cdc474598dd9e1475aa545cf49a77a",
+  "rankInPool": 0,
+  "poolSize": 26,
+  "data": {
+   "key": "src/components/image-upload/image-upload.tsx#ImageUploadControl",
+   "name": "ImageUploadControl",
+   "file": "src/components/image-upload/image-upload.tsx",
+   "directRenderers": 3,
+   "routes": [
+    "/[locale]/control-panel/branding",
+    "/[locale]/settings/general",
+    "/[locale]/settings/profile"
+   ],
+   "pageFiles": [
+    "src/app/[locale]/control-panel/branding/page.tsx",
+    "src/app/[locale]/(space)/settings/general/page.tsx",
+    "src/app/[locale]/(space)/settings/profile/page.tsx"
+   ],
+   "viaWrapper": [],
+   "roots": {
+    "/[locale]/control-panel/branding": "src/app/[locale]/control-panel/branding/page.tsx",
+    "/[locale]/settings/general": "src/app/[locale]/(space)/settings/general/page.tsx",
+    "/[locale]/settings/profile": "src/app/[locale]/(space)/settings/profile/page.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 3,
+   "maxDepth": 4,
+   "evidence": {
+    "/[locale]/control-panel/branding": [
+     "src/app/[locale]/control-panel/branding/page.tsx:31 <BrandingSettings>",
+     "src/app/[locale]/control-panel/branding/components/branding-settings.tsx:309 <LogoUploadField>",
+     "src/app/[locale]/control-panel/branding/components/logo-upload-field.tsx:129 <ImageUploadControl>"
+    ],
+    "/[locale]/settings/general": [
+     "src/app/[locale]/(space)/settings/general/page.tsx:6 <GeneralSettingsPageClient>",
+     "src/app/[locale]/(space)/settings/general/page-client.tsx:74 <DetailsSection>",
+     "src/app/[locale]/(space)/settings/general/components/details-section.tsx:33 <SpaceSettingsForm>",
+     "src/app/[locale]/(space)/settings/general/components/space-settings-form.tsx:88 <ImageUploadControl>"
+    ],
+    "/[locale]/settings/profile": [
+     "src/app/[locale]/(space)/settings/profile/page.tsx:68 <ProfileSettings>",
+     "src/app/[locale]/(space)/settings/profile/components/profile-settings.tsx:59 <ProfilePicture>",
+     "src/app/[locale]/(space)/settings/profile/components/profile-picture.tsx:61 <ProfilePictureUpload>",
+     "src/app/[locale]/(space)/settings/profile/components/profile-picture.tsx:37 <ImageUploadControl>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T1",
+  "band": "hard",
+  "subject": "src/features/poll/components/finalize-poll-dialog.tsx#VoteShortcut",
+  "order": "0179de02bfa1b80766ae5678b4c666b2e8b3941750e102c42ac826400edfff7c",
+  "rankInPool": 0,
+  "poolSize": 25,
+  "data": {
+   "key": "src/features/poll/components/finalize-poll-dialog.tsx#VoteShortcut",
+   "name": "VoteShortcut",
+   "file": "src/features/poll/components/finalize-poll-dialog.tsx",
+   "directRenderers": 1,
+   "routes": [
+    "/[locale]/poll/[urlId]",
+    "/[locale]/poll/[urlId]/edit",
+    "/[locale]/polls/[pollId]",
+    "/[locale]/polls/[pollId]/activity",
+    "/[locale]/polls/[pollId]/dates",
+    "/[locale]/polls/[pollId]/responses"
+   ],
+   "pageFiles": [
+    "src/app/[locale]/(optional-space)/poll/[urlId]/page.tsx",
+    "src/app/[locale]/(optional-space)/poll/[urlId]/(edit)/edit/page.tsx",
+    "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/page.tsx",
+    "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/activity/page.tsx",
+    "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/dates/page.tsx",
+    "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/responses/page.tsx"
+   ],
+   "viaWrapper": [
+    "/[locale]/poll/[urlId]",
+    "/[locale]/poll/[urlId]/edit",
+    "/[locale]/polls/[pollId]",
+    "/[locale]/polls/[pollId]/activity",
+    "/[locale]/polls/[pollId]/dates",
+    "/[locale]/polls/[pollId]/responses"
+   ],
+   "roots": {
+    "/[locale]/poll/[urlId]": "src/app/[locale]/(optional-space)/poll/[urlId]/layout.tsx",
+    "/[locale]/poll/[urlId]/edit": "src/app/[locale]/(optional-space)/poll/[urlId]/layout.tsx",
+    "/[locale]/polls/[pollId]": "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx",
+    "/[locale]/polls/[pollId]/activity": "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx",
+    "/[locale]/polls/[pollId]/dates": "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx",
+    "/[locale]/polls/[pollId]/responses": "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx"
+   },
+   "refOnlyRoutes": [],
+   "minDepth": 5,
+   "maxDepth": 8,
+   "evidence": {
+    "/[locale]/poll/[urlId]": [
+     "src/app/[locale]/(optional-space)/poll/[urlId]/layout.tsx:32 <PollLayout>",
+     "src/features/poll/components/poll-layout.tsx:78 <Layout>",
+     "src/features/poll/components/poll-layout.tsx:68 <AdminControls>",
+     "src/features/poll/components/poll-layout.tsx:27 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ],
+    "/[locale]/poll/[urlId]/edit": [
+     "src/app/[locale]/(optional-space)/poll/[urlId]/layout.tsx:32 <PollLayout>",
+     "src/features/poll/components/poll-layout.tsx:78 <Layout>",
+     "src/features/poll/components/poll-layout.tsx:68 <AdminControls>",
+     "src/features/poll/components/poll-layout.tsx:27 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ],
+    "/[locale]/polls/[pollId]": [
+     "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx:53 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ],
+    "/[locale]/polls/[pollId]/activity": [
+     "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx:53 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ],
+    "/[locale]/polls/[pollId]/dates": [
+     "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx:53 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ],
+    "/[locale]/polls/[pollId]/responses": [
+     "src/app/[locale]/(space)/(dashboard)/polls/[pollId]/layout.tsx:53 <PollPrimaryActions>",
+     "src/features/poll/components/poll-primary-actions.tsx:121 <FinalizePollDialog>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:777 <FinalizeWizard>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:741 <NotifyStep>",
+     "src/features/poll/components/finalize-poll-dialog.tsx:414 <VoteShortcut>"
+    ]
+   }
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T2",
+  "band": "medium",
+  "subject": "/[locale]/quick-create",
+  "order": "0a353d9f87ab9d640db806a22a5b67d4ce2552bb563cd6e9bc21f150f16c35c1",
+  "rankInPool": 0,
+  "poolSize": 19,
+  "data": {
+   "route": "/[locale]/quick-create",
+   "pageFile": "src/app/[locale]/quick-create/page.tsx",
+   "files": [
+    "src/app/[locale]/layout.tsx",
+    "src/lib/feature-flags/client.tsx",
+    "src/features/instance-policy/client.tsx",
+    "src/features/branding/client.tsx",
+    "src/i18n/client.tsx",
+    "src/trpc/client/provider.tsx",
+    "src/lib/datetime/timezone-sync.tsx",
+    "src/app/[locale]/components/posthog-init.tsx"
+   ],
+   "steps": [
+    {
+     "file": "src/app/[locale]/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "src/lib/feature-flags/client.tsx",
+     "component": "FeatureFlagsProvider",
+     "via": "src/app/[locale]/layout.tsx:90 <FeatureFlagsProvider>"
+    },
+    {
+     "file": "src/features/instance-policy/client.tsx",
+     "component": "InstancePolicyProvider",
+     "via": "src/app/[locale]/layout.tsx:91 <InstancePolicyProvider>"
+    },
+    {
+     "file": "src/features/branding/client.tsx",
+     "component": "BrandingProvider",
+     "via": "src/app/[locale]/layout.tsx:92 <BrandingProvider>"
+    },
+    {
+     "file": "src/i18n/client.tsx",
+     "component": "I18nProvider",
+     "via": "src/app/[locale]/layout.tsx:95 <I18nProvider>"
+    },
+    {
+     "file": "src/trpc/client/provider.tsx",
+     "component": "TRPCProvider",
+     "via": "src/app/[locale]/layout.tsx:96 <TRPCProvider>"
+    },
+    {
+     "file": "src/lib/datetime/timezone-sync.tsx",
+     "component": "TimeZoneSync",
+     "via": "src/app/[locale]/layout.tsx:99 <TimeZoneSync>"
+    },
+    {
+     "file": "src/app/[locale]/components/posthog-init.tsx",
+     "component": "PostHogSessionInit",
+     "via": "src/app/[locale]/layout.tsx:102 <PostHogSessionInit>"
+    }
+   ],
+   "notes": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T2",
+  "band": "hard",
+  "subject": "/[locale]/members",
+  "order": "0b072b6f886b5b4b01b39c3e3335c2e12e55ebfd29a4c3614e64c93795091d22",
+  "rankInPool": 0,
+  "poolSize": 11,
+  "data": {
+   "route": "/[locale]/members",
+   "pageFile": "src/app/[locale]/(space)/(dashboard)/members/page.tsx",
+   "files": [
+    "src/app/[locale]/layout.tsx",
+    "src/lib/feature-flags/client.tsx",
+    "src/features/instance-policy/client.tsx",
+    "src/features/branding/client.tsx",
+    "src/i18n/client.tsx",
+    "src/trpc/client/provider.tsx",
+    "src/lib/datetime/timezone-sync.tsx",
+    "src/app/[locale]/components/posthog-init.tsx",
+    "src/app/[locale]/(space)/layout.tsx",
+    "src/features/user/client.tsx",
+    "src/lib/datetime/client.tsx",
+    "src/features/billing/client.tsx",
+    "src/features/space/client.tsx",
+    "src/app/[locale]/(space)/(dashboard)/layout.tsx",
+    "src/app/[locale]/(space)/(dashboard)/components/space-sidebar-provider.tsx",
+    "src/features/navigation/components/command-menu/command-menu.tsx"
+   ],
+   "steps": [
+    {
+     "file": "src/app/[locale]/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "src/lib/feature-flags/client.tsx",
+     "component": "FeatureFlagsProvider",
+     "via": "src/app/[locale]/layout.tsx:90 <FeatureFlagsProvider>"
+    },
+    {
+     "file": "src/features/instance-policy/client.tsx",
+     "component": "InstancePolicyProvider",
+     "via": "src/app/[locale]/layout.tsx:91 <InstancePolicyProvider>"
+    },
+    {
+     "file": "src/features/branding/client.tsx",
+     "component": "BrandingProvider",
+     "via": "src/app/[locale]/layout.tsx:92 <BrandingProvider>"
+    },
+    {
+     "file": "src/i18n/client.tsx",
+     "component": "I18nProvider",
+     "via": "src/app/[locale]/layout.tsx:95 <I18nProvider>"
+    },
+    {
+     "file": "src/trpc/client/provider.tsx",
+     "component": "TRPCProvider",
+     "via": "src/app/[locale]/layout.tsx:96 <TRPCProvider>"
+    },
+    {
+     "file": "src/lib/datetime/timezone-sync.tsx",
+     "component": "TimeZoneSync",
+     "via": "src/app/[locale]/layout.tsx:99 <TimeZoneSync>"
+    },
+    {
+     "file": "src/app/[locale]/components/posthog-init.tsx",
+     "component": "PostHogSessionInit",
+     "via": "src/app/[locale]/layout.tsx:102 <PostHogSessionInit>"
+    },
+    {
+     "file": "src/app/[locale]/(space)/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "src/app/[locale]/(space)/layout.tsx",
+     "component": "SpaceGate",
+     "via": "src/app/[locale]/(space)/layout.tsx:56 <SpaceGate>"
+    },
+    {
+     "file": "src/features/user/client.tsx",
+     "component": "UserProvider",
+     "via": "src/app/[locale]/(space)/layout.tsx:33 <UserProvider>"
+    },
+    {
+     "file": "src/lib/datetime/client.tsx",
+     "component": "DateTimeProvider",
+     "via": "src/app/[locale]/(space)/layout.tsx:34 <DateTimeProvider>"
+    },
+    {
+     "file": "src/features/billing/client.tsx",
+     "component": "TierProvider",
+     "via": "src/app/[locale]/(space)/layout.tsx:40 <TierProvider>"
+    },
+    {
+     "file": "src/features/space/client.tsx",
+     "component": "SpaceProvider",
+     "via": "src/app/[locale]/(space)/layout.tsx:41 <SpaceProvider>"
+    },
+    {
+     "file": "src/app/[locale]/(space)/(dashboard)/layout.tsx",
+     "component": "default",
+     "via": "App Router layout"
+    },
+    {
+     "file": "src/app/[locale]/(space)/(dashboard)/components/space-sidebar-provider.tsx",
+     "component": "SpaceSidebarProvider",
+     "via": "src/app/[locale]/(space)/(dashboard)/layout.tsx:45 <SpaceSidebarProvider>"
+    },
+    {
+     "file": "src/features/navigation/components/command-menu/command-menu.tsx",
+     "component": "CommandMenuProvider",
+     "via": "src/app/[locale]/(space)/(dashboard)/layout.tsx:46 <CommandMenuProvider>"
+    }
+   ],
+   "notes": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T3",
+  "band": "easy",
+  "subject": "src/features/poll/components/poll-context.tsx#usePoll",
+  "order": "0e207a2450095eeb67f13ad30b388a35bdcc81ee792eb286052f76f71e166b6d",
+  "rankInPool": 0,
+  "poolSize": 10,
+  "data": {
+   "key": "src/features/poll/components/poll-context.tsx#usePoll",
+   "name": "usePoll",
+   "file": "src/features/poll/components/poll-context.tsx",
+   "order": "b132b27c262ab511eaf05bb00cc9f7cea8aab64200d9815920b81285f84da6ed",
+   "files": [
+    "src/features/poll/components/desktop-poll/participant-row-form.tsx",
+    "src/features/poll/components/desktop-poll/participant-row.tsx",
+    "src/features/poll/components/mobile-poll.tsx",
+    "src/features/poll/components/mobile-poll/poll-options.tsx",
+    "src/features/poll/components/poll-context.tsx"
+   ],
+   "lines": {
+    "src/features/poll/components/poll-context.tsx": [
+     35,
+     207
+    ],
+    "src/features/poll/components/desktop-poll/participant-row-form.tsx": [
+     13,
+     37
+    ],
+    "src/features/poll/components/desktop-poll/participant-row.tsx": [
+     18,
+     119
+    ],
+    "src/features/poll/components/mobile-poll/poll-options.tsx": [
+     5,
+     24
+    ],
+    "src/features/poll/components/mobile-poll.tsx": [
+     26,
+     36
+    ]
+   },
+   "aliasFiles": [],
+   "barrelFiles": [],
+   "viaBarrelImporters": [],
+   "grepOnly": [
+    "src/app/[locale]/(optional-space)/poll/[urlId]/admin-page.tsx",
+    "src/features/poll/client.tsx",
+    "src/features/poll/components/comments-sheet.tsx",
+    "src/features/poll/components/desktop-poll.tsx",
+    "src/features/poll/components/edit-poll.tsx",
+    "src/features/poll/components/event-card.tsx",
+    "src/features/poll/components/finalize-poll-dialog.tsx",
+    "src/features/poll/components/invitee-list.tsx",
+    "src/features/poll/components/manage-poll.tsx",
+    "src/features/poll/components/manage-poll/use-csv-exporter.ts",
+    "src/features/poll/components/notification-toggle.tsx",
+    "src/features/poll/components/participant-dropdown.tsx",
+    "src/features/poll/components/poll-admin-menu.tsx",
+    "src/features/poll/components/poll-branding.tsx",
+    "src/features/poll/components/poll-context-provider.tsx",
+    "src/features/poll/components/poll-footer.tsx",
+    "src/features/poll/components/poll-layout.tsx",
+    "src/features/poll/components/poll-outcome.tsx",
+    "src/features/poll/components/poll-primary-actions.tsx",
+    "src/features/poll/components/use-poll-scores.ts",
+    "src/features/poll/components/visibility.tsx",
+    "src/features/poll/components/vote-options.tsx",
+    "src/features/poll/components/voting-form.tsx"
+   ],
+   "grepOnlyTests": [],
+   "renameOnly": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T3",
+  "band": "medium",
+  "subject": "src/lib/datetime/server.ts#getDeviceDateTimeConfig",
+  "order": "2ab19068e465289b48289d63c28e9c58065a0674848759e1db8b2765d52c4280",
+  "rankInPool": 0,
+  "poolSize": 12,
+  "data": {
+   "key": "src/lib/datetime/server.ts#getDeviceDateTimeConfig",
+   "name": "getDeviceDateTimeConfig",
+   "file": "src/lib/datetime/server.ts",
+   "order": "91b7842106b8d6e3e2b246bc8993279c6e108437efa0f9b5c1c89b6d9bd198ea",
+   "files": [
+    "src/app/[locale]/(auth)/layout.tsx",
+    "src/app/[locale]/(optional-space)/layout.tsx",
+    "src/app/[locale]/e/[id]/page.tsx",
+    "src/app/[locale]/invite/[urlId]/page.tsx",
+    "src/app/[locale]/invite/[urlId]/vote/layout.tsx",
+    "src/app/[locale]/quick-create/page.tsx",
+    "src/app/[locale]/setup/page.tsx",
+    "src/features/scheduled-event/actions.ts",
+    "src/lib/datetime/server.ts"
+   ],
+   "lines": {
+    "src/lib/datetime/server.ts": [
+     50
+    ],
+    "src/app/[locale]/(auth)/layout.tsx": [
+     10,
+     19
+    ],
+    "src/app/[locale]/(optional-space)/layout.tsx": [
+     17,
+     33
+    ],
+    "src/features/scheduled-event/actions.ts": [
+     29,
+     223,
+     268
+    ],
+    "src/app/[locale]/e/[id]/page.tsx": [
+     35,
+     106
+    ],
+    "src/app/[locale]/invite/[urlId]/page.tsx": [
+     19,
+     66
+    ],
+    "src/app/[locale]/invite/[urlId]/vote/layout.tsx": [
+     6,
+     19
+    ],
+    "src/app/[locale]/quick-create/page.tsx": [
+     12,
+     22
+    ],
+    "src/app/[locale]/setup/page.tsx": [
+     11,
+     35
+    ]
+   },
+   "aliasFiles": [],
+   "barrelFiles": [],
+   "viaBarrelImporters": [],
+   "grepOnly": [
+    "src/lib/datetime/device.tsx"
+   ],
+   "grepOnlyTests": [],
+   "renameOnly": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T3",
+  "band": "hard",
+  "subject": "src/lib/datetime/format.ts#formatDateTimeRange",
+  "order": "63574642dc1470c99dd22bc3208f658f861b2f01ea4e652a9e051886794472d9",
+  "rankInPool": 0,
+  "poolSize": 1,
+  "data": {
+   "key": "src/lib/datetime/format.ts#formatDateTimeRange",
+   "name": "formatDateTimeRange",
+   "file": "src/lib/datetime/format.ts",
+   "order": "13331eaef4e7a5172be095c398ac77470440414c876eeadac3638cefacd2aaae",
+   "files": [
+    "src/app/[locale]/invite/[urlId]/vote/components/accessible-ballot.tsx",
+    "src/features/scheduled-event/utils.ts",
+    "src/lib/datetime/client.tsx",
+    "src/lib/datetime/format.test.ts",
+    "src/lib/datetime/format.ts",
+    "src/lib/datetime/time.tsx"
+   ],
+   "lines": {
+    "src/lib/datetime/format.ts": [
+     184
+    ],
+    "src/lib/datetime/client.tsx": [
+     8
+    ],
+    "src/features/scheduled-event/utils.ts": [
+     2,
+     59
+    ],
+    "src/lib/datetime/time.tsx": [
+     5,
+     87
+    ],
+    "src/app/[locale]/invite/[urlId]/vote/components/accessible-ballot.tsx": [
+     103,
+     818
+    ],
+    "src/lib/datetime/format.test.ts": [
+     6,
+     153,
+     214,
+     225,
+     236,
+     274
+    ]
+   },
+   "aliasFiles": [
+    "src/lib/datetime/client.tsx"
+   ],
+   "barrelFiles": [],
+   "viaBarrelImporters": [],
+   "grepOnly": [
+    "src/features/poll/components/forms/poll-options-form/week-calendar.tsx"
+   ],
+   "grepOnlyTests": [],
+   "renameOnly": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T4",
+  "band": "medium",
+  "subject": "/api/event/[...route]",
+  "order": "aefa042be4fd5ad8375e96d1af77728ac1b4b46901ceb3c144667032ee5a4798",
+  "rankInPool": 0,
+  "poolSize": 1,
+  "data": {
+   "url": "/api/event/[...route]",
+   "routeFile": "src/app/api/event/[...route]/route.ts",
+   "files": [
+    "src/features/calendars/components/add-to-calendar-menu-items.tsx"
+   ],
+   "testFiles": [
+    "tests/invite-ballot.spec.ts"
+   ],
+   "occurrences": [
+    {
+     "file": "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "line": 24,
+     "literal": "/api/event/${…}/google-calendar",
+     "segs": "api/event/*/google-calendar",
+     "context": "JsxExpression",
+     "topDecl": "AddToCalendarMenuItems",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "line": 36,
+     "literal": "/api/event/${…}/office365",
+     "segs": "api/event/*/office365",
+     "context": "JsxExpression",
+     "topDecl": "AddToCalendarMenuItems",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "line": 48,
+     "literal": "/api/event/${…}/outlook",
+     "segs": "api/event/*/outlook",
+     "context": "JsxExpression",
+     "topDecl": "AddToCalendarMenuItems",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "line": 60,
+     "literal": "/api/event/${…}/yahoo",
+     "segs": "api/event/*/yahoo",
+     "context": "JsxExpression",
+     "topDecl": "AddToCalendarMenuItems",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "line": 71,
+     "literal": "/api/event/${…}/ics",
+     "segs": "api/event/*/ics",
+     "context": "JsxExpression",
+     "topDecl": "AddToCalendarMenuItems",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "tests/invite-ballot.spec.ts",
+     "line": 628,
+     "literal": "/api/event/${…}/google-calendar",
+     "segs": "api/event/*/google-calendar",
+     "context": "CallExpression:expect(\n      page.getByRole(\"menuitem\",",
+     "topDecl": null,
+     "topExported": false,
+     "ambiguous": false,
+     "alternatives": []
+    }
+   ],
+   "anyAmbiguous": false,
+   "selfMentions": 0,
+   "v4": {
+    "requestFunctions": [
+     "src/features/calendars/components/add-to-calendar-menu-items.tsx#AddToCalendarMenuItems"
+    ],
+    "nonFunctionSites": [],
+    "callerEvidence": {
+     "src/features/calendars/components/add-to-calendar-button.tsx": [
+      "src/features/calendars/components/add-to-calendar-button.tsx#AddToCalendarButton -> src/features/calendars/components/add-to-calendar-menu-items.tsx#AddToCalendarMenuItems"
+     ],
+     "src/features/scheduled-event/components/scheduled-event-row.tsx": [
+      "src/features/scheduled-event/components/scheduled-event-row.tsx#ScheduledEventRowActions -> src/features/calendars/components/add-to-calendar-menu-items.tsx#AddToCalendarMenuItems"
+     ]
+    },
+    "files": [
+     "src/features/calendars/components/add-to-calendar-button.tsx",
+     "src/features/calendars/components/add-to-calendar-menu-items.tsx",
+     "src/features/scheduled-event/components/scheduled-event-row.tsx"
+    ]
+   },
+   "wildcardRisk": []
+  }
+ },
+ {
+  "repo": "rallly",
+  "type": "T4",
+  "band": "hard",
+  "subject": "/api/storage/[...key]",
+  "order": "78e41114e775841ce2233884297df7a9fb0c1e206b5b4caa108e82ce985508cf",
+  "rankInPool": 0,
+  "poolSize": 1,
+  "data": {
+   "url": "/api/storage/[...key]",
+   "routeFile": "src/app/api/storage/[...key]/route.ts",
+   "files": [
+    "src/lib/storage/asset-upload.ts",
+    "src/lib/storage/resolve-storage-url.ts"
+   ],
+   "testFiles": [
+    "src/features/branding/utils.test.ts"
+   ],
+   "occurrences": [
+    {
+     "file": "src/lib/storage/resolve-storage-url.ts",
+     "line": 41,
+     "literal": "/api/storage/${…}",
+     "segs": "api/storage/*",
+     "context": "CallExpression:absoluteUrl",
+     "topDecl": "resolveStorageUrl",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/lib/storage/asset-upload.ts",
+     "line": 89,
+     "literal": "/api/storage/upload/${…}?token=${…}",
+     "segs": "api/storage/upload/*",
+     "context": "PropertyAssignment:url",
+     "topDecl": "createAssetUploadUrl",
+     "topExported": true,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/branding/utils.test.ts",
+     "line": 125,
+     "literal": "/api/storage/branding/logo.png",
+     "segs": "api/storage/branding/logo.png",
+     "context": "CallExpression:expect(config.logo.light).toContain",
+     "topDecl": null,
+     "topExported": false,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/branding/utils.test.ts",
+     "line": 126,
+     "literal": "/api/storage/branding/logo.png",
+     "segs": "api/storage/branding/logo.png",
+     "context": "CallExpression:expect(config.logo.dark).toContain",
+     "topDecl": null,
+     "topExported": false,
+     "ambiguous": false,
+     "alternatives": []
+    },
+    {
+     "file": "src/features/branding/utils.test.ts",
+     "line": 127,
+     "literal": "/api/storage/branding/icon.png",
+     "segs": "api/storage/branding/icon.png",
+     "context": "CallExpression:expect(config.logoIcon).toContain",
+     "topDecl": null,
+     "topExported": false,
+     "ambiguous": false,
+     "alternatives": []
+    }
+   ],
+   "anyAmbiguous": false,
+   "selfMentions": 0,
+   "v4": {
+    "requestFunctions": [
+     "src/lib/storage/resolve-storage-url.ts#resolveStorageUrl",
+     "src/lib/storage/asset-upload.ts#createAssetUploadUrl"
+    ],
+    "nonFunctionSites": [],
+    "callerEvidence": {
+     "src/features/branding/utils.ts": [
+      "src/features/branding/utils.ts#resolveBrandingConfig -> src/lib/storage/resolve-storage-url.ts#resolveStorageUrl"
+     ],
+     "src/emails/branding.ts": [
+      "src/emails/branding.ts#getSpaceBranding -> src/lib/storage/resolve-storage-url.ts#resolveStorageUrl"
+     ],
+     "src/components/optimized-avatar-image.tsx": [
+      "src/components/optimized-avatar-image.tsx#OptimizedAvatarImage -> src/lib/storage/resolve-storage-url.ts#resolveStorageUrl"
+     ],
+     "src/features/space/components/space-icon.tsx": [
+      "src/features/space/components/space-icon.tsx#SpaceIcon -> src/lib/storage/resolve-storage-url.ts#resolveStorageUrl"
+     ],
+     "src/features/space/actions.ts": [
+      "src/features/space/actions.ts#getSpaceImageUploadUrlAction -> src/lib/storage/asset-upload.ts#createAssetUploadUrl"
+     ],
+     "src/features/user/actions.ts": [
+      "src/features/user/actions.ts#getAvatarUploadUrlAction -> src/lib/storage/asset-upload.ts#createAssetUploadUrl"
+     ],
+     "src/app/[locale]/control-panel/branding/actions.ts": [
+      "src/app/[locale]/control-panel/branding/actions.ts#getBrandingLogoUploadUrlAction -> src/lib/storage/asset-upload.ts#createAssetUploadUrl"
+     ]
+    },
+    "files": [
+     "src/app/[locale]/control-panel/branding/actions.ts",
+     "src/components/optimized-avatar-image.tsx",
+     "src/emails/branding.ts",
+     "src/features/branding/utils.ts",
+     "src/features/space/actions.ts",
+     "src/features/space/components/space-icon.tsx",
+     "src/features/user/actions.ts",
+     "src/lib/storage/asset-upload.ts",
+     "src/lib/storage/resolve-storage-url.ts"
+    ]
+   },
+   "wildcardRisk": []
+  }
+ }
+]

@@ -1,0 +1,26 @@
+{
+ "written_at": "2026-11-19T19:05:08Z",
+ "seed": "neorion-bench-v7-20261120",
+ "rule": "Order candidates by ascending sha256(seed|repo). Take the first candidate whose default-branch HEAD passes every eligibility check; record each skipped candidate with its reason in repo_selection.json.",
+ "eligibility": [
+  "public GitHub repository, open source license",
+  "Next.js App Router app written in TypeScript (next dependency, tsconfig.json, an app/ or src/app/ directory with page.tsx files)",
+  "app folder has at least 20 page.tsx files and at least 10 API route handlers (app/**/api/**/route.ts or pages/api)",
+  "not one of: ai-chatbot, papermark, formbricks, taxonomy, commerce, dub (used in earlier Neorion benchmarks)"
+ ],
+ "excluded": ["vercel/ai-chatbot", "mfts/papermark", "formbricks/formbricks", "shadcn-ui/taxonomy", "vercel/commerce", "dubinc/dub"],
+ "candidates": [
+  "umami-software/umami",
+  "lukevella/rallly",
+  "unkeyed/unkey",
+  "elie222/inbox-zero",
+  "midday-ai/midday",
+  "openstatusHQ/openstatus",
+  "calcom/cal.com",
+  "lobehub/lobe-chat",
+  "sadmann7/skateshop",
+  "nextjs/saas-starter",
+  "documenso/documenso",
+  "makeplane/plane"
+ ]
+}

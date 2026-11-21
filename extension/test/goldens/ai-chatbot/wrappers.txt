@@ -1,0 +1,9 @@
+# wrappers / : 6 files, 1 page (index 2026-11-19T06:00Z, fresh)
+# not wrappers: rendered inside the page
+1 app/layout.tsx:51 RootLayout
+2 components/theme-provider.tsx:6 ThemeProvider
+3 components/ui/tooltip.tsx:8 TooltipProvider
+4 app/(chat)/layout.tsx:12 Layout, SidebarShell
+5 components/chat/data-stream-provider.tsx:21 DataStreamProvider, DataStreamContext.Provider
+6 components/ui/sidebar.tsx:55 SidebarProvider, SidebarContext.Provider, SidebarInset
+page app/(chat)/page.tsx:1

@@ -1,0 +1,509 @@
+{
+  "neorion_commit": "458532dee1522cb1a3098b128b57f348018f8485",
+  "dub_commit": "6b463b4bdd9ed2fd9aa416f67b5b77d317b1471e",
+  "generated_utc": "2026-11-19T11:09:50.930737+00:00",
+  "mcp_config": {
+    "mcpServers": {
+      "neorion": {
+        "command": "node",
+        "args": [
+          ".neorion/mcp/server.cjs",
+          "--root",
+          "."
+        ],
+        "type": "stdio"
+      }
+    }
+  },
+  "index_sha256": "dde8c0c7d830e5a444df290b95e4a6b0cb254b4e535a9abc71c8a68b55c8093c",
+  "tarball_sha256": "d1ba41d5e7926fcb5718f45f4b6bad9af017eb7ab91ce71c3abe4d6131693f3e",
+  "bundled_server_sha256": "11c7e28f578152d839ec34d65c4823599f963885cbaa52a4ddb0ba5e0b42f81e",
+  "graph_files": [
+    "codebase_graph.md",
+    "neorion/graph/+dependencies.md",
+    "neorion/graph/+reverse-actions.md",
+    "neorion/graph/+reverse-hooks.md",
+    "neorion/graph/+reverse-renders.md",
+    "neorion/graph/app.md",
+    "neorion/graph/app~(ee)+2.md",
+    "neorion/graph/app~(ee).md",
+    "neorion/graph/app~+5b+domain+5d+.md",
+    "neorion/graph/app~api+2.md",
+    "neorion/graph/app~api.md",
+    "neorion/graph/app~app.dub.co+10.md",
+    "neorion/graph/app~app.dub.co+11.md",
+    "neorion/graph/app~app.dub.co+12.md",
+    "neorion/graph/app~app.dub.co+13.md",
+    "neorion/graph/app~app.dub.co+14.md",
+    "neorion/graph/app~app.dub.co+15.md",
+    "neorion/graph/app~app.dub.co+16.md",
+    "neorion/graph/app~app.dub.co+2.md",
+    "neorion/graph/app~app.dub.co+3.md",
+    "neorion/graph/app~app.dub.co+4.md",
+    "neorion/graph/app~app.dub.co+5.md",
+    "neorion/graph/app~app.dub.co+6.md",
+    "neorion/graph/app~app.dub.co+7.md",
+    "neorion/graph/app~app.dub.co+8.md",
+    "neorion/graph/app~app.dub.co+9.md",
+    "neorion/graph/app~app.dub.co.md",
+    "neorion/graph/app~cloaked.md",
+    "neorion/graph/app~custom-uri-scheme.md",
+    "neorion/graph/app~password.md",
+    "neorion/graph/app~wellknown.md",
+    "neorion/graph/lib~ai.md",
+    "neorion/graph/lib~api.md",
+    "neorion/graph/lib~hooks.md",
+    "neorion/graph/lib~integrations.md",
+    "neorion/graph/lib~qr.md",
+    "neorion/graph/lib~swr+2.md",
+    "neorion/graph/lib~swr+3.md",
+    "neorion/graph/lib~swr+4.md",
+    "neorion/graph/lib~swr.md",
+    "neorion/graph/tests~tracks.md",
+    "neorion/graph/ui.md",
+    "neorion/graph/ui~account.md",
+    "neorion/graph/ui~analytics+2.md",
+    "neorion/graph/ui~analytics.md",
+    "neorion/graph/ui~auth.md",
+    "neorion/graph/ui~customers.md",
+    "neorion/graph/ui~domains.md",
+    "neorion/graph/ui~folders.md",
+    "neorion/graph/ui~guides.md",
+    "neorion/graph/ui~integrations.md",
+    "neorion/graph/ui~layout+2.md",
+    "neorion/graph/ui~layout.md",
+    "neorion/graph/ui~links+2.md",
+    "neorion/graph/ui~links+3.md",
+    "neorion/graph/ui~links+4.md",
+    "neorion/graph/ui~links.md",
+    "neorion/graph/ui~logs.md",
+    "neorion/graph/ui~modals+2.md",
+    "neorion/graph/ui~modals+3.md",
+    "neorion/graph/ui~modals+4.md",
+    "neorion/graph/ui~modals+5.md",
+    "neorion/graph/ui~modals+6.md",
+    "neorion/graph/ui~modals+7.md",
+    "neorion/graph/ui~modals+8.md",
+    "neorion/graph/ui~modals+9.md",
+    "neorion/graph/ui~modals.md",
+    "neorion/graph/ui~oauth-apps.md",
+    "neorion/graph/ui~placeholders+2.md",
+    "neorion/graph/ui~placeholders.md",
+    "neorion/graph/ui~shared+2.md",
+    "neorion/graph/ui~shared+3.md",
+    "neorion/graph/ui~shared.md",
+    "neorion/graph/ui~support.md",
+    "neorion/graph/ui~users.md",
+    "neorion/graph/ui~webhooks.md",
+    "neorion/graph/ui~workspaces.md"
+  ],
+  "registration": "neo.connectAITools with VS Code test host, CLAUDE.md and Claude Code, Use bundled server",
+  "claude_md_diff": "--- /dev/null\n+++ after/CLAUDE.md\n@@ -0,0 +1,4 @@\n+<!-- neorion:start -->\n+For who renders a component, which layouts and providers wrap a route, what a rename touches, or who calls an API route, call the neorion_* tools first. Their results list path:line; confirm by reading only those lines, do not re-derive the whole chain. codebase_graph.md is a human overview; do not read it for these questions. Use Grep for anything else.\n+<!-- neorion:state {\"created\":true} -->\n+<!-- neorion:end -->\n",
+  "files": {
+    "codebase_graph.md": {
+      "sha256": "8483cf13d04f75b051986089099910b56bb9dfd847c8c12ad3cc48202d226def",
+      "bytes": 10636
+    },
+    "neorion/graph/+dependencies.md": {
+      "sha256": "e4c9969d2f8ff20d99357b0d505e810145866c9b17965428918d54ba999a2664",
+      "bytes": 2633
+    },
+    "neorion/graph/+reverse-actions.md": {
+      "sha256": "6e26f07074996e9811605292735ee92894fc10a869d751178a5cb4d280ed687e",
+      "bytes": 649
+    },
+    "neorion/graph/+reverse-hooks.md": {
+      "sha256": "ded259abbb46e89fcc874c0feabd7b20be7a03f8f2d0f05c5a630c93e85f4339",
+      "bytes": 11016
+    },
+    "neorion/graph/+reverse-renders.md": {
+      "sha256": "942bf2427f3ce2c9c46568ff4a07b4dfe9806e93888dba581cd8715d4c58c979",
+      "bytes": 9793
+    },
+    "neorion/graph/app.md": {
+      "sha256": "1c07fe9e166c3e96b375cf88c65ffe1347aefaead85d6fe9aa3959fed2584444",
+      "bytes": 594
+    },
+    "neorion/graph/app~(ee)+2.md": {
+      "sha256": "fe2f8dd4704bdd21fa616ad31de5852374b568e32840766ded1da64c1aef2e8b",
+      "bytes": 1034
+    },
+    "neorion/graph/app~(ee).md": {
+      "sha256": "eecf4c4c467898407f35186f9b458de6056f2d68f515bbf62c2342259e2d2608",
+      "bytes": 4580
+    },
+    "neorion/graph/app~+5b+domain+5d+.md": {
+      "sha256": "84576855525123d39a369f9120cc55acbbbfbe50fe6c4d2995edd06a80816c80",
+      "bytes": 2273
+    },
+    "neorion/graph/app~api+2.md": {
+      "sha256": "4d3652a3d5c939fa1ed1b7ed92d2bb9772e983b1b9fd503d96c1ca2e9b2d994b",
+      "bytes": 4312
+    },
+    "neorion/graph/app~api.md": {
+      "sha256": "88af591e85396c0bf981af6a86471c313be9e0b7b3fc27848d07677992e22f79",
+      "bytes": 4894
+    },
+    "neorion/graph/app~app.dub.co+10.md": {
+      "sha256": "8be466a004eab74e8cc81f2e4cdec164a4ba7bedefd5c93d46359813e10cbdd9",
+      "bytes": 5457
+    },
+    "neorion/graph/app~app.dub.co+11.md": {
+      "sha256": "44db3dd2a62758604cebd8c55c7c48e4a56a491ccd23d552b1c908270fe80ed0",
+      "bytes": 5261
+    },
+    "neorion/graph/app~app.dub.co+12.md": {
+      "sha256": "77401c23cb09c77e18ae11c114d99075eb7fb6b387631bc8360d0363a67be275",
+      "bytes": 5049
+    },
+    "neorion/graph/app~app.dub.co+13.md": {
+      "sha256": "664397fa5c9587b95215c085822fe732536e90b64bd954a58076a7a0db50019a",
+      "bytes": 5689
+    },
+    "neorion/graph/app~app.dub.co+14.md": {
+      "sha256": "8ea6ad81cc6187ee23814b6d17b85475ab72146f96e7c8100d5ec99d088e13ea",
+      "bytes": 5168
+    },
+    "neorion/graph/app~app.dub.co+15.md": {
+      "sha256": "94fe604dacd1522a27277bbb54c600454d38b8ff9dcab01c23556fdc96cbdaf6",
+      "bytes": 5293
+    },
+    "neorion/graph/app~app.dub.co+16.md": {
+      "sha256": "dbbe934b8c4feff1b52a980213bc697e3480ecf9c7b04d546cfd0e2e2e61e3e2",
+      "bytes": 3458
+    },
+    "neorion/graph/app~app.dub.co+2.md": {
+      "sha256": "ff3f7fce6470a44c54c778e42ddb739b071469653a431e0ff6eeb7c74cb43829",
+      "bytes": 5293
+    },
+    "neorion/graph/app~app.dub.co+3.md": {
+      "sha256": "0d44e45b6fd4f675106e9d472c98e88f03e876d4e2e630cd8cc63b7c78c00902",
+      "bytes": 5561
+    },
+    "neorion/graph/app~app.dub.co+4.md": {
+      "sha256": "da527969a28ffa2e6e20e76afb6b8bb307c1bba877a9514a897bacaffa04ebc8",
+      "bytes": 5449
+    },
+    "neorion/graph/app~app.dub.co+5.md": {
+      "sha256": "fabedbf7b917ed219a8d77c07c10c07b9807f7f3fcddbdef5ed9eaf1afc3da8b",
+      "bytes": 5570
+    },
+    "neorion/graph/app~app.dub.co+6.md": {
+      "sha256": "93ee18f70d4742c0045826251b83e31772103667d8431906dfdb33e09b1c3df7",
+      "bytes": 4571
+    },
+    "neorion/graph/app~app.dub.co+7.md": {
+      "sha256": "48f452f8d1507614a3dd46dab9141c286fc5bc9b2c5d727d565253e0750d05ca",
+      "bytes": 4877
+    },
+    "neorion/graph/app~app.dub.co+8.md": {
+      "sha256": "e114487b110f705f2d202b4c6b86ddaa7405204fd20e59bdc53f3ed5aa1f1677",
+      "bytes": 5158
+    },
+    "neorion/graph/app~app.dub.co+9.md": {
+      "sha256": "ec218dd9908ab7b53e04abef87368a1cbf02a797d176907da2723d016922c603",
+      "bytes": 5280
+    },
+    "neorion/graph/app~app.dub.co.md": {
+      "sha256": "4e75300eecde74d2c7fc5e64db443390af7a8f58384e4d5e6bc6a06199d0efb1",
+      "bytes": 5365
+    },
+    "neorion/graph/app~cloaked.md": {
+      "sha256": "1007ec094df269cc412083a1dfd012e9395256d704dc0d3f49eff529c6734b94",
+      "bytes": 356
+    },
+    "neorion/graph/app~custom-uri-scheme.md": {
+      "sha256": "b78710fe0298648e5eb760725a4022f40c5ebb847cc68d5e4e14beae91e6f24f",
+      "bytes": 225
+    },
+    "neorion/graph/app~password.md": {
+      "sha256": "07218aa4e6c0eb65300eb1d756fd813c31eb4dd22f45e0a14b07b4052cc43622",
+      "bytes": 574
+    },
+    "neorion/graph/app~wellknown.md": {
+      "sha256": "24305d4577805e6a16f8d8bac276b51a3e41901144c40bf6f5ce45f9b5dc41c3",
+      "bytes": 123
+    },
+    "neorion/graph/lib~ai.md": {
+      "sha256": "e75175d2127e29816a8a837b7432aa84244d5bce9b89f4492bed7e542c04ff38",
+      "bytes": 160
+    },
+    "neorion/graph/lib~api.md": {
+      "sha256": "0f4ad1cc69d29742d7e8696c6107786eb25826c452b5d222359a777d4abb2ea2",
+      "bytes": 115
+    },
+    "neorion/graph/lib~hooks.md": {
+      "sha256": "1d455fe6a1023dd7d5bebe2bc6e5a0503209e7c8b44a5d7c37ccc1f942e303d5",
+      "bytes": 695
+    },
+    "neorion/graph/lib~integrations.md": {
+      "sha256": "26e7ad525adcbe4c2d58f448d7541a7a8b6b79b83a2ac42dd77350cbc56b0ab5",
+      "bytes": 2469
+    },
+    "neorion/graph/lib~qr.md": {
+      "sha256": "6f9b7320df1a545e16c946fd615d1d58c61ff699cb9ae1ba3b6faf76710d8e41",
+      "bytes": 557
+    },
+    "neorion/graph/lib~swr+2.md": {
+      "sha256": "66f31da54d89fb4ac4064d699cfffc72edd0a21c12279e0ea0ec3064802ffaee",
+      "bytes": 5294
+    },
+    "neorion/graph/lib~swr+3.md": {
+      "sha256": "d65d2cd036a56184b472767a59948e3aadf925c3869f428df4fb6b575679c6be",
+      "bytes": 5210
+    },
+    "neorion/graph/lib~swr+4.md": {
+      "sha256": "359d67a2520f5cbbafce91b60074e64ac54acc742f031f2e506210c89a9f09bb",
+      "bytes": 582
+    },
+    "neorion/graph/lib~swr.md": {
+      "sha256": "6b3c7ee3cf9a5b750d271ee0e6c85681b45dd699f0d6f1695b6148bf9c9f86b7",
+      "bytes": 5456
+    },
+    "neorion/graph/tests~tracks.md": {
+      "sha256": "c4895e818a9759d0fdbe8b1a826c1e9cbb97bfbafa0fdd02d331c1162f8d82af",
+      "bytes": 478
+    },
+    "neorion/graph/ui.md": {
+      "sha256": "62699ea54d7df2d4bd9b0e311444add01c6ba8c6b5fa044fdefdfc6afddb936a",
+      "bytes": 629
+    },
+    "neorion/graph/ui~account.md": {
+      "sha256": "41b83214b7ba9b33fc2e22f043bacb193424de9872d081e2e3ca58b4e7501a74",
+      "bytes": 590
+    },
+    "neorion/graph/ui~analytics+2.md": {
+      "sha256": "ff758257d82fe7d6b194d6e1fac3121f61fafb153e6f2c30862a1af846057c26",
+      "bytes": 2822
+    },
+    "neorion/graph/ui~analytics.md": {
+      "sha256": "6aad47bbaad6862e0dc389936e487f8b9297cc67b1c8967487d83e3a4e984997",
+      "bytes": 6114
+    },
+    "neorion/graph/ui~auth.md": {
+      "sha256": "6f6e1bc9e6c1558968deeb93cbb19e1a7a85989da2313e214262aa868ec6e60c",
+      "bytes": 2085
+    },
+    "neorion/graph/ui~customers.md": {
+      "sha256": "62606ccf58e59e193759ef22467f19330daeeee4179e3ffa90ff8229a3f35260",
+      "bytes": 3780
+    },
+    "neorion/graph/ui~domains.md": {
+      "sha256": "05634fbc4ab1c530ea872208c32b59026ccdf47ceddf123413189979698ee237",
+      "bytes": 4220
+    },
+    "neorion/graph/ui~folders.md": {
+      "sha256": "b0a1a8d6614838242043ba6b395b66efb68e72716e495f5ad48e3162e6b7a95a",
+      "bytes": 4875
+    },
+    "neorion/graph/ui~guides.md": {
+      "sha256": "83f43dfc15ec9177ed05f81b501b7f1d6479c9394f80e39ed8caefe26b712a0a",
+      "bytes": 1224
+    },
+    "neorion/graph/ui~integrations.md": {
+      "sha256": "2aee695ae4e4b0c55acb436c384cedde1c6e632d268a3a18062bb6fa6879db0a",
+      "bytes": 1773
+    },
+    "neorion/graph/ui~layout+2.md": {
+      "sha256": "d217825caa08b6fe7cd93d9cf5a3fd624437a56147b95cd7602d99465bf121a7",
+      "bytes": 3771
+    },
+    "neorion/graph/ui~layout.md": {
+      "sha256": "ee5d5a1b399e26b2ad77b66cf1098110f70415d666378700cde5ea103f8a9aab",
+      "bytes": 5803
+    },
+    "neorion/graph/ui~links+2.md": {
+      "sha256": "6185cecbd8f4d141bf9e75679574b9a9d299587a19002150960f5648a042bc50",
+      "bytes": 5886
+    },
+    "neorion/graph/ui~links+3.md": {
+      "sha256": "5eed0d4c443ca46cdf2ff2cdb00052ab9bb3fb32365580837ef77dcb57ab4f22",
+      "bytes": 5795
+    },
+    "neorion/graph/ui~links+4.md": {
+      "sha256": "ceabf9d46acd9ba20a2cbddcc5471c3bec52943783b5557b527154e7f08a1774",
+      "bytes": 1949
+    },
+    "neorion/graph/ui~links.md": {
+      "sha256": "aa0382fa43b908fd2a46a2271416276822b80544bba938a5e2f6513cb0879f2a",
+      "bytes": 6076
+    },
+    "neorion/graph/ui~logs.md": {
+      "sha256": "13cf4bbc5d26a4b567271478fe262b8542c2f67a1e8ea5561baef3849f2baf06",
+      "bytes": 782
+    },
+    "neorion/graph/ui~modals+2.md": {
+      "sha256": "2227d5e2b1ab17cee56a57fc814c2d90f497ce475e531ef10b7e2a888e0d8ff1",
+      "bytes": 5924
+    },
+    "neorion/graph/ui~modals+3.md": {
+      "sha256": "73a953e57f4aaf73d9e8d155c82c0a040e1c3540dbc814c004f7cdb65591bf88",
+      "bytes": 5511
+    },
+    "neorion/graph/ui~modals+4.md": {
+      "sha256": "46c97b8bd803e93d2a93df3da305193c00cb87b134cca5170547f126bcb79e3f",
+      "bytes": 6064
+    },
+    "neorion/graph/ui~modals+5.md": {
+      "sha256": "3c5bc8ebd7543d7f8bd58013bf48c96ad5dbb1e6da442e2977b52f9c52807bd2",
+      "bytes": 5691
+    },
+    "neorion/graph/ui~modals+6.md": {
+      "sha256": "c6eaeabab2e60f6d2cc61164fb86e99fdf8bc4e0f0966bed270472882b46625a",
+      "bytes": 5870
+    },
+    "neorion/graph/ui~modals+7.md": {
+      "sha256": "126ee789a04459fd2f9d3b56b35eda65e30f6ad3082f785a1f77850b1d0bf6e3",
+      "bytes": 5527
+    },
+    "neorion/graph/ui~modals+8.md": {
+      "sha256": "d0bf8cc510485a37bbcb5b7d729b0056337e5971837b36e7e079a25f11ad56a6",
+      "bytes": 5590
+    },
+    "neorion/graph/ui~modals+9.md": {
+      "sha256": "aefbf59185efaba34681815dc48ab8f218d59c480694b2ec73cc2b38813ac38e",
+      "bytes": 2028
+    },
+    "neorion/graph/ui~modals.md": {
+      "sha256": "795d74d1f286bbca67c7f4c7941b2ff99701692a8854610f7968324f3a2bba9f",
+      "bytes": 5969
+    },
+    "neorion/graph/ui~oauth-apps.md": {
+      "sha256": "79ed9294a027bb365051c4746de6ddaad79ab6fce87fe64933f68b1947ec9e81",
+      "bytes": 1271
+    },
+    "neorion/graph/ui~placeholders+2.md": {
+      "sha256": "8a73b5024207763893561769fff5702b78fa93a0bdb718a9ab87039cbb5c20e2",
+      "bytes": 1555
+    },
+    "neorion/graph/ui~placeholders.md": {
+      "sha256": "a75d092ad57f0444b63617c94101512ca0ee438eda5f72d049cdb963dbf83936",
+      "bytes": 5423
+    },
+    "neorion/graph/ui~shared+2.md": {
+      "sha256": "c143e7d76bd8a4943b725371da4296dbb1f6019e0511bb150a7f942d5d6d756d",
+      "bytes": 5911
+    },
+    "neorion/graph/ui~shared+3.md": {
+      "sha256": "a8d1d64a02cdf2fa3002631b88ff4881e2f12acd906beec7bce60937b482e1e7",
+      "bytes": 1164
+    },
+    "neorion/graph/ui~shared.md": {
+      "sha256": "24f7d780ee83ca0894e551dd247df057af02fda7a314571e8827eade7db94eef",
+      "bytes": 5552
+    },
+    "neorion/graph/ui~support.md": {
+      "sha256": "381c89c4265d2eec21f4ccb32aea99b7ba9cd91a7666e866713f6e1505aa9e22",
+      "bytes": 1518
+    },
+    "neorion/graph/ui~users.md": {
+      "sha256": "f69e9839142cb3ec1387348e878019016eca89832333cfafc169de442ab16c23",
+      "bytes": 185
+    },
+    "neorion/graph/ui~webhooks.md": {
+      "sha256": "3d210de28b6e4d0788f1cc0cb382dd9d4d2c476f4443af7a1c42fef595708dd2",
+      "bytes": 2370
+    },
+    "neorion/graph/ui~workspaces.md": {
+      "sha256": "10013c9b76ce3a87cab0a0e3a8cb82da3aa3bcb2e746d10cd445e59b3b0d9eb7",
+      "bytes": 5240
+    },
+    "CLAUDE.md": {
+      "sha256": "14857e1372d566c2cd5bf18db7159a60eda727a0bb44ae0396ffc659f28da222",
+      "bytes": 441
+    },
+    ".mcp.json": {
+      "sha256": "d6d81a6676469653505019144c25265f833dc8faed4c50d87455f88fee46ba6a",
+      "bytes": 186
+    },
+    ".neorion/index.v1.json": {
+      "sha256": "dde8c0c7d830e5a444df290b95e4a6b0cb254b4e535a9abc71c8a68b55c8093c",
+      "bytes": 1752490
+    },
+    ".neorion/mcp/server.cjs": {
+      "sha256": "11c7e28f578152d839ec34d65c4823599f963885cbaa52a4ddb0ba5e0b42f81e",
+      "bytes": 296209
+    }
+  },
+  "e3_files": [
+    "codebase_graph.md",
+    "neorion/graph/+dependencies.md",
+    "neorion/graph/+reverse-actions.md",
+    "neorion/graph/+reverse-hooks.md",
+    "neorion/graph/+reverse-renders.md",
+    "neorion/graph/app.md",
+    "neorion/graph/app~(ee)+2.md",
+    "neorion/graph/app~(ee).md",
+    "neorion/graph/app~+5b+domain+5d+.md",
+    "neorion/graph/app~api+2.md",
+    "neorion/graph/app~api.md",
+    "neorion/graph/app~app.dub.co+10.md",
+    "neorion/graph/app~app.dub.co+11.md",
+    "neorion/graph/app~app.dub.co+12.md",
+    "neorion/graph/app~app.dub.co+13.md",
+    "neorion/graph/app~app.dub.co+14.md",
+    "neorion/graph/app~app.dub.co+15.md",
+    "neorion/graph/app~app.dub.co+16.md",
+    "neorion/graph/app~app.dub.co+2.md",
+    "neorion/graph/app~app.dub.co+3.md",
+    "neorion/graph/app~app.dub.co+4.md",
+    "neorion/graph/app~app.dub.co+5.md",
+    "neorion/graph/app~app.dub.co+6.md",
+    "neorion/graph/app~app.dub.co+7.md",
+    "neorion/graph/app~app.dub.co+8.md",
+    "neorion/graph/app~app.dub.co+9.md",
+    "neorion/graph/app~app.dub.co.md",
+    "neorion/graph/app~cloaked.md",
+    "neorion/graph/app~custom-uri-scheme.md",
+    "neorion/graph/app~password.md",
+    "neorion/graph/app~wellknown.md",
+    "neorion/graph/lib~ai.md",
+    "neorion/graph/lib~api.md",
+    "neorion/graph/lib~hooks.md",
+    "neorion/graph/lib~integrations.md",
+    "neorion/graph/lib~qr.md",
+    "neorion/graph/lib~swr+2.md",
+    "neorion/graph/lib~swr+3.md",
+    "neorion/graph/lib~swr+4.md",
+    "neorion/graph/lib~swr.md",
+    "neorion/graph/tests~tracks.md",
+    "neorion/graph/ui.md",
+    "neorion/graph/ui~account.md",
+    "neorion/graph/ui~analytics+2.md",
+    "neorion/graph/ui~analytics.md",
+    "neorion/graph/ui~auth.md",
+    "neorion/graph/ui~customers.md",
+    "neorion/graph/ui~domains.md",
+    "neorion/graph/ui~folders.md",
+    "neorion/graph/ui~guides.md",
+    "neorion/graph/ui~integrations.md",
+    "neorion/graph/ui~layout+2.md",
+    "neorion/graph/ui~layout.md",
+    "neorion/graph/ui~links+2.md",
+    "neorion/graph/ui~links+3.md",
+    "neorion/graph/ui~links+4.md",
+    "neorion/graph/ui~links.md",
+    "neorion/graph/ui~logs.md",
+    "neorion/graph/ui~modals+2.md",
+    "neorion/graph/ui~modals+3.md",
+    "neorion/graph/ui~modals+4.md",
+    "neorion/graph/ui~modals+5.md",
+    "neorion/graph/ui~modals+6.md",
+    "neorion/graph/ui~modals+7.md",
+    "neorion/graph/ui~modals+8.md",
+    "neorion/graph/ui~modals+9.md",
+    "neorion/graph/ui~modals.md",
+    "neorion/graph/ui~oauth-apps.md",
+    "neorion/graph/ui~placeholders+2.md",
+    "neorion/graph/ui~placeholders.md",
+    "neorion/graph/ui~shared+2.md",
+    "neorion/graph/ui~shared+3.md",
+    "neorion/graph/ui~shared.md",
+    "neorion/graph/ui~support.md",
+    "neorion/graph/ui~users.md",
+    "neorion/graph/ui~webhooks.md",
+    "neorion/graph/ui~workspaces.md",
+    "CLAUDE.md"
+  ],
+  "prompts_sha256": "5c21db604b99ca9d91d6949e9ca4247b4064fec058fadccdc5eabce1fe6098f0"
+}

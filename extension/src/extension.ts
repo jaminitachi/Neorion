@@ -1,16 +1,18 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { validRange } from 'semver';
 import { Project } from 'ts-morph';
 import { RouteAnalyzer } from './core/analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './core/analyzers/ComponentAnalyzer';
-import { MarkdownSerializer } from './core/serializers/MarkdownSerializer';
-import { CodebaseGraph, LibraryInfo } from './core/types/GraphTypes';
+import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
+import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
+import { writeGraph } from './core/serializers/GraphOutput';
+import { CodebaseGraph, DirectoryMetadata, LibraryInfo } from './core/types/GraphTypes';
 
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Neo Architecture Map extension is now active!');
 
     // Command: Generate Graph (Markdown)
     let generateGraphDisposable = vscode.commands.registerCommand('neo.generateGraph', async () => {
@@ -21,6 +23,14 @@ export function activate(context: vscode.ExtensionContext) {
     let showGraphDisposable = vscode.commands.registerCommand('neo.showGraph', async () => {
         await runAnalysis(context, { visualize: true });
     });
+
+    for (const [command, connect] of [['neo.connectAITools', true], ['neo.disconnectAITools', false]] as const) {
+        context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
+            const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            if (!root) return vscode.window.showErrorMessage('No workspace folder open');
+            await configureAgents(root, connect ? await findProject(root) ?? root : root, connect, context);
+        }));
+    }
 
     // Auto-update on save
     let debounceTimer: NodeJS.Timeout;
@@ -43,6 +53,67 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showGraphDisposable);
 }
 
+async function findProject(root: string) {
+    if (fs.existsSync(path.join(root, 'tsconfig.json'))) return root;
+    const configs = await vscode.workspace.findFiles('**/tsconfig.json', '**/{node_modules,.next}/**');
+    const candidates = configs.map(uri => uri.fsPath).filter(file => isWithin(root, file));
+    candidates.sort((a, b) =>
+        path.relative(root, a).split(path.sep).length -
+        path.relative(root, b).split(path.sep).length || a.localeCompare(b));
+    return candidates.length ? path.dirname(candidates[0]) : undefined;
+}
+
+async function configureAgents(root: string, project: string, connect: boolean, context: vscode.ExtensionContext) {
+    try {
+        const choices = connect ? await vscode.window.showQuickPick([
+            ...AGENT_FILES.map(label => ({ label, picked: fs.existsSync(path.join(root, label)) })),
+            { label: REGISTER_MCP, picked: false },
+            { label: COPY_MCP, picked: false }
+        ], { canPickMany: true, placeHolder: 'Choose AI instruction files and optional MCP registration' }) :
+            AGENT_FILES.map(label => ({ label }));
+        if (!choices?.length) return;
+        const selected = choices.map(choice => choice.label);
+        let mcpTargets: McpTarget[] = [];
+        let bundled = false;
+        const bundleSource = path.resolve(context.extensionPath ?? path.dirname(__dirname), 'out/mcp.cjs');
+        if (selected.includes(REGISTER_MCP)) {
+            const targets = await vscode.window.showQuickPick(Object.entries(MCP_TARGETS).map(([label, target]) => ({
+                label, description: target.file
+            })), { canPickMany: true, placeHolder: 'Choose AI tools for workspace MCP registration' });
+            if (targets === undefined) return;
+            mcpTargets = targets.map(target => target.label as McpTarget);
+            if (mcpTargets.length) {
+                const mode = await vscode.window.showQuickPick(['Use bundled server', 'Use pinned npm package (requires publishing)'], {
+                    placeHolder: 'Choose how to launch the Neorion MCP server'
+                });
+                if (!mode) return;
+                bundled = mode === 'Use bundled server';
+            }
+        }
+        if (selected.includes(COPY_MCP)) {
+            const formats = ['Codex CLI', 'Windsurf', 'Gemini CLI'] as const;
+            const format = await vscode.window.showQuickPick([...formats], { placeHolder: 'Choose a global MCP config format' });
+            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project, bundleSource));
+        }
+        const instructions = selected.filter(label => AGENT_FILES.includes(label));
+        const configFiles = (connect ? mcpTargets : Object.keys(MCP_TARGETS) as McpTarget[])
+            .map(target => MCP_TARGETS[target].file);
+        const selectedPaths = new Set([...instructions, ...configFiles].map(file => path.join(root, file)));
+        const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
+        if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
+        const mcp = planMcp(root, project, mcpTargets, bundled,
+            bundleSource, connect);
+        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
+        mcp.commit();
+        const approval = mcpTargets.includes('Claude Code') ?
+            ' Claude Code asks for approval before using a project MCP server for the first time.' : '';
+        const registration = mcp.count ? ` Updated MCP registration for ${mcp.count} tool(s).` : '';
+        vscode.window.showInformationMessage(`Neorion updated ${count} AI instruction file(s).${registration}${approval}`);
+    } catch (error) {
+        vscode.window.showErrorMessage(`Could not update AI tools: ${error}`);
+    }
+}
+
 interface AnalysisOptions {
     markdown?: boolean;
     visualize?: boolean;
@@ -50,40 +121,26 @@ interface AnalysisOptions {
 
 async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOptions, silent: boolean = false) {
     const workspaceFolders = vscode.workspace.workspaceFolders;
-    if (!workspaceFolders) {
+    if (!workspaceFolders?.length) {
         if (!silent) vscode.window.showErrorMessage('No workspace folder open');
         return;
     }
 
-    let projectPath = workspaceFolders[0].uri.fsPath;
-    let tsConfigPath = path.join(projectPath, 'tsconfig.json');
-    let packageJsonPath = path.join(projectPath, 'package.json');
-    
-    // Attempt to find app directory
-    let appDir = path.join(projectPath, 'app');
-    if (!fs.existsSync(appDir)) {
-        appDir = path.join(projectPath, 'src', 'app');
+    const workspaceRoot = workspaceFolders[0].uri.fsPath;
+    const projectPath = await findProject(workspaceRoot);
+    if (!projectPath) {
+        if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
+        return;
     }
+    const tsConfigPath = path.join(projectPath, 'tsconfig.json');
 
-    // Smart detection: If not at root, search for it
-    if (!fs.existsSync(tsConfigPath)) {
-        if (!silent) vscode.window.showInformationMessage('tsconfig.json not found at root. Searching workspace...');
-        
-        const tsconfigs = await vscode.workspace.findFiles('**/tsconfig.json', '**/node_modules/**');
-        if (tsconfigs.length > 0) {
-            // Prefer 'neo_client' or closest to root
-            const preferred = tsconfigs.find(uri => uri.fsPath.includes('neo_client')) || tsconfigs[0];
-            tsConfigPath = preferred.fsPath;
-            projectPath = path.dirname(tsConfigPath); // Update project root
-            packageJsonPath = path.join(projectPath, 'package.json');
-            appDir = path.join(projectPath, 'app');
-            
-            if (!silent) vscode.window.showInformationMessage(`Found project at: ${vscode.workspace.asRelativePath(projectPath)}`);
-        } else {
-             if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
-             return;
-        }
-    }
+    const packageJsonPath = path.join(projectPath, 'package.json');
+    const routerDirectory = (name: string) => {
+        const root = path.join(projectPath, name);
+        return fs.existsSync(root) ? root : path.join(projectPath, 'src', name);
+    };
+    const appDir = routerDirectory('app');
+    const pagesDir = routerDirectory('pages');
 
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {
         try {
@@ -93,57 +150,73 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 tsConfigFilePath: tsConfigPath,
             });
 
-            // 1. Analyze Routes
-            // appDir is already calculated above
-            const routeAnalyzer = new RouteAnalyzer(project, appDir);
-            const routes = routeAnalyzer.analyze();
-            
-            // 2. Analyze Components
-            if (progress) progress.report({ message: "Scanning components..." });
-            const componentAnalyzer = new ComponentAnalyzer(project);
-            const sourceFiles = project.getSourceFiles().filter(sf => {
-                const filePath = sf.getFilePath();
-                return !filePath.includes('node_modules') && !filePath.includes('.next');
+            const sourceFiles = project.getSourceFiles().filter(file => {
+                const filePath = file.getFilePath();
+                return !file.isDeclarationFile() && isWithin(projectPath, filePath) &&
+                    !path.relative(projectPath, filePath).split(path.sep)
+                        .some(part => part === 'node_modules' || part === '.next');
             });
-            
-            const components = sourceFiles.flatMap(sf => componentAnalyzer.analyzeFile(sf));
+            const routes = new RouteAnalyzer(appDir, pagesDir, projectPath).analyze(sourceFiles, staticMetadataFiles(appDir));
+            const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
+            const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
+            const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
+            if (progress) progress.report({ message: "Scanning components and hooks..." });
+            const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes, !!options.markdown);
 
-            // 3. Analyze Dependencies
+            const directories = new Map<string, DirectoryMetadata>();
+            const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
+            for (const file of sourceFiles) {
+                const parts = path.relative(projectPath, file.getFilePath()).split(path.sep).slice(0, -1);
+                for (const [index, part] of parts.entries()) {
+                    const directory = parts.slice(0, index + 1).join('/');
+                    if (index > (parts[0] === 'src' ? 1 : 0)) break;
+                    const role = routeDirectories.includes(directory) ? 'routes' : part === 'components' ? 'ui_components' :
+                        part === 'hooks' ? 'react_hooks' : 'other';
+                    directories.set(directory, { path: directory, role });
+                }
+            }
+
+            let name = path.basename(projectPath);
             let libraries: LibraryInfo[] = [];
+            let devDependencies: string[] = [];
             if (fs.existsSync(packageJsonPath)) {
                 const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
-                const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-                libraries = Object.entries(deps).map(([name, version]) => ({
+                if (typeof pkg?.name === 'string' && pkg.name.trim()) name = pkg.name;
+                libraries = Object.entries(pkg?.dependencies ?? {}).map(([name, version]) => ({
                     name,
-                    version: version as string,
-                    role: 'dependency'
+                    version: safeDependencySpec(version)
                 }));
+                devDependencies = Object.keys(pkg?.devDependencies ?? {}).sort();
             }
 
             // 4. Construct Graph
             const graph: CodebaseGraph = {
                 metadata: {
-                    name: 'neo_client',
-                    framework: 'nextjs',
-                    router: 'app',
-                    language: 'ts',
-                    directories: []
+                    name,
+                    router: hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none'),
+                    directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
                 },
                 routes,
-                components,
-                hooks: [],
-                libraries
+                sourceFileCount: sourceFiles.length,
+                ...analysis,
+                libraries,
+                devDependencies
             };
 
             if (options.markdown) {
                 // 5. Serialize
                 if (progress) progress.report({ message: "Generating Markdown..." });
-                const serializer = new MarkdownSerializer();
-                const output = serializer.serialize(graph);
+                const outputPath = writeGraph(projectPath, graph);
 
-                // 6. Write to file and open
-                const outputPath = path.join(projectPath, 'codebase_graph.md');
-                fs.writeFileSync(outputPath, output);
+                const promptKey = 'neo.agentPromptShown:' + projectPath;
+                if (context.workspaceState && !context.workspaceState.get(promptKey)) {
+                    const saved = context.workspaceState.update(promptKey, true);
+                    void Promise.resolve(saved).then(async () => {
+                        const answer = await vscode.window.showInformationMessage(
+                            'Connect AI tools to the Neorion architecture map?', 'Yes');
+                        if (answer === 'Yes') await configureAgents(workspaceRoot, projectPath, true, context);
+                    }).catch(error => console.error(error));
+                }
 
                 if (!silent) {
                     const doc = await vscode.workspace.openTextDocument(outputPath);
@@ -155,7 +228,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             if (options.visualize) {
                 // 5. Visualize
                 if (progress) progress.report({ message: "Rendering Graph..." });
-                GraphVisualizer.createOrShow(context.extensionUri, graph);
+                GraphVisualizer.createOrShow(context.extensionUri, graph, projectPath);
             }
 
         } catch (error) {
@@ -181,6 +254,40 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             await run(progress);
         });
     }
+}
+
+function staticMetadataFiles(directory: string): string[] {
+    if (!fs.existsSync(directory)) return [];
+    return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
+        const file = path.join(directory, entry.name);
+        if (entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.')) {
+            return staticMetadataFiles(file);
+        }
+        return entry.isFile() && /^(?:opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name)
+            ? [file] : [];
+    }).sort();
+}
+
+function safeDependencySpec(value: unknown): string {
+    if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) return '[redacted]';
+    const spec = value.trim();
+    const isTag = (version: string) => /^[a-z][a-z0-9-]*$/i.test(version);
+    if (spec && (validRange(spec) || isTag(spec))) return spec;
+
+    const alias = /^npm:(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(?:@(.+))?$/i.exec(spec);
+    if (alias && (!alias[1] || validRange(alias[1]) || isTag(alias[1]))) return spec;
+
+    const workspace = /^workspace:(.+)$/.exec(spec)?.[1];
+    if (workspace && (validRange(workspace) || workspace === '^' || workspace === '~')) return spec;
+
+    // Accept repository URLs with plain path segments and an optional ref.
+    const git = /^(?:git\+)?https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[a-z0-9_-][a-z0-9_.-]*)+\.git(?:#[a-z0-9_-][a-z0-9_.-]*(?:\/[a-z0-9_-][a-z0-9_.-]*)*)?$/i;
+    return git.test(spec) ? spec : '[redacted]';
+}
+
+function isWithin(root: string, file: string): boolean {
+    const relative = path.relative(root, file);
+    return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
 
 export function deactivate() {}

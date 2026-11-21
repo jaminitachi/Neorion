@@ -1,0 +1,393 @@
+{
+ "t7a": {
+  "keyFile": "src/features/api-keys/utils.ts",
+  "keyExports": [
+   "randomToken",
+   "hashApiKey",
+   "generateApiKey",
+   "extractApiKeyPrefix",
+   "isLegacyApiKeyHash",
+   "verifyApiKey"
+  ],
+  "keyRefs": {
+   "randomToken": {
+    "src/features/api-keys/utils.ts": [
+     11,
+     27,
+     45,
+     46
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     8,
+     23,
+     29,
+     30,
+     35
+    ]
+   },
+   "hashApiKey": {
+    "src/features/api-keys/utils.ts": [
+     26,
+     52
+    ],
+    "src/app/api/middleware/api-key.ts": [
+     10,
+     112
+    ],
+    "src/app/api/v1/[...route]/route.test.ts": [
+     119,
+     344,
+     713,
+     735,
+     755,
+     775,
+     852,
+     3159
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     6,
+     74,
+     81,
+     81,
+     92
+    ]
+   },
+   "generateApiKey": {
+    "src/features/api-keys/utils.ts": [
+     40
+    ],
+    "src/features/api-keys/mutations.ts": [
+     6,
+     35
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     5,
+     43,
+     48,
+     49,
+     55,
+     61,
+     66,
+     114,
+     122,
+     128,
+     135,
+     144,
+     153,
+     207,
+     224
+    ]
+   },
+   "extractApiKeyPrefix": {
+    "src/features/api-keys/utils.ts": [
+     64
+    ],
+    "src/app/api/middleware/api-key.ts": [
+     9,
+     33
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     4,
+     99,
+     104,
+     109,
+     115
+    ]
+   },
+   "isLegacyApiKeyHash": {
+    "src/features/api-keys/utils.ts": [
+     79
+    ],
+    "src/app/api/middleware/api-key.ts": [
+     11,
+     92
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     7,
+     88,
+     92
+    ]
+   },
+   "verifyApiKey": {
+    "src/features/api-keys/utils.ts": [
+     89
+    ],
+    "src/app/api/middleware/api-key.ts": [
+     12,
+     83
+    ],
+    "src/app/api/v1/[...route]/route.test.ts": [
+     119,
+     847
+    ],
+    "src/features/api-keys/utils.test.ts": [
+     9,
+     67,
+     76,
+     123,
+     130,
+     139,
+     148,
+     154,
+     159,
+     171,
+     180,
+     188,
+     193,
+     198,
+     209,
+     214,
+     219,
+     228,
+     231
+    ]
+   }
+  },
+  "keyUsers": [
+   "src/app/api/middleware/api-key.ts",
+   "src/features/api-keys/mutations.ts"
+  ],
+  "verifierFile": "src/app/api/middleware/api-key.ts",
+  "verifierExports": [
+   "spaceApiKeyAuth"
+  ],
+  "verifierExportRefs": {
+   "spaceApiKeyAuth": {
+    "src/app/api/middleware/api-key.ts": [
+     171
+    ],
+    "src/app/api/v1/[...route]/route.ts": [
+     49,
+     419,
+     859,
+     916,
+     969,
+     1065,
+     1131,
+     1207
+    ]
+   }
+  },
+  "testFilesExcluded": [
+   "src/app/api/v1/[...route]/route.test.ts",
+   "src/features/api-keys/utils.test.ts"
+  ],
+  "files": [
+   "src/app/api/middleware/api-key.ts",
+   "src/app/api/v1/[...route]/route.ts",
+   "src/features/api-keys/mutations.ts",
+   "src/features/api-keys/utils.ts"
+  ]
+ },
+ "t7b": {
+  "sigFile": "src/lib/signature.ts",
+  "sigRefs": {
+   "createSignature": {
+    "src/lib/signature.ts": [
+     8,
+     34
+    ],
+    "src/lib/storage/asset-upload.ts": [
+     8,
+     19
+    ],
+    "src/features/notifications/utils.ts": [
+     1,
+     35
+    ],
+    "src/features/notifications/utils.test.ts": [
+     2,
+     47
+    ],
+    "src/lib/signature.test.ts": [
+     2,
+     9,
+     14,
+     20
+    ]
+   },
+   "verifySignature": {
+    "src/lib/signature.ts": [
+     23
+    ],
+    "src/lib/storage/asset-upload.ts": [
+     8,
+     35
+    ],
+    "src/features/notifications/utils.ts": [
+     1,
+     55
+    ],
+    "src/lib/signature.test.ts": [
+     2,
+     10,
+     21,
+     24,
+     28,
+     34
+    ]
+   }
+  },
+  "tokenFile": "src/features/notifications/utils.ts",
+  "createRefs": {
+   "src/features/notifications/utils.ts": [
+    25
+   ],
+   "src/features/poll/comment/actions.ts": [
+    10,
+    66
+   ],
+   "src/features/poll/participant/actions.ts": [
+    15,
+    161
+   ],
+   "src/features/notifications/utils.test.ts": [
+    4,
+    19,
+    24,
+    30,
+    35
+   ]
+  },
+  "parseRefs": {
+   "src/features/notifications/utils.ts": [
+    43
+   ],
+   "src/features/notifications/mutations.ts": [
+    8,
+    62
+   ],
+   "src/features/notifications/loaders.ts": [
+    9,
+    22
+   ],
+   "src/features/notifications/utils.test.ts": [
+    4,
+    20,
+    31,
+    40,
+    53,
+    59
+   ]
+  },
+  "createCallers": [
+   "src/features/poll/comment/actions.ts",
+   "src/features/poll/participant/actions.ts"
+  ],
+  "parseCallers": [
+   "src/features/notifications/loaders.ts",
+   "src/features/notifications/mutations.ts"
+  ],
+  "parseWrappers": {
+   "src/features/notifications/loaders.ts": [
+    "loadUnsubscribeTarget"
+   ],
+   "src/features/notifications/mutations.ts": [
+    "unsubscribeWithToken"
+   ]
+  },
+  "wrapperRefs": {
+   "src/features/notifications/loaders.ts#loadUnsubscribeTarget": {
+    "src/features/notifications/loaders.ts": [
+     21
+    ],
+    "src/app/[locale]/unsubscribe/[token]/page.tsx": [
+     5,
+     17
+    ]
+   },
+   "src/features/notifications/mutations.ts#unsubscribeWithToken": {
+    "src/features/notifications/mutations.ts": [
+     61
+    ],
+    "src/features/notifications/actions.ts": [
+     6,
+     42
+    ],
+    "src/app/api/unsubscribe/[token]/route.ts": [
+     2,
+     14
+    ]
+   }
+  },
+  "otherSignatureUsers": [
+   "src/lib/storage/asset-upload.ts"
+  ],
+  "files": [
+   "src/app/[locale]/unsubscribe/[token]/page.tsx",
+   "src/app/api/unsubscribe/[token]/route.ts",
+   "src/features/notifications/actions.ts",
+   "src/features/notifications/loaders.ts",
+   "src/features/notifications/mutations.ts",
+   "src/features/notifications/utils.ts",
+   "src/features/poll/comment/actions.ts",
+   "src/features/poll/participant/actions.ts",
+   "src/lib/signature.ts"
+  ]
+ },
+ "t6": {
+  "env": "NEXT_PUBLIC_TURNSTILE_SITE_KEY",
+  "reads": {
+   "src/env.ts": [
+    360
+   ],
+   "src/lib/feature-flags/config.ts": [
+    27
+   ],
+   "src/lib/auth.ts": [
+    86,
+    88
+   ],
+   "src/app/[locale]/(auth)/login/components/login-email-form.tsx": [
+    28
+   ],
+   "src/app/[locale]/e/[id]/components/rsvp-verify-email.tsx": [
+    30
+   ]
+  },
+  "files": [
+   "src/app/[locale]/(auth)/login/components/login-email-form.tsx",
+   "src/app/[locale]/e/[id]/components/rsvp-verify-email.tsx",
+   "src/env.ts",
+   "src/lib/auth.ts",
+   "src/lib/feature-flags/config.ts"
+  ],
+  "textHits": [
+   "src/app/[locale]/(auth)/login/components/login-email-form.tsx",
+   "src/app/[locale]/e/[id]/components/rsvp-verify-email.tsx",
+   "src/env.ts",
+   "src/lib/auth.ts",
+   "src/lib/feature-flags/config.ts"
+  ]
+ },
+ "t8": {
+  "key": "pollClosedDescription",
+  "uses": {
+   "src/features/poll/components/voting-form.tsx": [
+    "132 t()"
+   ],
+   "src/features/poll/components/participant-dropdown.tsx": [
+    "232 t()",
+    "298 t()"
+   ],
+   "src/features/poll/components/poll-outcome.tsx": [
+    "114 i18nKey"
+   ],
+   "src/features/poll/components/poll-response-actions.tsx": [
+    "132 t()"
+   ]
+  },
+  "files": [
+   "src/features/poll/components/participant-dropdown.tsx",
+   "src/features/poll/components/poll-outcome.tsx",
+   "src/features/poll/components/poll-response-actions.tsx",
+   "src/features/poll/components/voting-form.tsx"
+  ],
+  "textHits": [
+   "src/features/poll/components/participant-dropdown.tsx",
+   "src/features/poll/components/poll-outcome.tsx",
+   "src/features/poll/components/poll-response-actions.tsx",
+   "src/features/poll/components/voting-form.tsx"
+  ]
+ }
+}

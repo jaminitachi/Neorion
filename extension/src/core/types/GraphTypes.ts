@@ -1,82 +1,76 @@
-export interface CodebaseMetadata {
-  name: string;
-  framework: string;
-  router: 'app' | 'pages';
-  language: 'ts' | 'js';
-  directories: DirectoryMetadata[];
-}
+import type { QueryIndex } from '../../mcp/Index';
 
 export interface DirectoryMetadata {
   path: string;
-  role: 'routes' | 'ui_components' | 'react_hooks' | 'api_client' | 'state_management' | 'utils' | 'other';
+  role: 'routes' | 'ui_components' | 'react_hooks' | 'other';
 }
 
 export interface RouteNode {
   id: string;
-  path: string; // URL path e.g. /login
-  file: string; // File path e.g. app/login/page.tsx
-  type: 'page' | 'layout' | 'loading' | 'error' | 'not-found';
-  segment: string;
-  layoutId?: string; // ID of the parent layout
-  componentName?: string; // Name of the component rendered
+  path: string;
+  file: string;
+  type: 'page' | 'layout' | 'loading' | 'error' | 'not-found' | 'api' | 'robots' | 'sitemap' | 'opengraph-image' | 'template' | 'default' | 'global-error';
+  methods?: string[];
+  scope?: string;
+  wraps?: string[];
+  componentId?: string;
   isClient: boolean;
-  usesHooks?: string[]; // IDs of hooks used
-  domain?: string;
+  domain: string;
 }
 
 export interface ComponentNode {
   id: string;
   name: string;
   path: string;
-  kind: 'page' | 'layout' | 'ui' | 'form' | 'modal' | 'provider' | 'other';
   isClient: boolean;
-  domain?: string;
-  props: ComponentProp[];
-  imports: ImportInfo[];
-  hooks: string[]; // Names of hooks used
-  renders: string[]; // IDs of child components rendered
+  domain: string;
+  props: string[];
+  hooks: string[];
   description?: string;
-}
-
-export interface ComponentProp {
-  name: string;
-  type: string;
-  required: boolean;
-  defaultValue?: string;
-}
-
-export interface ImportInfo {
-  name: string;
-  from: string;
-  isExternal: boolean;
+  aliasOf?: string;
 }
 
 export interface HookNode {
   id: string;
   name: string;
-  path: string;
-  kind: 'business' | 'utility' | 'other';
-  signature: string;
-  dependencies: DependencyInfo[];
+  path?: string;
+  module?: string;
 }
 
-export interface DependencyInfo {
-  type: 'api' | 'store' | 'hook' | 'component' | 'other';
-  name: string;
+export interface ComponentEdge {
   from: string;
+  to: string;
+  type: 'imports' | 'renders' | 'uses-action';
 }
 
 export interface LibraryInfo {
   name: string;
   version: string;
-  role: string;
-  usage?: string;
 }
 
+export interface FactValue {
+  depth: number;
+  fanOut: number;
+  layoutOnly?: boolean;
+}
+
+export type DetailFacts = Map<string, Map<string, FactValue>>;
+
 export interface CodebaseGraph {
-  metadata: CodebaseMetadata;
+  metadata: {
+    name: string;
+    router: 'app' | 'pages' | 'mixed' | 'none';
+    directories: DirectoryMetadata[];
+  };
   routes: RouteNode[];
+  index?: QueryIndex;
+  sourceFileCount: number;
+  facts: DetailFacts;
   components: ComponentNode[];
   hooks: HookNode[];
+  edges: ComponentEdge[];
   libraries: LibraryInfo[];
+  devDependencies: string[];
+  actions: string[];
+  fileHooks: Map<string, { hooks: string[]; isClient: boolean }>;
 }

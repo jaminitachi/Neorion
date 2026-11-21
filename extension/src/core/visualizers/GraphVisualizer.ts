@@ -1,3 +1,5 @@
+import * as path from 'path';
+import { randomBytes } from 'crypto';
 import * as vscode from 'vscode';
 import { CodebaseGraph } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -8,7 +10,7 @@ export class GraphVisualizer {
     private readonly _extensionUri: vscode.Uri;
     private _disposables: vscode.Disposable[] = [];
 
-    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    private constructor(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, private projectRoot: string) {
         this._panel = panel;
         this._extensionUri = extensionUri;
 
@@ -33,14 +35,17 @@ export class GraphVisualizer {
 
     private async openFile(filePath: string) {
         try {
-            const doc = await vscode.workspace.openTextDocument(filePath);
+            const fullPath = path.resolve(this.projectRoot, filePath);
+            const relative = path.relative(this.projectRoot, fullPath);
+            if (!relative || relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) return;
+            const doc = await vscode.workspace.openTextDocument(fullPath);
             await vscode.window.showTextDocument(doc);
         } catch (e) {
             vscode.window.showErrorMessage(`Failed to open file: ${filePath}`);
         }
     }
 
-    public static createOrShow(extensionUri: vscode.Uri, graph: CodebaseGraph) {
+    public static createOrShow(extensionUri: vscode.Uri, graph: CodebaseGraph, projectRoot: string) {
         const column = vscode.window.activeTextEditor
             ? vscode.window.activeTextEditor.viewColumn
             : undefined;
@@ -48,6 +53,7 @@ export class GraphVisualizer {
         // If we already have a panel, show it.
         if (GraphVisualizer.currentPanel) {
             GraphVisualizer.currentPanel._panel.reveal(column);
+            GraphVisualizer.currentPanel.projectRoot = projectRoot;
             GraphVisualizer.currentPanel.update(graph);
             return;
         }
@@ -66,7 +72,7 @@ export class GraphVisualizer {
             }
         );
 
-        GraphVisualizer.currentPanel = new GraphVisualizer(panel, extensionUri);
+        GraphVisualizer.currentPanel = new GraphVisualizer(panel, extensionUri, projectRoot);
         GraphVisualizer.currentPanel.update(graph);
     }
 
@@ -89,9 +95,12 @@ export class GraphVisualizer {
         // 1. Prepare Nodes
         const routeNodes = graph.routes.map(r => ({ 
             id: r.id, 
-            label: r.path, 
+            label: r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.scope ?? r.path,
             group: r.domain || 'other', 
-            title: `Route: ${r.path}\nFile: ${r.file}\nDomain: ${r.domain}`,
+            title: [`Route: ${r.path}`, `File: ${r.file}`, `Domain: ${r.domain}`,
+                ...(r.methods?.includes('ALL') ? ['HTTP methods undetermined'] : []),
+                ...(r.wraps?.length ? ['Wraps:', ...r.wraps.map(id => id.slice('route:'.length))] : [])
+            ].join('\n'),
             shape: 'box',     
             path: r.file,
             margin: 10
@@ -106,38 +115,25 @@ export class GraphVisualizer {
             path: c.path 
         }));
 
-        const hookSet = new Set<string>();
-        graph.components.forEach(c => {
-            if (c.hooks) c.hooks.forEach(h => hookSet.add(h));
+        const actionNodes = graph.actions.map(id => {
+            const separator = id.lastIndexOf('#');
+            const file = id.slice('action:'.length, separator);
+            const label = id.slice(separator + 1);
+            return {
+                id, label, path: file, group: DomainExtractor.extract('/' + file),
+                title: `Server action: ${label}\nPath: ${file}`, shape: 'box', margin: 10
+            };
         });
-        
-        const hookNodes = Array.from(hookSet).map(h => ({
-            id: `hook_${h}`,
-            label: h,
-            group: 'hooks',
-            title: `Hook: ${h}\n(Inferred from usage)`,
-            shape: 'diamond', 
-            size: 20,
-            path: '' 
-        }));
-        // Hooks hidden per user request to reduce clutter
-        // const hookSet = new Set<string>();
-        // graph.components.forEach(c => {
-        //     if (c.hooks) c.hooks.forEach(h => hookSet.add(h));
-        // });
-        
-        // const hookNodes = Array.from(hookSet).map(h => ({
-        //     id: `hook_${h}`,
-        //     label: h,
-        //     group: 'hooks',
-        //     title: `Hook: ${h}\n(Inferred from usage)`,
-        //     shape: 'diamond', 
-        //     size: 20,
-        //     path: '' 
-        // }));
-
-        const rawNodes = [...routeNodes, ...componentNodes];
-        let nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
+        const callerNodes = [...new Set(graph.edges.map(edge => edge.from).filter(id => id.startsWith('file:')))]
+            .map(id => {
+                const file = id.slice('file:'.length);
+                return {
+                    id, label: path.posix.basename(file), path: file,
+                    group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'box'
+                };
+            });
+        const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes, ...callerNodes];
+        const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group)));
         
         // Hub nodes with reduced mass to prevent spinning
@@ -165,52 +161,30 @@ export class GraphVisualizer {
         };
 
         const edges = [
-             // Route to Component (Page to Root Component)
-             ...graph.routes.filter(r => r.componentName).map(r => ({ 
-                 from: r.id, 
-                 to: `cmp_${r.componentName}`, 
-                 arrows: 'to', 
-                 dashes: false,
-                 physics: true,
-                 length: 50, // Page <-> Root Component is TIGHT
-                 width: 2
-             })),
-             // Component to Component (Imports)
-             ...graph.components.flatMap(c => c.imports.filter(i => !i.isExternal).map(i => ({ 
-                 from: c.id, 
-                 to: `cmp_${i.name}`, 
-                 arrows: 'to', 
-                 dashes: false,
-                 physics: true, // Re-enabled dragging physics!
-                 length: getEdgeLength(c.id, `cmp_${i.name}`),
-                 color: { opacity: 0.2 } 
-             }))),
-             // Hub Gravity (Nodes to their Domain Hubs)
-             ...nodes.filter(n => !n.id.startsWith('hub_')).map(n => ({
-                 from: n.id, 
-                 to: `hub_${n.group}`, 
-                 color: { opacity: 0 }, 
-                 length: 100, // Medium orbit
-                 physics: true, 
-                 smooth: false, 
-                 dashes: false, 
-                 width: 0 
-             }))
+            ...graph.routes.flatMap(route => route.componentId ? [{
+                from: route.id, to: route.componentId, arrows: 'to', length: 50, width: 2
+            }] : []),
+            ...graph.edges.map(edge => ({
+                from: edge.from, to: edge.to, title: edge.type, arrows: 'to',
+                dashes: edge.type === 'imports', length: getEdgeLength(edge.from, edge.to)
+            })),
+            ...nodes.map(node => ({
+                from: node.id, to: `hub_${node.group}`, color: { opacity: 0 },
+                length: 100, smooth: false, width: 0
+            }))
         ];
-
-        const validNodeIds = new Set(nodes.map(n => n.id));
-        const validEdges = edges.filter(e => validNodeIds.has(e.to) && validNodeIds.has(e.from));
-
-        const graphPayload = { nodes, edges: validEdges };
-        const safeGraphData = Buffer.from(JSON.stringify(graphPayload)).toString('base64');
 
         const groupsConfig = domains.reduce((acc, domain) => {
             const color = DomainExtractor.getColor(domain);
             acc[domain] = { color: { background: color, border: color } };
             return acc;
-        }, {} as any);
+        }, Object.create(null) as Record<string, { color: { background: string; border: string } }>);
         groupsConfig['hooks'] = { color: { background: '#e17055', border: '#e17055' } };
         
+
+        const graphPayload = { nodes: [...nodes, ...hubNodes], edges, groupsConfig, domains };
+        const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
+        const nonce = randomBytes(16).toString('base64');
 
         const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'media', 'vis-network.min.js'));
 
@@ -218,7 +192,7 @@ export class GraphVisualizer {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline' ${webview.cspSource};">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}' ${webview.cspSource};">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Neo Architecture Graph</title>
     <script type="text/javascript" src="${scriptUri}"></script>
@@ -240,7 +214,6 @@ export class GraphVisualizer {
         .btn { background: #333; color: white; border: 1px solid #555; padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 12px; transition: background 0.2s; }
         .btn:hover { background: #444; }
         
-        .version-tag { position: absolute; bottom: 5px; right: 5px; opacity: 0.3; font-size: 10px; pointer-events: none; }
         #error-overlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; align-items: center; justify-content: center; flex-direction: column; }
         #error-content { background: #2d2d2d; padding: 20px; border-radius: 8px; max-width: 80%; border: 1px solid #ff4444; color: #ff9999; }
         #debug-log { position: absolute; bottom: 0; left: 0; width: 100%; max-height: 150px; background: rgba(0,0,0,0.8); color: lime; font-family: monospace; font-size: 10px; overflow-y: auto; display: none; padding: 5px; }
@@ -251,29 +224,26 @@ export class GraphVisualizer {
     <div class="legend" id="legend">
         <!-- Generated by JS -->
     </div>
-    <div class="version-tag">Neorion v0.1.4 - Static Space</div>
     
     <div id="controls">
-        <button id="btn-physics" class="btn" onclick="togglePhysics()">❄️ Freeze</button>
-        <button class="btn" onclick="network.fit({animation: true})">Fit Graph</button>
+        <button id="btn-physics" class="btn">❄️ Freeze</button>
+        <button id="btn-fit" class="btn">Fit Graph</button>
     </div>
 
     <div id="error-overlay">
         <div id="error-content">
             <h3 style="margin-top: 0">Rendering Failed</h3>
             <p id="error-message">Unknown error</p>
-            <button onclick="document.getElementById('debug-log').style.display = 'block'" style="background: #444; border: none; color: white; padding: 5px;">Show Logs</button>
+            <button id="btn-logs" style="background: #444; border: none; color: white; padding: 5px;">Show Logs</button>
         </div>
     </div>
     <div id="debug-log"></div>
     
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         let physicsEnabled = true;
         let activeDomain = null; // Filter state
 
-        const groupsConfig = ${JSON.stringify(groupsConfig)};
-        const domains = ${JSON.stringify(domains)};
 
         function log(msg) {
             console.log(msg);
@@ -337,20 +307,38 @@ export class GraphVisualizer {
             }
         }
 
-        function initLegend() {
+        function initLegend(domains, groupsConfig) {
             const legend = document.getElementById('legend');
-            legend.innerHTML = domains.map(d => {
-                const color = groupsConfig[d] ? groupsConfig[d].color.background : '#888';
-                return \`<div class="legend-item" data-domain="\${d}" onclick="toggleFilter('\${d}')">
-                    <div class="dot" style="background: \${color};"></div>\${d}
-                </div>\`;
-            }).join('');
+            for (const domain of domains) {
+                const item = document.createElement('div');
+                item.className = 'legend-item';
+                item.dataset.domain = domain;
+                item.addEventListener('click', () => toggleFilter(domain));
+                const dot = document.createElement('div');
+                dot.className = 'dot';
+                dot.style.background = groupsConfig[domain].color.background;
+                item.append(dot, document.createTextNode(domain));
+                legend.appendChild(item);
+            }
         }
 
+        function withTextTooltip(item) {
+            if (!item.title) return item;
+            const tooltip = document.createElement('div');
+            tooltip.style.whiteSpace = 'pre-wrap';
+            tooltip.textContent = item.title;
+            return { ...item, title: tooltip };
+        }
+
+        document.getElementById('btn-logs').addEventListener('click', () => {
+            document.getElementById('debug-log').style.display = 'block';
+        });
+
         try {
-            initLegend();
             const rawData = "${safeGraphData}";
-            let graphData = JSON.parse(atob(rawData));
+            const { nodes, edges, groupsConfig, domains } = JSON.parse(
+                new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
+            );
 
             const container = document.getElementById('mynetwork');
             const options = {
@@ -390,7 +378,13 @@ export class GraphVisualizer {
             if (typeof vis === 'undefined') {
                 showError('Error: vis library not loaded.');
             } else {
-                window.network = new vis.Network(container, { nodes: new vis.DataSet(graphData.nodes), edges: new vis.DataSet(graphData.edges) }, options);
+                window.network = new vis.Network(container, {
+                    nodes: new vis.DataSet(nodes.map(withTextTooltip)),
+                    edges: new vis.DataSet(edges.map(withTextTooltip))
+                }, options);
+                initLegend(domains, groupsConfig);
+                document.getElementById('btn-physics').addEventListener('click', togglePhysics);
+                document.getElementById('btn-fit').addEventListener('click', () => network.fit({ animation: true }));
                 
                 network.once("stabilizationIterationsDone", function () {
                     log('Stabilization finished. Freezing.');
@@ -402,14 +396,7 @@ export class GraphVisualizer {
                     if (params.nodes.length > 0) {
                         const nodeId = params.nodes[0];
                         const clickedNode = network.body.data.nodes.get(nodeId);
-                        if (clickedNode) {
-                            let path = clickedNode.path;
-                            if (!path && clickedNode.title) {
-                                 const match = clickedNode.title.match(/Path: (.*)/);
-                                 if (match) path = match[1].trim();
-                            }
-                            if (path) vscode.postMessage({ command: 'openFile', path });
-                        }
+                        if (clickedNode?.path) vscode.postMessage({ command: 'openFile', path: clickedNode.path });
                     }
                 });
             }

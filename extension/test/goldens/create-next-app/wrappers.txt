@@ -1,0 +1,10 @@
+# wrappers /structure : 3 files, 1 page (index 2026-11-19T06:00Z, fresh)
+# not wrappers: rendered inside the page
+branch A
+1 src/app/layout.tsx:20 RootLayout
+2 src/app/structure/layout.tsx:2 Layout
+3 fixture/providers.tsx:2 Provider [cond]
+branch B
+1 src/app/layout.tsx:20 RootLayout
+2 src/app/structure/layout.tsx:2 Layout
+page src/app/structure/page.tsx:2

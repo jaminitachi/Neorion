@@ -62,7 +62,7 @@ export class DomainExtractor {
         'auth': palette[8],
       };
       
-      if (fixedColors[domain]) return fixedColors[domain];
+      if (Object.prototype.hasOwnProperty.call(fixedColors, domain)) return fixedColors[domain];
   
       // 2. Hash to Palette Index
       // If domain isn't fixed, deterministically map it to one of the palette colors

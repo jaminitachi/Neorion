@@ -1,0 +1,56 @@
+[
+  {
+    "model": "sonnet",
+    "variant": "E2",
+    "model_id": "claude-sonnet-5-5",
+    "tools": [
+      "mcp__neorion__neorion_api_consumers",
+      "mcp__neorion__neorion_rename_impact",
+      "mcp__neorion__neorion_search",
+      "mcp__neorion__neorion_who_renders",
+      "mcp__neorion__neorion_wrappers"
+    ],
+    "claude_md_loaded": true
+  },
+  {
+    "model": "sonnet",
+    "variant": "E3",
+    "model_id": "claude-sonnet-5-5",
+    "tools": [],
+    "claude_md_loaded": true
+  },
+  {
+    "model": "sonnet",
+    "variant": "E0",
+    "model_id": "claude-sonnet-5-5",
+    "tools": [],
+    "claude_md_loaded": false
+  },
+  {
+    "model": "haiku",
+    "variant": "E2",
+    "model_id": "claude-haiku-5-5",
+    "tools": [
+      "mcp__neorion__neorion_api_consumers",
+      "mcp__neorion__neorion_rename_impact",
+      "mcp__neorion__neorion_search",
+      "mcp__neorion__neorion_who_renders",
+      "mcp__neorion__neorion_wrappers"
+    ],
+    "claude_md_loaded": true
+  },
+  {
+    "model": "haiku",
+    "variant": "E3",
+    "model_id": "claude-haiku-5-5",
+    "tools": [],
+    "claude_md_loaded": true
+  },
+  {
+    "model": "haiku",
+    "variant": "E0",
+    "model_id": "claude-haiku-5-5",
+    "tools": [],
+    "claude_md_loaded": false
+  }
+]

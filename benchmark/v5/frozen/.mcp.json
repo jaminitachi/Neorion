@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "neorion": {
+      "command": "node",
+      "args": [
+        ".neorion/mcp/server.cjs",
+        "--root",
+        "."
+      ],
+      "type": "stdio"
+    }
+  }
+}
