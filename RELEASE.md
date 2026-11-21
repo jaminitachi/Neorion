@@ -13,17 +13,25 @@ Check out the release branch. Set `RELEASE_PR` to its PR number and, for a stack
   BRANCH=$(git symbolic-ref --short HEAD)
   PKG=$(node -p "require('./neorion/package.json').name")
   VERSION=$(node -p "require('./neorion/package.json').version")
-  RELEASE_ENV=${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$VERSION/release.env"}
-  if [[ ! -f "$RELEASE_ENV" ]]; then
+  REGISTRY=https://registry.npmjs.org/
+  RELEASE_ENV="$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$VERSION/release.env"
+  settings=$(printf '%s=%q\n' PREP_PR "${PREP_PR:-}" RELEASE_PR "$RELEASE_PR" BRANCH "$BRANCH" \
+    REGISTRY "$REGISTRY" PKG "$PKG" VERSION "$VERSION")
+  if [[ -f "$RELEASE_ENV" ]]; then
+    echo "Existing release record at $RELEASE_ENV"
+    cat "$RELEASE_ENV"
+    recorded=$(grep -E '^(PREP_PR|RELEASE_PR|BRANCH|REGISTRY|PKG|VERSION)=' "$RELEASE_ENV")
+    [[ "$recorded" == "$settings" ]] ||
+      { echo "FAIL: settings differ. Before publishing, delete $(dirname "$RELEASE_ENV") and rerun setup." >&2; exit 1; }
+  else
     mkdir -p "$(dirname "$RELEASE_ENV")"
-    printf '%s=%q\n' PREP_PR "${PREP_PR:-}" RELEASE_PR "$RELEASE_PR" BRANCH "$BRANCH" \
-      REGISTRY https://registry.npmjs.org/ PKG "$PKG" VERSION "$VERSION" > "$RELEASE_ENV"
+    printf '%s\n' "$settings" > "$RELEASE_ENV"
   fi
   echo "OK: release settings at $RELEASE_ENV"
 )
 ```
 
-In a new terminal, cd to the repo and rerun the failed block; it finds the record automatically.
+In a new terminal, rerun the failed step from a checkout of the same release version to find its record.
 
 ## 1. Prepare the PRs
 
@@ -33,7 +41,7 @@ For the stacked first release, review the prerequisite PR and run this block. A 
 (
   set -euo pipefail
   trap 'echo "FAIL: prerequisite PR checks or merge failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
   : "${PREP_PR:?Set PREP_PR for a stacked release}"
   if [[ "$(gh pr view "$PREP_PR" --json state --jq .state)" == MERGED ]]; then
     echo "OK: prerequisite PR already merged"
@@ -52,7 +60,7 @@ Run the second block on the release branch. The empty commit triggers a fresh pu
 (
   set -euo pipefail
   trap 'echo "FAIL: release branch preparation failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
   : "${PREP_PR:?Set PREP_PR for a stacked release}"
   [[ "$(gh pr view "$PREP_PR" --json state --jq .state)" == MERGED ]] ||
     { echo "FAIL: prerequisite PR #$PREP_PR must be MERGED" >&2; exit 1; }
@@ -98,7 +106,7 @@ Review the release PR's current diff. The VSIX build compiles the code used by t
 (
   set -euo pipefail
   trap 'echo "FAIL: release build or smoke test failed" >&2' ERR
-  RELEASE_ENV=${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}
+  RELEASE_ENV=${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}
   source "$RELEASE_ENV"
   git fetch origin
   RELEASE_SHA=$(git rev-parse HEAD)
@@ -145,12 +153,15 @@ Review the release PR's current diff. The VSIX build compiles the code used by t
   mv -- "$TARBALL" "$(dirname "$RELEASE_ENV")/"
   TARBALL="$(dirname "$RELEASE_ENV")/${TARBALL##*/}"
   SHA512=$(sha512sum "$TARBALL")
-  printf '%s=%q\n' RELEASE_SHA "$RELEASE_SHA" TARBALL "$TARBALL" SHA512 "$SHA512" >> "$RELEASE_ENV"
+  printf '%s=%q\n' PREP_PR "${PREP_PR:-}" RELEASE_PR "$RELEASE_PR" BRANCH "$BRANCH" \
+    REGISTRY "$REGISTRY" PKG "$PKG" VERSION "$VERSION" \
+    RELEASE_SHA "$RELEASE_SHA" TARBALL "$TARBALL" SHA512 "$SHA512" > "$release_dir/release.env"
+  mv -- "$release_dir/release.env" "$RELEASE_ENV"
   printf 'OK: archive %s\nSHA-512: %s\nRelease head: %s\n' "$TARBALL" "${SHA512%% *}" "$RELEASE_SHA"
 )
 ```
 
-Review the archive listing for both bundles, the skill, the plugin and MCP manifests, and the license notices. Keep the original archive and release record together until the release finishes. Strict validation can report `ICON_MISSING`.
+Review the archive listing for both bundles, the skill, the plugin and MCP manifests, and the license notices. Keep the original archive and release record together until the release finishes. The `ICON_MISSING` and npm `allowScripts` warnings are known and harmless for these checks.
 
 ## 3a. Check CI and publish
 
@@ -160,7 +171,7 @@ Use an authenticated npm session. Only an E404 qualifies as an absent version.
 (
   set -euo pipefail
   trap 'echo "FAIL: publish preflight or npm publish failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
   check_pr() {
     local actual
     actual=$(gh pr view "$RELEASE_PR" --json baseRefName,headRefName,headRefOid,isDraft,state \
@@ -190,17 +201,24 @@ Use an authenticated npm session. Only an E404 qualifies as an absent version.
 )
 ```
 
-If npm rejects the unscoped name, change the npm manifest name, the marketplace package, and both README npm invocations to the scoped name. Keep public access and the `neorion` executable and plugin ID. Push the fix, update `PKG` in the record, and repeat Steps 2 and 3.
+If npm rejects the unscoped name, use this fallback.
+
+1. Stop the publish attempt.
+2. Set the new `PKG` by changing the npm manifest name to `@<npm-user>/neorion` (for example, `@jaminitachi/neorion`). Update the marketplace package and the npm pins in `README.md` and `neorion/README.md`. Replace `neorion@0.5.0` in both User installation commands below with the scoped pin. Keep public access, the `neorion` executable, and the plugin ID.
+3. Delete the unpublished version's record directory (the parent of the `release.env` path printed by setup), then rerun setup.
+4. Commit and push the changes to the release branch, rerun Step 2, then rerun 3a.
 
 ## 3b. Verify the published release and merge
 
 Use the same record, including when publish had an uncertain outcome or the PR is already merged. A merge commit preserves the published head in history.
+To recover a lost 3b record, restore `PKG`, `VERSION`, `REGISTRY`, `RELEASE_PR`, `BRANCH`, and `RELEASE_SHA`, plus `SHA512` from the SHA-512 hex printed by Step 2.
 
 ```bash
 (
   set -euo pipefail
   trap 'echo "FAIL: published release verification or merge failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  : "${SHA512:?run Step 2 first}"
   expected=$(node -e 'console.log("sha512-" + Buffer.from(process.argv[1], "hex").toString("base64"))' "${SHA512%% *}")
   for attempt in {1..10}; do
     if result=$(npm view "$PKG@$VERSION" dist.integrity --json --registry="$REGISTRY" --prefer-online) &&
@@ -223,13 +241,13 @@ Use the same record, including when publish had an uncertain outcome or the PR i
   echo 'OK: registry integrity matches'
   verify_dir=$(mktemp -d)
   trap 'rm -rf -- "$verify_dir"' EXIT
-  mkdir "$verify_dir/marketplace" "$verify_dir/home"
+  mkdir "$verify_dir/marketplace" "$verify_dir/home" "$verify_dir/sample"
   git archive "$RELEASE_SHA" .claude-plugin | tar -x -C "$verify_dir/marketplace"
   (
-    cd "$verify_dir"
+    cd "$verify_dir/sample"
     unset ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_OAUTH_TOKEN
     export HOME="$verify_dir/home" CLAUDE_CONFIG_DIR="$verify_dir/claude-config"
-    export npm_config_cache="$verify_dir/npm-cache" npm_config_registry="$REGISTRY"
+    export npm_config_cache="$verify_dir/npm-cache" npm_config_registry="$REGISTRY" XDG_CACHE_HOME="$verify_dir/cache"
     test "$(npx --yes --package="$PKG@$VERSION" neorion --version)" = "$VERSION"
     printf '{}\n' > tsconfig.json
     printf 'export const Example = 1;\n' > example.ts
@@ -280,7 +298,7 @@ For the **maintainer post-release check**, run from the repository root.
 (
   set -euo pipefail
   trap 'echo "FAIL: graph or Codex setup failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:-"$(git rev-parse --path-format=absolute --git-common-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
   npx --yes --package="$PKG@$VERSION" neorion graph
   npx --yes --package="$PKG@$VERSION" neorion setup codex
   codex mcp list
@@ -290,13 +308,16 @@ For the **maintainer post-release check**, run from the repository root.
 
 ## Rollback
 
-Deprecate a withdrawn version using its original release record. If the checkout has moved to a newer version, set `RELEASE_ENV` to the withdrawn version’s record.
+Set `RELEASE_ENV` to the original release record of the version you intend to withdraw before running either block.
 
 ```bash
 (
   set -euo pipefail
   trap 'echo "FAIL: npm deprecation failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
+  source "${RELEASE_ENV:?set RELEASE_ENV to the record of the version you want to roll back}"
+  echo "Deprecate $PKG@$VERSION"
+  IFS= read -r -p "Type $PKG@$VERSION to confirm: " confirmation &&
+    [[ "$confirmation" == "$PKG@$VERSION" ]] || { echo 'Deprecate cancelled' >&2; exit 1; }
   npm deprecate "$PKG@$VERSION" \
     "This version has been withdrawn. See https://github.com/jaminitachi/Neorion for updates." \
     --registry="$REGISTRY"
@@ -304,7 +325,7 @@ Deprecate a withdrawn version using its original release record. If the checkout
 )
 ```
 
-If the release PR head changes after publication, deprecate 0.5.0 and prepare 0.5.1 on that PR. If it already merged, open a fix PR against master. Update the CLI, extension, extension lockfile, and plugin versions, the marketplace's npm pin, and both README invocations. Keep the marketplace entry. Use a fresh release record and repeat Steps 2 and 3, which include strict marketplace validation.
+If the PR head moves after publication and 0.5.0 is sound, reset the release branch to `RELEASE_SHA`, restore that head on the PR, and rerun 3b. If 0.5.0 needs a fix, deprecate it and prepare 0.5.1 on the release PR or open a fix PR against master if it already merged. Update the CLI, extension, extension lockfile, and plugin versions, the marketplace's npm pin, and both README invocations. Keep the marketplace entry. Use a fresh record and repeat Steps 2, 3a, and 3b.
 
 Once 0.5.1 is available, tell MCP users to rerun versioned `neorion setup` or update their MCP pin to 0.5.1 and restart the client. Claude users can uninstall the withdrawn plugin while waiting. Once the new marketplace pin lands, refresh it with `claude plugin marketplace update neorion`, then update or reinstall `neorion@neorion` in the same scope and restart Claude Code.
 
@@ -314,9 +335,10 @@ Reserve unpublish for cases that meet npm's removal policy. Publish 0.5.1 first,
 (
   set -euo pipefail
   trap 'echo "FAIL: npm unpublish failed" >&2' ERR
-  source "${RELEASE_ENV:-"$(git rev-parse --absolute-git-dir)/neorion-release/$(node -p "require('./neorion/package.json').version")/release.env"}"
-  read -r -p "Type $PKG to confirm unpublish of $PKG@$VERSION: " confirmation
-  [[ "$confirmation" == "$PKG" ]] || { echo 'Unpublish cancelled' >&2; exit 1; }
+  source "${RELEASE_ENV:?set RELEASE_ENV to the record of the version you want to roll back}"
+  echo "Unpublish $PKG@$VERSION"
+  IFS= read -r -p "Type $PKG@$VERSION to confirm: " confirmation &&
+    [[ "$confirmation" == "$PKG@$VERSION" ]] || { echo 'Unpublish cancelled' >&2; exit 1; }
   npm unpublish "$PKG@$VERSION" --registry="$REGISTRY"
   echo "OK: unpublished $PKG@$VERSION"
 )
