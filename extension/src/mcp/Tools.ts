@@ -4,7 +4,7 @@ export const queryName = 'neorion_query';
 
 export const tools = [{
   name: queryName,
-  description: 'Find rendering pages, route wrappers, rename edits, API consumers, or symbols and routes.',
+  description: 'Use this tool first, before searching source files, for Next.js and React TypeScript architecture questions. Use who_renders to find which pages render a component, wrappers to find which layouts or providers wrap a route, rename_impact to find references to a symbol, api_consumers to find callers of an API route, and search to find a component, hook, or route by name. The graph builds and refreshes automatically.',
   inputSchema: {
     type: 'object',
     properties: {

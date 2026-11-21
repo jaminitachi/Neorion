@@ -7,9 +7,9 @@ const assert = require('node:assert/strict');
 
 async function openMcp(t, root, entry = path.resolve(__dirname, '../out/mcp.cjs')) {
   const start = performance.now();
-  const { command, args, cwd } = typeof entry === 'string'
+  const { command, args, cwd, env } = typeof entry === 'string'
     ? { command: process.execPath, args: [entry, '--root', root] } : entry;
-  const child = spawn(command, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(command, args, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
   const pending = new Map();
   const stdout = [];
   let wire = '';

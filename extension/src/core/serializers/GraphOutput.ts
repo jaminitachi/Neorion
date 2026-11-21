@@ -27,7 +27,7 @@ function fileList(root: string): string {
   }
 }
 
-export function writeGraph(root: string, graph: CodebaseGraph): string {
+export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = true): string {
   const { overview, details } = new MarkdownSerializer().serialize(graph, fileList(root));
   const cache = workspaceCache(root);
   const directory = path.join(cache, DETAIL_DIRECTORY);
@@ -71,6 +71,7 @@ export function writeGraph(root: string, graph: CodebaseGraph): string {
       fs.rmSync(temporary, { force: true });
     }
   }
+  if (!migrateLegacy) return output;
   const legacyOverview = path.join(root, 'codebase_graph.md');
   if (fs.lstatSync(legacyOverview, { throwIfNoEntry: false })?.isFile()) {
     const content = fs.readFileSync(legacyOverview, 'utf8');

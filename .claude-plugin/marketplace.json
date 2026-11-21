@@ -1,0 +1,19 @@
+{
+  "name": "neorion",
+  "owner": {
+    "name": "jaminitachi"
+  },
+  "metadata": {
+    "description": "Architecture queries for Next.js and React TypeScript projects."
+  },
+  "plugins": [
+    {
+      "name": "neorion",
+      "source": {
+        "source": "npm",
+        "package": "neorion",
+        "version": "0.5.0"
+      }
+    }
+  ]
+}

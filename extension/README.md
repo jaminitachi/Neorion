@@ -25,8 +25,8 @@ offline with Node.js 18 or later. The project config locates the bundle at
 launch using the current workspace and local cache settings. Claude Code uses
 the project working directory, and Cursor and VS Code expand
 `${workspaceFolder}`. Run **Connect AI tools** to populate the cache for a new
-checkout or after moving a project. The optional pinned npm mode requires
-`neorion-mcp@0.4.0` to be published before it can run. Claude Code asks for
+checkout or after moving a project. The optional pinned npm mode works once
+the matching CLI version is published on npm. Claude Code asks for
 approval before first using a project MCP server.
 **Other tools: copy configuration snippet** uses absolute paths to the
 installed bundle and the project. Paste it into the global configuration for
@@ -89,7 +89,7 @@ renders take a separate turn. Ties among fetch facts favor page entry points.
 
 ## Build and install locally
 
-From this directory, run `npm ci` and `npx vsce package`. Run `npm run pack:mcp` to build the standalone `neorion-mcp` tarball under `out/`. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.
+From this directory, run `npm ci` and `npx vsce package`. Run `npm run pack:cli` to build the standalone `neorion` tarball in this directory. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.
 
 Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.txt).
 

@@ -5,7 +5,8 @@ const path = require('node:path');
 const { ts } = require('@ts-morph/common');
 
 const root = path.resolve(__dirname, '..');
-const metadata = JSON.parse(fs.readFileSync(path.join(root, 'out/bundle-meta.json'), 'utf8'));
+const metadataFile = process.argv.includes('--cli') ? 'out/cli-bundle-meta.json' : 'out/bundle-meta.json';
+const metadata = JSON.parse(fs.readFileSync(path.join(root, metadataFile), 'utf8'));
 const bundled = new Set();
 for (const output of Object.values(metadata.outputs)) {
   for (const [input, { bytesInOutput }] of Object.entries(output.inputs ?? {})) {
