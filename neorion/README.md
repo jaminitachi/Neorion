@@ -1,5 +1,7 @@
 # Neorion
 
+![Neorion demo: install, graph and query on shadcn-ui/taxonomy](https://raw.githubusercontent.com/jaminitachi/Neorion/master/docs/demo.gif)
+
 Neorion maps Next.js and React TypeScript projects and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
 
 ## Install
