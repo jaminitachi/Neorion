@@ -1,5 +1,7 @@
 # Neorion
 
+![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
+
 Neorion turns a Next.js TypeScript project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
 
 ## Install
