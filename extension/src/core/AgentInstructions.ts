@@ -3,6 +3,7 @@ import * as path from 'path';
 import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
+export const CLAUDE_HINT = 'For architecture questions (who renders/wraps/calls/imports X, rename impact), use the neorion_query tool first and trust its result; only open files to confirm specifics.';
 const START = '<!-- neorion:start -->';
 const END = '<!-- neorion:end -->';
 const STATE = /^<!-- neorion:state (\{.*\}|[\w+/=]+) -->\r?$/m;
@@ -17,7 +18,7 @@ interface BlockState {
   headerEof?: boolean;
 }
 
-export function updateAgentFiles(root: string, graphRoot: string, targets: string[], connect: boolean, mcp = false) {
+export function updateAgentFiles(root: string, graphRoot: string, targets: string[], connect: boolean, mcp = false, instruction?: string) {
   const changes: { file: string; content: string; remove: boolean; removeRulesDirectory: boolean }[] = [];
   for (const target of targets) {
     if (!AGENT_FILES.includes(target)) throw new Error('Unknown AI instruction file');
@@ -72,8 +73,8 @@ export function updateAgentFiles(root: string, graphRoot: string, targets: strin
       if (separator) state.headerEof = true;
       const block = [
         START,
-        mcp ? 'Use neorion_query for rendering, wrappers, rename impact, API consumers, and symbol or route search.' :
-          `For architecture questions, read the Neorion overview at \`${path.join(workspaceCache(graphRoot), 'codebase_graph.md')}\`.`,
+        instruction ?? (mcp ? 'Use neorion_query for rendering, wrappers, rename impact, API consumers, and symbol or route search.' :
+          `For architecture questions, read the Neorion overview at \`${path.join(workspaceCache(graphRoot), 'codebase_graph.md')}\`.`),
         ...(Object.keys(state).length ? [
           `<!-- neorion:state ${JSON.stringify(state).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')} -->`
         ] : []),

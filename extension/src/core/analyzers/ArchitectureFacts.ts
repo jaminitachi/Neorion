@@ -177,6 +177,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
       const name = tag.getText();
+      const providerTag = name.endsWith('Provider');
       if (!/^[A-Z]/.test(name) && !name.endsWith('.Provider')) continue;
       const declarations = declarationsOf(tag);
       const definition = declarations.find(declaration => !declaration.getSourceFile().isDeclarationFile());
@@ -187,12 +188,20 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         Node.isVariableDeclaration(definition) ? definition.getName() ?? name : name;
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const location: Wrapper = {
+      const nested = local ? wrappedChains(local, false, relativePath, bodies, seen) : [];
+      // A dedicated component file gets its own wrapper row. Inline provider tags
+      // belong to the file rendering them, even if their definitions are imported.
+      const provider = providerTag && (!local || definition.getSourceFile() === tag.getSourceFile());
+      const location: Wrapper = provider ? {
+        file: relativePath(tag.getSourceFile()), symbol: name, line: tag.getStartLineNumber(), conditional,
+        provider: true, external: definition ? undefined : module,
+        definitionFile: definition && definition.getSourceFile() !== tag.getSourceFile()
+          ? relativePath(definition.getSourceFile()) : undefined
+      } : {
         file: relativePath((definition ?? tag).getSourceFile()),
         symbol: exportedName, line: (definition ?? tag).getStartLineNumber(), conditional,
         external: definition ? undefined : module
       };
-      const nested = local ? wrappedChains(local, false, relativePath, bodies, seen) : [];
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => ({
         path: [...prefix.path, label, ...next.path],
         locations: [...prefix.locations, location, ...next.locations],

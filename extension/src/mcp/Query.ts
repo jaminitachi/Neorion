@@ -18,6 +18,8 @@ const declaration = (symbol: SymbolEntry) => `${location(symbol.file, symbol.lin
 const bySymbol = (a: SymbolEntry, b: SymbolEntry) => compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name);
 const byRoute = (a: Route, b: Route) => compare(a.url, b.url) || compare(a.file, b.file);
 const flagTest = (file: string) => testFile(file) ? ' [test]' : '';
+const generatedFile = (file: string) =>
+  /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
   return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
@@ -301,18 +303,43 @@ export class QueryEngine {
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
+    const notes = [row('# not wrappers: rendered inside the page')];
     const rows = chains.flatMap((id, branch) => {
       if (expired()) return [];
-      const groups = group((this.index.wrapChains[id] ?? []).filter(item => includeExternal || !item.external), item => item.file);
+      const items = (this.index.wrapChains[id] ?? []).filter(item => includeExternal || item.provider || !item.external);
+      const groups = group(items, item => item.file);
+      const name = (item: typeof items[number]) => {
+        const source = item.external ?? item.definitionFile;
+        return source && includeExternal ? `${source}#${item.symbol}` : item.symbol;
+      };
+      const providers = items.filter(item => item.provider || item.symbol.endsWith('Provider'));
+      const branchLabel = `branch ${String.fromCharCode(65 + branch)}`;
+      if (providers.length) {
+        const scope = chains.length > 1 ? `, ${branchLabel}` : '';
+        const seen = new Set<string>();
+        const names: string[] = [];
+        for (const item of providers) {
+          const identity = `${item.external ?? item.definitionFile ?? item.file}#${item.symbol}`;
+          if (seen.has(identity)) continue;
+          seen.add(identity);
+          names.push(item.symbol);
+        }
+        notes.push(row(`# providers (outermost first${scope}): ${names.join(', ')}`,
+          ...new Set(providers.map(item => item.file))));
+      }
       const entries: Row[] = [];
-      if (chains.length > 1) entries.push(row(`branch ${String.fromCharCode(65 + branch)}`));
+      if (chains.length > 1) entries.push(row(branchLabel));
       let order = 0;
       for (const [file, items] of groups) {
         if (expired()) break;
-        const label = `${++order} ${location(file, items[0].line)}`;
+        const components = items.filter(item => !item.provider);
+        const providers = items.filter(item => item.provider);
+        const label = `${++order} ${location(file, (components[0] ?? items[0]).line)}`;
         files.add(file);
-        const symbols = items.map(item => item.external ? `${item.external}#${item.symbol}` : item.symbol);
-        entries.push({ ...row(`${label} ${[...new Set(symbols)].join(', ')}` +
+        const symbols = [...new Set(components.map(name))];
+        const providerNames = [...new Set(providers.map(name))];
+        entries.push({ ...row(label + (symbols.length ? ` ${symbols.join(', ')}` : '') +
+          (providerNames.length ? ` providers: ${providerNames.join(', ')}` : '') +
           (items.some(item => item.conditional) ? ' [cond]' : '') + flagTest(file), file), pathEnd: label.length });
       }
       return entries;
@@ -324,7 +351,7 @@ export class QueryEngine {
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
     return { rows, title: route.url, count: `${files.size} files, 1 page`, targets: [route.file],
-      notes: [row('# not wrappers: rendered inside the page')] };
+      notes };
   }
 
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
@@ -385,16 +412,20 @@ export class QueryEngine {
   private consumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
     const rows: Row[] = [];
     const senders = new Set<string>();
+    const generatedSenders = new Set<string>();
     const calls = new Set<string>();
     let owners = new Set<number>();
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
-      .sort((a, b) => compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
+      .sort((a, b) => Number(generatedFile(a.file)) - Number(generatedFile(b.file)) ||
+        compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
     for (const fetch of fetches) {
       if (expired()) break;
       senders.add(fetch.file);
+      const generated = generatedFile(fetch.file);
+      if (generated) generatedSenders.add(fetch.file);
       const label = `send   ${location(fetch.file, fetch.line)}`;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${fetch.via}` +
-        (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file);
+        (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
       rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
     }
@@ -431,9 +462,11 @@ export class QueryEngine {
       (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/') ||
         other.url.slice(0, other.url.lastIndexOf('/')) === route.url.slice(0, route.url.lastIndexOf('/'))))
       .map(other => other.url))].sort().slice(0, 5);
+    const senderCount = `${senders.size} sender${senders.size === 1 ? '' : 's'}` +
+      (generatedSenders.size ? ` (${generatedSenders.size} generated)` : '');
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
-      count: rows.length ? `${senders.size} sender${senders.size === 1 ? '' : 's'}, ${calls.size} callers` : undefined,
+      count: rows.length ? `${senderCount}, ${calls.size} callers` : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
         fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
         fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :

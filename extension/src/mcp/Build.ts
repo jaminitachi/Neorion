@@ -3,7 +3,7 @@ import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
-import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
+import { INDEX_PATH, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
 import { projectSnapshot } from '../core/ProjectSnapshot';
 
 type BuildResult = { error?: string; building?: boolean };
@@ -19,6 +19,7 @@ async function fresh(root: string, indexPath: string) {
     return false;
   }
   if (index?.schema !== 1 || index.generator !== VERSION || !index.files) return false;
+  if (index.wrapperRevision !== WRAPPER_INDEX_REVISION) return false;
   return typeof index.projectSnapshot === 'string' && index.projectSnapshot === projectSnapshot(root);
 }
 
