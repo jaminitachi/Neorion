@@ -6,10 +6,10 @@ Neorion turns a Next.js TypeScript project into a local architecture map. Use th
 
 ## Install
 
-Neorion 0.5.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
+Neorion 0.5.1 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
 
 ```sh
-npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.0/neorion-0.5.0.tgz
+npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.1/neorion-0.5.1.tgz
 ```
 
 From your TypeScript project, build the graph and ask a question.
@@ -39,7 +39,7 @@ Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folde
 
 ## Claude Code
 
-The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.0` on npm, which is not published.
+The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.1` on npm, which is not published.
 
 The installed package contains the plugin. The installed plugin passes `claude plugin validate`. From the root of your project, run:
 
