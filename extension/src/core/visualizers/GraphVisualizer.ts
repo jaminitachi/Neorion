@@ -226,7 +226,7 @@ export class GraphVisualizer {
     </div>
     
     <div id="controls">
-        <button id="btn-physics" class="btn">❄️ Freeze</button>
+        <button id="btn-physics" class="btn">Pause layout</button>
         <button id="btn-fit" class="btn">Fit Graph</button>
     </div>
 
@@ -262,14 +262,14 @@ export class GraphVisualizer {
             vscode.postMessage({ command: 'error', text: msg });
         }
 
-        function togglePhysics() {
-            physicsEnabled = !physicsEnabled;
+        function setPhysicsEnabled(enabled) {
+            physicsEnabled = enabled;
             if (!physicsEnabled) network.storePositions();
             network.setOptions({ physics: { enabled: physicsEnabled } });
             
             const btn = document.getElementById('btn-physics');
-            btn.innerText = physicsEnabled ? "❄️ Freeze" : "▶️ Unfreeze";
-            btn.style.background = physicsEnabled ? "#333" : "#e17055";
+            btn.textContent = physicsEnabled ? 'Pause layout' : 'Layout paused (click to resume)';
+            btn.title = physicsEnabled ? 'Click to pause layout' : 'Click to re-run layout';
         }
 
         // Filtering Logic
@@ -342,6 +342,11 @@ export class GraphVisualizer {
 
             const container = document.getElementById('mynetwork');
             const options = {
+                layout: {
+                    randomSeed: 42,
+                    // Start physics from seeded positions and skip the clustering pre-pass.
+                    improvedLayout: false
+                },
                 nodes: {
                     font: { size: 14, color: '#eeeeee' },
                     borderWidth: 2,
@@ -383,13 +388,17 @@ export class GraphVisualizer {
                     edges: new vis.DataSet(edges.map(withTextTooltip))
                 }, options);
                 initLegend(domains, groupsConfig);
-                document.getElementById('btn-physics').addEventListener('click', togglePhysics);
                 document.getElementById('btn-fit').addEventListener('click', () => network.fit({ animation: true }));
                 
-                network.once("stabilizationIterationsDone", function () {
-                    log('Stabilization finished. Freezing.');
-                    togglePhysics();
+                const pauseAfterStabilization = () => {
+                    log('Stabilization finished. Layout paused.');
+                    setPhysicsEnabled(false);
                     network.fit();
+                };
+                network.once('stabilizationIterationsDone', pauseAfterStabilization);
+                document.getElementById('btn-physics').addEventListener('click', () => {
+                    network.off('stabilizationIterationsDone', pauseAfterStabilization);
+                    setPhysicsEnabled(!physicsEnabled);
                 });
 
                 network.on("doubleClick", function (params) {
