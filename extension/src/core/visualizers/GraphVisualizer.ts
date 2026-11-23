@@ -103,6 +103,7 @@ export class GraphVisualizer {
                 : r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.path;
             return {
                 id: r.id,
+                kind: r.type === 'layout' ? 'layout' : 'route',
                 label,
                 group: r.domain || 'other',
                 title: [`Route: ${label}`, `File: ${r.file}`, `Domain: ${r.domain}`,
@@ -115,7 +116,8 @@ export class GraphVisualizer {
         });
 
         const componentNodes = graph.components.map(c => ({ 
-            id: c.id, 
+            id: c.id,
+            kind: 'component',
             label: c.name, 
             group: c.domain || 'other', 
             title: `Component: ${c.name}\nPath: ${c.path}\nDomain: ${c.domain}\n\n${c.description ? '📝 ' + c.description : ''}`,
@@ -128,7 +130,7 @@ export class GraphVisualizer {
             const file = id.slice('action:'.length, separator);
             const label = id.slice(separator + 1);
             return {
-                id, label, path: file, group: DomainExtractor.extract('/' + file),
+                id, label, kind: 'action', path: file, group: DomainExtractor.extract('/' + file),
                 title: `Server action: ${label}\nPath: ${file}`, shape: 'box'
             };
         });
@@ -136,7 +138,7 @@ export class GraphVisualizer {
             .map(id => {
                 const file = id.slice('file:'.length);
                 return {
-                    id, label: path.posix.basename(file), path: file,
+                    id, kind: 'file', label: path.posix.basename(file), path: file,
                     group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'box'
                 };
             });
@@ -217,6 +219,7 @@ export class GraphVisualizer {
             const padding = (denseGraph ? 18 : 10) + Math.min(20, Math.sqrt(degree) * 4);
             return {
                 ...node,
+                fullLabel: node.label,
                 label: truncateLabel(node.label),
                 ...(prominent ? {
                     margin: padding,
@@ -252,10 +255,27 @@ export class GraphVisualizer {
             --border-color: var(--vscode-panel-border, #444);
         }
         body { margin: 0; padding: 0; width: 100%; height: 100vh; background-color: var(--bg-color); color: var(--fg-color); overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
-        #mynetwork { width: 100%; height: 100%; border: 1px solid var(--border-color); }
+        body { display: flex; flex-direction: column; }
+        #mynetwork { flex: 1; min-height: 0; width: 100%; }
+        #top-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
+        #search-controls { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+        #search-input { box-sizing: border-box; width: min(220px, 55vw); padding: 6px 8px; font: inherit; background: var(--vscode-input-background, var(--bg-color)); color: var(--vscode-input-foreground, var(--fg-color)); border: 1px solid var(--vscode-input-border, var(--border-color)); border-radius: 4px; }
+        #search-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--fg-color)); }
+        :is(button, input):focus-visible { outline: 2px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
+        #graph-area { position: relative; display: flex; flex: 1; min-height: 0; }
+        #hint { position: absolute; bottom: 10px; left: 10px; margin: 0; padding: 5px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-color); font-size: 12px; pointer-events: none; }
+        #details { position: absolute; top: 0; right: 0; bottom: 0; box-sizing: border-box; width: min(300px, 100%); padding: 14px; overflow: auto; background: var(--vscode-sideBar-background, var(--bg-color)); color: var(--vscode-sideBar-foreground, var(--fg-color)); border-left: 1px solid var(--border-color); z-index: 1001; font-size: 13px; overflow-wrap: anywhere; }
+        #details header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+        #details h2 { margin: 0; font-size: 16px; }
+        #details h3 { margin: 16px 0 4px; font-size: 13px; }
+        #details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; }
+        #details dd { margin: 0; }
+        #details ul { padding-left: 18px; margin: 0; }
+        .connection { text-align: left; padding: 3px 0; border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--fg-color)); font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+        .connection:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--fg-color)); }
         .legend { position: absolute; top: 10px; left: 10px; background: var(--bg-color); opacity: 0.9; max-height: 80vh; overflow-y: auto; padding: 10px; border-radius: 5px; z-index: 1000; border: 1px solid var(--border-color); }
         .legend-item { display: flex; align-items: center; margin-bottom: 5px; font-size: 12px; cursor: pointer; padding: 2px 4px; border-radius: 3px; transition: background 0.2s; }
-        .legend-item:hover { background: rgba(255,255,255,0.1); }
+        .legend-item:hover { background: var(--vscode-list-hoverBackground, var(--border-color)); }
         .legend-item.inactive { opacity: 0.3; }
         .dot { box-sizing: border-box; width: 12px; height: 12px; border: 1px solid; border-radius: 50%; margin-right: 8px; }
         .shape-key { border-top: 1px solid var(--border-color); margin-top: 6px; padding: 6px 4px 0; font-size: 12px; }
@@ -264,9 +284,9 @@ export class GraphVisualizer {
         .shape-icon { box-sizing: border-box; width: 14px; height: 10px; border: 1px solid currentColor; }
         .shape-icon.ellipse { border-radius: 50%; }
         
-        #controls { position: absolute; top: 10px; right: 10px; z-index: 1000; display: flex; gap: 8px; }
-        .btn { background: #333; color: white; border: 1px solid #555; padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 12px; transition: background 0.2s; }
-        .btn:hover { background: #444; }
+        #controls { display: flex; flex-wrap: wrap; gap: 8px; }
+        .btn { background: var(--vscode-button-secondaryBackground, var(--bg-color)); color: var(--vscode-button-secondaryForeground, var(--fg-color)); border: 1px solid var(--vscode-button-border, var(--border-color)); padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 12px; transition: background 0.2s; }
+        .btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--border-color)); }
         
         #error-overlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; align-items: center; justify-content: center; flex-direction: column; }
         #error-content { background: #2d2d2d; padding: 20px; border-radius: 8px; max-width: 80%; border: 1px solid #ff4444; color: #ff9999; }
@@ -274,27 +294,50 @@ export class GraphVisualizer {
     </style>
 </head>
 <body>
-    <div id="mynetwork"></div>
-    <div class="legend">
-        <div id="legend"></div>
-        <div class="shape-key">
-            <div class="shape-key-title">Node shapes</div>
-            <div class="shape-key-item"><span class="shape-icon" aria-hidden="true"></span>Route / action</div>
-            <div class="shape-key-item"><span class="shape-icon ellipse" aria-hidden="true"></span>Component</div>
+    <div id="top-bar">
+        <div id="search-controls" role="search">
+            <input id="search-input" type="search" aria-label="Search nodes" placeholder="Search nodes">
+            <span id="search-count" role="status"></span>
+        </div>
+        <div id="controls">
+            <button id="btn-physics" class="btn">Pause layout</button>
+            <button id="btn-clusters" class="btn" hidden>Expand all</button>
+            <button id="btn-fit" class="btn">Fit Graph</button>
         </div>
     </div>
+    <div id="graph-area">
+        <div id="mynetwork"></div>
+        <div class="legend">
+            <div id="legend"></div>
+            <div class="shape-key">
+                <div class="shape-key-title">Node shapes</div>
+                <div class="shape-key-item"><span class="shape-icon" aria-hidden="true"></span>Route / action</div>
+                <div class="shape-key-item"><span class="shape-icon ellipse" aria-hidden="true"></span>Component</div>
+            </div>
+        </div>
     
-    <div id="controls">
-        <button id="btn-physics" class="btn">Pause layout</button>
-        <button id="btn-clusters" class="btn" hidden>Expand all</button>
-        <button id="btn-fit" class="btn">Fit Graph</button>
+        <p id="hint">Click a node for details, double-click to open file</p>
+        <aside id="details" aria-labelledby="details-label" hidden>
+            <header>
+                <h2 id="details-label"></h2>
+                <button id="details-close" class="btn" aria-label="Close details">×</button>
+            </header>
+            <dl>
+                <dt>Kind</dt><dd id="details-kind"></dd>
+                <dt>File path</dt><dd id="details-path"></dd>
+                <dt>Domain</dt><dd id="details-domain"></dd>
+            </dl>
+            <button id="details-open" class="btn">Open file</button>
+            <h3>Incoming</h3><ul id="details-incoming"></ul>
+            <h3>Outgoing</h3><ul id="details-outgoing"></ul>
+        </aside>
     </div>
 
     <div id="error-overlay">
         <div id="error-content">
             <h3 style="margin-top: 0">Rendering Failed</h3>
             <p id="error-message">Unknown error</p>
-            <button id="btn-logs" style="background: #444; border: none; color: white; padding: 5px;">Show Logs</button>
+            <button id="btn-logs" class="btn">Show Logs</button>
         </div>
     </div>
     <div id="debug-log"></div>
@@ -303,6 +346,7 @@ export class GraphVisualizer {
         const vscode = acquireVsCodeApi();
         let physicsEnabled = true;
         let activeDomain = null;
+        let searchMatches = null;
 
 
         function log(msg) {
@@ -345,18 +389,31 @@ export class GraphVisualizer {
             return network.findNode(id).length > 0;
         }
 
-        function toggleFilter(domain) {
-            activeDomain = activeDomain === domain ? null : domain;
+        function nodeOpacity(id, domain) {
+            return domainOpacity(domain) * (!searchMatches || searchMatches.has(id) ? 1 : 0.18);
+        }
+
+        function clusterOpacity(cluster) {
+            return domainOpacity(cluster.domain) *
+                (!searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18);
+        }
+
+        function updateNodeOpacity() {
             const updates = network.body.data.nodes.get()
-                .filter(node => node.shape !== 'dot' && !isInsideCluster(node.id))
-                .map(node => ({ id: node.id, opacity: domainOpacity(node.group) }));
+                .filter(node => node.kind && !isInsideCluster(node.id))
+                .map(node => ({ id: node.id, opacity: nodeOpacity(node.id, node.group) }));
             network.body.data.nodes.update(updates);
 
-            for (const { id, domain } of componentClusters) {
-                if (isCollapsed(id)) {
-                    network.updateClusteredNode(id, { opacity: domainOpacity(domain) });
+            for (const cluster of componentClusters) {
+                if (isCollapsed(cluster.id)) {
+                    network.updateClusteredNode(cluster.id, { opacity: clusterOpacity(cluster) });
                 }
             }
+        }
+
+        function toggleFilter(domain) {
+            activeDomain = activeDomain === domain ? null : domain;
+            updateNodeOpacity();
             document.querySelectorAll('.legend-item').forEach(el => {
                 el.classList.toggle('inactive', activeDomain !== null && el.dataset.domain !== activeDomain);
             });
@@ -372,7 +429,7 @@ export class GraphVisualizer {
                     id, group: domain,
                     label: domain + ' (' + count + ' components)',
                     shape: 'box', margin: 20, mass: 12,
-                    opacity: domainOpacity(domain),
+                    opacity: clusterOpacity(cluster),
                     font: { size: ${routeFontSize + 6}, bold: { size: ${routeFontSize + 6} } },
                     scaling: { label: { drawThreshold: 0 } }
                 }
@@ -392,7 +449,7 @@ export class GraphVisualizer {
                 )
             });
             network.body.data.edges.add(hubEdges);
-            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: domainOpacity(domain) })));
+            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: nodeOpacity(id, domain) })));
         }
 
         function updateClusterButton(button) {
@@ -484,6 +541,16 @@ export class GraphVisualizer {
                 }, options);
                 initLegend(domains, groupsConfig);
                 const adjacency = new Map(neighbors);
+                const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
+                const connections = new Map(Array.from(graphNodes.keys(), id => [
+                    id, { incoming: new Set(), outgoing: new Set() }
+                ]));
+                for (const { id, from, to } of edges) {
+                    if (!id?.startsWith('hub-edge:') && connections.has(from) && connections.has(to)) {
+                        connections.get(from).outgoing.add(to);
+                        connections.get(to).incoming.add(from);
+                    }
+                }
                 const components = nodes.filter(node => node.shape === 'ellipse');
                 const clusterButton = document.getElementById('btn-clusters');
                 componentClusters = bigGroups.map(([domain, count], index) => {
@@ -494,11 +561,119 @@ export class GraphVisualizer {
                         hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
                     };
                 });
+                const searchInput = document.getElementById('search-input');
+                const searchCount = document.getElementById('search-count');
+                const details = document.getElementById('details');
+                let searchTimer;
+
+                function applySearch() {
+                    clearTimeout(searchTimer);
+                    const query = searchInput.value.trim().toLowerCase();
+                    searchMatches = query ? new Set() : null;
+                    if (searchMatches) {
+                        for (const node of graphNodes.values()) {
+                            if ([node.fullLabel, node.path].some(value => value.toLowerCase().includes(query))) {
+                                searchMatches.add(node.id);
+                            }
+                        }
+                    }
+                    searchCount.textContent = searchMatches ? searchMatches.size + (searchMatches.size === 1 ? ' match' : ' matches') : '';
+                    updateNodeOpacity();
+                }
+
+                function focusNode(id) {
+                    const [clusterId] = network.findNode(id);
+                    if (clusterId !== id) {
+                        const cluster = componentClusters.find(cluster => cluster.id === clusterId);
+                        if (cluster) {
+                            expandGroup(cluster);
+                            updateClusterButton(clusterButton);
+                        }
+                    }
+                    network.selectNodes([id], false);
+                    showDetails(id);
+                    network.focus(id, {
+                        animation: { duration: 350, easingFunction: 'easeInOutQuad' },
+                        locked: false,
+                        // Leave space for the details panel without moving the canvas.
+                        offset: { x: -details.offsetWidth / 2, y: 0 }
+                    });
+                }
+
+                function closeDetails() {
+                    details.hidden = true;
+                    document.getElementById('details-open').onclick = null;
+                }
+
+                function openNodeFile(node) {
+                    if (node?.path) vscode.postMessage({ command: 'openFile', path: node.path });
+                }
+
+                function showDetails(id) {
+                    const node = graphNodes.get(id);
+                    if (!node) {
+                        closeDetails();
+                        return;
+                    }
+                    document.getElementById('details-label').textContent = node.fullLabel;
+                    document.getElementById('details-kind').textContent = node.kind;
+                    document.getElementById('details-path').textContent = node.path;
+                    document.getElementById('details-domain').textContent = node.group;
+                    const openButton = document.getElementById('details-open');
+                    openButton.disabled = !node.path;
+                    openButton.onclick = () => openNodeFile(node);
+
+                    for (const [direction, ids] of Object.entries(connections.get(id))) {
+                        const list = document.getElementById('details-' + direction);
+                        list.replaceChildren();
+                        if (ids.size === 0) {
+                            const empty = document.createElement('li');
+                            empty.textContent = 'None';
+                            list.appendChild(empty);
+                        }
+                        for (const adjacent of ids) {
+                            const neighbor = graphNodes.get(adjacent);
+                            const item = document.createElement('li');
+                            const button = document.createElement('button');
+                            button.className = 'connection';
+                            button.textContent = neighbor.fullLabel;
+                            button.title = neighbor.path;
+                            button.addEventListener('click', () => focusNode(adjacent));
+                            item.appendChild(button);
+                            list.appendChild(item);
+                        }
+                    }
+                    details.hidden = false;
+                }
+
+                searchInput.addEventListener('input', () => {
+                    clearTimeout(searchTimer);
+                    searchTimer = setTimeout(applySearch, 150);
+                });
+                searchInput.addEventListener('keydown', event => {
+                    if (event.key === 'Escape') {
+                        event.preventDefault();
+                        searchInput.value = '';
+                        applySearch();
+                    } else if (event.key === 'Enter') {
+                        event.preventDefault();
+                        applySearch();
+                        const first = searchMatches?.values().next().value;
+                        if (first !== undefined) focusNode(first);
+                    }
+                });
+                document.getElementById('details-close').addEventListener('click', () => {
+                    network.unselectAll();
+                    closeDetails();
+                });
+                network.on('click', ({ nodes }) => showDetails(nodes[0]));
+
                 for (const cluster of componentClusters) collapseGroup(cluster);
                 clusterButton.hidden = componentClusters.length === 0;
                 clusterButton.addEventListener('click', () => {
                     const expand = componentClusters.some(({ id }) => isCollapsed(id));
                     network.unselectAll();
+                    closeDetails();
                     for (const cluster of componentClusters) {
                         if (expand && isCollapsed(cluster.id)) expandGroup(cluster);
                         else if (!expand) collapseGroup(cluster);
@@ -542,7 +717,7 @@ export class GraphVisualizer {
                         const { x, y } = network.getPosition(node.id);
                         const fontSize = Math.min(14 / scale, Math.max(12, (isFocused ? 12 : 10) / scale));
                         ctx.font = fontSize + 'px arial';
-                        ctx.globalAlpha = domainOpacity(node.group);
+                        ctx.globalAlpha = nodeOpacity(node.id, node.group);
                         if (fontSize > 12) {
                             const width = ctx.measureText(node.label).width + 8 / scale;
                             const height = fontSize + 4 / scale;
@@ -586,8 +761,7 @@ export class GraphVisualizer {
                             }
                             return;
                         }
-                        const clickedNode = network.body.data.nodes.get(nodeId);
-                        if (clickedNode?.path) vscode.postMessage({ command: 'openFile', path: clickedNode.path });
+                        openNodeFile(graphNodes.get(nodeId));
                     }
                 });
             }
