@@ -178,9 +178,9 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.match(outputs.rename_impact, /# not affected: .*writeData \(comment\).*writeData \(different symbol\)/);
   assert.doesNotMatch(outputs.rename_impact, /^use .*other.ts/m);
   assert.match(outputs.wrappers, /branch A[\s\S]+branch B/);
-  assert.match(outputs.wrappers, /Provider providers: QueryProvider \[cond\]/);
+  assert.match(outputs.wrappers, /Provider providers: QueryProvider \(external: widgets\) \[cond\]/);
   assert.doesNotMatch(outputs.wrappers, /WrapperInside/);
-  assert.match(await client.text('wrappers', { route: '/structure', includeExternal: true }), /fixture\/providers.tsx:2 Provider providers: widgets#QueryProvider/);
+  assert.equal(await client.text('wrappers', { route: '/structure', includeExternal: true }), outputs.wrappers);
 
   const page = path.join(root, 'app/structure/page.tsx');
   fs.utimesSync(page, 1, 1);
@@ -257,14 +257,94 @@ test('wrappers list rendered providers in chain order for each branch', async t 
   await generate(root);
   const client = await openMcp(t, root);
   const output = await client.text('wrappers', { route: '/' });
-  assert.match(output, /^# providers \(outermost first, branch A\): RootProvider, ConfigContext\.Provider, InlineProvider, ExternalProvider, ChildProvider, ChildContext\.Provider, ExternalProvider$/m);
-  assert.match(output, /^# providers \(outermost first, branch B\): RootProvider, FallbackProvider$/m);
-  assert.match(output, /^1 app\/layout.tsx:5 RootProvider providers: ConfigContext\.Provider, InlineProvider, ExternalProvider \[cond\]$/m);
-  assert.match(output, /^2 app\/child-provider.tsx:3 ChildProvider providers: ChildContext\.Provider, ExternalProvider \[cond\]$/m);
-  assert.doesNotMatch(output, /Suspense|widgets#|context\.ts:|fooProvider/);
+  assert.match(output, /^# providers \(outermost first, branch A\): RootProvider, ConfigContext\.Provider, InlineProvider, ExternalProvider \(external: widgets\), ChildProvider, ChildContext\.Provider, ExternalProvider \(external: other-widgets\)$/m);
+  assert.match(output, /^# providers \(outermost first, branch B\): RootProvider, FallbackProvider \(external: widgets\)$/m);
+  assert.match(output, /^1 app\/layout.tsx:5 RootProvider, Suspense \(external: widgets\) providers: ConfigContext\.Provider, InlineProvider, ExternalProvider \(external: widgets\) \[cond\]$/m);
+  assert.match(output, /^2 app\/child-provider.tsx:3 ChildProvider providers: ChildContext\.Provider, ExternalProvider \(external: other-widgets\) \[cond\]$/m);
+  assert.doesNotMatch(output, /context\.ts:|fooProvider/);
   assert.match(output, /^# complete: indexed wrapper chains$/m);
-  const external = await client.text('wrappers', { route: '/', includeExternal: true });
-  assert.match(external, /RootProvider, widgets#Suspense providers: context\.ts#ConfigContext\.Provider, InlineProvider, widgets#ExternalProvider/);
+  const local = await client.text('wrappers', { route: '/', includeExternal: false });
+  assert.match(local, /RootProvider providers: ConfigContext\.Provider, InlineProvider/);
+  assert.match(local, /^# providers \(outermost first, branch B\): RootProvider, FallbackProvider \(external: widgets\)$/m);
+  assert.doesNotMatch(local, /Suspense/);
+});
+
+test('helper-wrapped server actions appear in the graph and resolve to their runtime use sites', async t => {
+  const root = temporary(t);
+  fs.cpSync(path.join(__dirname, 'fixtures/server-actions'), root, { recursive: true });
+  const overview = await generate(root);
+  assert.match(overview, /^app\/page\.tsx > app\/actions\.ts#discard app\/actions\.ts#save app\/actions\.ts#signOut app\/actions\.ts#submit$/m);
+  assert.match(overview, /^lib\/call\.ts > app\/actions\.ts#default app\/actions\.ts#discard app\/actions\.ts#helper app\/actions\.ts#picked app\/actions\.ts#plainHelper app\/actions\.ts#reexported app\/actions\.ts#save app\/actions\.ts#signOut$/m);
+  assert.doesNotMatch(overview, /#(?:Options|Result|literal|typeOnly|mixed)/);
+
+  const client = await openMcp(t, root);
+  const query = target => client.text('query', { kind: 'api_consumers', target });
+  for (const [name, lines] of [
+    ['app/actions.ts#submit', ['app/page.tsx:12']],
+    ['save', ['app/page.tsx:10,13', 'lib/call.ts:8']],
+    ['discard', ['app/page.tsx:10,11', 'lib/call.ts:8']],
+    ['signOut', ['app/page.tsx:14', 'lib/call.ts:4']],
+    ['reexported', ['lib/call.ts:16']],
+    ['plainHelper', ['lib/call.ts:16']],
+    ['helper', ['lib/call.ts:17']],
+    ['default', ['lib/call.ts:16']],
+    ['defAct', ['lib/call.ts:16']],
+    ['picked', ['lib/call.ts:16']],
+    ['onlyInline', ['app/panels.tsx:9']],
+    ['app/panels.tsx#ServerPanel.inline', ['app/panels.tsx:3']],
+    ['unused', []]
+  ]) {
+    const output = await query(name);
+    assert.match(output, /# complete: indexed server action callers$/m, name);
+    assert.deepEqual(output.split('\n').filter(line => line.startsWith('call   ')).map(line => line.slice(7)), lines, name);
+  }
+  assert.match(await query('app/actions.ts#reexported'), /^# api_consumers app\/actions\.ts:19#reexported /m);
+  assert.match(await query('reexportedElsewhere'), /^# api_consumers lib\/other-actions\.ts:4#reexportedElsewhere : 0 caller files /m);
+  assert.match(await query('plainHelper'), /^# api_consumers app\/actions\.ts:21#plainHelper /m);
+  assert.match(await query('helper'), /^# api_consumers app\/actions\.ts:28#helper /m);
+  assert.match(await query('defAct'), /^# api_consumers app\/actions\.ts:22#default /m);
+  assert.match(await query('submit'), /^# ambiguous api_consumers submit/m);
+  assert.match(await query('inline'), /^# ambiguous api_consumers inline[^\n]*\napp\/panels\.tsx:2#ServerPanel\.inline server action\napp\/panels\.tsx:7#OtherPanel\.inline server action/m);
+  assert.match(await query('singOut'), /^# did you mean: app\/actions\.ts:10#signOut$/m);
+  assert.match(await query('app/panels.tsx#onlyInlne'), /^# did you mean: app\/panels\.tsx:8#OtherPanel\.onlyInline$/m);
+  assert.match(await query('literal'), /^# partial: target unresolved$/m);
+
+  const files = ['app/actions.ts', 'lib/other-actions.ts', 'app/page.tsx', 'app/panels.tsx', 'lib/call.ts', 'lib/reex.ts'];
+  const reexports = () => JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8')).serverActions
+    .filter(action => action.name.startsWith('reexported')).sort((a, b) => a.name.localeCompare(b.name));
+  const expected = reexports();
+  for (const order of [files, [...files].reverse()]) {
+    write(root, 'tsconfig.json', JSON.stringify({ compilerOptions: { jsx: 'preserve' }, files: order }));
+    assert.equal(await generate(root), overview);
+    assert.deepEqual(reexports(), expected);
+  }
+});
+
+test('star re-exported actions get a unique ID when the base ID is already registered', t => {
+  const { buildSync } = require('esbuild');
+  const { Project } = require('ts-morph');
+  const { outputFiles } = buildSync({
+    entryPoints: [path.join(__dirname, '../src/core/analyzers/ComponentAnalyzer.ts')],
+    bundle: true, packages: 'external', platform: 'node', write: false
+  });
+  const analyzerModule = { exports: {} };
+  new Function('module', 'require', outputFiles[0].text)(analyzerModule, require);
+  const { ComponentAnalyzer } = analyzerModule.exports;
+
+  const root = temporary(t);
+  write(root, 'actions.ts', "'use server';\nexport * from './implementation';");
+  write(root, 'implementation.ts', 'export async function run() {}');
+  write(root, 'caller.ts', "import { run } from './actions';\nrun();");
+  const project = new Project();
+  const files = project.addSourceFilesAtPaths(path.join(root, '*.ts'));
+  const barrel = project.getSourceFileOrThrow('actions.ts');
+  // Pass the barrel twice to exercise a collision at the star re-export registration.
+  const { actions, index } = new ComponentAnalyzer(root).analyze([barrel, ...files], [], true);
+  assert.deepEqual(actions, ['action:actions.ts#run', 'action:actions.ts#run~2']);
+  assert.deepEqual(index.serverActions, [
+    { name: 'run', file: 'actions.ts', line: 2, callers: [] },
+    { name: 'run', file: 'actions.ts', line: 2, callers: [['caller.ts', 2]] }
+  ]);
 });
 
 test('API consumers flag generated sends and count distinct generated sender files', async t => {

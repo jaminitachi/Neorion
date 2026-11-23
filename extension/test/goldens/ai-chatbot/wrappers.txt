@@ -1,10 +1,10 @@
 # wrappers / : 6 files, 1 page (index 2026-11-19T06:00Z, fresh)
 # not wrappers: rendered inside the page
-# providers (outermost first): ThemeProvider, NextThemesProvider, SessionProvider, TooltipProvider, DataStreamProvider, DataStreamContext.Provider, SidebarProvider, SidebarContext.Provider
-1 app/layout.tsx:51 RootLayout providers: SessionProvider
-2 components/theme-provider.tsx:6 ThemeProvider providers: NextThemesProvider
+# providers (outermost first): ThemeProvider, NextThemesProvider (external: next-themes), SessionProvider (external: next-auth/react), TooltipProvider, DataStreamProvider, DataStreamContext.Provider, SidebarProvider, SidebarContext.Provider
+1 app/layout.tsx:51 RootLayout providers: SessionProvider (external: next-auth/react)
+2 components/theme-provider.tsx:6 ThemeProvider providers: NextThemesProvider (external: next-themes)
 3 components/ui/tooltip.tsx:8 TooltipProvider
-4 app/(chat)/layout.tsx:12 Layout, SidebarShell
+4 app/(chat)/layout.tsx:12 Layout, Suspense (external: react), SidebarShell
 5 components/chat/data-stream-provider.tsx:21 DataStreamProvider providers: DataStreamContext.Provider
 6 components/ui/sidebar.tsx:55 SidebarProvider, SidebarInset providers: SidebarContext.Provider
 page app/(chat)/page.tsx:1

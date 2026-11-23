@@ -1,12 +1,18 @@
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import type { Wrapper } from '../../mcp/Index';
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
   return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
+}
+
+export function isPackageSpecifier(specifier: string): boolean {
+  return !specifier.startsWith('.') && !specifier.startsWith('@/') && !specifier.startsWith('#') &&
+    !path.isAbsolute(specifier) && !path.win32.isAbsolute(specifier);
 }
 
 function addFact(facts: DetailFacts, file: string, fact: string, depth = 1, fanOut = 1, layoutOnly = false) {
@@ -99,6 +105,7 @@ interface WrapperChain {
   path: string[];
   locations: Wrapper[];
   conditional?: boolean;
+  contextProvider?: boolean;
 }
 
 const emptyChain: WrapperChain = { path: [], locations: [] };
@@ -138,8 +145,12 @@ export function conditionalAt(node: Node, boundary?: Node): number {
   return 0;
 }
 
+const providerName = (name: string) => name.endsWith('Provider');
+const externalProviderName = (name: string) => /(?:Config|Context)$/.test(name);
+const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|ErrorBoundary)$/.test(name);
+
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
-  bodies: Map<Node, Node>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
+  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
   if (seen.has(body)) return [];
   seen = new Set(seen).add(body);
   const chains = new Map<string, WrapperChain>();
@@ -177,36 +188,44 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
       const name = tag.getText();
-      const providerTag = name.endsWith('Provider');
-      if (!/^[A-Z]/.test(name) && !name.endsWith('.Provider')) continue;
+      const member = Node.isPropertyAccessExpression(tag) ? tag.getName() : name;
+      if (!/^[A-Z]/.test(member)) continue;
+      const contextProvider = member === 'Provider' && Node.isPropertyAccessExpression(tag);
       const declarations = declarationsOf(tag);
-      const definition = declarations.find(declaration => !declaration.getSourceFile().isDeclarationFile());
+      const definition = declarations.find(declaration => projectFiles.has(declaration.getSourceFile()));
       const local = definition && bodies.get(definition);
-      const module = (Node.isPropertyAccessExpression(tag) ? tag.getExpression() : tag).getSymbol()
-        ?.getDeclarations()[0]?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
+      let root = tag;
+      while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
+      const binding = root.getSymbol()?.getDeclarations()[0];
+      const module = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
+      const external = !definition && module && isPackageSpecifier(module) ? module : undefined;
       const exportedName = Node.isFunctionDeclaration(definition) || Node.isClassDeclaration(definition) ||
         Node.isVariableDeclaration(definition) ? definition.getName() ?? name : name;
+      const importedName = root === tag && Node.isImportSpecifier(binding) ? binding.getName() : name;
+      const names = [name, exportedName, importedName];
+      const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const nested = local ? wrappedChains(local, false, relativePath, bodies, seen) : [];
-      // A dedicated component file gets its own wrapper row. Inline provider tags
-      // belong to the file rendering them, even if their definitions are imported.
-      const provider = providerTag && (!local || definition.getSourceFile() === tag.getSourceFile());
-      const location: Wrapper = provider ? {
-        file: relativePath(tag.getSourceFile()), symbol: name, line: tag.getStartLineNumber(), conditional,
-        provider: true, external: definition ? undefined : module,
-        definitionFile: definition && definition.getSourceFile() !== tag.getSourceFile()
-          ? relativePath(definition.getSourceFile()) : undefined
-      } : {
-        file: relativePath((definition ?? tag).getSourceFile()),
-        symbol: exportedName, line: (definition ?? tag).getStartLineNumber(), conditional,
-        external: definition ? undefined : module
-      };
-      chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => ({
-        path: [...prefix.path, label, ...next.path],
-        locations: [...prefix.locations, location, ...next.locations],
-        conditional: prefix.conditional || next.conditional
-      })));
+      const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen) : [];
+      const primitive = names.some(layoutPrimitive);
+      chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
+        const provider = !primitive && (namedProvider || !!next.contextProvider);
+        // A dedicated component gets its own row. Inline provider tags belong to the file rendering them.
+        const providerTag = provider && (!local || definition.getSourceFile() === tag.getSourceFile());
+        const source = providerTag ? tag : definition ?? tag;
+        const location: Wrapper = {
+          file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
+          line: source.getStartLineNumber(), conditional, provider, providerTag, external,
+          definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
+            ? relativePath(definition.getSourceFile()) : undefined
+        };
+        return {
+          path: [...prefix.path, label, ...next.path],
+          locations: [...prefix.locations, location, ...next.locations],
+          conditional: prefix.conditional || next.conditional,
+          contextProvider: prefix.contextProvider || contextProvider
+        };
+      }));
     }
     for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional]), entry);
   };
@@ -216,7 +235,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
 }
 
 // Pages Router applications can wrap the page before inserting it into _app.
-function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, bodies: Map<Node, Node>) {
+function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, bodies: Map<Node, Node>,
+  projectFiles: Set<SourceFile>) {
   if (!source || !source.getFullText().includes('getLayout')) return [];
   const page = new Set<Node>(source.getExportedDeclarations().get('default') ?? []);
   const chains: WrapperChain[] = [];
@@ -232,7 +252,7 @@ function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, 
         (!Node.isArrowFunction(right) && !Node.isFunctionExpression(right))) continue;
     const parameter = right.getParameters()[0]?.getNameNode();
     if (Node.isIdentifier(parameter)) {
-      chains.push(...wrappedChains(right.getBody(), false, relativePath, bodies, new Set(), parameter.getText()));
+      chains.push(...wrappedChains(right.getBody(), false, relativePath, bodies, projectFiles, new Set(), parameter.getText()));
     }
   }
   return chains;
@@ -250,6 +270,7 @@ export function collectRenderFacts(
     outgoing.set(edge.from, targets);
   }
   const filesByPath = new Map(files.map(file => [relativePath(file), file]));
+  const projectFiles = new Set(files);
   const layoutsByPage = new Map<string, string[]>();
   for (const layout of routes.filter(route => route.wraps).sort((a, b) => a.file.length - b.file.length)) {
     for (const page of layout.wraps!) {
@@ -286,22 +307,26 @@ export function collectRenderFacts(
         const component = routesByFile.get(wrapper)?.componentId ?? (body && componentByBody.get(body));
         if (component) wrapperRoots.set(wrapper, component);
         const definition = exported[0];
+        const symbol = component && componentsById.get(component)?.name || 'default';
+        const paths = body ? wrappedChains(body, !!app, relativePath, bodies, projectFiles) : [];
         wrapperLocations.set(wrapper, {
-          file: wrapper, symbol: component && componentsById.get(component)?.name || 'default',
-          line: definition?.getSourceFile() === source ? definition?.getStartLineNumber() ?? 1 : 1, conditional: false
+          file: wrapper, symbol,
+          line: definition?.getSourceFile() === source ? definition?.getStartLineNumber() ?? 1 : 1, conditional: false,
+          provider: paths.length > 0 && providerName(symbol), providerTag: false
         });
-        wrapperChains.set(wrapper, body ? wrappedChains(body, !!app, relativePath, bodies) : []);
+        wrapperChains.set(wrapper, paths);
       }
       layoutSeeds.push(wrapperRoots.get(wrapper), `file:${wrapper}`);
       const paths = wrapperChains.get(wrapper)!;
+      const location = wrapperLocations.get(wrapper)!;
       chains = chains.flatMap(prefix => (paths.length ? paths : [emptyChain]).map(next => ({
         path: [...prefix.path, wrapper, ...next.path],
-        locations: [...prefix.locations, wrapperLocations.get(wrapper)!, ...next.locations],
+        locations: [...prefix.locations, next.contextProvider ? { ...location, provider: true } : location, ...next.locations],
         conditional: prefix.conditional || next.conditional
       })));
     }
     if (app && filesByPath.get(app)?.getFullText().includes('getLayout')) {
-      const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies);
+      const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies, projectFiles);
       if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => ({
         path: [...prefix.path, ...chain.path],
         locations: [...prefix.locations, ...chain.locations],
@@ -358,7 +383,7 @@ function addition(node: Node | undefined) {
   return Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.PlusToken ? node : undefined;
 }
 
-function wrappedExpression(node: Node) {
+export function wrappedExpression(node: Node) {
   if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) ||
       Node.isTypeAssertion(node) || Node.isSatisfiesExpression(node) || Node.isNonNullExpression(node)) {
     return node.getExpression();

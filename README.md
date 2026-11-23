@@ -19,6 +19,13 @@ neorion graph
 neorion query wrappers /
 ```
 
+`wrappers` includes third-party components on the page’s wrapper chain and labels
+them with their package. Pass `--no-external` to hide third-party non-provider wrappers, or set
+`includeExternal: false` in the MCP tool.
+
+Use `neorion query api_consumers signOut` to find a server action’s caller files
+and lines. Use `path#Name` to qualify an action name shared by multiple files.
+
 ## Codex
 
 Run the following command from the root of your project, then start a new Codex session there.

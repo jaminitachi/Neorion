@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
-import { WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type Wrapper } from '../../mcp/Index';
+import {
+  WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type Wrapper
+} from '../../mcp/Index';
 import { declarationsOf } from './ArchitectureFacts';
 
 type RelativePath = (source: SourceFile) => string;
@@ -12,6 +14,7 @@ export class QueryIndexBuilder {
   private edges: [string, string, number, number][] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
   private fetches: PendingFetch[] = [];
+  private actions = new Map<string, ServerAction>();
 
   render(from: string, to: string, line: number, conditional: number) {
     this.edges.push([from, to, line, conditional]);
@@ -25,12 +28,27 @@ export class QueryIndexBuilder {
     this.fetches.push(entry);
   }
 
+  action(id: string, name: string, file: string, line: number) {
+    this.actions.set(id, { name, file, line, callers: [] });
+  }
+
+  actionAlias(id: string, alias: string) {
+    const action = this.actions.get(id)!;
+    if (alias !== action.name && !action.aliases?.includes(alias)) (action.aliases ??= []).push(alias);
+  }
+
+  useAction(id: string, file: string, line: number) {
+    const callers = this.actions.get(id)!.callers;
+    const previous = callers[callers.length - 1];
+    if (previous?.[0] !== file || previous[1] !== line) callers.push([file, line]);
+  }
+
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
       schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.', wrapperRevision: WRAPPER_INDEX_REVISION,
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
-      routeWrap: {}, branches: {}, references: [], fetches: [], mentions: Object.create(null)
+      routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null)
     };
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
@@ -51,11 +69,12 @@ export class QueryIndexBuilder {
     for (const [node, component] of components) {
       byGraphId.set(component.id, add(node, component.name, 'component', component.aliasOf ?? null));
     }
+    const actionSymbols = new Map<string, number>();
     for (const [node, id] of actions) {
-      if (Node.isIdentifier(node) || Node.isExportAssignment(node)) continue;
       const name = id.slice(id.lastIndexOf('#') + 1);
-      const binding = Node.isArrowFunction(node) || Node.isFunctionExpression(node) ? node.getParentOrThrow() : node;
-      byNode.set(node, add(Node.isVariableDeclaration(binding) ? binding : node, name, 'function', null));
+      const symbol = actionSymbols.get(id) ?? add(node, name, 'function', null);
+      actionSymbols.set(id, symbol);
+      byNode.set(node, symbol);
     }
     for (const file of files) {
       const relative = relativePath(file);
