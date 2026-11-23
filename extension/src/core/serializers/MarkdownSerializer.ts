@@ -81,6 +81,20 @@ export class MarkdownSerializer {
   public serialize(graph: CodebaseGraph, fileList: string) {
     const fileListTokens = count(fileList);
     const budget = Math.min(6000, Math.max(3000, Math.floor(fileListTokens / 4)));
+    // Budget probes repack the same detail rows. Keep exact counts for those rows
+    // and bound the amount of text retained by the cache.
+    const detailRowCounts = new Map<string, number>();
+    let remainingCacheCharacters = 1_000_000;
+    const countDetailRow = (text: string) => {
+      const cached = detailRowCounts.get(text);
+      if (cached !== undefined) return cached;
+      const tokens = count(text);
+      if (text.length <= remainingCacheCharacters) {
+        detailRowCounts.set(text, tokens);
+        remainingCacheCharacters -= text.length;
+      }
+      return tokens;
+    };
     const details = new Map<string, string>();
     // Keep small-project detail maps within the original aggregate limits.
     // Larger projects also bound the extra space used by architecture facts.
@@ -188,7 +202,7 @@ export class MarkdownSerializer {
       const footer = markdown ? '' : '~~~\n';
       const parts: string[] = [];
       let entries: { text: string; directory: string }[] = [];
-      const headingSize = count(heading);
+      const headingSize = countDetailRow(heading);
       const rowBudget = DETAIL_BUDGET - 16 - reserved;
       let partsSize = 0;
       let size = headingSize;
@@ -212,11 +226,11 @@ export class MarkdownSerializer {
         while (rest) {
           const prefix = !entries.length || entries[entries.length - 1]?.directory !== directory ? directory : '';
           let length = rest.length;
-          if (size + count(prefix + rest) > rowBudget && entries.length) {
+          if (size + countDetailRow(prefix + rest) > rowBudget && entries.length) {
             flush();
             continue;
           }
-          while (length && size + count(prefix + rest.slice(0, length)) > rowBudget) {
+          while (length && size + countDetailRow(prefix + rest.slice(0, length)) > rowBudget) {
             length = Math.floor(length / 2);
           }
           if (!length) throw new Error(`Graph directory path exceeds the detail budget in ${area}`);
@@ -227,7 +241,7 @@ export class MarkdownSerializer {
           }
           const entry = prefix + rest.slice(0, length);
           entries.push({ text: entry.endsWith('\n') ? entry : entry + '\n', directory });
-          size += count(entry);
+          size += countDetailRow(entry);
           rest = rest.slice(length);
           if (rest) flush();
         }
