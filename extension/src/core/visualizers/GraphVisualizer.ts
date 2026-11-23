@@ -144,6 +144,15 @@ export class GraphVisualizer {
         const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group))).sort();
         
+        const componentCounts = new Map<string, number>();
+        for (const node of nodes) {
+            if (node.shape === 'ellipse') {
+                componentCounts.set(node.group, (componentCounts.get(node.group) ?? 0) + 1);
+            }
+        }
+        const bigGroups = [...componentCounts].filter(([, count]) => count > 40);
+
+        const hasBigGroups = bigGroups.length > 0;
         // Hub nodes with reduced mass to prevent spinning
         const hubNodes = domains.map(d => ({
             id: `hub_${d}`,
@@ -163,14 +172,13 @@ export class GraphVisualizer {
             const fromDomain = nodeDomainMap.get(fromId);
             const toDomain = nodeDomainMap.get(toId);
             // Same Galaxy (Domain): Tight gravity
-            if (fromDomain && toDomain && fromDomain === toDomain) return 50; 
-            // Inter-Galactic: Far away
-            return 400; 
+            if (fromDomain && toDomain && fromDomain === toDomain) return hasBigGroups ? 160 : 50;
+            return hasBigGroups ? 500 : 400;
         };
 
         const codeEdges = [
             ...graph.routes.flatMap(route => route.componentId ? [{
-                from: route.id, to: route.componentId, arrows: 'to', length: 50, width: 2
+                from: route.id, to: route.componentId, arrows: 'to', length: hasBigGroups ? 160 : 50, width: 2
             }] : []),
             ...graph.edges.map(edge => ({
                 from: edge.from, to: edge.to, title: edge.type, arrows: 'to',
@@ -186,9 +194,10 @@ export class GraphVisualizer {
         }
         const edges = [
             ...codeEdges,
-            ...nodes.map(node => ({
+            ...nodes.map((node, index) => ({
+                id: `hub-edge:${index}`,
                 from: node.id, to: `hub_${node.group}`, color: { opacity: 0 },
-                length: 100, smooth: false, width: 0
+                length: hasBigGroups ? 220 : 100, smooth: false, width: 0
             }))
         ];
 
@@ -200,18 +209,18 @@ export class GraphVisualizer {
         }, Object.create(null) as Record<string, { color: { background: string; border: string } }>);
 
         const denseGraph = nodes.length > 100;
+        // A dense graph fits at a much smaller scale than a handful of nodes.
+        const routeFontSize = denseGraph ? 62 : 18;
         const displayNodes = nodes.map(node => {
             const prominent = node.id.startsWith('route:') || node.id.startsWith('action:');
             const degree = neighbors.get(node.id)?.size ?? 0;
-            // A dense graph fits at a much smaller scale than a handful of nodes.
-            const fontSize = denseGraph ? 62 : 18;
             const padding = (denseGraph ? 18 : 10) + Math.min(20, Math.sqrt(degree) * 4);
             return {
                 ...node,
                 label: truncateLabel(node.label),
                 ...(prominent ? {
                     margin: padding,
-                    font: { size: fontSize, bold: { size: fontSize } },
+                    font: { size: routeFontSize, bold: { size: routeFontSize } },
                     scaling: { label: { drawThreshold: 0 } }
                 } : node.shape === 'ellipse' ? {
                     // Keep the ellipse dimensions stable as labels appear and disappear.
@@ -220,7 +229,7 @@ export class GraphVisualizer {
             };
         });
         const graphPayload = {
-            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph,
+            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, bigGroups,
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]])
         };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
@@ -277,6 +286,7 @@ export class GraphVisualizer {
     
     <div id="controls">
         <button id="btn-physics" class="btn">Pause layout</button>
+        <button id="btn-clusters" class="btn" hidden>Expand all</button>
         <button id="btn-fit" class="btn">Fit Graph</button>
     </div>
 
@@ -292,7 +302,7 @@ export class GraphVisualizer {
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         let physicsEnabled = true;
-        let activeDomain = null; // Filter state
+        let activeDomain = null;
 
 
         function log(msg) {
@@ -314,47 +324,80 @@ export class GraphVisualizer {
 
         function setPhysicsEnabled(enabled) {
             physicsEnabled = enabled;
-            if (!physicsEnabled) network.storePositions();
             network.setOptions({ physics: { enabled: physicsEnabled } });
+            if (!physicsEnabled) network.storePositions();
             
             const btn = document.getElementById('btn-physics');
             btn.textContent = physicsEnabled ? 'Pause layout' : 'Layout paused (click to resume)';
             btn.title = physicsEnabled ? 'Click to pause layout' : 'Click to re-run layout';
         }
 
-        // Filtering Logic
-        function toggleFilter(domain) {
-            if (activeDomain === domain) {
-                // Reset
-                activeDomain = null;
-                // Restore all opacities
-                network.body.data.nodes.update(
-                    network.body.data.nodes.get().map(n => ({ id: n.id, opacity: undefined, color: undefined }))
-                );
-                document.querySelectorAll('.legend-item').forEach(el => el.classList.remove('inactive'));
-            } else {
-                // Focus
-                activeDomain = domain;
-                const allNodes = network.body.data.nodes.get();
-                const updates = allNodes.map(n => {
-                    const isMatch = n.group === domain || n.group === 'hooks'; // Keep hooks visible as connectors
-                    const isHub = n.id.startsWith('hub_');
-                    if (isHub) return { id: n.id }; // Ignore hubs
+        function domainOpacity(domain) {
+            return !activeDomain || domain === activeDomain || domain === 'hooks' ? 1 : 0.1;
+        }
 
-                    return { 
-                        id: n.id, 
-                        opacity: isMatch ? 1 : 0.1,
-                        // Optional: grey out color
-                    };
-                });
-                network.body.data.nodes.update(updates);
-                
-                // Update Legend UI
-                document.querySelectorAll('.legend-item').forEach(el => {
-                    if (el.dataset.domain === domain) el.classList.remove('inactive');
-                    else el.classList.add('inactive');
-                });
+        function isInsideCluster(id) {
+            return network.findNode(id).length > 1;
+        }
+
+        function isCollapsed(id) {
+            // Expanded clusters are absent, and vis logs an error if isCluster receives an absent ID.
+            return network.findNode(id).length > 0;
+        }
+
+        function toggleFilter(domain) {
+            activeDomain = activeDomain === domain ? null : domain;
+            const updates = network.body.data.nodes.get()
+                .filter(node => node.shape !== 'dot' && !isInsideCluster(node.id))
+                .map(node => ({ id: node.id, opacity: domainOpacity(node.group) }));
+            network.body.data.nodes.update(updates);
+
+            for (const { id, domain } of componentClusters) {
+                if (isCollapsed(id)) {
+                    network.updateClusteredNode(id, { opacity: domainOpacity(domain) });
+                }
             }
+            document.querySelectorAll('.legend-item').forEach(el => {
+                el.classList.toggle('inactive', activeDomain !== null && el.dataset.domain !== activeDomain);
+            });
+        }
+
+        function collapseGroup(cluster) {
+            const { id, domain, count, hubEdges } = cluster;
+            // Remove tethers before clustering so vis never redirects them to the cluster.
+            network.body.data.edges.remove(hubEdges.map(edge => edge.id));
+            network.cluster({
+                joinCondition: node => node.group === domain && node.shape === 'ellipse',
+                clusterNodeProperties: {
+                    id, group: domain,
+                    label: domain + ' (' + count + ' components)',
+                    shape: 'box', margin: 20, mass: 12,
+                    opacity: domainOpacity(domain),
+                    font: { size: ${routeFontSize + 6}, bold: { size: ${routeFontSize + 6} } },
+                    scaling: { label: { drawThreshold: 0 } }
+                }
+            });
+        }
+
+        function expandGroup(cluster) {
+            const { id, domain, componentIds, hubEdges } = cluster;
+            network.openCluster(id, {
+                // Give members distinct positions even when layout is paused.
+                releaseFunction: (center, positions) => Object.fromEntries(
+                    Object.keys(positions).sort().map((nodeId, index) => {
+                        const angle = index * Math.PI * (3 - Math.sqrt(5));
+                        const radius = 26 * Math.sqrt(index);
+                        return [nodeId, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
+                    })
+                )
+            });
+            network.body.data.edges.add(hubEdges);
+            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: domainOpacity(domain) })));
+        }
+
+        function updateClusterButton(button) {
+            button.textContent = componentClusters.some(({ id }) => isCollapsed(id))
+                ? 'Expand all' : 'Collapse big groups';
         }
 
         function initLegend(domains, groupsConfig) {
@@ -385,9 +428,10 @@ export class GraphVisualizer {
             document.getElementById('debug-log').style.display = 'block';
         });
 
+        let componentClusters = [];
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains, denseGraph, neighbors } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -413,15 +457,15 @@ export class GraphVisualizer {
                 physics: {
                     stabilization: {
                         enabled: true,
-                        iterations: 2000,
+                        iterations: bigGroups.length ? 4000 : 2000,
                         updateInterval: 50,
                         fit: true
                     },
                     solver: 'barnesHut', 
                     barnesHut: {
-                        gravitationalConstant: -40000, // Massive repulsion (Static Space)
-                        centralGravity: 0.001,         // Almost zero gravity (Universe)
-                        springLength: 50,              // Tighter internal springs
+                        gravitationalConstant: bigGroups.length ? -300000 : -40000,
+                        centralGravity: bigGroups.length ? 0.22 : 0.001,
+                        springLength: bigGroups.length ? 160 : 50,
                         springConstant: 0.04,
                         damping: 0.5,                  // High resistance (Stops self-movement)
                         avoidOverlap: 1
@@ -441,6 +485,28 @@ export class GraphVisualizer {
                 initLegend(domains, groupsConfig);
                 const adjacency = new Map(neighbors);
                 const components = nodes.filter(node => node.shape === 'ellipse');
+                const clusterButton = document.getElementById('btn-clusters');
+                componentClusters = bigGroups.map(([domain, count], index) => {
+                    const componentIds = components.filter(node => node.group === domain).map(node => node.id);
+                    const members = new Set(componentIds);
+                    return {
+                        id: 'component-cluster:' + index, domain, count, componentIds,
+                        hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
+                    };
+                });
+                for (const cluster of componentClusters) collapseGroup(cluster);
+                clusterButton.hidden = componentClusters.length === 0;
+                clusterButton.addEventListener('click', () => {
+                    const expand = componentClusters.some(({ id }) => isCollapsed(id));
+                    network.unselectAll();
+                    for (const cluster of componentClusters) {
+                        if (expand && isCollapsed(cluster.id)) expandGroup(cluster);
+                        else if (!expand) collapseGroup(cluster);
+                    }
+                    updateClusterButton(clusterButton);
+                    network.fit();
+                });
+
                 let hoveredNode;
                 let showComponentLabels = false;
                 let showLabelScale = 0.8;
@@ -472,10 +538,11 @@ export class GraphVisualizer {
                     for (const node of components) {
                         const isFocused = focused.has(node.id);
                         if (!showComponentLabels && !isFocused) continue;
+                        if (isInsideCluster(node.id)) continue;
                         const { x, y } = network.getPosition(node.id);
                         const fontSize = Math.min(14 / scale, Math.max(12, (isFocused ? 12 : 10) / scale));
                         ctx.font = fontSize + 'px arial';
-                        ctx.globalAlpha = activeDomain && node.group !== activeDomain && node.group !== 'hooks' ? 0.1 : 1;
+                        ctx.globalAlpha = domainOpacity(node.group);
                         if (fontSize > 12) {
                             const width = ctx.measureText(node.label).width + 8 / scale;
                             const height = fontSize + 4 / scale;
@@ -509,6 +576,16 @@ export class GraphVisualizer {
                 network.on("doubleClick", function (params) {
                     if (params.nodes.length > 0) {
                         const nodeId = params.nodes[0];
+                        if (network.isCluster(nodeId)) {
+                            const cluster = componentClusters.find(({ id }) => id === nodeId);
+                            if (cluster) {
+                                network.unselectAll();
+                                expandGroup(cluster);
+                                updateClusterButton(clusterButton);
+                                network.fit();
+                            }
+                            return;
+                        }
                         const clickedNode = network.body.data.nodes.get(nodeId);
                         if (clickedNode?.path) vscode.postMessage({ command: 'openFile', path: clickedNode.path });
                     }
