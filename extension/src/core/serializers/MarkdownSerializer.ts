@@ -461,22 +461,37 @@ export class MarkdownSerializer {
         Math.max(...right.map(usage)) - Math.max(...left.map(usage)) || a.localeCompare(b)
       ).map(([file, hooks]) => `${file}: ${hooks.map(id => names.get(id)!).join(',')}`), true]
     ] as const;
-    const lengths = sections.map(([, rows]) => rows.length);
-    const render = () => {
-      const omitted = sections.filter(([, rows], i) => lengths[i] < rows.length).map(([name]) => name);
-      return (omitted.length ? `Overview abbreviates ${omitted.join(', ')}. See area details.\n\n` : '') + intro +
-        sections.map(([name, rows, tree], i) => {
-          const visible = rows.slice(0, lengths[i]);
-          return section(name, tree && visible.length ? ['~~~text', ...visible, '~~~'] : visible);
-        }).join('');
-    };
-    const fitOverview = () => {
+    const filename = (i: number) => `+areas${i ? '+' + (i + 1) : ''}.md`;
+    const fitOverview = (layout: 'plain' | 'index' | 'overflow', minimumAreas = 10) => {
+      const lengths = sections.map(([, rows], i) => i === 2 && layout === 'index' ? 0 : rows.length);
+      const render = () => {
+        const omitted = sections.filter(([, rows], i) => lengths[i] < rows.length && i !== 2 &&
+          (i !== 1 || layout !== 'overflow')).map(([name]) => name);
+        return (omitted.length ? `Overview abbreviates ${omitted.join(', ')}. See area details.\n\n` : '') + intro +
+          sections.map(([name, rows, tree], i) => {
+            const visible = rows.slice(0, lengths[i]);
+            const hidden = rows.length - lengths[i];
+            const body = tree && visible.length ? ['~~~text', ...visible, '~~~'] : visible;
+            if (i === 2 && (layout === 'index' || hidden)) {
+              const title = visible.length ? `${hidden} more areas` : 'Area index';
+              body.push(`- [${title}](<${DETAIL_DIRECTORY}/${filename(0)}>)`);
+            }
+            if (i === 1 && hidden && layout === 'overflow') {
+              if (body.length) body.push('');
+              body.push(`${hidden} more, use \`api_consumers\` with the action name.`);
+            }
+            return section(name, body);
+          }).join('');
+      };
+      const order = layout === 'overflow' ? [3, 1, 2, 0] : [3, 1, 0];
+      const minimums = [0, 0, minimumAreas, 1];
       let overview = render();
-      for (const i of [3, 1, 0]) {
+      for (const i of order) {
         if (count(overview) <= budget) break;
         // Keep entry points into the details even if the route tree alone exceeds the budget.
-        let low = i === 3 ? Math.min(1, lengths[i]) : 0;
+        let low = Math.min(minimums[i], lengths[i]);
         let high = lengths[i];
+        // The first omission can add a link or note, but the full section is already over budget.
         while (low < high) {
           lengths[i] = Math.ceil((low + high) / 2);
           if (count(render()) <= budget) low = lengths[i];
@@ -485,12 +500,25 @@ export class MarkdownSerializer {
         lengths[i] = low;
         overview = render();
       }
-      return overview;
+      return { overview, lengths };
     };
-    let overview = fitOverview();
-    if (count(overview) > budget) {
+    let result = fitOverview('plain');
+    if (count(result.overview) > budget) {
       // A project with many areas can exceed the overview budget with links alone.
-      const filename = (i: number) => `+areas${i ? '+' + (i + 1) : ''}.md`;
+      result = fitOverview('index');
+    }
+    const routeCount = sections[0][1].length;
+    const minimumAreas = areaRowsInOverview.length > 10 ? [10, 0] : [10];
+    for (const minimum of minimumAreas) {
+      if (result.lengths[0] === routeCount) break;
+      // Trade direct area links for routes, down to the index link if needed.
+      const candidate = fitOverview('overflow', minimum);
+      if (candidate.lengths[0] > result.lengths[0] && count(candidate.overview) <= budget) {
+        result = candidate;
+      }
+    }
+    const { overview, lengths } = result;
+    if (lengths[2] < areaRowsInOverview.length) {
       const nextLink = (i: number) => `\n[Next](<${filename(i)}>)\n`;
       const reserved = areaRowsInOverview.reduce((max, _, i) => Math.max(max, count(nextLink(i))), 0);
       const { parts } = detailParts('Area index', areaRowsInOverview.map(row =>
@@ -499,9 +527,6 @@ export class MarkdownSerializer {
         const next = i + 1 < parts.length ? nextLink(i + 1) : '';
         details.set(filename(i), part + next);
       });
-      areaRowsInOverview.splice(0, areaRowsInOverview.length, `- [Area index](<${DETAIL_DIRECTORY}/${filename(0)}>)`);
-      sections.forEach(([, rows], i) => { lengths[i] = rows.length; });
-      overview = fitOverview();
     }
     if (count(overview) > budget) throw new Error('Graph overview exceeded its token budget');
     return { overview, details };

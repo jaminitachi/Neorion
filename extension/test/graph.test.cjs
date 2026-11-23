@@ -1,5 +1,6 @@
 const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -381,22 +382,89 @@ test('enforces the tracked file-list budget and partitions oversized areas witho
   assert.equal(fs.readFileSync(path.join(directory, 'notes.md'), 'utf8'), 'handwritten');
 });
 
+function addOverviewSource(project, file, source = 'export default function Page() { return null; }') {
+  const target = path.join(project, 'src', file);
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, source);
+}
 
-test('links every area through a paginated index when direct links exceed the overview budget', async t => {
+function overviewRows(overview, heading) {
+  return (overview.split(`\n## ${heading}\n\n`)[1] ?? '').split('\n## ')[0].split('\n')
+    .filter(row => row && !row.startsWith('~~~'));
+}
+
+test('preserves the HEAD plain overview byte for byte when all routes fit', async t => {
+  const overview = await generate(reviewFixture(t));
+  assert.equal(overview, fs.readFileSync(path.join(__dirname, 'goldens/overview-plain.md'), 'utf8'));
+});
+
+test('keeps every route row when areas and server actions compete for overview space', async t => {
+  const project = reviewFixture(t);
+  const areaNames = Array.from({ length: 32 }, (_, i) => `(long-generated-area-name-${i})`);
+  for (const name of areaNames) addOverviewSource(project, `app/${name}/page.tsx`);
+  const actionDefinitions = Array.from({ length: 60 }, (_, i) => `export async function updateRecord${i}() {}`);
+  addOverviewSource(project, 'lib/generated-actions.ts', ['"use server";', ...actionDefinitions].join('\n'));
+
+  const overview = await generate(project);
+  const rows = new Set(overviewRows(overview, 'Routes').map(row => row.trimStart()));
+  for (const name of areaNames) assert.ok(rows.has(`${name}  page.tsx=Page`), name);
+  assert.doesNotMatch(overview, /^Overview abbreviates .*Routes/);
+  const areaRows = overviewRows(overview, 'Areas');
+  assert.ok(areaRows.length > 11, 'keeps more than the minimum 10 direct area links when space allows');
+  assert.match(areaRows.at(-1), /^- \[\d+ more areas\]\(<neorion\/graph\/\+areas\.md>\)$/);
+  assert.match(overview, /\d+ more, use `api_consumers` with the action name\./);
+  assert.ok(count(overview) <= 1500);
+  assertOverviewLinks(project, overview);
+});
+
+test('preserves the HEAD index overview byte for byte and lists every area across its pages', async t => {
   const project = reviewFixture(t);
   for (let i = 0; i < 180; i++) {
-    const dir = path.join(project, 'src/app', `(long-generated-area-name-${i})`);
-    fs.mkdirSync(dir);
-    fs.writeFileSync(path.join(dir, 'page.tsx'), 'export default function Page() { return null; }');
+    addOverviewSource(project, `app/(long-generated-area-name-${i})/card.tsx`, 'export function Card() { return <div />; }');
   }
   const overview = await generate(project);
-  assert.match(overview, /\[Area index\]/);
+  assert.equal(overview, fs.readFileSync(path.join(__dirname, 'goldens/overview-index.md'), 'utf8'));
+  assert.deepEqual(overviewRows(overview, 'Areas'), ['- [Area index](<neorion/graph/+areas.md>)']);
   assert.ok(count(overview) <= 1500);
   assertOverviewLinks(project, overview);
   const dir = cachePath(project, 'neorion/graph');
-  const indexes = fs.readdirSync(dir).filter(file => file.startsWith('+areas'));
+  const files = fs.readdirSync(dir);
+  const indexes = files.filter(file => file.startsWith('+areas'));
   assert.ok(indexes.length > 1);
-  for (const index of indexes) assert.ok(count(fs.readFileSync(path.join(dir, index), 'utf8')) <= 3000);
+  const pages = indexes.map(index => fs.readFileSync(path.join(dir, index), 'utf8'));
+  for (const page of pages) assert.ok(count(page) <= 3000);
+  const listedAreas = pages.flatMap(page => [...page.matchAll(/^- .*\]\(<([^>]+)>\)$/gm)].map(match => match[1]));
+  const areaFiles = files.filter(file => (!file.startsWith('+') || file === '+dependencies.md') && !/\+\d+\.md$/.test(file));
+  assert.equal(areaFiles.length, 188);
+  assert.deepEqual(listedAreas.sort(), areaFiles.sort());
+});
+
+test('retains the HEAD area index and route rows when long area links exceed the budget', async t => {
+  const project = reviewFixture(t);
+  for (let i = 0; i < 11; i++) {
+    const hex = createHash('sha512').update(String(i)).digest('hex').repeat(2).slice(0, 250);
+    addOverviewSource(project, `app/(${hex}-${i})/page.tsx`);
+  }
+  for (let i = 0; i < 50; i++) addOverviewSource(project, `app/r/seg-${i}/deep/page.tsx`, 'export default function P(){return null}');
+
+  const overview = await generate(project);
+  assert.ok(overviewRows(overview, 'Routes').length >= 9, 'HEAD retained 9 route rows');
+  assert.deepEqual(overviewRows(overview, 'Areas'), ['- [Area index](<neorion/graph/+areas.md>)']);
+  assert.ok(count(overview) <= 1500);
+  assertOverviewLinks(project, overview);
+});
+
+test('keeps the HEAD route rows when the action note costs space and all area links fit', async t => {
+  const project = reviewFixture(t);
+  for (let i = 0; i < 100; i++) addOverviewSource(project, `app/r/customer-record-${i}/deep/page.tsx`);
+  const actions = Array.from({ length: 40 }, (_, i) => `export async function updateRecord${i}() {}`);
+  addOverviewSource(project, 'lib/generated-actions.ts', ['"use server";', ...actions].join('\n'));
+
+  const overview = await generate(project);
+  assert.equal(overviewRows(overview, 'Areas').length, 9);
+  assert.equal(overviewRows(overview, 'Routes').length, 78);
+  assert.match(overview, /^Overview abbreviates Routes, Server actions\./);
+  assert.ok(!fs.readdirSync(cachePath(project, 'neorion/graph')).some(file => file.startsWith('+areas')));
 });
 
 test('keeps the most used hook when the overview truncates hook definitions', async t => {
