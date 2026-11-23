@@ -92,19 +92,27 @@ export class GraphVisualizer {
     }
 
     private _getHtmlForWebview(webview: vscode.Webview, graph: CodebaseGraph) {
-        // 1. Prepare Nodes
-        const routeNodes = graph.routes.map(r => ({ 
-            id: r.id, 
-            label: r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.scope ?? r.path,
-            group: r.domain || 'other', 
-            title: [`Route: ${r.path}`, `File: ${r.file}`, `Domain: ${r.domain}`,
-                ...(r.methods?.includes('ALL') ? ['HTTP methods undetermined'] : []),
-                ...(r.wraps?.length ? ['Wraps:', ...r.wraps.map(id => id.slice('route:'.length))] : [])
-            ].join('\n'),
-            shape: 'box',     
-            path: r.file,
-            margin: 10
-        }));
+        const truncateLabel = (label: string) => {
+            const characters = Array.from(label);
+            return characters.length > 28 ? characters.slice(0, 27).join('') + '…' : label;
+        };
+
+        const routeNodes = graph.routes.map(r => {
+            const label = r.type === 'layout' ? `layout ${r.scope ?? r.path}`
+                : ['loading', 'error', 'not-found', 'template', 'default', 'global-error'].includes(r.type) ? `${r.type} ${r.path}`
+                : r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.path;
+            return {
+                id: r.id,
+                label,
+                group: r.domain || 'other',
+                title: [`Route: ${label}`, `File: ${r.file}`, `Domain: ${r.domain}`,
+                    ...(r.methods?.includes('ALL') ? ['HTTP methods undetermined'] : []),
+                    ...(r.wraps?.length ? ['Wraps:', ...r.wraps.map(id => id.slice('route:'.length))] : [])
+                ].join('\n'),
+                shape: 'box',
+                path: r.file
+            };
+        });
 
         const componentNodes = graph.components.map(c => ({ 
             id: c.id, 
@@ -121,7 +129,7 @@ export class GraphVisualizer {
             const label = id.slice(separator + 1);
             return {
                 id, label, path: file, group: DomainExtractor.extract('/' + file),
-                title: `Server action: ${label}\nPath: ${file}`, shape: 'box', margin: 10
+                title: `Server action: ${label}\nPath: ${file}`, shape: 'box'
             };
         });
         const callerNodes = [...new Set(graph.edges.map(edge => edge.from).filter(id => id.startsWith('file:')))]
@@ -160,14 +168,24 @@ export class GraphVisualizer {
             return 400; 
         };
 
-        const edges = [
+        const codeEdges = [
             ...graph.routes.flatMap(route => route.componentId ? [{
                 from: route.id, to: route.componentId, arrows: 'to', length: 50, width: 2
             }] : []),
             ...graph.edges.map(edge => ({
                 from: edge.from, to: edge.to, title: edge.type, arrows: 'to',
                 dashes: edge.type === 'imports', length: getEdgeLength(edge.from, edge.to)
-            })),
+            }))
+        ];
+        const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
+        for (const { from, to } of codeEdges) {
+            if (from !== to && neighbors.has(from) && neighbors.has(to)) {
+                neighbors.get(from)?.add(to);
+                neighbors.get(to)?.add(from);
+            }
+        }
+        const edges = [
+            ...codeEdges,
             ...nodes.map(node => ({
                 from: node.id, to: `hub_${node.group}`, color: { opacity: 0 },
                 length: 100, smooth: false, width: 0
@@ -181,7 +199,30 @@ export class GraphVisualizer {
             return acc;
         }, Object.create(null) as Record<string, { color: { background: string; border: string } }>);
 
-        const graphPayload = { nodes: [...nodes, ...hubNodes], edges, groupsConfig, domains };
+        const denseGraph = nodes.length > 100;
+        const displayNodes = nodes.map(node => {
+            const prominent = node.id.startsWith('route:') || node.id.startsWith('action:');
+            const degree = neighbors.get(node.id)?.size ?? 0;
+            // A dense graph fits at a much smaller scale than a handful of nodes.
+            const fontSize = denseGraph ? 62 : 18;
+            const padding = (denseGraph ? 18 : 10) + Math.min(20, Math.sqrt(degree) * 4);
+            return {
+                ...node,
+                label: truncateLabel(node.label),
+                ...(prominent ? {
+                    margin: padding,
+                    font: { size: fontSize, bold: { size: fontSize } },
+                    scaling: { label: { drawThreshold: 0 } }
+                } : node.shape === 'ellipse' ? {
+                    // Keep the ellipse dimensions stable as labels appear and disappear.
+                    font: { size: 12, color: 'transparent', bold: { color: 'transparent' } }
+                } : {})
+            };
+        });
+        const graphPayload = {
+            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph,
+            neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]])
+        };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
         const nonce = randomBytes(16).toString('base64');
 
@@ -346,7 +387,7 @@ export class GraphVisualizer {
 
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, denseGraph, neighbors } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -398,12 +439,66 @@ export class GraphVisualizer {
                     edges: new vis.DataSet(edges.map(withTextTooltip))
                 }, options);
                 initLegend(domains, groupsConfig);
+                const adjacency = new Map(neighbors);
+                const components = nodes.filter(node => node.shape === 'ellipse');
+                let hoveredNode;
+                let showComponentLabels = false;
+                let showLabelScale = 0.8;
+
+                function updateLabelVisibility() {
+                    const scale = network.getScale();
+                    if (scale >= showLabelScale) showComponentLabels = true;
+                    else if (scale <= showLabelScale * 0.875) showComponentLabels = false;
+                }
+
+                network.on('zoom', updateLabelVisibility);
+                network.on('hoverNode', ({ node }) => { hoveredNode = node; });
+                network.on('blurNode', () => { hoveredNode = undefined; });
+                network.on('afterDrawing', ctx => {
+                    // Fits can change the scale without emitting a zoom event.
+                    updateLabelVisibility();
+                    const active = network.getSelectedNodes();
+                    if (hoveredNode !== undefined) active.push(hoveredNode);
+                    if (!showComponentLabels && active.length === 0) return;
+                    const focused = new Set();
+                    for (const id of active) {
+                        focused.add(id);
+                        for (const adjacent of adjacency.get(id) ?? []) focused.add(adjacent);
+                    }
+                    const scale = network.getScale();
+                    ctx.save();
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    for (const node of components) {
+                        const isFocused = focused.has(node.id);
+                        if (!showComponentLabels && !isFocused) continue;
+                        const { x, y } = network.getPosition(node.id);
+                        const fontSize = Math.min(14 / scale, Math.max(12, (isFocused ? 12 : 10) / scale));
+                        ctx.font = fontSize + 'px arial';
+                        ctx.globalAlpha = activeDomain && node.group !== activeDomain && node.group !== 'hooks' ? 0.1 : 1;
+                        if (fontSize > 12) {
+                            const width = ctx.measureText(node.label).width + 8 / scale;
+                            const height = fontSize + 4 / scale;
+                            ctx.fillStyle = groupsConfig[node.group].color.background;
+                            ctx.beginPath();
+                            ctx.roundRect(x - width / 2, y - height / 2, width, height, 3 / scale);
+                            ctx.fill();
+                        }
+                        ctx.fillStyle = '#111111';
+                        ctx.fillText(node.label, x, y);
+                    }
+                    ctx.restore();
+                });
                 document.getElementById('btn-fit').addEventListener('click', () => network.fit({ animation: true }));
                 
                 const pauseAfterStabilization = () => {
                     log('Stabilization finished. Layout paused.');
                     setPhysicsEnabled(false);
                     network.fit();
+                    if (denseGraph) {
+                        // Dense graphs start farther out, so reveal labels after a modest zoom in.
+                        showLabelScale = Math.min(0.8, network.getScale() * 1.4);
+                    }
                 };
                 network.once('stabilizationIterationsDone', pauseAfterStabilization);
                 document.getElementById('btn-physics').addEventListener('click', () => {
