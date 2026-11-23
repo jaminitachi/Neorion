@@ -51,6 +51,56 @@ function readMap(project, overview, name) {
   return files;
 }
 
+test('graph domain colors are distinct, deterministic, and visible on both themes', () => {
+  const { outputFiles } = require('esbuild').buildSync({
+    entryPoints: [path.join(__dirname, '../src/core/visualizers/GraphVisualizer.ts')],
+    bundle: true,
+    platform: 'node',
+    external: ['vscode'],
+    write: false
+  });
+  const visualizerModule = { exports: {} };
+  const mockRequire = name => name === 'vscode' ? { Uri: { joinPath: path.join } } : require(name);
+  new Function('module', 'require', outputFiles[0].text)(visualizerModule, mockRequire);
+  const visualizer = Object.create(visualizerModule.exports.GraphVisualizer.prototype);
+  visualizer._extensionUri = '/extension';
+  const webview = { asWebviewUri: uri => uri };
+  const domains = ['api', 'auth', 'billing', 'dashboard', 'docs', 'editor', 'hooks',
+    'marketing', 'pages', 'profile', 'reports', 'search', 'settings', 'other', 'shared-ui'];
+  const groupsFor = names => {
+    const graph = {
+      routes: names.map(domain => ({ id: domain, path: '/' + domain, domain })),
+      components: [], actions: [], edges: []
+    };
+    const html = visualizer._getHtmlForWebview(webview, graph);
+    const [, payload] = /const rawData = "([^"]+)"/.exec(html);
+    return JSON.parse(Buffer.from(payload, 'base64').toString('utf8')).groupsConfig;
+  };
+  const luminance = hex => {
+    const [r, g, b] = hex.slice(1).match(/../g).map(pair => {
+      const channel = parseInt(pair, 16) / 255;
+      return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  };
+  const contrast = (a, b) => {
+    const first = luminance(a);
+    const second = luminance(b);
+    return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+  };
+  const groups = groupsFor(domains);
+  assert.deepEqual(groups, groupsFor([...domains].reverse()));
+  const fills = new Set();
+  for (const domain of domains) {
+    const { background, border } = groups[domain].color;
+    assert.ok(!fills.has(background.toLowerCase()), `Duplicate fill for ${domain}`);
+    fills.add(background.toLowerCase());
+    assert.ok(contrast(background, '#1e1e1e') >= 2, `Dark background fill contrast for ${domain}`);
+    assert.ok(contrast(border, '#1e1e1e') >= 3, `Dark background border contrast for ${domain}`);
+    assert.ok(contrast(border, '#ffffff') >= 3, `Light background border contrast for ${domain}`);
+  }
+});
+
 test('taxonomy maps APIs, special routes, duplicate component names, and hooks', { skip: !externalFixtures }, async t => {
   const { project } = copyFixture(t, 'taxonomy');
   const overview = await generate(project);

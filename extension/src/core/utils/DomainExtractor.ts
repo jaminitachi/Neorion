@@ -1,3 +1,9 @@
+const DOMAIN_PALETTE = [
+  '#FF6B6B', '#4ECDC4', '#A78BFA', '#FFAE55',
+  '#73C653', '#F38ECB', '#57A5F5', '#D7CD56',
+  '#C9936F', '#A6DCAD', '#70D6FF', '#DD92F0',
+];
+
 export class DomainExtractor {
   
     public static extract(filePath: string): string {
@@ -25,52 +31,20 @@ export class DomainExtractor {
       return 'other';
     }
   
-    public static getColor(domain: string): string {
-      // 1. Curated High-Contrast Palette (20 Distinct Colors)
-      // Designed to be visually distinct against dark backgrounds
-      const palette = [
-        '#FF6B6B', // Red
-        '#4ECDC4', // Teal
-        '#45B7D1', // Cyan
-        '#FFA07A', // Light Salmon
-        '#989898', // Grey (Common)
-        '#D980FA', // Lavender
-        '#E17055', // Burnt Orange
-        '#00CEC9', // Robin's Egg
-        '#6C5CE7', // Purple
-        '#FDCB6E', // Mustard
-        '#0984E3', // Blue
-        '#B2BEC3', // Silver
-        '#FF7675', // Pink
-        '#A29BFE', // Periwinkle
-        '#00B894', // Green
-        '#FD79A8', // Hot Pink
-        '#636E72', // Slate
-        '#FAB1A0', // Peach
-        '#55E6C1', // Mint
-        '#2D3436', // Charcoal (Rare)
-      ];
+    public static getColor(domain: string, sortedIndex: number): string {
+      if (domain === 'other') return '#989898';
+      if (sortedIndex < DOMAIN_PALETTE.length) return DOMAIN_PALETTE[sortedIndex];
 
-      // Fixed mappings for core domains
-      const fixedColors: Record<string, string> = {
-        'other': palette[4],      
-        'shared-ui': palette[11], 
-        'shared-hooks': palette[13],
-        'core-lib': palette[10],
-        'core-utils': palette[2],
-        'admin': palette[9],
-        'auth': palette[8],
+      // Sample hues at golden-angle intervals. Convert HSL to hex for vis-network.
+      const hue = (sortedIndex - DOMAIN_PALETTE.length) * 137.507764 % 360;
+      const saturation = 0.7;
+      const lightness = 0.68;
+      const amplitude = saturation * Math.min(lightness, 1 - lightness);
+      const channel = (offset: number) => {
+        const k = (offset + hue / 30) % 12;
+        const value = lightness - amplitude * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+        return Math.round(value * 255).toString(16).padStart(2, '0');
       };
-      
-      if (Object.prototype.hasOwnProperty.call(fixedColors, domain)) return fixedColors[domain];
-  
-      // 2. Hash to Palette Index
-      // If domain isn't fixed, deterministically map it to one of the palette colors
-      let hash = 0;
-      for (let i = 0; i < domain.length; i++) {
-        hash = domain.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      const index = Math.abs(hash) % palette.length;
-      return palette[index];
+      return `#${channel(0)}${channel(8)}${channel(4)}`;
     }
-  }
+}
