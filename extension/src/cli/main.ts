@@ -16,6 +16,7 @@ import { kinds, queryName } from '../mcp/Tools';
 const help = `Usage:
   neorion graph [dir]
   neorion query <kind> <target> [--limit n] [--root dir]
+  neorion query wrappers <route> [--no-external | --include-external]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
@@ -105,21 +106,29 @@ async function main([command, ...args]: string[]) {
   const query = command === 'query';
   const { values, positionals } = parseArgs({
     args,
-    options: { root: { type: 'string' }, ...(query ? { limit: { type: 'string' as const } } : {}) },
+    options: { root: { type: 'string' }, ...(query ? {
+      limit: { type: 'string' as const },
+      'no-external': { type: 'boolean' as const },
+      'include-external': { type: 'boolean' as const }
+    } : {}) },
     allowPositionals: query
   });
   const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
   if (!query) return serve(root, { autoBuild: true });
   if (positionals.length !== 2) throw new Error(help);
+  const [kind, target] = positionals;
+  if (values['no-external'] && values['include-external']) throw new Error('Choose either --no-external or --include-external.');
+  const externalOption = values['no-external'] ? { includeExternal: false } :
+    values['include-external'] ? { includeExternal: true } : {};
+  if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
   const project = findProject(root);
   if (!project) throw new Error(missingTsconfig(root));
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
   if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
-  const [kind, target] = positionals;
   const limit = values.limit === undefined ? undefined : Number(values.limit);
-  console.log(projectText(project, engine.query(queryName, { kind, target, limit })));
+  console.log(projectText(project, engine.query(queryName, { kind, target, limit, ...externalOption })));
 }
 
 if (isMainThread) {

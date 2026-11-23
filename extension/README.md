@@ -38,9 +38,9 @@ Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/fi
 | Kind | Answers |
 | --- | --- |
 | `who_renders` | Which page routes can render a component, including via a layout? |
-| `wrappers` | Which layouts and providers wrap a page, in outermost-first order? |
+| `wrappers` | Which layouts and providers wrap a page, in outermost-first order? Third-party wrappers are included by default. Set `includeExternal: false` to hide third-party non-provider wrappers. |
 | `rename_impact` | Which files contain checker-resolved references to a declaration? |
-| `api_consumers` | Which files contain API route literals or call a function that uses them? |
+| `api_consumers` | Which files use an API route or a server action? Pass the action name or `path#Name` to see caller files and lines. |
 | `search` | Which declarations or routes match a name or path fragment? |
 
 The server returns project-relative `path:line` locations. Results have a

@@ -19,7 +19,7 @@ async function fresh(root: string, indexPath: string) {
     return false;
   }
   if (index?.schema !== 1 || index.generator !== VERSION || !index.files) return false;
-  if (index.wrapperRevision !== WRAPPER_INDEX_REVISION) return false;
+  if (index.wrapperRevision !== WRAPPER_INDEX_REVISION || !Array.isArray(index.serverActions)) return false;
   return typeof index.projectSnapshot === 'string' && index.projectSnapshot === projectSnapshot(root);
 }
 
