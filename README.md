@@ -93,6 +93,8 @@ claude --plugin-dir "$NEORION_DIR/neorion"
 
 ## VS Code extension
 
+![Taxonomy in Routes view with the layouts that wrap /login highlighted](docs/graph-view/after-taxonomy-routes.png)
+
 ```sh
 cd extension
 npm ci
