@@ -1,6 +1,8 @@
 export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 1;
-export const INDEX_PATH = '.neorion/index.v1.json';
+export const QUERY_INDEX_REVISION = 2;
+export const INDEX_SCHEMA = 2;
+export const INDEX_PATH = '.neorion/index.v2.json';
+export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
@@ -41,7 +43,10 @@ export interface FetchEntry {
   dynamic?: boolean;
 }
 
-export type Reference = [symbol: number, file: string, line: number, kind: string, detail?: string, caller?: number];
+type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number];
+export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
+// A null path reuses the referenced symbol's defining file.
+export type IndexedReference = Reference | [symbol: number, file: null, ...site: ReferenceSite];
 
 export interface ServerAction {
   file: string;
@@ -52,7 +57,7 @@ export interface ServerAction {
 }
 
 export interface QueryIndex {
-  schema: 1;
+  schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
   generator?: string;
   generatedAt: string;
@@ -70,7 +75,7 @@ export interface QueryIndex {
   wrapChains: Record<string, Wrapper[]>;
   routeWrap: Record<string, string>;
   branches?: Record<string, string[]>;
-  references: Reference[];
+  references: IndexedReference[];
   fetches: FetchEntry[];
   serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;

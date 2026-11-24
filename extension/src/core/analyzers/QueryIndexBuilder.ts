@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
-  QUERY_INDEX_REVISION, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  INDEX_SCHEMA, QUERY_INDEX_REVISION, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { declarationsOf } from './ArchitectureFacts';
 
@@ -46,7 +46,7 @@ export class QueryIndexBuilder {
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
-      schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
+      schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
       wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null)
@@ -254,10 +254,15 @@ export class QueryIndexBuilder {
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {
         const symbol = index.symbols[id - 1];
+        const sameFile = symbol.file === relative;
         for (const [line, entries] of lines) {
+          if (sameFile && entries.some(entry => entry[3] === 'use')) (symbol.localUses ??= []).push(line);
           for (const entry of entries) {
-            if (symbol.file === relative && entry[3] === 'use') (symbol.localUses ??= []).push(line);
-            else index.references.push(entry);
+            if (!sameFile) index.references.push(entry);
+            else if (entry[3] !== 'use') {
+              const [, , ...site] = entry;
+              index.references.push([id, null, ...site]);
+            }
           }
         }
       }

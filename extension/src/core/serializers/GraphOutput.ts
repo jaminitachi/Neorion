@@ -1,5 +1,5 @@
 import { workspaceCache } from '../WorkspaceCache';
-import { INDEX_PATH } from '../../mcp/Index';
+import { INDEX_PATH, LEGACY_INDEX_PATH } from '../../mcp/Index';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
@@ -89,7 +89,7 @@ export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = t
       if (fs.readFileSync(file, 'utf8').startsWith(DETAIL_MARKER)) fs.unlinkSync(file);
     }
   }
-  const oldIndex = path.join(root, INDEX_PATH);
+  const oldIndex = path.join(root, LEGACY_INDEX_PATH);
   if (graph.index && fs.lstatSync(path.dirname(oldIndex), { throwIfNoEntry: false })?.isDirectory() &&
       fs.lstatSync(oldIndex, { throwIfNoEntry: false })?.isFile()) {
     try {

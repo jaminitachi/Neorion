@@ -2,7 +2,7 @@
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
-Neorion turns a Next.js project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
+Neorion turns a Next.js project written in TypeScript or JavaScript into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
 
 ## Install
 
@@ -82,8 +82,11 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion reads `tsconfig.json` or
-`jsconfig.json` and uses defaults for Next.js projects without a config.
+From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
+`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
+`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
+`vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph

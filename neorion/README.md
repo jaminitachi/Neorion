@@ -2,7 +2,7 @@
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](https://raw.githubusercontent.com/jaminitachi/Neorion/master/docs/demo.gif)
 
-Neorion maps Next.js and React projects and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
+Neorion maps Next.js projects written in TypeScript or JavaScript and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
 
 ## Install
 
@@ -62,8 +62,11 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion reads `tsconfig.json` or
-`jsconfig.json` and uses defaults for Next.js projects without a config.
+From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
+`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
+`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
+`vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph

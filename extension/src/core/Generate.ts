@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
-import { projectConfig } from './FindProject';
+import { ignoredProjectDirectories, projectConfig } from './FindProject';
 import { projectSnapshot } from './ProjectSnapshot';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
@@ -99,8 +99,18 @@ function openProject(root: string): Project {
 
     const config = configPath ? ts.readConfigFile(configPath, ts.sys.readFile) : { config: {} };
     if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
-    const { options, fileNames } = ts.parseJsonConfigFileContent(config.config, ts.sys, root,
+    const parse = (host: ts.ParseConfigHost) => ts.parseJsonConfigFileContent({ ...config.config }, host, root,
         { allowJs: true, checkJs: false }, configPath ?? path.join(root, 'jsconfig.json'));
+    // Resolve inherited file selection before applying defaults to wildcard discovery.
+    const selection = config.config.extends ? parse({ ...ts.sys, readDirectory: () => [] }).raw : config.config;
+    const host: ts.ParseConfigHost = selection.files === undefined && selection.include === undefined && selection.exclude === undefined
+        ? {
+            ...ts.sys,
+            readDirectory(directory, extensions, excludes, includes, depth) {
+                return ts.sys.readDirectory(directory, extensions, [...(excludes ?? []), ...ignoredProjectDirectories], includes, depth);
+            }
+        } : ts.sys;
+    const { options, fileNames } = parse(host);
     const project = new Project({ compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
     for (const file of fileNames) project.addSourceFileAtPath(file);
     project.resolveSourceFileDependencies();

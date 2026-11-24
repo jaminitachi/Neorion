@@ -1,4 +1,4 @@
-# api_consumers /api/vote -> app/(chat)/api/vote/route.ts:17 : 1 read, 2 requests, 2 route literals (index 2026-11-19T06:00Z, fresh)
+# api_consumers /api/vote -> app/(chat)/api/vote/route.ts:17 : 5 sites in 2 files: 1 read, 2 requests, 2 other mentions (index 2026-11-19T06:00Z, fresh)
 send   components/chat/message-actions.tsx:47 PureMessageActions PATCH fetch [partial url]
 send   components/chat/message-actions.tsx:64 PureMessageActions ? route literal [partial url]
 send   components/chat/message-actions.tsx:92 PureMessageActions PATCH fetch [partial url]

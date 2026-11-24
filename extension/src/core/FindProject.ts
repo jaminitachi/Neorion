@@ -2,7 +2,8 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const excluded = new Set(['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage']);
+export const ignoredProjectDirectories = ['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage', 'public'] as const;
+const excluded = new Set<string>(ignoredProjectDirectories);
 const maxDepth = 4;
 
 export function projectConfig(directory: string): string | undefined {
@@ -24,12 +25,14 @@ function hasNextDependency(directory: string): boolean {
 
 export function findProject(root: string): string | undefined {
   const start = resolve(root);
+  let fallback: string | undefined;
   let level = [start];
   for (let depth = 0; level.length && depth <= maxDepth; depth++) {
     const next: string[] = [];
     for (const directory of level) {
       try {
-        if (projectConfig(directory) || hasNextDependency(directory)) return directory;
+        if (projectConfig(directory)) return directory;
+        if (!fallback && hasNextDependency(directory)) fallback = directory;
         if (depth === maxDepth || directory === homedir()) continue;
         for (const entry of readdirSync(directory, { withFileTypes: true })) {
           if (entry.isDirectory() && !entry.name.startsWith('.') && !excluded.has(entry.name)) {
@@ -42,8 +45,9 @@ export function findProject(root: string): string | undefined {
     }
     level = next.sort((a, b) => a.localeCompare(b));
   }
+  return fallback;
 }
 
 export function missingProject(root: string) {
-  return `Neorion found no tsconfig.json, jsconfig.json, or Next.js package under ${root}.`;
+  return `Neorion found no tsconfig.json, jsconfig.json, or package.json with a next dependency under ${root}.`;
 }

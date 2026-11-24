@@ -24,7 +24,7 @@ const generatedFile = (file: string) =>
   /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
 const apiEvidence = new Map([
   ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
-  ['fetch', 'request'], ['axios', 'request'], ['route literal', 'route literal']
+  ['fetch', 'request'], ['axios', 'request']
 ]);
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
@@ -138,7 +138,12 @@ export class QueryEngine {
       return compare(left?.file ?? '', right?.file ?? '') || compare(left?.name ?? '', right?.name ?? '') ||
         a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
     });
-    this.references = group(index.references, reference => reference[0]);
+    const references = index.references.map((reference): Reference => {
+      if (reference[1] !== null) return reference;
+      const [id, , ...site] = reference;
+      return [id, this.symbols.get(id)?.file ?? '', ...site];
+    });
+    this.references = group(references, reference => reference[0]);
     this.fetches = group(index.fetches, fetch => fetch.route);
     for (const route of index.routes) {
       if (route.kind !== 'page') continue;
@@ -437,6 +442,7 @@ export class QueryEngine {
   private consumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
     const rows: Row[] = [];
     const evidence = new Map<string, number>();
+    const files = new Set<string>();
     const generatedFiles = new Set<string>();
     let owners = new Set<number>();
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
@@ -444,10 +450,11 @@ export class QueryEngine {
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
     for (const fetch of fetches) {
       if (expired()) break;
+      files.add(fetch.file);
       const generated = generatedFile(fetch.file);
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
-      const kind = apiEvidence.get(via) ?? 'route literal';
+      const kind = apiEvidence.get(via) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const label = `send   ${location(fetch.file, fetch.line)}`;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${via}` +
@@ -474,6 +481,7 @@ export class QueryEngine {
         const key = `${file}:${line} ${name}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        files.add(file);
         const label = `call${level}  ${location(file, line)}`;
         rows.push({ ...row(`${label} ${name}${flagTest(file)}`, file), pathEnd: label.length });
       }
@@ -488,13 +496,16 @@ export class QueryEngine {
         other.url.slice(0, other.url.lastIndexOf('/')) === route.url.slice(0, route.url.lastIndexOf('/'))))
       .map(other => other.url))].sort().slice(0, 5);
     evidence.set('caller', seen.size);
-    const count = ['read', 'mutate', 'fallback key', 'request', 'route literal', 'caller'].flatMap(kind => {
+    const breakdown = ['read', 'mutate', 'fallback key', 'request', 'other mention', 'caller'].flatMap(kind => {
       const total = evidence.get(kind);
       return total ? [`${total} ${kind}${total === 1 ? '' : 's'}`] : [];
-    }).join(', ') + (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
+    }).join(', ');
+    const count = `${rows.length} ${rows.length === 1 ? 'site' : 'sites'} in ${files.size} ${files.size === 1 ? 'file' : 'files'}` +
+      (breakdown ? `: ${breakdown}` : '') +
+      (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
-      count: count || undefined,
+      count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
         fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
         fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :

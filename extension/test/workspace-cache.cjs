@@ -2,6 +2,7 @@ const { createHash } = require('node:crypto');
 const { realpathSync } = require('node:fs');
 const { homedir } = require('node:os');
 const path = require('node:path');
+const indexFile = '.neorion/index.v2.json';
 
 function cachePath(root, ...parts) {
   const home = homedir();
@@ -12,4 +13,4 @@ function cachePath(root, ...parts) {
   return path.join(env && path.isAbsolute(env) ? env : fallback, 'neorion', key, ...parts);
 }
 
-module.exports = { cachePath };
+module.exports = { cachePath, indexFile };

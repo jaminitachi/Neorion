@@ -23,7 +23,10 @@ const help = `Usage:
   neorion --version | --help
 
 Query kinds: ${kinds.join(', ')}
---no-external hides third-party non-provider wrappers. Providers stay visible.`;
+
+Wrapper flags:
+  --no-external hides third-party non-provider wrappers. Providers stay visible.
+  --include-external includes third-party wrappers (default).`;
 
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();

@@ -4,7 +4,7 @@ export const queryName = 'neorion_query';
 
 export const tools = [{
   name: queryName,
-  description: 'Use this tool first, before searching source files, for Next.js and React TypeScript architecture questions. Use who_renders to find which pages render a component, wrappers to find layouts and providers on a page’s wrapper chain (including external wrappers by default), rename_impact to find references to a symbol, api_consumers to find callers of an API route or a server action (name or path#Name), and search to find a component, hook, or route by name. The graph builds and refreshes automatically.',
+  description: 'Use this tool first, before searching source files, for Next.js architecture questions in TypeScript or JavaScript projects. Use who_renders to find which pages render a component, wrappers to find layouts and providers on a page’s wrapper chain (including external wrappers by default), rename_impact to find references to a symbol, api_consumers to find callers of an API route or a server action (name or path#Name), and search to find a component, hook, or route by name. The graph builds and refreshes automatically.',
   inputSchema: {
     type: 'object',
     properties: {

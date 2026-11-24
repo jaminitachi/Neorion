@@ -1,4 +1,4 @@
-# api_consumers /api/neorion-test -> src/app/api/neorion-test/route.ts:1 : 1 request, 3 callers (index 2026-11-19T06:00Z, fresh)
+# api_consumers /api/neorion-test -> src/app/api/neorion-test/route.ts:1 : 4 sites in 4 files: 1 request, 3 callers (index 2026-11-19T06:00Z, fresh)
 send   fixture/client.tsx:4 writeData GET fetch
 call1  fixture/dynamic.ts:1 writeData
 call1  fixture/use-client.ts:2 writeData
