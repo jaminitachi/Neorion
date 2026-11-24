@@ -253,8 +253,10 @@ export class QueryIndexBuilder {
         fn: owner ? index.symbols[owner - 1].name : null });
     }
 
-    const trpcSources = new Set(files.filter(file =>
-      file.getImportDeclarations().some(entry => /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()))));
+    const hasValueBinding = (entry: ReturnType<SourceFile['getImportDeclarations']>[number]) => !entry.isTypeOnly() &&
+      (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
+    const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
+      /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
     const dynamicBindings = new Map<Node, number>();
     const externalModules = new Map<string, number>();
     const graphNames = new Map<string, number>();
@@ -289,9 +291,9 @@ export class QueryIndexBuilder {
           }
         }
       }
-      if (trpcSources.has(file) || trpcSources.size && imports.some(entry => trpcSources.has(entry.getModuleSpecifierSourceFile()!))) {
-        index.trpcFiles!.push(relative);
-      }
+      const trpc = trpcSources.has(file) || trpcSources.size > 0 && imports.some(entry =>
+        trpcSources.has(entry.getModuleSpecifierSourceFile()!) && hasValueBinding(entry));
+      if (trpc) index.trpcFiles!.push(relative);
       const localNames = new Set(imports.flatMap(entry => [
         entry.getDefaultImport()?.getText(), ...entry.getNamedImports().map(specifier => specifier.getAliasNode()?.getText())
       ]));
@@ -311,6 +313,7 @@ export class QueryIndexBuilder {
       }
       const externalCalls = new Map<number, Map<string, ExternalCall>>();
       const graphReferences = new Map<string, GraphReference>();
+      const trpcModuleUses = new Map<string, [number, number]>();
       const recordGraph = (id: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number) => {
         const key = JSON.stringify([id, line, kind, owner, detail]);
         if (graphReferences.has(key)) return;
@@ -329,6 +332,7 @@ export class QueryIndexBuilder {
           let referenceKind = kind;
           let referenceCaller = caller;
           let referenceOwner = graphOwner;
+          let moduleUse = kind === 'call' && (graphOwner ?? caller) === undefined;
           if (kind === 'use') {
             const symbol = index.symbols[id - 1];
             const sameFile = symbol.file === relative;
@@ -336,13 +340,20 @@ export class QueryIndexBuilder {
             const jsx = (Node.isJsxOpeningElement(parent) || Node.isJsxSelfClosingElement(parent) || Node.isJsxClosingElement(parent)) &&
               parent.getTagNameNode() === node;
             const signature = Node.isFunctionDeclaration(parent) && parent.getNameNode() === node;
-            referenceOwner = !jsx && (!sameFile || symbol.kind !== 'constant' || symbol.typeOnly) ? owners(node)[1] : undefined;
-            if (sameFile && !jsx && !signature && (symbol.kind !== 'constant' || symbol.typeOnly) && referenceOwner !== id) {
+            referenceOwner = jsx ? undefined : owners(node)[1];
+            if (sameFile && !jsx && !signature && referenceOwner !== id &&
+              (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
               recordGraph(id, line, GraphReferenceKind.Use, referenceOwner);
             }
+            moduleUse = !jsx && !signature && referenceOwner === undefined;
             referenceCaller = sameFile ? undefined : referenceOwner;
             if (sameFile) referenceOwner = undefined;
             else if (jsx) referenceKind = 'jsx-use';
+          }
+          // Type queries such as ReturnType<typeof createContext> are graph uses
+          // but do not show that a dependency passed into a runtime router.
+          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !node.getAncestors().some(Node.isTypeNode)) {
+            trpcModuleUses.set(`${id}:${line}`, [id, line]);
           }
           const lines = references.get(id) ?? new Map<number, Reference[]>();
           const entries = lines.get(line) ?? [];
@@ -527,6 +538,7 @@ export class QueryIndexBuilder {
         kind !== GraphReferenceKind.Use || !references.get(id)?.get(line)?.some(reference =>
           reference[3] === 'call' && (reference[6] ?? reference[5]) === owner));
       if (graphEntries.length) index.graphReferences![fileId] = graphEntries;
+      if (trpcModuleUses.size) (index.trpcModuleUses ??= {})[fileId] = [...trpcModuleUses.values()];
       for (const calls of externalCalls.values()) index.externalCalls!.push(...calls.values());
       // Keep the first ten diagnostic comment matches in each test category.
       // The tool can only show ten exclusions and can filter out tests.

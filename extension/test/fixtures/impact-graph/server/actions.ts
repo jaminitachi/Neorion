@@ -7,6 +7,9 @@ export async function createItem(value: string) {
   const label = normalize(value);
   await db.$transaction(tx => tx.item.create({ data: { label } }));
   revalidate('/items');
+  normalize(label);
+  normalize(label);
+  normalize(label);
 }
 
 export async function anotherAction() { return 'different owner'; }

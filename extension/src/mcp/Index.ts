@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 2;
+export const GRAPH_INDEX_REVISION = 3;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -100,4 +100,5 @@ export interface QueryIndex {
   routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number]>;
   layoutStyles?: Record<string, string[]>;
   trpcFiles?: string[];
+  trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }

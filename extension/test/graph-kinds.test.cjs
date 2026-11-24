@@ -64,8 +64,17 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   for (const evidence of [/api GET \/api\/items\/\[id\]/, /page \/b\/\[id\].*generateMetadata/,
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
-    /# partial: tRPC client proxy not traced/]) assert.match(impact, evidence);
+    /# partial: tRPC client proxy not traced \(server\/router\.ts:4\)/]) assert.match(impact, evidence);
+  assert.match(impact, /d1 module server\/router\.ts:4/);
   assert.doesNotMatch(impact, /api POST/);
+  assert.match(query('search', 'prepareMutation'), /# neighbors: .*; tRPC client proxy not traced \(server\/router\.ts:4\)/);
+  assert.match(query('impact', 'POST'), /# complete/);
+  const typeUse = query('impact', 'exampleContext');
+  assert.match(typeUse, /d1 module server\/router\.ts:9/);
+  assert.match(typeUse, /# complete/);
+  const constant = query('impact', 'DATA_SUFFIX');
+  assert.match(constant, /d1 use server\/data\.ts:5 getData/);
+  assert.match(constant, /page \/b\/\[id\]/);
   const shallow = query('impact', 'normalize', '--depth', '1');
   assert.match(shallow, /# partial: depth limit/);
   assert.match(query('impact', 'createItem', '--depth', '1'), /layout .*wraps 2 routes/);
@@ -85,7 +94,9 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   const callees = await check('callees', 'createItem');
   assert.match(callees, /db\.\$transaction  server\/db\.ts#db/);
   assert.match(callees, /ext next\/cache  revalidatePath/);
-  assert.match(callees, /call .*normalize/);
+  assert.match(callees, /: 2 project calls/);
+  assert.match(callees, /^d1 call :7,10,11 \+1  normalize/m);
+  assert.equal(callees.split('\n').filter(line => line.includes('  normalize  ')).length, 1);
   assert.match(callees, /# unresolved: 1 calls/);
   assert.doesNotMatch(callees, /anotherAction/);
   assert.match(query('callees', 'CreateItem'), /d1 action .*createItem/);
@@ -98,10 +109,17 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   const { root, query, run, build } = fixture(t);
   const hub = Array.from({ length: 200 }, (_, i) => `export function caller${i}() { return cn(); }`).join('\n');
   fs.writeFileSync(path.join(root, 'lib/hub.ts'), `export function cn() {}\n${hub}\n`);
+  const actions = Array.from({ length: 6 }, (_, i) => `export async function extraAction${i}() { return normalize('extra'); }`);
+  fs.appendFileSync(path.join(root, 'server/actions.ts'), '\n' + actions.join('\n') + '\n');
   const indexFile = build();
   const impact = query('impact', 'cn');
   assert.match(impact, /hub collapsed/);
   assert.match(impact, /200 callers in 1 files/);
+  const actionImpact = query('impact', 'normalize');
+  assert.match(actionImpact, /^actions: 7 in 1 file \(top: createItem /m);
+  assert.match(actionImpact, /^page \/items.* via CreateItem > createItem/m);
+  assert.match(actionImpact, /^d1 call .*createItem/m);
+  assert.doesNotMatch(actionImpact, /^action /m);
   const timed = run(['query', 'impact', 'cn'], { NEORION_QUERY_DEADLINE_MS: '1', NEORION_AUTOBUILD: '0' });
   assert.match(timed, /# timeout impact/);
   assert.match(timed, /# partial: timed out/);
@@ -173,6 +191,12 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   const blank = changes();
   assert.match(blank, /0 files, 0 symbols, 0 routes/);
   assert.match(blank, /# complete: git diff HEAD/);
+
+  edit('server/data.ts', text => text.replace("DATA_SUFFIX = ''", "DATA_SUFFIX = '!'"));
+  const constant = changes();
+  assert.match(constant, /changed server\/data\.ts:4 DATA_SUFFIX/);
+  assert.match(constant, /route page \/b\/\[id\].*DATA_SUFFIX d2/);
+  git('restore', 'server/data.ts');
 
   edit('server/actions.ts', text => text.replace('  const label', '  // Preserve the item label.\n  const label'));
   const comments = changes();
