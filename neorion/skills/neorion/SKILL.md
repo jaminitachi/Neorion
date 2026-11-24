@@ -1,6 +1,6 @@
 ---
 name: neorion
-description: Answers architecture questions in Next.js projects written in TypeScript or JavaScript from a prebuilt index. Use it for questions like "which pages render X", "what layouts or providers wrap this route", "who calls this API route or server action", "what breaks if I rename X", or "where is X used", before searching or reading files.
+description: Answers architecture questions in Next.js projects written in TypeScript or JavaScript from a prebuilt index. Use it before renaming or moving a component, editing a layout or provider, or changing an API route or server action. Ask it first to find which pages render a component, what wraps a route, who calls an API or action, what a rename affects, or where a symbol is used.
 allowed-tools: mcp__plugin_neorion_neorion__neorion_query, mcp__neorion__neorion_query, Bash(neorion query:*)
 ---
 Call `neorion_query` with `kind` and `target`:
