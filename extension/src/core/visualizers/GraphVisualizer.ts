@@ -866,16 +866,21 @@ export class GraphVisualizer {
                         // Compact those bands so one sparse branch cannot shrink the whole Routes view.
                         const columns = new Map();
                         for (const id of main) {
-                            const level = graphNodes.get(id)?.level ?? componentClusters.find(cluster => cluster.id === id).level;
+                            const { level, size } = graphNodes.get(id) ?? clustersById.get(id);
                             const column = columns.get(level) ?? [];
-                            column.push({ id, y: network.getPosition(id).y });
+                            column.push({ id, size, y: network.getPosition(id).y });
                             columns.set(level, column);
                         }
                         const positions = [];
                         for (const [level, column] of columns) {
-                            column.sort((a, b) => a.y - b.y).forEach(({ id }, index) => {
-                                positions.push([id, { x: level * 410, y: (index - (column.length - 1) / 2) * 52 }]);
+                            column.sort((a, b) => a.y - b.y);
+                            let y = 0;
+                            const rows = column.map(({ id, size }, index) => {
+                                if (index) y += Math.max(52, column[index - 1].size + size + 16);
+                                return [id, { x: level * 410, y }];
                             });
+                            const center = (y + column.at(-1).size - column[0].size) / 2;
+                            for (const [id, point] of rows) positions.push([id, { x: point.x, y: point.y - center }]);
                         }
                         placeNodes(positions);
                     }
