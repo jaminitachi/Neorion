@@ -65,7 +65,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
     /# partial: tRPC client proxy not traced \(server\/router\.ts:4\)/]) assert.match(impact, evidence);
-  assert.match(impact, /d1 module server\/router\.ts:4/);
+  assert.match(impact, /d1 call server\/router\.ts:4 create/);
   assert.doesNotMatch(impact, /api POST/);
   assert.match(query('search', 'prepareMutation'), /# neighbors: .*; tRPC client proxy not traced \(server\/router\.ts:4\)/);
   assert.match(query('impact', 'POST'), /# complete/);
@@ -163,6 +163,54 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   });
   assert.equal(await mcp.text('query', { kind: 'path', target: '/items', to: 'createItem' }), directly);
   assert.equal((await mcp.call('query', { kind: 'path', target: '/items' })).isError, true);
+});
+
+test('tRPC resolves router paths, client aliases and server callers while reporting cache-only sites', { timeout: 40_000 }, async t => {
+  const { root, env, query, build } = fixture(t);
+  build();
+  const target = 'server/trpc-routes.ts#invoices.total';
+  const consumers = query('api_consumers', 'invoices.total');
+  assert.match(consumers, /# ambiguous api_consumers invoices.total/);
+  assert.match(consumers, /server\/trpc-routes.ts:12#invoices.total tRPC procedure/);
+  assert.match(consumers, /server\/trpc-other.ts:6#invoices.total tRPC procedure/);
+  assert.match(query('search', 'invoices.list'), /procedure server\/trpc-routes.ts:14#invoices.list/);
+  assert.match(query('api_consumers', 'invoices.list'), /InvoicePanel \(useInfiniteQuery\)/);
+  assert.match(query('api_consumers', 'invoices.changed'), /InvoicePanel \(useSubscription\)/);
+
+  const create = query('api_consumers', 'invoices.create');
+  assert.match(create, /2 caller sites/);
+  assert.match(create, /InvoicePanel \(useMutation\)/);
+  assert.match(create, /writeThroughFactory \(create\)/);
+  assert.match(create, /# complete: indexed tRPC callers/);
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assert.equal(await mcp.text('query', { kind: 'api_consumers', target: 'invoices.create' }), create);
+  assert.match(query('callees', 'invoices.create'), /d1 call :13  storeInvoice/);
+  assert.match(query('callees', 'history.create'), /d1 call :13  storeInvoice/);
+  assert.match(query('path', '/trpc-check', 'storeInvoice'), /2 trpc .*invoices.create/);
+  assert.match(query('who_renders', 'invoices.create'), /page \/trpc-check/);
+  const upstream = query('impact', 'calculateTotal');
+  assert.match(upstream, /invoices.total/);
+  assert.match(upstream, /page \/trpc-check/);
+  assert.doesNotMatch(upstream, /trpc-cache|useDynamic|unrelated/);
+  assert.match(query('callees', 'useDynamic'), /# partial: tRPC procedure target unresolved/);
+  assert.match(query('path', 'useDynamic', 'calculateTotal'), /# partial: tRPC procedure target unresolved/);
+
+  const dynamic = query('api_consumers', 'server/trpc-other.ts#invoices.total');
+  assert.match(dynamic, /0 caller sites/);
+  assert.match(dynamic, /# partial: tRPC procedure target unresolved/);
+  const total = query('api_consumers', target);
+  assert.match(total, /4 caller sites, 3 cache-only/);
+  assert.match(total, /readThroughRouter \(total\)/);
+  assert.match(total, /readThroughTransport \(query\)/);
+  assert.match(total, /InvoicePanel \(useQuery\)/);
+  assert.match(total, /InvoicePanel \(useSuspenseQuery\)/);
+  for (const operation of ['invalidate', 'fetch', 'prefetch']) {
+    assert.ok(total.split('\n').some(line => line.startsWith('cache-only app/trpc-cache/page.tsx:') && line.endsWith(`(${operation})`)));
+  }
+  assert.doesNotMatch(total, /unrelated/);
+  assert.match(query('path', '/trpc-cache', target), /no directed path/);
 });
 
 function gitFixture(t) {

@@ -2,7 +2,7 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import type { IndexedReference, QueryIndex } from './Index';
 
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
-  'defaultSymbols' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' | 'trpcFiles' | 'trpcModuleUses'> & {
+  'defaultSymbols' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' | 'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -14,11 +14,11 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 // the base index fields without inflating the graph data.
 export function packGraph(index: QueryIndex): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols,
-    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, ...rest } = index;
+    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols,
-    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses
+    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues
   };
   if (JSON.stringify(facts).length < 128 * 1024) return index;
 

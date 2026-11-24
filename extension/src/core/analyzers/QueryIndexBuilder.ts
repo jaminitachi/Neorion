@@ -8,6 +8,7 @@ import {
   type GraphReference, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
+import { TrpcFacts } from './TrpcFacts';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner'> & { route: string; node: Node };
@@ -116,14 +117,14 @@ export class QueryIndexBuilder {
     const names = new Set<string>();
     const wrappedOwners = new Set<number>();
     const add = (node: Node, name: string, kind: QueryIndex['symbols'][number]['kind'], aliasOf: string | null) => {
-      if (byNode.has(node)) return byNode.get(node)!;
+      if (byNode.has(node) && kind !== 'procedure') return byNode.get(node)!;
       const id = index.symbols.length + 1;
       const file = relativePath(node.getSourceFile());
       const line = node.getStartLineNumber();
       const end = node.getEndLineNumber();
       index.symbols.push({ id, file, name, kind, line, end: end > line ? end : undefined, exported: exported.has(node) || undefined,
         aliasOf: aliasOf ?? undefined, typeOnly: Node.isInterfaceDeclaration(node) || Node.isTypeAliasDeclaration(node) || undefined });
-      byNode.set(node, id);
+      if (!byNode.has(node)) byNode.set(node, id);
       names.add(name);
       return id;
     };
@@ -174,6 +175,42 @@ export class QueryIndexBuilder {
       const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
       if (id !== undefined) byNode.set(node, id);
     }
+    const hasValueBinding = (entry: ReturnType<SourceFile['getImportDeclarations']>[number]) => !entry.isTypeOnly() &&
+      (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
+    const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
+      /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
+    const trpcFacts = new TrpcFacts(files, trpcSources);
+    const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
+    const procedureSymbols = new Map<Node, Map<string, number>>();
+    const procedureResolvers = new Map<Node, Node>();
+    const unboundProcedures = new Set<number>();
+    const boundProcedures = new Set<number>();
+    const recordTrpcIssue = (id: number, file: number, line: number) => {
+      const sites = (index.trpcIssues ??= {})[id] ??= [];
+      if (!sites.some(site => site[0] === file && site[1] === line)) sites.push([file, line]);
+    };
+    for (const procedure of trpcFacts.procedures()) {
+      const known = procedureSymbols.get(procedure.property) ?? new Map<string, number>();
+      procedureSymbols.set(procedure.property, known);
+      const id = known.get(procedure.name) ?? add(procedure.property, procedure.name, 'procedure', null);
+      known.set(procedure.name, id);
+      procedureIds.set(procedure, id);
+      const bodyOwner = byNode.get(procedure.body);
+      if (bodyOwner === undefined) {
+        byNode.set(procedure.body, id);
+        procedureResolvers.set(procedure.body, procedure.resolver);
+      } else if (bodyOwner !== id) {
+        const aliases = (index.trpcAliases ??= {})[bodyOwner] ??= [];
+        if (!aliases.includes(id)) aliases.push(id);
+      }
+      if (procedure.unresolved) {
+        const source = relativePath(procedure.unresolved.getSourceFile());
+        recordTrpcIssue(id, byGraphId.get(`file:${source}`)!, procedure.unresolved.getStartLineNumber());
+      }
+      if (procedure.clientsKnown) boundProcedures.add(id);
+      else unboundProcedures.add(id);
+    }
+
     const owners = (node: Node): [legacy?: number, graph?: number] => {
       let graph: number | undefined;
       for (const parent of node.getAncestors()) {
@@ -253,10 +290,6 @@ export class QueryIndexBuilder {
         fn: owner ? index.symbols[owner - 1].name : null });
     }
 
-    const hasValueBinding = (entry: ReturnType<SourceFile['getImportDeclarations']>[number]) => !entry.isTypeOnly() &&
-      (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
-    const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
-      /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
     const dynamicBindings = new Map<Node, number>();
     const externalModules = new Map<string, number>();
     const graphNames = new Map<string, number>();
@@ -314,6 +347,23 @@ export class QueryIndexBuilder {
       const externalCalls = new Map<number, Map<string, ExternalCall>>();
       const graphReferences = new Map<string, GraphReference>();
       const trpcModuleUses = new Map<string, [number, number]>();
+      const trpcUseKeys = new Set<string>();
+      const recordTrpcUse = (node: Node, use: NonNullable<ReturnType<TrpcFacts['use']>>, owner?: number) => {
+        const line = node.getStartLineNumber();
+        const operation = use.cache ? 'cache:' + use.operation : use.operation;
+        for (const procedure of use.targets) {
+          const id = procedureIds.get(procedure);
+          if (id === undefined) continue;
+          const key = JSON.stringify([id, line, operation, owner]);
+          if (trpcUseKeys.has(key)) continue;
+          trpcUseKeys.add(key);
+          ((index.trpcUses ??= {})[fileId] ??= []).push([id, line, operation, owner]);
+          if (!use.cache && !isTestFile(relative)) boundProcedures.add(id);
+        }
+        if (!use.unresolved) return;
+        const ids = new Set([owner ?? fileId, ...use.unresolved.flatMap(path => procedureIds.get(path) ?? [])]);
+        for (const id of ids) recordTrpcIssue(id, fileId, line);
+      };
       const recordGraph = (id: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number) => {
         const key = JSON.stringify([id, line, kind, owner, detail]);
         if (graphReferences.has(key)) return;
@@ -477,7 +527,31 @@ export class QueryIndexBuilder {
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             recordDynamic(node, node.getArguments()[0], graphOwner);
           }
-          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression), 'call', undefined, owner, graphOwner);
+          const trpcUse = trpcFacts.hasRouters && Node.isCallExpression(node) ? trpcFacts.use(node) : undefined;
+          if (trpcUse) {
+            recordTrpcUse(node, trpcUse, graphOwner);
+            return;
+          }
+          const resolver = procedureResolvers.get(node);
+          if (resolver && !Node.isArrowFunction(resolver) && !Node.isFunctionExpression(resolver)) {
+            const procedure = byNode.get(node)!;
+            if (!record(resolver, declarationsOf(resolver), 'call', undefined, procedure, procedure)) {
+              for (const id of [procedure, ...index.trpcAliases?.[procedure] ?? []]) {
+                recordTrpcIssue(id, fileId, resolver.getStartLineNumber());
+              }
+            }
+          }
+          let found = false;
+          if (Node.isCallExpression(node)) {
+            const declarations = declarationsOf(expression);
+            // A call through a typed receiver can end at the named method contract.
+            if (trpcFacts.hasRouters && graphOwner !== undefined) for (const declaration of declarations) {
+              if (Node.isMethodSignature(declaration) && exports.has(declaration.getSourceFile())) {
+                add(declaration, declaration.getName(), 'function', null);
+              }
+            }
+            found = record(node, declarations, 'call', undefined, owner, graphOwner);
+          }
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found);
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
@@ -561,6 +635,8 @@ export class QueryIndexBuilder {
         refs.push([dynamicBindings.get(binding)!, site.line, GraphReferenceKind.Render, owner, conditional]);
       }
     }
+    const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
+    if (unbound.length) index.trpcUnbound = unbound;
     return index;
   }
 }

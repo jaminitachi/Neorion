@@ -196,10 +196,10 @@ export class QueryEngine {
     return { file, name: text.slice(delimiter + 1) };
   }
 
-  private matchSymbol(text: string, component: boolean) {
+  private matchSymbol(text: string) {
     const { file, name } = this.symbolTarget(text);
     return (this.names.get(name) ?? [])
-      .filter(symbol => (file === undefined || symbol.file === file) && (!component || symbol.kind === 'component')).sort(bySymbol);
+      .filter(symbol => file === undefined || symbol.file === file).sort(bySymbol);
   }
 
   private matchRoute(text: string, kind: string) {
@@ -586,7 +586,7 @@ export class QueryEngine {
   }
 
   private matchGraphSymbol(target: string, graph: DependencyGraph) {
-    const matches = this.matchSymbol(target, false);
+    const matches = this.matchSymbol(target);
     if (matches.length) return matches;
     const { name, file } = this.symbolTarget(target);
     if (name === 'default' && file) {
@@ -604,7 +604,7 @@ export class QueryEngine {
     if (tool === 'changes') return {
       result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
     };
-    if (tool === 'impact' && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
+    if (tool === 'impact' && !this.names.has(target) && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
       const file = path.posix.normalize(target);
       const seeds = graph.fileSeeds(file);
@@ -617,11 +617,12 @@ export class QueryEngine {
     const [symbol] = matches;
     if (!symbol) return { result: { rows: [], notes: this.suggestions(target.split('#').pop()!, undefined, expired) } };
     const result = tool === 'impact' ? graph.impact([symbol.id], depth, !!includeTests, limit, expired) : graph.callees(symbol.id, depth, uses, expired);
-    return { result: { ...result, title: `${symbol.file}#${symbol.name}`, targets: [symbol.file] } };
+    const title = symbol.kind === 'procedure' ? declaration(symbol) : `${symbol.file}#${symbol.name}`;
+    return { result: { ...result, title, targets: [symbol.file] } };
   }
 
   private pathQuery(from: string, to: string, graph: DependencyGraph, expired: () => boolean) {
-    const routeTarget = (text: string) => text.startsWith('/') || (!text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
+    const routeTarget = (text: string) => text.startsWith('/') || (!this.names.has(text) && !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
     const resolve = (target: string, kind: 'page' | 'api') => {
       if (routeTarget(target)) {
         const routes = this.matchPathRoute(target, kind);
@@ -663,13 +664,16 @@ export class QueryEngine {
       ambiguous = !!answer.ambiguous;
     } else if (tool === 'search') result = this.search(target, args.filter, expired);
     else if (tool === 'who_renders' || tool === 'rename_impact') {
-      const matches = this.matchSymbol(target, tool === 'who_renders');
+      const matches = this.matchSymbol(target).filter(symbol =>
+        tool === 'who_renders' ? symbol.kind === 'component' || symbol.kind === 'procedure' : symbol.kind !== 'procedure');
       if (matches.length > 1) {
         ambiguous = true;
         result = { rows: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)), limit: 10 };
       } else if (matches.length) {
         const [symbol] = matches;
-        result = tool === 'who_renders' ? this.renders(symbol, !!args.direct, expired) : this.rename(symbol, !!args.includeTests, expired);
+        result = symbol.kind === 'procedure'
+          ? this.graph()?.procedureRoutes(symbol, !!args.direct, expired) ?? { rows: [], partial: 'regenerate legacy index' }
+          : tool === 'who_renders' ? this.renders(symbol, !!args.direct, expired) : this.rename(symbol, !!args.includeTests, expired);
         result.title = `${symbol.file}#${symbol.name}`;
         result.targets = [symbol.file];
       } else result.notes = this.suggestions(target.split('#').pop()!, tool === 'who_renders' ? 'component' : undefined, expired);
@@ -685,14 +689,18 @@ export class QueryEngine {
         : this.consumers(routes[0], args.callers, !!args.includeTests, expired);
       else if (tool === 'api_consumers' && (actionPath || !/[\\/]/.test(target))) {
         const { file, name } = this.symbolTarget(target);
+        const procedures = this.matchSymbol(target).filter(symbol => symbol.kind === 'procedure');
         const candidates = (this.index.serverActions ?? []).filter(action => file === undefined || action.file === file);
         const exact = candidates.filter(action => action.name === name || action.aliases?.includes(name));
         const actions = (exact.length ? exact : candidates.filter(action => actionShortName(action.name) === name))
           .sort((a, b) => compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name));
-        if (actions.length > 1) {
+        if (actions.length + procedures.length > 1) {
           ambiguous = true;
-          result = { rows: actions.map(action => row(`${actionLocation(action)} server action`, action.file)), limit: 10 };
-        } else if (actions.length) result = this.actionConsumers(actions[0], !!args.includeTests, expired);
+          result = { rows: [...actions.map(action => row(`${actionLocation(action)} server action`, action.file)),
+            ...procedures.map(procedure => row(`${declaration(procedure)} tRPC procedure`, procedure.file))], limit: 10 };
+        } else if (procedures.length) result = this.graph()?.procedureConsumers(procedures[0], !!args.includeTests) ??
+          { rows: [], partial: 'regenerate legacy index' };
+        else if (actions.length) result = this.actionConsumers(actions[0], !!args.includeTests, expired);
         else {
           result.notes = this.suggestions(name, 'action', expired, file);
           if (!this.index.serverActions) result.partial = 'regenerate legacy index';
