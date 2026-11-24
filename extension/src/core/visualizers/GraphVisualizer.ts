@@ -838,6 +838,8 @@ export class GraphVisualizer {
                     placeNodes(positions);
                 }
                 let fitScale = 1;
+                let fitWidth;
+                let fitHeight;
                 function visibleComponents() {
                     const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
                     const links = new Map(Array.from(visible, id => [id, new Set()]));
@@ -868,8 +870,15 @@ export class GraphVisualizer {
                     return groups.sort((a, b) => b.length - a.length);
                 }
 
-                function fitGraph() {
-                    if (!container.clientWidth || !container.clientHeight) return;
+                function fitGraph(keepView = false) {
+                    const { clientWidth: width, clientHeight: height } = container;
+                    if (!width || !height) return;
+                    fitWidth = width;
+                    fitHeight = height;
+                    const previousScale = network.getScale();
+                    const view = keepView && Math.abs(previousScale / fitScale - 1) > 0.01
+                        ? { scale: previousScale, position: network.getViewPosition() } : null;
+                    network.setSize(width + 'px', height + 'px');
                     const groups = visibleComponents();
                     if (!groups.length) {
                         restorePositions();
@@ -878,9 +887,10 @@ export class GraphVisualizer {
                         network.redraw();
                         return;
                     }
-                    const cutoff = Math.max(2, groups.flat().length / 10);
-                    const fitAll = routesMode || domainFocus;
-                    const main = fitAll ? groups.flat() : groups[0];
+                    const visible = groups.flat();
+                    const cutoff = Math.max(2, visible.length / 10);
+                    const fitAll = routesMode || domainFocus || hopNodes;
+                    const main = fitAll ? visible : groups[0];
                     const small = fitAll ? [] : groups.slice(1).filter(group => group.length < cutoff);
                     rowNodes = new Set(small.flat());
                     restorePositions(rowNodes);
@@ -909,15 +919,12 @@ export class GraphVisualizer {
                         }
                         placeNodes(positions);
                     }
-                    network.setSize(container.clientWidth + 'px', container.clientHeight + 'px');
-                    network.redraw();
-                    network.fit({ nodes: main });
+                    network.body.emitter.emit('_resizeNodes');
                     const boxes = main.map(id => network.getBoundingBox(id));
                     const left = Math.min(...boxes.map(box => box.left));
                     const right = Math.max(...boxes.map(box => box.right));
                     const top = Math.min(...boxes.map(box => box.top));
                     const bottom = Math.max(...boxes.map(box => box.bottom));
-                    const { clientWidth: width, clientHeight: height } = container;
                     const padding = 34;
                     const rowHeight = rowNodes.size ? 112 : 0;
                     const scale = Math.min(1.2, Math.max(1, width - padding * 2) / Math.max(1, right - left),
@@ -947,6 +954,24 @@ export class GraphVisualizer {
                         }
                         placeNodes(positions);
                         rowHeading = network.DOMtoCanvas({ x: padding, y: height - 80 });
+                    }
+                    if (view) {
+                        const inView = id => {
+                            const { x, y } = network.getPosition(id);
+                            return Math.abs(x - view.position.x) * view.scale < width / 2 - padding &&
+                                Math.abs(y - view.position.y) * view.scale < height / 2 - padding;
+                        };
+                        const keep = hopNodes ? visible.every(inView)
+                            : selectedId ? inView(selectedId) : main.some(inView);
+                        if (keep) {
+                            network.moveTo(view);
+                        } else if (!hopNodes && focusIds) {
+                            const answer = visible.filter(id => focusIds.has(id));
+                            if (answer.length) {
+                                network.fit({ nodes: answer });
+                                fitScale = network.getScale();
+                            }
+                        }
                     }
                     network.redraw();
                 }
@@ -1010,7 +1035,7 @@ export class GraphVisualizer {
                     });
                 }
 
-                function applyFilters() {
+                function applyFilters(keepView = true) {
                     hopNodes = hopLimit ? neighborsWithinHops() : null;
                     withoutRedraw(() => {
                         syncAnswerClusters();
@@ -1050,7 +1075,7 @@ export class GraphVisualizer {
                         closeDetails();
                         return;
                     }
-                    fitGraph();
+                    fitGraph(keepView);
                 }
 
                 function legendRow(name, count) {
@@ -1269,7 +1294,7 @@ export class GraphVisualizer {
                     domainFocus = { cluster, domains: visibleDomains, position: network.getPosition(cluster.id) };
                     expandGroups([cluster]);
                     visibleDomains = new Set([cluster.domain]);
-                    applyFilters();
+                    applyFilters(false);
                 }
 
                 function leaveDomainFocus() {
@@ -1278,7 +1303,7 @@ export class GraphVisualizer {
                     visibleDomains = domains;
                     collapseGroups([cluster]);
                     placeNodes([[cluster.id, position]]);
-                    applyFilters();
+                    applyFilters(false);
                 }
 
                 clusterButton.addEventListener('click', () => {
@@ -1291,7 +1316,7 @@ export class GraphVisualizer {
                     restorePositions();
                     if (expand) expandGroups(componentClusters.filter(({ id }) => isCollapsed(id)));
                     else collapseGroups(componentClusters);
-                    applyFilters();
+                    applyFilters(false);
                 });
 
                 const labelControl = document.getElementById('label-levels');
@@ -1493,7 +1518,9 @@ export class GraphVisualizer {
 
                 document.getElementById('btn-fit').addEventListener('click', () => fitGraph());
                 new ResizeObserver(() => {
-                    if (!physicsEnabled) fitGraph();
+                    if (!physicsEnabled && (container.clientWidth !== fitWidth || container.clientHeight !== fitHeight)) {
+                        fitGraph(true);
+                    }
                 }).observe(container);
                 
                 const pauseAfterStabilization = () => {
