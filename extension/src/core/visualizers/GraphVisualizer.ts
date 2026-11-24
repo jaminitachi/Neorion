@@ -219,16 +219,16 @@ export class GraphVisualizer {
 
         const codeEdges = [
             ...graph.routes.flatMap(route => route.componentId ? [{
-                from: route.id, to: route.componentId, type: 'renders', width: 2
+                from: route.id, to: route.componentId, type: 'renders'
             }] : []),
             ...layouts.flatMap(layout => (layout.wraps ?? []).map(page => ({
-                from: layout.id, to: page, type: 'wraps', width: 3
+                from: layout.id, to: page, type: 'wraps'
             }))),
             ...graph.edges
         ].filter(edge => nodeDomainMap.has(edge.from) && nodeDomainMap.has(edge.to))
             .map((edge, index) => ({
                 ...edge, id: 'edge:' + index, title: edge.type, arrows: 'to',
-                dashes: edge.type === 'imports', length: getEdgeLength(edge.from, edge.to)
+                length: getEdgeLength(edge.from, edge.to)
             }));
         const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
         for (const { from, to } of codeEdges) {
@@ -295,6 +295,8 @@ export class GraphVisualizer {
         #search-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--fg-color)); }
         :is(button, input):focus-visible { outline: 2px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
         #graph-area { position: relative; display: flex; flex: 1; min-height: 0; }
+        #hop-levels { margin-top: 10px; }
+        div.vis-tooltip { background-color: var(--bg-color); color: var(--fg-color); border-color: var(--border-color); box-shadow: none; font: 12px system-ui; pointer-events: none; }
         #graph-footer { display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; padding: 5px 10px; border-top: 1px solid var(--border-color); font-size: 12px; }
         #stats { font-variant-numeric: tabular-nums; }
         #details { flex: 0 0 min(300px, 36%); min-width: 0; box-sizing: border-box; padding: 14px; overflow: auto; background: var(--vscode-sideBar-background, var(--bg-color)); color: var(--vscode-sideBar-foreground, var(--fg-color)); border-left: 1px solid var(--border-color); z-index: 1001; font-size: 13px; overflow-wrap: anywhere; }
@@ -396,6 +398,11 @@ export class GraphVisualizer {
             </dl>
             <button id="details-open" class="btn">Open file</button>
             <p class="passport-counts"><span id="upstream"></span> upstream · <span id="downstream"></span> downstream</p>
+            <div id="hop-levels" class="segments" role="group" aria-label="Neighborhood depth" title="Click the active depth to return to the query answer">
+                <button class="btn" data-hops="1" aria-pressed="false">1 hop</button>
+                <button class="btn" data-hops="2" aria-pressed="false">2 hops</button>
+                <button class="btn" data-hops="3" aria-pressed="false">3 hops</button>
+            </div>
             <section id="wrapper-section" hidden>
                 <h3>Wrapped by (outer → inner)</h3>
                 <ol id="details-wrappers"></ol>
@@ -435,6 +442,7 @@ export class GraphVisualizer {
         let visibleDomains;
         let searchMatches = null;
         let focusIds = null;
+        let hopNodes = null;
 
 
         function log(msg) {
@@ -474,12 +482,12 @@ export class GraphVisualizer {
         }
 
         function nodeOpacity(id) {
-            if (focusIds) return focusIds.has(id) ? 1 : 0.15;
+            if (hopNodes || focusIds) return (hopNodes || focusIds).has(id) ? 1 : 0.15;
             return !searchMatches || searchMatches.has(id) ? 1 : 0.18;
         }
 
         function clusterOpacity(cluster) {
-            if (focusIds) return cluster.componentIds.some(id => focusIds.has(id)) ? 1 : 0.15;
+            if (hopNodes || focusIds) return cluster.componentIds.some(id => (hopNodes || focusIds).has(id)) ? 1 : 0.15;
             return !searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18;
         }
 
@@ -558,7 +566,8 @@ export class GraphVisualizer {
                 const linear = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
                 return sum + linear * [0.2126, 0.7152, 0.0722][index];
             }, 0);
-            const surface = luminance(rgb(background));
+            const surfaceRGB = rgb(background);
+            const surface = luminance(surfaceRGB);
             const contrast = channels => {
                 const fill = luminance(channels);
                 return (Math.max(surface, fill) + 0.05) / (Math.min(surface, fill) + 0.05);
@@ -567,10 +576,10 @@ export class GraphVisualizer {
             const textColor = hex(rgb(foreground));
             for (const [domain, color] of Object.entries(groupsConfig)) {
                 const original = rgb(color);
-                const target = surface > 0.3 ? 0 : 255;
+                const target = surface > 0.179 ? 0 : 255;
                 let adjusted = original;
-                for (let mix = 0.05; contrast(adjusted) < 3 && mix <= 1; mix += 0.05) {
-                    adjusted = original.map(value => Math.round(value + (target - value) * mix));
+                for (let step = 1; contrast(adjusted) < 3 && step <= 20; step++) {
+                    adjusted = original.map(value => Math.round(value + (target - value) * step / 20));
                 }
                 const fill = hex(adjusted);
                 groups[domain] = { color: {
@@ -578,16 +587,22 @@ export class GraphVisualizer {
                     hover: { background: fill, border: textColor }
                 } };
             }
-            const widgetBorder = styles.getPropertyValue('--vscode-editorWidget-border').trim();
-            const editorForeground = styles.getPropertyValue('--vscode-foreground').trim() || foreground;
+            const widget = styles.getPropertyValue('--vscode-editorWidget-border').trim();
+            const neutral = rgb(styles.getPropertyValue('--vscode-foreground').trim() || foreground);
+            const accent = styles.getPropertyValue('--vscode-textLink-foreground').trim()
+                || styles.getPropertyValue('--vscode-focusBorder').trim() || foreground;
+            const highContrast = document.body.matches('.vscode-high-contrast, .vscode-high-contrast-light');
+            const renderOpacity = highContrast ? 1 : 0.92;
+            const renderContrast = channels => contrast(channels.map(
+                (value, index) => value * renderOpacity + surfaceRGB[index] * (1 - renderOpacity)));
+            const border = widget ? rgb(widget) : neutral;
+            const renderColor = [border, neutral, surface > 0.179 ? [0, 0, 0] : [255, 255, 255]]
+                .find(channels => renderContrast(channels) >= 3);
             return {
                 groups,
-                font: { color: textColor, background: hex(rgb(background)), bold: { color: textColor } },
-                edge: {
-                    color: hex(rgb(widgetBorder && contrast(rgb(widgetBorder)) >= 2 ? widgetBorder : editorForeground)),
-                    inherit: false,
-                    opacity: document.body.matches('.vscode-high-contrast, .vscode-high-contrast-light') ? 1 : 0.6
-                }
+                font: { color: textColor, background: hex(surfaceRGB), bold: { color: textColor } },
+                edge: { color: hex(renderColor), inherit: false, opacity: renderOpacity },
+                accent: hex(rgb(accent))
             };
         }
 
@@ -639,7 +654,7 @@ export class GraphVisualizer {
                     },
                     minVelocity: 0.75
                 },
-                interaction: { hover: true, tooltipDelay: 200, zoomView: true }
+                interaction: { hover: true, tooltipDelay: 200, zoomView: true, selectConnectedEdges: false }
             };
             
             if (typeof vis === 'undefined') {
@@ -653,12 +668,25 @@ export class GraphVisualizer {
                 const graphColors = node => theme.groups[node.group].color;
                 const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
                 const codeEdges = edges.filter(edge => edge.type);
+                const edgeStyles = {
+                    wraps: { width: 2.8, dashes: false },
+                    renders: { width: 1.8, dashes: false },
+                    imports: { width: 0.85, dashes: [5, 4] },
+                    'uses-action': { width: 2, dashes: [1.5, 4] }
+                };
                 function edgeColor(edge) {
-                    const color = edge.type === 'wraps'
-                        ? { color: graphColors(graphNodes.get(edge.from)).background, inherit: false, opacity: 1 }
-                        : theme.edge;
-                    const focused = !focusIds || (focusIds.has(edge.from) && focusIds.has(edge.to));
-                    return { ...color, opacity: color.opacity * (focused ? 1 : 0.15) };
+                    let { color, opacity } = theme.edge;
+                    if (edge.type === 'wraps') {
+                        color = graphColors(graphNodes.get(edge.from)).background;
+                        opacity = 1;
+                    } else if (edge.type === 'uses-action') {
+                        color = theme.accent;
+                        opacity = 1;
+                    } else if (edge.type === 'imports') {
+                        opacity *= 0.65;
+                    }
+                    const focused = hopNodes || !focusIds || (focusIds.has(edge.from) && focusIds.has(edge.to));
+                    return { color, highlight: color, hover: color, inherit: false, opacity: opacity * (focused ? 1 : 0.15) };
                 }
                 function updateEdgeColors() {
                     const updates = codeEdges.map(edge => ({ id: edge.id, color: edgeColor(edge) }));
@@ -685,7 +713,8 @@ export class GraphVisualizer {
                         const dot = item.querySelector('.dot');
                         dot.style.backgroundColor = color.background;
                     }
-                    network.redraw();
+                    if (routesMode) fitGraph();
+                    else network.redraw();
                 }).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
                 const adjacency = new Map(neighbors);
                 const connections = new Map(Array.from(graphNodes.keys(), id => [
@@ -750,6 +779,8 @@ export class GraphVisualizer {
                 }
 
                 let selectedId;
+                let hopLimit;
+                const hopOpenedClusters = new Set();
                 let rowNodes = new Set();
                 let rowHeading;
                 let fitScale = 1;
@@ -860,24 +891,91 @@ export class GraphVisualizer {
                 const domainRows = new Map();
                 const edgeTypes = ['wraps', 'renders', 'imports', 'uses-action'];
                 const visibleEdgeTypes = new Set(edgeTypes);
+                const incidentEdges = new Map(Array.from(graphNodes.keys(), id => [id, []]));
+                for (const edge of codeEdges) {
+                    incidentEdges.get(edge.from).push(edge);
+                    incidentEdges.get(edge.to).push(edge);
+                }
+                const hopButtons = [...document.querySelectorAll('#hop-levels button')];
+                function neighborsWithinHops() {
+                    const nodes = new Set([selectedId]);
+                    let frontier = [selectedId];
+                    for (let depth = 0; depth < hopLimit && frontier.length; depth++) {
+                        const next = [];
+                        for (const id of frontier) {
+                            for (const { from, to, type } of incidentEdges.get(id)) {
+                                if (!visibleEdgeTypes.has(type)) continue;
+                                const adjacent = from === id ? to : from;
+                                if (nodes.has(adjacent) || !visibleDomains.has(graphNodes.get(adjacent).group)) continue;
+                                nodes.add(adjacent);
+                                next.push(adjacent);
+                            }
+                        }
+                        frontier = next;
+                    }
+                    return nodes;
+                }
+
+                function syncHopClusters(keepId) {
+                    for (const cluster of componentClusters) {
+                        const needed = hopNodes && cluster.componentIds.some(id => hopNodes.has(id));
+                        if (needed && isCollapsed(cluster.id)) {
+                            expandGroup(cluster);
+                            hopOpenedClusters.add(cluster.id);
+                        } else if (!needed && hopOpenedClusters.delete(cluster.id) && !cluster.componentIds.includes(keepId)) {
+                            collapseGroup(cluster);
+                        }
+                    }
+                    updateClusterButton(clusterButton);
+                }
+
+                function resetHops(keepId) {
+                    if (!hopLimit) return false;
+                    hopLimit = undefined;
+                    hopNodes = null;
+                    syncHopClusters(keepId);
+                    return true;
+                }
+
+                for (const button of hopButtons) {
+                    button.addEventListener('click', () => {
+                        const hops = Number(button.dataset.hops);
+                        hopLimit = hopLimit === hops ? undefined : hops;
+                        applyFilters();
+                    });
+                }
+
                 function applyFilters() {
+                    hopNodes = hopLimit ? neighborsWithinHops() : null;
+                    syncHopClusters(selectedId);
+                    for (const button of hopButtons) {
+                        button.setAttribute('aria-pressed', String(Number(button.dataset.hops) === hopLimit));
+                    }
                     for (const [domain, { checkbox, label }] of domainRows) {
                         checkbox.checked = visibleDomains.has(domain);
                         label.setAttribute('aria-pressed', String(visibleDomains.size === 1 && visibleDomains.has(domain)));
                     }
                     const nodeUpdates = Array.from(graphNodes.values(), node => ({
-                        id: node.id, hidden: !visibleDomains.has(node.group)
+                        id: node.id, hidden: !visibleDomains.has(node.group) || (hopNodes !== null && !hopNodes.has(node.id)),
+                        opacity: nodeOpacity(node.id)
                     }));
                     for (const cluster of componentClusters) {
                         if (isCollapsed(cluster.id)) {
-                            network.body.nodes[cluster.id].setOptions({ hidden: !visibleDomains.has(cluster.domain) });
+                            network.body.nodes[cluster.id].setOptions({
+                                hidden: !visibleDomains.has(cluster.domain) || hopNodes !== null,
+                                opacity: clusterOpacity(cluster)
+                            });
                         }
                     }
                     network.body.data.nodes.update(nodeUpdates);
-                    const edgeUpdates = codeEdges.map(edge => ({ id: edge.id, hidden: !visibleEdgeTypes.has(edge.type) }));
+                    const edgeUpdates = codeEdges.map(edge => ({
+                        id: edge.id,
+                        hidden: !visibleEdgeTypes.has(edge.type) || (hopNodes !== null && (!hopNodes.has(edge.from) || !hopNodes.has(edge.to))),
+                        color: edgeColor(edge)
+                    }));
                     for (const update of edgeUpdates) {
                         for (const id of network.getClusteredEdges(update.id)) {
-                            if (id !== update.id) network.body.edges[id].setOptions({ hidden: update.hidden });
+                            if (id !== update.id) network.body.edges[id].setOptions({ hidden: update.hidden, color: update.color });
                         }
                     }
                     network.body.data.edges.update(edgeUpdates);
@@ -987,11 +1085,16 @@ export class GraphVisualizer {
 
                 function closeDetails() {
                     if (details.hidden) return;
+                    const restoreHops = resetHops();
                     selectedId = undefined;
                     focusIds = null;
                     network.unselectAll();
                     details.hidden = true;
                     document.getElementById('details-open').onclick = null;
+                    if (restoreHops) {
+                        applyFilters();
+                        return;
+                    }
                     updateNodeOpacity();
                     updateEdgeColors();
                     fitGraph();
@@ -1043,6 +1146,7 @@ export class GraphVisualizer {
                         closeDetails();
                         return;
                     }
+                    const restoreHops = selectedId !== id && resetHops(id);
                     selectedId = id;
                     const wrappers = (layoutsByPage.get(id) ?? []).map(edge => edge.from);
                     const pages = node.kind === 'component' ? renderedBy(node.renderSymbol) : [];
@@ -1073,6 +1177,10 @@ export class GraphVisualizer {
 
                     const opened = details.hidden;
                     details.hidden = false;
+                    if (restoreHops) {
+                        applyFilters();
+                        return;
+                    }
                     updateNodeOpacity();
                     updateEdgeColors();
                     if (opened || routesMode) fitGraph();
@@ -1132,6 +1240,17 @@ export class GraphVisualizer {
 
                 network.on('hoverNode', ({ node }) => { hoveredNode = node; network.redraw(); });
                 network.on('blurNode', () => { hoveredNode = undefined; network.redraw(); });
+                network.on('beforeDrawing', () => {
+                    const scale = network.getScale();
+                    for (const id of network.body.edgeIndices) {
+                        const original = edgeById.get(network.getBaseEdge(id));
+                        if (!original) continue;
+                        const style = edgeStyles[original.type];
+                        const edge = network.body.edges[id];
+                        edge.options.width = style.width / scale;
+                        edge.options.dashes = style.dashes && style.dashes.map(length => length / scale);
+                    }
+                });
                 network.on('afterDrawing', ctx => {
                     const scale = network.getScale();
                     const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
@@ -1144,7 +1263,7 @@ export class GraphVisualizer {
                     }
                     labelControl.title = labelOverride ? 'Click the active level to return to Auto' : 'Auto · follows zoom';
 
-                    const focused = new Set(focusIds ?? network.getSelectedNodes());
+                    const focused = new Set(hopNodes ?? focusIds ?? network.getSelectedNodes());
                     for (const id of [...focused]) focused.add(network.findNode(id)[0]);
                     if (hoveredNode !== undefined) focused.add(hoveredNode);
                     for (const id of [...focused]) {
