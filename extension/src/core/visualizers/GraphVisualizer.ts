@@ -495,48 +495,72 @@ export class GraphVisualizer {
             return !searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18;
         }
 
+        function withoutRedraw(update) {
+            // Vis emits synchronous redraws for DataSet and cluster changes while physics is paused.
+            const { emitter } = network.body;
+            const wasDrawing = network.renderer.allowRedraw;
+            if (wasDrawing) emitter.emit('_blockRedraw');
+            try {
+                update();
+            } finally {
+                if (wasDrawing) emitter.emit('_allowRedraw');
+            }
+        }
+
         function updateNodeOpacity() {
             const updates = network.body.data.nodes.get()
                 .filter(node => node.kind && !isInsideCluster(node.id))
                 .map(node => ({ id: node.id, opacity: nodeOpacity(node.id) }));
-            network.body.data.nodes.update(updates);
-
-            for (const cluster of componentClusters) {
-                if (isCollapsed(cluster.id)) {
-                    network.updateClusteredNode(cluster.id, { opacity: clusterOpacity(cluster) });
+            withoutRedraw(() => {
+                network.body.data.nodes.update(updates);
+                for (const cluster of componentClusters) {
+                    if (isCollapsed(cluster.id)) {
+                        network.body.nodes[cluster.id].setOptions({ opacity: clusterOpacity(cluster) });
+                    }
                 }
-            }
+            });
+            network.redraw();
         }
 
-        function collapseGroup(cluster) {
-            const { id, domain, hubEdges } = cluster;
-            // Remove tethers before clustering so vis never redirects them to the cluster.
-            network.body.data.edges.remove(hubEdges.map(edge => edge.id));
-            network.cluster({
-                joinCondition: node => node.group === domain && node.kind === 'component',
-                clusterNodeProperties: {
-                    id, group: domain,
-                    label: '', shape: 'dot', size: cluster.size, mass: 12, allowSingleNodeCluster: true,
-                    level: cluster.level, hidden: !visibleDomains.has(domain),
-                    opacity: clusterOpacity(cluster)
+        function collapseGroups(clusters) {
+            if (!clusters.length) return;
+            withoutRedraw(() => {
+                // Remove tethers before clustering so vis never redirects them to a bubble.
+                network.body.data.edges.remove(clusters.flatMap(cluster => cluster.hubEdges.map(edge => edge.id)));
+                for (const cluster of clusters) {
+                    const { id, domain } = cluster;
+                    network.cluster({
+                        joinCondition: node => node.group === domain && node.kind === 'component',
+                        clusterNodeProperties: {
+                            id, group: domain,
+                            label: '', shape: 'dot', size: cluster.size, mass: 12, allowSingleNodeCluster: true,
+                            level: cluster.level, hidden: !visibleDomains.has(domain),
+                            opacity: clusterOpacity(cluster)
+                        }
+                    }, false);
                 }
+                network.body.emitter.emit('_dataChanged');
             });
         }
 
-        function expandGroup(cluster) {
-            const { id, domain, componentIds, hubEdges } = cluster;
-            network.openCluster(id, {
-                // Give members distinct positions even when layout is paused.
-                releaseFunction: (center, positions) => Object.fromEntries(
-                    Object.keys(positions).sort().map((nodeId, index) => {
-                        const angle = index * Math.PI * (3 - Math.sqrt(5));
-                        const radius = 41 * Math.sqrt(index);
-                        return [nodeId, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
-                    })
-                )
+        function expandGroups(clusters) {
+            if (!clusters.length) return;
+            withoutRedraw(() => {
+                for (const { id } of clusters) {
+                    network.openCluster(id, {
+                        // Give members distinct positions even when layout is paused.
+                        releaseFunction: (center, positions) => Object.fromEntries(
+                            Object.keys(positions).sort().map((nodeId, index) => {
+                                const angle = index * Math.PI * (3 - Math.sqrt(5));
+                                const radius = 41 * Math.sqrt(index);
+                                return [nodeId, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
+                            })
+                        )
+                    }, false);
+                }
+                // Adding the tethers also refreshes vis's visible indices.
+                network.body.data.edges.add(clusters.flatMap(cluster => cluster.hubEdges.map(edge => ({ ...edge, hidden: routesMode }))));
             });
-            network.body.data.edges.add(hubEdges.map(edge => ({ ...edge, hidden: routesMode })));
-            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: nodeOpacity(id) })));
         }
 
         function updateClusterButton(button) {
@@ -862,18 +886,19 @@ export class GraphVisualizer {
                     restorePositions(rowNodes);
                     rowHeading = undefined;
                     if (routesMode) {
-                        // Vis orders the tree, but reserves separate vertical bands for disconnected subtrees.
-                        // Compact those bands so one sparse branch cannot shrink the whole Routes view.
+                        // The analyzed wrapper depth gives each node its column.
+                        // Sort by source path so sibling routes are kept together.
                         const columns = new Map();
                         for (const id of main) {
                             const { level, size } = graphNodes.get(id) ?? clustersById.get(id);
                             const column = columns.get(level) ?? [];
-                            column.push({ id, size, y: network.getPosition(id).y });
+                            const order = graphNodes.get(id)?.path ?? clustersById.get(id).domain;
+                            column.push({ id, size, order });
                             columns.set(level, column);
                         }
                         const positions = [];
                         for (const [level, column] of columns) {
-                            column.sort((a, b) => a.y - b.y);
+                            column.sort((a, b) => a.order.localeCompare(b.order));
                             let y = 0;
                             const rows = column.map(({ id, size }, index) => {
                                 if (index) y += Math.max(52, column[index - 1].size + size + 16);
@@ -961,15 +986,19 @@ export class GraphVisualizer {
 
                 function syncAnswerClusters() {
                     const answer = hopNodes ?? focusIds;
+                    const expand = [];
+                    const collapse = [];
                     for (const cluster of componentClusters) {
                         const needed = answer && visibleDomains.has(cluster.domain) && cluster.componentIds.some(id => answer.has(id));
                         if (needed && isCollapsed(cluster.id)) {
-                            expandGroup(cluster);
+                            expand.push(cluster);
                             temporarilyOpened.add(cluster.id);
                         } else if (!needed && temporarilyOpened.delete(cluster.id)) {
-                            collapseGroup(cluster);
+                            collapse.push(cluster);
                         }
                     }
+                    expandGroups(expand);
+                    collapseGroups(collapse);
                     updateClusterButton(clusterButton);
                 }
 
@@ -983,38 +1012,40 @@ export class GraphVisualizer {
 
                 function applyFilters() {
                     hopNodes = hopLimit ? neighborsWithinHops() : null;
-                    syncAnswerClusters();
-                    for (const button of hopButtons) {
-                        button.setAttribute('aria-pressed', String(Number(button.dataset.hops) === hopLimit));
-                    }
-                    for (const [domain, { checkbox, label }] of domainRows) {
-                        checkbox.checked = visibleDomains.has(domain);
-                        label.setAttribute('aria-pressed', String(visibleDomains.size === 1 && visibleDomains.has(domain)));
-                    }
-                    const nodeUpdates = Array.from(graphNodes.values(), node => ({
-                        id: node.id, hidden: !visibleDomains.has(node.group) || (hopNodes !== null && !hopNodes.has(node.id)),
-                        opacity: nodeOpacity(node.id)
-                    }));
-                    for (const cluster of componentClusters) {
-                        if (isCollapsed(cluster.id)) {
-                            network.body.nodes[cluster.id].setOptions({
-                                hidden: !visibleDomains.has(cluster.domain) || hopNodes !== null,
-                                opacity: clusterOpacity(cluster)
-                            });
+                    withoutRedraw(() => {
+                        syncAnswerClusters();
+                        for (const button of hopButtons) {
+                            button.setAttribute('aria-pressed', String(Number(button.dataset.hops) === hopLimit));
                         }
-                    }
-                    network.body.data.nodes.update(nodeUpdates);
-                    const edgeUpdates = codeEdges.map(edge => ({
-                        id: edge.id,
-                        hidden: !visibleEdgeTypes.has(edge.type) || (hopNodes !== null && (!hopNodes.has(edge.from) || !hopNodes.has(edge.to))),
-                        color: edgeColor(edge)
-                    }));
-                    for (const update of edgeUpdates) {
-                        for (const id of network.getClusteredEdges(update.id)) {
-                            if (id !== update.id) network.body.edges[id].setOptions({ hidden: update.hidden, color: update.color });
+                        for (const [domain, { checkbox, label }] of domainRows) {
+                            checkbox.checked = visibleDomains.has(domain);
+                            label.setAttribute('aria-pressed', String(visibleDomains.size === 1 && visibleDomains.has(domain)));
                         }
-                    }
-                    network.body.data.edges.update(edgeUpdates);
+                        const nodeUpdates = Array.from(graphNodes.values(), node => ({
+                            id: node.id, hidden: !visibleDomains.has(node.group) || (hopNodes !== null && !hopNodes.has(node.id)),
+                            opacity: nodeOpacity(node.id)
+                        }));
+                        for (const cluster of componentClusters) {
+                            if (isCollapsed(cluster.id)) {
+                                network.body.nodes[cluster.id].setOptions({
+                                    hidden: !visibleDomains.has(cluster.domain) || hopNodes !== null,
+                                    opacity: clusterOpacity(cluster)
+                                });
+                            }
+                        }
+                        network.body.data.nodes.update(nodeUpdates);
+                        const edgeUpdates = codeEdges.map(edge => ({
+                            id: edge.id,
+                            hidden: !visibleEdgeTypes.has(edge.type) || (hopNodes !== null && (!hopNodes.has(edge.from) || !hopNodes.has(edge.to))),
+                            color: edgeColor(edge)
+                        }));
+                        for (const update of edgeUpdates) {
+                            for (const id of network.getClusteredEdges(update.id)) {
+                                if (id !== update.id) network.body.edges[id].setOptions({ hidden: update.hidden, color: update.color });
+                            }
+                        }
+                        network.body.data.edges.update(edgeUpdates);
+                    });
                     if (selectedId && !network.body.nodeIndices.includes(selectedId)) {
                         closeDetails();
                         return;
@@ -1090,7 +1121,7 @@ export class GraphVisualizer {
                 }
                 initLegend();
 
-                function applySearch() {
+                function applySearch(openMatch = false) {
                     clearTimeout(searchTimer);
                     const query = searchInput.value.trim().toLowerCase();
                     searchMatches = query ? new Set() : null;
@@ -1102,7 +1133,9 @@ export class GraphVisualizer {
                         }
                     }
                     searchCount.textContent = searchMatches ? searchMatches.size + (searchMatches.size === 1 ? ' match' : ' matches') : '';
-                    updateNodeOpacity();
+                    const first = openMatch ? searchMatches?.values().next().value : undefined;
+                    if (first !== undefined) showDetails(first);
+                    else updateNodeOpacity();
                 }
 
                 function closeDetails() {
@@ -1207,9 +1240,7 @@ export class GraphVisualizer {
                         applySearch();
                     } else if (event.key === 'Enter') {
                         event.preventDefault();
-                        applySearch();
-                        const first = searchMatches?.values().next().value;
-                        if (first !== undefined) showDetails(first);
+                        applySearch(true);
                     }
                 });
                 let pendingSelection;
@@ -1226,7 +1257,7 @@ export class GraphVisualizer {
                     pendingSelection = setTimeout(() => showDetails(nodes[0]), 250);
                 });
 
-                for (const cluster of componentClusters) collapseGroup(cluster);
+                collapseGroups(componentClusters);
                 clusterButton.hidden = componentClusters.length === 0;
                 if (componentClusters.length) {
                     document.getElementById('hint').textContent = 'Click for details · Double-click to open a file or expand a bubble';
@@ -1236,7 +1267,7 @@ export class GraphVisualizer {
                     closeDetails();
                     restorePositions();
                     domainFocus = { cluster, domains: visibleDomains, position: network.getPosition(cluster.id) };
-                    expandGroup(cluster);
+                    expandGroups([cluster]);
                     visibleDomains = new Set([cluster.domain]);
                     applyFilters();
                 }
@@ -1245,7 +1276,7 @@ export class GraphVisualizer {
                     const { cluster, domains, position } = domainFocus;
                     domainFocus = undefined;
                     visibleDomains = domains;
-                    collapseGroup(cluster);
+                    collapseGroups([cluster]);
                     placeNodes([[cluster.id, position]]);
                     applyFilters();
                 }
@@ -1258,10 +1289,8 @@ export class GraphVisualizer {
                     closeDetails();
                     const expand = componentClusters.some(({ id }) => isCollapsed(id));
                     restorePositions();
-                    for (const cluster of componentClusters) {
-                        if (expand && isCollapsed(cluster.id)) expandGroup(cluster);
-                        else if (!expand) collapseGroup(cluster);
-                    }
+                    if (expand) expandGroups(componentClusters.filter(({ id }) => isCollapsed(id)));
+                    else collapseGroups(componentClusters);
                     applyFilters();
                 });
 
@@ -1436,33 +1465,24 @@ export class GraphVisualizer {
                 let resumeGraphPhysics = false;
                 function switchLayout(toRoutes) {
                     if (routesMode === toRoutes) return;
-                    if (toRoutes) {
-                        restorePositions();
-                        resumeGraphPhysics = physicsEnabled;
-                        graphPositions = network.getPositions(network.body.nodeIndices);
-                        setPhysicsEnabled(false);
-                    }
-                    routesMode = toRoutes;
-                    const hubs = nodes.filter(node => !node.kind);
-                    network.body.data.nodes.update(hubs.map(({ id }) => ({ id, hidden: toRoutes })));
-                    const activeTethers = network.body.data.edges.getIds({ filter: edge => edge.id.startsWith('hub-edge:') });
-                    network.body.data.edges.update(activeTethers.map(id => ({ id, hidden: toRoutes })));
-                    network.setOptions({
-                        layout: { hierarchical: {
-                            enabled: toRoutes,
-                            direction: 'LR',
-                            sortMethod: 'directed',
-                            levelSeparation: 410,
-                            nodeSpacing: 52,
-                            treeSpacing: 64
-                        } },
-                        edges: { smooth: toRoutes ? false : options.edges.smooth },
-                        physics: { enabled: false }
+                    withoutRedraw(() => {
+                        if (toRoutes) {
+                            restorePositions();
+                            resumeGraphPhysics = physicsEnabled;
+                            graphPositions = network.getPositions(Object.keys(network.body.nodes));
+                            setPhysicsEnabled(false);
+                        }
+                        routesMode = toRoutes;
+                        const hubs = nodes.filter(node => !node.kind);
+                        network.body.data.nodes.update(hubs.map(({ id }) => ({ id, hidden: toRoutes })));
+                        const activeTethers = network.body.data.edges.getIds({ filter: edge => edge.id.startsWith('hub-edge:') });
+                        network.body.data.edges.update(activeTethers.map(id => ({ id, hidden: toRoutes })));
+                        network.setOptions({ edges: { smooth: toRoutes ? false : options.edges.smooth } });
+                        if (!toRoutes) {
+                            placeNodes(Object.entries(graphPositions));
+                            setPhysicsEnabled(resumeGraphPhysics);
+                        }
                     });
-                    if (!toRoutes) {
-                        placeNodes(Object.entries(graphPositions));
-                        setPhysicsEnabled(resumeGraphPhysics);
-                    }
                     graphButton.setAttribute('aria-pressed', String(!toRoutes));
                     routesButton.setAttribute('aria-pressed', String(toRoutes));
                     physicsButton.disabled = toRoutes;
