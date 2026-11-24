@@ -847,6 +847,8 @@ export class GraphVisualizer {
                 let fitScale = 1;
                 let fitWidth;
                 let fitHeight;
+                let previousLabelSlots = new Map();
+                let previousLabelScale;
                 function visibleComponents() {
                     const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
                     const links = new Map(Array.from(visible, id => [id, new Set()]));
@@ -891,6 +893,7 @@ export class GraphVisualizer {
                         restorePositions();
                         rowNodes.clear();
                         rowHeading = undefined;
+                        previousLabelSlots.clear();
                         network.redraw();
                         return;
                     }
@@ -985,6 +988,7 @@ export class GraphVisualizer {
                             }
                         }
                     }
+                    previousLabelSlots.clear();
                     network.redraw();
                 }
 
@@ -1357,8 +1361,16 @@ export class GraphVisualizer {
                     network.redraw();
                 });
 
-                network.on('hoverNode', ({ node }) => { hoveredNode = node; network.redraw(); });
-                network.on('blurNode', () => { hoveredNode = undefined; network.redraw(); });
+                network.on('hoverNode', ({ node }) => {
+                    hoveredNode = node;
+                    previousLabelSlots.clear();
+                    network.redraw();
+                });
+                network.on('blurNode', () => {
+                    hoveredNode = undefined;
+                    previousLabelSlots.clear();
+                    network.redraw();
+                });
                 network.on('beforeDrawing', () => {
                     const scale = network.getScale();
                     for (const id of network.body.edgeIndices) {
@@ -1375,6 +1387,11 @@ export class GraphVisualizer {
                     const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
                         : routesMode || domainFocus || network.body.nodeIndices.length <= 150 || scale >= fitScale * 1.3
                             ? 'Read' : 'Map');
+                    // Keep the last valid slot across wheel steps and pans within the same level.
+                    const previousSlots = !physicsEnabled && currentLevel === level &&
+                        Math.abs(scale / previousLabelScale - 1) <= 0.15 ? previousLabelSlots : undefined;
+                    previousLabelSlots = new Map();
+                    previousLabelScale = scale;
                     if (currentLevel !== level) {
                         currentLevel = level;
                         for (const button of levelButtons) {
@@ -1393,7 +1410,25 @@ export class GraphVisualizer {
                     const { clientWidth: width, clientHeight: height } = container;
                     const labels = [];
                     const positionsByDomain = new Map();
-                    const markers = [];
+                    // Label boxes and leaders are in screen pixels. Index markers in the same space.
+                    const cellSize = 32;
+                    const cellColumns = Math.floor(width / cellSize) + 1;
+                    const cellRows = Math.floor(height / cellSize) + 1;
+                    const markerCells = new Array(cellColumns * cellRows);
+                    const cellX = x => Math.floor(Math.max(0, Math.min(width, x)) / cellSize);
+                    const cellY = y => Math.floor(Math.max(0, Math.min(height, y)) / cellSize);
+                    function hitsMarker(box) {
+                        const right = cellX(box.right);
+                        const bottom = cellY(box.bottom);
+                        const left = cellX(box.left);
+                        for (let row = cellY(box.top); row <= bottom; row++) {
+                            for (let column = left; column <= right; column++) {
+                                const cell = markerCells[row * cellColumns + column];
+                                if (cell?.some(marker => overlaps(box, marker))) return true;
+                            }
+                        }
+                        return false;
+                    }
                     for (const id of network.body.nodeIndices) {
                         const node = graphNodes.get(id);
                         const cluster = clustersById.get(id);
@@ -1401,7 +1436,16 @@ export class GraphVisualizer {
                         const { x, y } = network.canvasToDOM(network.getPosition(id));
                         const radius = (cluster?.size ?? node.size) * scale + 2;
                         if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
-                        markers.push({ left: x - radius, top: y - radius, right: x + radius, bottom: y + radius });
+                        const marker = { left: x - radius, top: y - radius, right: x + radius, bottom: y + radius };
+                        const left = cellX(marker.left);
+                        const right = cellX(marker.right);
+                        const bottom = cellY(marker.bottom);
+                        for (let row = cellY(marker.top); row <= bottom; row++) {
+                            for (let column = left; column <= right; column++) {
+                                const index = row * cellColumns + column;
+                                (markerCells[index] ??= []).push(marker);
+                            }
+                        }
                         if (x < 0 || x > width || y < 0 || y > height) continue;
                         const domain = node?.group ?? cluster.domain;
                         if (level === 'Map' && !rowNodes.has(id)) {
@@ -1418,23 +1462,26 @@ export class GraphVisualizer {
                             (level === 'Read' && (isRoute || node.kind !== 'component' || degree >= 2));
                         if (!eligible) continue;
                         labels.push({
-                            x, y, radius, domain, size: cluster || isRoute ? 13 : 11,
+                            id, x, y, radius, domain, size: cluster || isRoute ? 13 : 11,
                             text: cluster ? domain + ' · ' + cluster.count + (cluster.count === 1 ? ' component' : ' components') : node.shortLabel,
                             alpha: isHovered ? 1 : cluster ? clusterOpacity(cluster) : nodeOpacity(id),
-                            attention: isHovered ? 0 : id === selectedId ? 1 : isFocused ? 2 : 3,
+                            attention: isHovered ? 0 : id === selectedId ? 1 : isFocused || (cluster && !focusIds) ? 2 : 3,
                             priority: cluster ? 0 : kindPriority[node.kind],
                             degree,
+                            important: isHovered || id === selectedId || Boolean(cluster) || mapRoutes.has(id),
                             inRow: rowNodes.has(id)
                         });
                     }
                     for (const [domain, positions] of positionsByDomain) {
                         if (positions.length < 2 || componentClusters.some(cluster => cluster.domain === domain && isCollapsed(cluster.id))) continue;
                         const center = positions.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), { x: 0, y: 0 });
-                        labels.push({ x: center.x / positions.length, y: center.y / positions.length,
+                        labels.push({ id: 'domain:' + domain, x: center.x / positions.length, y: center.y / positions.length,
                             radius: 16, size: 13, text: domain, alpha: focusIds ? 0.15 : 1,
-                            attention: 3, priority: 4, degree: 0 });
+                            attention: 3, priority: 4, degree: 0, important: false });
                     }
-                    labels.sort((a, b) => a.attention - b.attention || a.priority - b.priority || b.degree - a.degree);
+                    labels.sort((a, b) => a.attention - b.attention ||
+                        Number(b.important) - Number(a.important) ||
+                        a.priority - b.priority || b.degree - a.degree);
 
                     // Work in screen pixels, leaving vis in control of the canvas transform.
                     ctx.save();
@@ -1484,7 +1531,8 @@ export class GraphVisualizer {
                         const candidates = label.inRow ? [...vertical, ...sides] : [...sides, ...vertical];
                         // Try positions toward either end of the text before moving farther from the marker.
                         const aligned = [clampLeft(x - 8), clampLeft(x - w + 8)];
-                        for (const offset of [0, 8, 16, 24, 32]) {
+                        const maxOffset = label.important ? 64 : 32;
+                        for (let offset = 0; offset <= maxOffset; offset += 8) {
                             if (offset) {
                                 for (const shift of [0, -labelGap, labelGap]) {
                                     const top = y - h / 2 + shift;
@@ -1496,13 +1544,19 @@ export class GraphVisualizer {
                                 candidates.push([left, y - radius - h - offset, offset], [left, y + radius + offset, offset]);
                             }
                         }
-                        for (const [left, top, offset] of candidates) {
+                        let placement;
+                        let fallback;
+                        const lastSlot = previousSlots?.get(label.id);
+                        const preferred = candidates[lastSlot] ? lastSlot : 0;
+                        for (let attempt = 0; attempt < candidates.length; attempt++) {
+                            const slot = attempt === 0 ? preferred : attempt <= preferred ? attempt - 1 : attempt;
+                            const [left, top, offset] = candidates[slot];
                             const box = { left, top, right: left + w, bottom: top + h };
                             if (left < 2 || top < 2 || box.right > width - 2 || box.bottom > height - 2) continue;
-                            if (occupied.some(other => overlaps(box, other, labelGap)) ||
-                                markers.some(other => overlaps(box, other)) || leaders.some(other => overlaps(box, other))) continue;
+                            if (hitsMarker(box) || occupied.some(other => overlaps(box, other, labelGap)) ||
+                                leaders.some(other => overlaps(box, other))) continue;
+                            let line;
                             if (offset && label.domain) {
-                                // Leave a clear path from the marker to displaced text and keep it clear for later labels.
                                 const endX = Math.max(left, Math.min(x, box.right));
                                 const endY = Math.max(top, Math.min(y, box.bottom));
                                 const dx = Math.sign(endX - x);
@@ -1510,32 +1564,44 @@ export class GraphVisualizer {
                                 if (dx && dy) continue;
                                 const startX = x + dx * radius;
                                 const startY = y + dy * radius;
+                                // Pad across the stroke so later labels and leaders keep it clear.
                                 const leader = {
                                     left: Math.min(startX, endX) - Math.abs(dy), right: Math.max(startX, endX) + Math.abs(dy),
                                     top: Math.min(startY, endY) - Math.abs(dx), bottom: Math.max(startY, endY) + Math.abs(dx)
                                 };
-                                if (markers.some(other => overlaps(leader, other)) ||
-                                    occupied.some(other => overlaps(leader, other, 1)) ||
+                                if (occupied.some(other => overlaps(leader, other, 1)) ||
                                     leaders.some(other => overlaps(leader, other))) continue;
-                                leaders.push(leader);
-                                ctx.globalAlpha = label.alpha;
-                                ctx.strokeStyle = theme.groups[label.domain].color.background;
-                                ctx.lineWidth = 1.5;
-                                ctx.beginPath();
-                                ctx.moveTo(startX - dx * 2, startY - dy * 2);
-                                ctx.lineTo(endX, endY);
-                                ctx.stroke();
+                                line = { leader, fromX: startX - dx * 2, fromY: startY - dy * 2, endX, endY };
+                                if (hitsMarker(leader)) {
+                                    // A priority label can still use an unobstructed text box in a dense cluster.
+                                    if (label.important) fallback ??= { box, line, slot };
+                                    continue;
+                                }
                             }
-                            occupied.push(box);
-                            ctx.globalAlpha = label.alpha;
-                            ctx.fillStyle = theme.font.background;
-                            ctx.beginPath();
-                            ctx.roundRect(left, top, w, h, 3);
-                            ctx.fill();
-                            ctx.fillStyle = theme.font.color;
-                            ctx.fillText(label.text, left + 4, top + h / 2);
+                            placement = { box, line, slot };
                             break;
                         }
+                        placement ??= fallback;
+                        if (!placement) continue;
+                        const { box, line } = placement;
+                        if (!physicsEnabled) previousLabelSlots.set(label.id, placement.slot);
+                        ctx.globalAlpha = label.alpha;
+                        if (line) {
+                            leaders.push(line.leader);
+                            ctx.strokeStyle = theme.groups[label.domain].color.background;
+                            ctx.lineWidth = 1.5;
+                            ctx.beginPath();
+                            ctx.moveTo(line.fromX, line.fromY);
+                            ctx.lineTo(line.endX, line.endY);
+                            ctx.stroke();
+                        }
+                        occupied.push(box);
+                        ctx.fillStyle = theme.font.background;
+                        ctx.beginPath();
+                        ctx.roundRect(box.left, box.top, w, h, 3);
+                        ctx.fill();
+                        ctx.fillStyle = theme.font.color;
+                        ctx.fillText(label.text, box.left + 4, box.top + h / 2);
                     }
                     ctx.restore();
                 });
