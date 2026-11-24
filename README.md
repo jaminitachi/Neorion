@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion answers Next.js App Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
+Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
@@ -33,15 +33,21 @@ The last line says whether the answer is complete. When it is not, it reads `# p
 
 ## What you can ask
 
-| Kind | Example question |
+| Kind | Question |
 | --- | --- |
 | `wrappers` | Which layouts and providers wrap `/dashboard`, outermost first? |
 | `who_renders` | Which pages render `UserAvatar`, including through a layout? |
 | `api_consumers` | Which files call the `/api/posts` route, or a server action? |
 | `rename_impact` | Which files reference `buttonVariants`? |
 | `search` | Which components, routes or declarations match `billing`? |
+| `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
+| `callees` | What does a symbol call, render, or fetch? |
+| `path` | What is the shortest directed dependency chain from a page or symbol to a symbol or API route? |
+| `changes` | Which symbols, routes, and wrappers are affected by a Git diff? |
 
-The CLI runs on Node.js 18 or later without native modules or Python. Queries refresh the graph automatically.
+Use `--depth <n>` to set the traversal depth for `impact` or `callees`. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination. For `changes`, use `--staged` or `--unstaged` to narrow the diff, or `--base <ref>` to compare against the merge base of `HEAD` and that ref.
+
+The CLI runs on Node.js 18 or later without native modules or Python. CLI queries refresh the graph when needed.
 
 Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also draws an interactive graph that opens source files from their nodes.
 
@@ -58,7 +64,7 @@ We asked 30 questions about 3 lesser-known Next.js App Router apps, using only e
 | Call paths and callees | 4/6 | 3.5/6 | 3/6 |
 | Index build, sum of 3 apps | 26.164 s (0.5.2) | 15.919 s | 56.632 s |
 
-The impact and call path rows were rerun after adding the `impact`, `callees` and `path` queries (commit `a70c2a6`). The other Neorion rows come from 0.5.2. slugy was used while building those queries, so the held-out row leaves it out. Neorion ties Graphify on impact questions, still misses tRPC procedure questions in sharetab, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
+The impact and call path rows were rerun after adding the `impact`, `callees` and `path` queries (commit `a70c2a6`). The total and held-out rows combine those rerun scores with the 0.5.2 wrapper, renderer and caller scores. The wrappers and index build rows come from 0.5.2. slugy was used while building those queries, so the held-out row leaves it out. Neorion ties Graphify on impact questions, still misses tRPC procedure questions in sharetab, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
 
 ## Install
 
@@ -68,7 +74,7 @@ Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs t
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
 ```
 
-From your TypeScript project, build the graph and ask a question.
+From your project root, build the graph and ask a question.
 
 ```sh
 neorion graph
@@ -76,11 +82,13 @@ neorion query wrappers /
 ```
 
 `wrappers` includes third-party components on the page’s wrapper chain and labels
-them with their package. Pass `--no-external` to hide third-party non-provider wrappers, or set
-`includeExternal: false` in the MCP tool.
+them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
+in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 Use `neorion query api_consumers signOut` to find a server action’s caller files
 and lines. Use `path#Name` to qualify an action name shared by multiple files.
+
+[Build from source](#build-from-source) for JavaScript project discovery, the agent setup behavior documented below, and the `impact`, `callees`, `path`, and `changes` queries.
 
 ## Codex
 
@@ -93,38 +101,37 @@ neorion setup codex
 It does three things.
 
 * It installs the Neorion skill in `~/.agents/skills/neorion`.
-* It writes a short hint into `./AGENTS.md` in the current folder. The hint tells Codex to run `neorion query <kind> <target>` in the shell for architecture questions, using the `node` or `npx` form when needed. If `AGENTS.md` does not exist, it is created.
+* It writes a short hint into `./AGENTS.md` in the current folder. The hint tells Codex to query Neorion first for architecture questions and gives the CLI command as a fallback. Setup creates `AGENTS.md` if needed.
 * It registers the Neorion MCP server with Codex, or prints the config if Codex is unavailable on PATH.
 
-The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. The rest of the file is left as it is. Running the command again replaces that block. It never adds a second copy. To remove the hint, delete the block. The VS Code extension’s **Connect AI tools** and **Disconnect AI tools** commands manage the same marked block in `AGENTS.md` and `CLAUDE.md`.
+The Codex and Claude Code hints and skills cover `impact` for upstream callers and affected routes, `callees` for downstream dependencies, `path` for the shortest directed dependency chain, and `changes` for routes and wrappers affected by a Git diff.
 
-Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json` or `package.json`.
+The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. Running the command again replaces that block. Run `neorion setup codex --remove` from the project to clear its block and remove the user-wide skill and MCP registration that setup still owns. Setup recognizes older installations by their released skill and default MCP command. Rerun `--remove` in other projects to clear their blocks, or use `--remove --no-hint` to keep the current project's block. The VS Code extension’s **Connect AI tools** and **Disconnect AI tools** commands manage the same marked block in `AGENTS.md` and `CLAUDE.md`.
+
+Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
 
 ## Claude Code
 
-The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.2` on npm, which is not published.
-
-The installed package contains the plugin. The installed plugin passes `claude plugin validate`. From the root of your project, run:
+From your project root, run setup once and then start Claude Code as usual.
 
 ```sh
 neorion setup claude
+claude
 ```
 
-It writes a short hint into `./CLAUDE.md` in the current folder. The hint tells Claude Code to use the Neorion tool first for architecture questions. If `CLAUDE.md` does not exist, it is created. The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`, and the rest of the file is left as it is. Running the command again replaces that block. It never adds a second copy.
+Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md`. If `CLAUDE_CONFIG_DIR` is set, the skill goes under `$CLAUDE_CONFIG_DIR/skills/neorion/`. If registration fails, setup prints a manual command for your shell (PowerShell on Windows).
 
-The command then prints the launch command. Start Claude Code with the plugin from your project:
+Pass `--no-hint` to skip updating `CLAUDE.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
+
+Ask “Which layouts or providers wrap the / route?” For headless use, allow the registered tool explicitly.
 
 ```sh
-claude --plugin-dir "$(npm root -g)/neorion"
+claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neorion__neorion_query
 ```
 
-Ask a normal architecture question such as “Which layouts or providers wrap the / route?” Approve the Neorion MCP call if prompted. For headless use, allow the MCP tool explicitly. The prompt comes before `--allowedTools`.
+Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
 
-```sh
-claude -p --model haiku --plugin-dir "$(npm root -g)/neorion" "Which layouts or providers wrap the / route?" --allowedTools mcp__plugin_neorion_neorion__neorion_query
-```
-
-Pass `--no-hint` to skip updating `CLAUDE.md`, which setup updates only in folders containing `tsconfig.json` or `package.json`.
+For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
 
 ## Build from source
 
@@ -138,14 +145,20 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your TypeScript project, run the CLI directly from the clone.
+From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
+`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
+`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
+`vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph
 node "$NEORION_DIR/neorion/dist/neorion.cjs" setup codex --local
 node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
-claude --plugin-dir "$NEORION_DIR/neorion"
+claude
 ```
+
+Direct setup from a clone records the clone's path when `neorion` is unavailable on `PATH`. Rerun setup from the new location after moving the clone.
 
 ## VS Code extension
 
@@ -156,3 +169,7 @@ npx vsce package
 ```
 
 In VS Code, run **Extensions: Install from VSIX...** and select the generated `.vsix` file. See the [extension README](extension/README.md) for commands and local tests.
+
+## License
+
+[MIT](LICENSE) © 2026 Tachi Lim (jaminitachi)

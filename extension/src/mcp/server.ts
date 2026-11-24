@@ -5,9 +5,9 @@ import { parentPort, Worker } from 'node:worker_threads';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
+import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { findProject, missingTsconfig } from '../core/FindProject';
+import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText, waitForBuild } from './Build';
 import { legacyKind, queryName, tools } from './Tools';
 
@@ -21,15 +21,16 @@ export function indexReader(root: string) {
   function readIndex() {
     // A long-lived stdio session picks up an atomically regenerated index.
     try {
-      const cached = resolve(workspaceCache(root), INDEX_PATH);
-      const file = statSync(cached, { throwIfNoEntry: false }) ? cached : resolve(realpathSync(root), INDEX_PATH);
+      const cache = workspaceCache(root);
+      const file = [INDEX_PATH, LEGACY_INDEX_PATH].map(indexPath => resolve(cache, indexPath))
+        .find(candidate => statSync(candidate, { throwIfNoEntry: false })) ?? resolve(realpathSync(root), LEGACY_INDEX_PATH);
       if (realpathSync(file) !== file) throw new Error(missing);
       const stat = statSync(file);
       if (!stat.isFile()) throw new Error(missing);
       const signature = `${file}:${stat.ino}:${stat.mtimeMs}:${stat.size}`;
       if (signature !== loaded) {
         const index: QueryIndex = JSON.parse(readFileSync(file, 'utf8'));
-        if (index.schema !== 1 || index.root !== '.' || typeof index.generatedAt !== 'string' ||
+        if ((index.schema !== INDEX_SCHEMA && index.schema !== 1) || index.root !== '.' || typeof index.generatedAt !== 'string' ||
             !index.files || !index.wrapChains || !index.routeWrap || !Array.isArray(index.symbols) ||
             !Array.isArray(index.routes) || !Array.isArray(index.renderEdges) ||
             !Array.isArray(index.references) || !Array.isArray(index.fetches)) throw new Error(missing);
@@ -125,7 +126,7 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
-    if (!project) return reply(missingTsconfig(root), true);
+    if (!project) return reply(missingProject(root), true);
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);

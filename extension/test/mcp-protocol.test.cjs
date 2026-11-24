@@ -1,4 +1,4 @@
-const { cachePath } = require('./workspace-cache.cjs');
+const { cachePath, indexFile } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -66,7 +66,7 @@ test('P4 Formbricks index and five real stdio calls meet size and latency target
   execFileSync('git', ['-C', repo, 'archive', '--output', archive, 'HEAD:apps/web']);
   execFileSync('tar', ['-xf', archive, '-C', root]);
   await generate(root);
-  const size = fs.statSync(cachePath(root, '.neorion/index.v1.json')).size;
+  const size = fs.statSync(cachePath(root, indexFile)).size;
   assert.ok(size <= 15_000_000, `${size} bytes`);
   const client = await openMcp(t, root, process.env.NEORION_MCP_ENTRY);
   const queries = {

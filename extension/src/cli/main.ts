@@ -1,33 +1,41 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-import { accessSync, constants, copyFileSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
-import { CLAUDE_HINT, updateAgentFiles } from '../core/AgentInstructions';
-import { findProject, missingTsconfig } from '../core/FindProject';
+import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
+import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
 import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
+import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
   neorion graph [dir]
   neorion query <kind> <target> [--limit n] [--root dir]
   neorion query wrappers <route> [--no-external | --include-external]
+  neorion query impact <symbol|file> [--depth n] [--include-tests]
+  neorion query callees <symbol> [--depth n] [--uses]
+  neorion query path <from> <to>
+  neorion query changes [--base ref | --staged | --unstaged]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
+  neorion setup <codex|claude> --remove [--no-hint]
   neorion --version | --help
 
-Query kinds: ${kinds.join(', ')}`;
+Query kinds: ${kinds.join(', ')}
+
+Wrapper flags:
+  --no-external hides third-party non-provider wrappers. Providers stay visible.
+  --include-external includes third-party wrappers (default).`;
 
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();
-  if (!['tsconfig.json', 'package.json'].some(name => existsSync(join(root, name)))) {
-    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json or package.json.`);
+  if (!['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)))) {
+    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json, jsconfig.json, or package.json.`);
     return false;
   }
   const changed = updateAgentFiles(root, root, [file], true, false, instruction);
@@ -56,33 +64,13 @@ function runsCurrentEntry() {
   return false;
 }
 
-function setupCodex(local: boolean, noHint: boolean) {
-  const skills = join(homedir(), '.agents', 'skills', 'neorion');
-  mkdirSync(skills, { recursive: true });
-  copyFileSync(join(__dirname, '../skills/neorion/SKILL.md'), join(skills, 'SKILL.md'));
-  console.log('✓ Skill installed: ~/.agents/skills/neorion');
-
-  let skippedHint = false;
-  if (!noHint) {
-    const entry = /[^\w./:\\-]/.test(__filename)
-      ? `"${process.platform === 'win32' ? __filename : __filename.replace(/(["\\$`])/g, '\\$1')}"`
-      : __filename;
-    const cli = !local && isTemporaryCliInstall(__filename) ? `npx -y ${packageSpec}` :
-      !local && runsCurrentEntry() ? 'neorion' : `node ${entry}`;
-    skippedHint = !writeHint('AGENTS.md', `For architecture questions (who renders/wraps/calls/imports X, rename impact), run \`${cli} query <kind> <target>\` in the shell first (kinds: who_renders, wrappers, rename_impact, api_consumers, search) and trust a result that ends with \`# complete\`. Only open files to confirm specifics, or when the result ends with \`# partial\`.`);
-  }
-
-  const { command, args } = mcpCommand({ localEntry: __filename, detectCache: !local });
-  const result = spawnSync('codex', ['mcp', 'add', 'neorion', '--', command, ...args], { encoding: 'utf8' });
-  if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
-    console.log(`Add to ~/.codex/config.toml:\n[mcp_servers.neorion]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}`);
-  } else {
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(result.stderr.trim() || 'Could not register the Neorion MCP server.');
-    console.log('✓ MCP server registered: neorion  (check: codex mcp list)');
-  }
-  console.log(skippedHint ? 'Next: rerun setup from the project root to add the AGENTS.md hint.' :
-    'Next: start `codex` in this project and ask "which pages render <Component>?"');
+function hintCommand(temporary: boolean, onPath: boolean) {
+  if (temporary) return `npx -y ${packageSpec}`;
+  if (onPath) return 'neorion';
+  const entry = /[^\w./:\\-]/.test(__filename)
+    ? `"${process.platform === 'win32' ? __filename : __filename.replace(/(["\\$`])/g, '\\$1')}"`
+    : __filename;
+  return `node ${entry}`;
 }
 
 async function main([command, ...args]: string[]) {
@@ -94,13 +82,36 @@ async function main([command, ...args]: string[]) {
     return run(resolve(args[0] ?? '.'));
   }
   if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude')) {
+    const agent = args[0];
+    const codex = agent === 'codex';
     const { values } = parseArgs({
       args: args.slice(1),
-      options: { ...(args[0] === 'codex' ? { local: { type: 'boolean' as const } } : {}), 'no-hint': { type: 'boolean' } }
+      options: {
+        ...(codex ? { local: { type: 'boolean' as const } } : {}),
+        'no-hint': { type: 'boolean' },
+        remove: { type: 'boolean' }
+      }
     });
-    if (args[0] === 'codex') return setupCodex(!!values.local, !!values['no-hint']);
-    if (!values['no-hint']) writeHint('CLAUDE.md', CLAUDE_HINT);
-    return console.log(`claude --plugin-dir "${resolve(__dirname, '..')}"`);
+    const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
+    const temporary = !values.local && isTemporaryCliInstall(__filename);
+    const onPath = !values.local && !temporary && runsCurrentEntry();
+    const launch = onPath && process.platform !== 'win32' ? { command: 'neorion', args: ['mcp'] }
+      : mcpCommand({ localEntry: temporary ? undefined : __filename });
+    let skippedHint = false;
+    setupAgent(agent, __filename, launch, !!values.remove, () => {
+      if (values['no-hint']) return;
+      if (values.remove) {
+        const root = process.cwd();
+        if (updateAgentFiles(root, root, [file], false)) console.log(`${join(root, file)} (Neorion block removed)`);
+      } else {
+        skippedHint = !writeHint(file, queryHint(hintCommand(temporary, onPath)));
+      }
+    });
+    if (codex && !values.remove) {
+      console.log(skippedHint ? 'Next: rerun setup from the project root to add the AGENTS.md hint.' :
+        'Next: start `codex` in this project and ask "which pages render <Component>?"');
+    }
+    return;
   }
   if (command !== 'query' && command !== 'mcp') throw new Error(help);
   const query = command === 'query';
@@ -108,6 +119,12 @@ async function main([command, ...args]: string[]) {
     args,
     options: { root: { type: 'string' }, ...(query ? {
       limit: { type: 'string' as const },
+      depth: { type: 'string' as const },
+      'include-tests': { type: 'boolean' as const },
+      uses: { type: 'boolean' as const },
+      base: { type: 'string' as const },
+      staged: { type: 'boolean' as const },
+      unstaged: { type: 'boolean' as const },
       'no-external': { type: 'boolean' as const },
       'include-external': { type: 'boolean' as const }
     } : {}) },
@@ -115,20 +132,32 @@ async function main([command, ...args]: string[]) {
   });
   const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
   if (!query) return serve(root, { autoBuild: true });
-  if (positionals.length !== 2) throw new Error(help);
-  const [kind, target] = positionals;
+  const [kind, target, to] = positionals;
+  if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
+  if (Number(!!values.staged) + Number(!!values.unstaged) + Number(values.base !== undefined) > 1) {
+    throw new Error('Choose only one of --base, --staged, or --unstaged.');
+  }
   if (values['no-external'] && values['include-external']) throw new Error('Choose either --no-external or --include-external.');
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
   const project = findProject(root);
-  if (!project) throw new Error(missingTsconfig(root));
+  if (!project) throw new Error(missingProject(root));
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
   if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
   const limit = values.limit === undefined ? undefined : Number(values.limit);
-  console.log(projectText(project, engine.query(queryName, { kind, target, limit, ...externalOption })));
+  const options = {
+    ...(target === undefined ? {} : { target }),
+    ...(to === undefined ? {} : { to }),
+    ...(values.base === undefined ? {} : { base: values.base }),
+    ...(values.staged || values.unstaged ? { scope: values.staged ? 'staged' : 'unstaged' } : {}),
+    ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),
+    ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
+    ...(values.uses === undefined ? {} : { uses: values.uses })
+  };
+  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options })));
 }
 
 if (isMainThread) {
