@@ -4,7 +4,7 @@ Across three apps, **Neorion scored 21/30, Graphify 17.5/30, and GitNexus 14/30*
 
 ## Method
 
-- **Apps.** Three lesser-known Next.js App Router apps, picked to avoid model memory (all under 100 stars), each shallow-cloned at a fixed commit:
+- **Apps.** Three lesser-known Next.js App Router apps, each with fewer than 100 stars when selected and shallow-cloned at a fixed commit.
 
   | App | Repo | Commit | Notes |
   | --- | --- | --- | --- |
@@ -12,7 +12,7 @@ Across three apps, **Neorion scored 21/30, Graphify 17.5/30, and GitNexus 14/30*
   | rep-deck | [rudra-xi/rep-deck](https://github.com/rudra-xi/rep-deck) | `2a0dbea` | Strength-training tracker. Path aliases to barrel files, server actions reached through hooks. |
   | sharetab | [sw-carlos-cristobal/sharetab](https://github.com/sw-carlos-cristobal/sharetab) | `b802d71` | Bill splitting. Every route under `[locale]`, tRPC instead of server actions. |
 
-- **Tools.** Neorion 0.5.2, Graphify 0.9.115 (`GRAPHIFY_BACKEND=none`, AST extraction only), GitNexus 1.6.12 (`analyze --index-only`, `GITNEXUS_LBUG_EXTENSION_INSTALL=load-only`).
+- **Tools.** Neorion 0.5.2, Graphify 0.9.115 (`GRAPHIFY_BACKEND=none`, AST extraction only), GitNexus 1.6.12 (`gitnexus analyze --index-only`, `GITNEXUS_LBUG_EXTENSION_INSTALL=load-only`).
 - **Native mode.** Only each tool's shipped CLI commands. No LLM calls, API keys, hand-written Cypher, or source-search commands. At most three commands per question cell.
 - **Questions.** 10 per app, 2 in each of 5 categories:
   - **W** wrappers: the ordered layouts and providers around a route.
@@ -21,7 +21,7 @@ Across three apps, **Neorion scored 21/30, Graphify 17.5/30, and GitNexus 14/30*
   - **I** transitive impact: which routes are affected if X changes.
   - **P** path or relationship: a call chain, or what X calls.
 - **Ground truth.** Every item was checked by reading the cited source lines at the pinned commit.
-- **Scoring.** correct = 1, partial = 0.5, wrong = 0. Correct needs all required items and no wrong items; for W questions the order must also be right. Partial needs at least half the required items and at most one wrong item. Asserting a listed trap item makes the answer wrong.
+- **Scoring.** Correct = 1, partial = 0.5, wrong = 0. Unless a question specifies its own rubric, correct needs all required items and no wrong items. Partial needs at least half the required items and at most one wrong item. For wrapper questions, full credit requires the correct order, and partial credit requires every layout even if a provider is missing or the order is wrong. Asserting a listed trap item makes the answer wrong.
 
 ## Scores by app, tool and category
 

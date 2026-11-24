@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion answers the Next.js App Router questions that general code graphs don't: which layouts and providers wrap a route, which pages render a component, and who calls a server action, deterministically and offline.
+Neorion answers Next.js App Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
@@ -41,7 +41,7 @@ The last line says whether the answer is complete. When it is not, it reads `# p
 | `rename_impact` | Which files reference `buttonVariants`? |
 | `search` | Which components, routes or declarations match `billing`? |
 
-One JS file, Node 18+, no native modules, no Python, works offline; queries refresh the graph themselves.
+The CLI runs on Node.js 18 or later without native modules or Python. Queries refresh the graph automatically.
 
 Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also draws an interactive graph that opens source files from their nodes.
 
@@ -55,7 +55,7 @@ We asked 30 questions about 3 lesser-known Next.js App Router apps, using only e
 | Wrappers (layouts and providers of a route) | 6/6 | 0/6 | 0/6 |
 | Transitive impact | 3/6 | 5/6 | 4/6 |
 | Call paths and callees | 2/6 | 3.5/6 | 3/6 |
-| Index build, sum of 3 apps | 26.2 s | 15.9 s | 56.6 s |
+| Index build, sum of 3 apps | 26.164 s | 15.919 s | 56.632 s |
 
 Neorion loses on impact and call path questions, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
 
