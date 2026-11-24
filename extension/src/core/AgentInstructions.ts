@@ -1,9 +1,31 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { kinds, type QueryKind } from '../mcp/Tools';
 import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
-export const CLAUDE_HINT = 'For architecture questions (who renders/wraps/calls/imports X, rename impact), use the neorion_query tool first and trust its result; only open files to confirm specifics.';
+const queryArguments: Record<QueryKind, string> = {
+  who_renders: ' <Component>',
+  wrappers: ' <route>',
+  rename_impact: ' <Symbol>',
+  api_consumers: ' <route or action>',
+  search: ' <text>',
+  impact: ' <symbol or file>',
+  callees: ' <symbol>',
+  path: ' <from> <to>',
+  changes: ''
+};
+
+export function queryHint(cli?: string) {
+  return [
+    'To find which pages render a component, what wraps a route, who calls an API or action, what a rename affects, where a symbol is used, or how dependencies and Git changes affect a route, ask Neorion with the `neorion_query` tool before grepping.',
+    `Query kinds are ${kinds.map(kind => `\`${kind}${queryArguments[kind]}\``).join(', ')}.`,
+    'For `path`, pass `target` and `to` in MCP. For `changes`, omit `target`.',
+    'Include this rule in prompts you give subagents.',
+    '`# complete` means trust the result. For `# partial: <reason>`, read the reason and verify against the source.',
+    ...(cli ? [`If MCP is unavailable, run \`${cli} query <kind> <target>\` for single-target queries. Use \`${cli} query path <from> <to>\` to trace a path and \`${cli} query changes\` to inspect a Git diff.`] : [])
+  ].join('\n');
+}
 const START = '<!-- neorion:start -->';
 const END = '<!-- neorion:end -->';
 const STATE = /^<!-- neorion:state (\{.*\}|[\w+/=]+) -->\r?$/m;
@@ -73,7 +95,7 @@ export function updateAgentFiles(root: string, graphRoot: string, targets: strin
       if (separator) state.headerEof = true;
       const block = [
         START,
-        instruction ?? (mcp ? 'Use neorion_query for rendering, wrappers, rename impact, API consumers, and symbol or route search.' :
+        instruction?.replace(/\n/g, nl) ?? (mcp ? queryHint().replace(/\n/g, nl) :
           `For architecture questions, read the Neorion overview at \`${path.join(workspaceCache(graphRoot), 'codebase_graph.md')}\`.`),
         ...(Object.keys(state).length ? [
           `<!-- neorion:state ${JSON.stringify(state).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')} -->`

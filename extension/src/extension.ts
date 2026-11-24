@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { findProject, generateGraph } from './core/Generate';
 import { missingProject } from './core/FindProject';
-import { AGENT_FILES, CLAUDE_HINT, updateAgentFiles } from './core/AgentInstructions';
+import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
 
@@ -89,8 +89,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
         const mcp = planMcp(root, project, mcpTargets, bundled,
             bundleSource, connect);
-        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured,
-            mcp.configured ? CLAUDE_HINT : undefined);
+        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
         mcp.commit();
         const approval = mcpTargets.includes('Claude Code') ?
             ' Claude Code asks for approval before using a project MCP server for the first time.' : '';
