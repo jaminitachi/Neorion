@@ -1395,7 +1395,7 @@ export class GraphVisualizer {
                         if (!eligible) continue;
                         labels.push({
                             ...point, radius, size: cluster || isRoute ? 13 : 11,
-                            text: cluster ? domain + ' (' + cluster.count + ')' : node.shortLabel,
+                            text: cluster ? domain + ' · ' + cluster.count + (cluster.count === 1 ? ' component' : ' components') : node.shortLabel,
                             alpha: cluster ? clusterOpacity(cluster) : nodeOpacity(id),
                             priority: isFocused ? 0 : cluster ? 1 : isRoute ? 2 : 4,
                             inRow: rowNodes.has(id)
