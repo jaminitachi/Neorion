@@ -184,16 +184,6 @@ export class GraphVisualizer {
         const nodes = Array.from(new Map(rawNodes.map(item => [item.id, item])).values());
         const domains = Array.from(new Set(nodes.map(n => n.group))).sort();
         
-        const componentCounts = new Map<string, number>();
-        for (const node of nodes) {
-            if (node.kind === 'component') {
-                componentCounts.set(node.group, (componentCounts.get(node.group) ?? 0) + 1);
-            }
-        }
-        const bigGroups = [...componentCounts].filter(([, count]) => count > 40);
-
-        const hasBigGroups = bigGroups.length > 0;
-        // Hub nodes with reduced mass to prevent spinning
         const hubNodes = domains.map(d => ({
             id: `hub_${d}`,
             level: componentLevel,
@@ -205,18 +195,7 @@ export class GraphVisualizer {
             fixed: false, // RELEASED: Allow hubs to float and find natural balance
             title: '', path: ''
         }));
-        // 3. Prepare Edges (Galaxy v2: Tight Clusters, Loose Space)
-        const nodeDomainMap = new Map<string, string>();
-        nodes.forEach(n => nodeDomainMap.set(n.id, n.group));
-
-        const getEdgeLength = (fromId: string, toId: string) => {
-            const fromDomain = nodeDomainMap.get(fromId);
-            const toDomain = nodeDomainMap.get(toId);
-            // Same Galaxy (Domain): Tight gravity
-            if (fromDomain && toDomain && fromDomain === toDomain) return hasBigGroups ? 160 : 50;
-            return hasBigGroups ? 500 : 400;
-        };
-
+        const nodeDomainMap = new Map(nodes.map(node => [node.id, node.group]));
         const codeEdges = [
             ...graph.routes.flatMap(route => route.componentId ? [{
                 from: route.id, to: route.componentId, type: 'renders'
@@ -225,11 +204,23 @@ export class GraphVisualizer {
                 from: layout.id, to: page, type: 'wraps'
             }))),
             ...graph.edges
-        ].filter(edge => nodeDomainMap.has(edge.from) && nodeDomainMap.has(edge.to))
-            .map((edge, index) => ({
-                ...edge, id: 'edge:' + index, title: edge.type, arrows: 'to',
-                length: getEdgeLength(edge.from, edge.to)
-            }));
+        ].filter(edge => nodeDomainMap.has(edge.from) && nodeDomainMap.has(edge.to));
+
+        // Dense mid-size graphs can be harder to read than sparse graphs with more nodes.
+        const denseGraph = nodes.length > 100 || (nodes.length >= 64 && codeEdges.length >= 2 * nodes.length);
+        const componentCounts = new Map<string, number>();
+        if (denseGraph) {
+            for (const node of nodes) {
+                if (node.kind === 'component') {
+                    componentCounts.set(node.group, (componentCounts.get(node.group) ?? 0) + 1);
+                }
+            }
+        }
+        const clusterGroups = [...componentCounts];
+        const hasClusters = clusterGroups.length > 0;
+        const getEdgeLength = (from: string, to: string) => nodeDomainMap.get(from) === nodeDomainMap.get(to)
+            ? (hasClusters ? 160 : 50) : (hasClusters ? 500 : 400);
+
         const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
         for (const { from, to } of codeEdges) {
             if (from !== to && neighbors.has(from) && neighbors.has(to)) {
@@ -238,11 +229,13 @@ export class GraphVisualizer {
             }
         }
         const edges = [
-            ...codeEdges,
+            ...codeEdges.map((edge, index) => ({
+                ...edge, id: 'edge:' + index, title: edge.type, arrows: 'to', length: getEdgeLength(edge.from, edge.to)
+            })),
             ...nodes.map((node, index) => ({
                 id: `hub-edge:${index}`,
                 from: node.id, to: `hub_${node.group}`, color: { opacity: 0 },
-                length: hasBigGroups ? 220 : 100, smooth: false, width: 0
+                length: hasClusters ? 220 : 100, smooth: false, width: 0
             }))
         ];
 
@@ -251,16 +244,19 @@ export class GraphVisualizer {
             return acc;
         }, Object.create(null) as Record<string, string>);
 
-        const denseGraph = nodes.length > 100;
-        const displayNodes = nodes.map(node => ({
-            ...node,
-            fullLabel: node.label,
-            shortLabel: truncateLabel(node.label),
-            label: '',
-            size: node.kind === 'component' ? 13 : 18
-        }));
+        const displayNodes = nodes.map(node => {
+            const degree = neighbors.get(node.id)?.size ?? 0;
+            const base = node.kind === 'component' ? 8 : 12;
+            return {
+                ...node,
+                fullLabel: node.label,
+                shortLabel: truncateLabel(node.label),
+                label: '',
+                size: Math.min(base + 14, base + Math.sqrt(degree) * 3.2)
+            };
+        });
         const graphPayload = {
-            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, bigGroups,
+            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, clusterGroups,
             counts: { routes: graph.routes.length, components: graph.components.length, actions: graph.actions.length,
                 edges: codeEdges.length },
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]]),
@@ -443,6 +439,7 @@ export class GraphVisualizer {
         let searchMatches = null;
         let focusIds = null;
         let hopNodes = null;
+        let domainFocus;
 
 
         function log(msg) {
@@ -505,14 +502,14 @@ export class GraphVisualizer {
         }
 
         function collapseGroup(cluster) {
-            const { id, domain, count, hubEdges } = cluster;
+            const { id, domain, hubEdges } = cluster;
             // Remove tethers before clustering so vis never redirects them to the cluster.
             network.body.data.edges.remove(hubEdges.map(edge => edge.id));
             network.cluster({
                 joinCondition: node => node.group === domain && node.kind === 'component',
                 clusterNodeProperties: {
                     id, group: domain,
-                    label: '', shape: 'dot', size: 32, mass: 12,
+                    label: '', shape: 'dot', size: cluster.size, mass: 12, allowSingleNodeCluster: true,
                     level: cluster.level, hidden: !visibleDomains.has(domain),
                     opacity: clusterOpacity(cluster)
                 }
@@ -526,7 +523,7 @@ export class GraphVisualizer {
                 releaseFunction: (center, positions) => Object.fromEntries(
                     Object.keys(positions).sort().map((nodeId, index) => {
                         const angle = index * Math.PI * (3 - Math.sqrt(5));
-                        const radius = 26 * Math.sqrt(index);
+                        const radius = 41 * Math.sqrt(index);
                         return [nodeId, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
                     })
                 )
@@ -536,8 +533,8 @@ export class GraphVisualizer {
         }
 
         function updateClusterButton(button) {
-            button.textContent = componentClusters.some(({ id }) => isCollapsed(id))
-                ? 'Expand all' : 'Collapse big groups';
+            button.textContent = domainFocus ? 'Exit domain focus'
+                : componentClusters.some(({ id }) => isCollapsed(id)) ? 'Expand all' : 'Collapse groups';
         }
 
         function withTextTooltip(item) {
@@ -613,7 +610,7 @@ export class GraphVisualizer {
         let componentClusters = [];
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors, counts, renderRoots, renderEdges } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, denseGraph, clusterGroups, neighbors, counts, renderRoots, renderEdges } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -639,15 +636,15 @@ export class GraphVisualizer {
                 physics: {
                     stabilization: {
                         enabled: true,
-                        iterations: bigGroups.length ? 4000 : 2000,
+                        iterations: clusterGroups.length ? 4000 : 2000,
                         updateInterval: 50,
                         fit: false
                     },
                     solver: 'barnesHut', 
                     barnesHut: {
-                        gravitationalConstant: bigGroups.length ? -300000 : -40000,
-                        centralGravity: bigGroups.length ? 0.22 : 0.001,
-                        springLength: bigGroups.length ? 160 : 50,
+                        gravitationalConstant: clusterGroups.length ? -300000 : -40000,
+                        centralGravity: clusterGroups.length ? 0.22 : 0.001,
+                        springLength: clusterGroups.length ? 160 : 50,
                         springConstant: 0.04,
                         damping: 0.5,                  // High resistance (Stops self-movement)
                         avoidOverlap: 1
@@ -728,11 +725,12 @@ export class GraphVisualizer {
                 }
                 const components = nodes.filter(node => node.kind === 'component');
                 const clusterButton = document.getElementById('btn-clusters');
-                componentClusters = bigGroups.map(([domain, count], index) => {
+                componentClusters = clusterGroups.map(([domain, count], index) => {
                     const componentIds = components.filter(node => node.group === domain).map(node => node.id);
                     const members = new Set(componentIds);
                     return {
                         id: 'component-cluster:' + index, domain, count, componentIds, level: components[0].level,
+                        size: Math.min(52, 27 + Math.sqrt(count) * 2.5),
                         hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
                     };
                 });
@@ -747,7 +745,12 @@ export class GraphVisualizer {
                     layoutsByPage.set(edge.to, chain);
                 }
                 for (const chain of layoutsByPage.values()) {
-                    chain.sort((a, b) => graphNodes.get(a.from).path.length - graphNodes.get(b.from).path.length);
+                    chain.sort((a, b) => {
+                        const first = graphNodes.get(a.from);
+                        const second = graphNodes.get(b.from);
+                        return first.level - second.level ||
+                            Number(first.routeType === 'template') - Number(second.routeType === 'template');
+                    });
                 }
                 for (const [from, to] of renderEdges) {
                     const parents = incomingRenders.get(to) ?? new Set();
@@ -780,9 +783,17 @@ export class GraphVisualizer {
 
                 let selectedId;
                 let hopLimit;
-                const hopOpenedClusters = new Set();
+                const temporarilyOpened = new Set();
                 let rowNodes = new Set();
                 let rowHeading;
+                const unpinned = new Map();
+                function restorePositions(keepInRow = new Set()) {
+                    for (const [id, point] of unpinned) {
+                        if (keepInRow.has(id)) continue;
+                        if (network.body.nodes[id]) network.moveNode(id, point.x, point.y);
+                        unpinned.delete(id);
+                    }
+                }
                 let fitScale = 1;
                 function visibleComponents() {
                     const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
@@ -818,15 +829,18 @@ export class GraphVisualizer {
                     if (!container.clientWidth || !container.clientHeight) return;
                     const groups = visibleComponents();
                     if (!groups.length) {
+                        restorePositions();
                         rowNodes.clear();
                         rowHeading = undefined;
                         network.redraw();
                         return;
                     }
-                    const cutoff = Math.max(2, Math.floor(groups.flat().length / 10));
-                    const main = groups.filter((group, index) => routesMode || index === 0 || group.length >= cutoff).flat();
-                    const small = routesMode ? [] : groups.slice(1).filter(group => group.length < cutoff);
+                    const cutoff = Math.max(2, groups.flat().length / 10);
+                    const fitAll = routesMode || domainFocus;
+                    const main = fitAll ? groups.flat() : groups[0];
+                    const small = fitAll ? [] : groups.slice(1).filter(group => group.length < cutoff);
                     rowNodes = new Set(small.flat());
+                    restorePositions(rowNodes);
                     rowHeading = undefined;
                     if (routesMode) {
                         // Vis orders the tree, but reserves separate vertical bands for disconnected subtrees.
@@ -869,6 +883,7 @@ export class GraphVisualizer {
                         const spacing = Math.max(1, width - padding * 2) / totalSlots;
                         for (const group of small) {
                             for (const id of group) {
+                                if (!unpinned.has(id)) unpinned.set(id, network.getPosition(id));
                                 const point = network.DOMtoCanvas({
                                     x: padding + (slot + 0.5) * spacing,
                                     y: height - 35
@@ -916,25 +931,18 @@ export class GraphVisualizer {
                     return nodes;
                 }
 
-                function syncHopClusters(keepId) {
+                function syncAnswerClusters() {
+                    const answer = hopNodes ?? focusIds;
                     for (const cluster of componentClusters) {
-                        const needed = hopNodes && cluster.componentIds.some(id => hopNodes.has(id));
+                        const needed = answer && visibleDomains.has(cluster.domain) && cluster.componentIds.some(id => answer.has(id));
                         if (needed && isCollapsed(cluster.id)) {
                             expandGroup(cluster);
-                            hopOpenedClusters.add(cluster.id);
-                        } else if (!needed && hopOpenedClusters.delete(cluster.id) && !cluster.componentIds.includes(keepId)) {
+                            temporarilyOpened.add(cluster.id);
+                        } else if (!needed && temporarilyOpened.delete(cluster.id)) {
                             collapseGroup(cluster);
                         }
                     }
                     updateClusterButton(clusterButton);
-                }
-
-                function resetHops(keepId) {
-                    if (!hopLimit) return false;
-                    hopLimit = undefined;
-                    hopNodes = null;
-                    syncHopClusters(keepId);
-                    return true;
                 }
 
                 for (const button of hopButtons) {
@@ -947,7 +955,7 @@ export class GraphVisualizer {
 
                 function applyFilters() {
                     hopNodes = hopLimit ? neighborsWithinHops() : null;
-                    syncHopClusters(selectedId);
+                    syncAnswerClusters();
                     for (const button of hopButtons) {
                         button.setAttribute('aria-pressed', String(Number(button.dataset.hops) === hopLimit));
                     }
@@ -979,9 +987,9 @@ export class GraphVisualizer {
                         }
                     }
                     network.body.data.edges.update(edgeUpdates);
-                    if (network.getSelectedNodes().some(id => !network.body.nodeIndices.includes(id))) {
-                        network.unselectAll();
+                    if (selectedId && !network.body.nodeIndices.includes(selectedId)) {
                         closeDetails();
+                        return;
                     }
                     fitGraph();
                 }
@@ -1069,35 +1077,15 @@ export class GraphVisualizer {
                     updateNodeOpacity();
                 }
 
-                function focusNode(id) {
-                    const [clusterId] = network.findNode(id);
-                    if (clusterId !== id) {
-                        const cluster = componentClusters.find(cluster => cluster.id === clusterId);
-                        if (cluster) {
-                            expandGroup(cluster);
-                            updateClusterButton(clusterButton);
-                        }
-                    }
-                    network.selectNodes([id], false);
-                    showDetails(id);
-                    if (!rowNodes.has(id)) network.focus(id, { locked: false });
-                }
-
                 function closeDetails() {
                     if (details.hidden) return;
-                    const restoreHops = resetHops();
                     selectedId = undefined;
                     focusIds = null;
+                    hopLimit = undefined;
                     network.unselectAll();
                     details.hidden = true;
                     document.getElementById('details-open').onclick = null;
-                    if (restoreHops) {
-                        applyFilters();
-                        return;
-                    }
-                    updateNodeOpacity();
-                    updateEdgeColors();
-                    fitGraph();
+                    applyFilters();
                 }
 
                 function openNodeFile(node) {
@@ -1119,7 +1107,7 @@ export class GraphVisualizer {
                                 visibleDomains.add(neighbor.group);
                                 applyFilters();
                             }
-                            focusNode(nodeId);
+                            showDetails(nodeId);
                         });
                         item.appendChild(button);
                         list.appendChild(item);
@@ -1146,7 +1134,7 @@ export class GraphVisualizer {
                         closeDetails();
                         return;
                     }
-                    const restoreHops = selectedId !== id && resetHops(id);
+                    if (selectedId !== id) hopLimit = undefined;
                     selectedId = id;
                     const wrappers = (layoutsByPage.get(id) ?? []).map(edge => edge.from);
                     const pages = node.kind === 'component' ? renderedBy(node.renderSymbol) : [];
@@ -1175,15 +1163,9 @@ export class GraphVisualizer {
                     queryInput.scrollLeft = 0;
                     copyStatus.textContent = '';
 
-                    const opened = details.hidden;
                     details.hidden = false;
-                    if (restoreHops) {
-                        applyFilters();
-                        return;
-                    }
-                    updateNodeOpacity();
-                    updateEdgeColors();
-                    if (opened || routesMode) fitGraph();
+                    applyFilters();
+                    network.selectNodes([id], false);
                 }
 
                 searchInput.addEventListener('input', () => {
@@ -1199,27 +1181,60 @@ export class GraphVisualizer {
                         event.preventDefault();
                         applySearch();
                         const first = searchMatches?.values().next().value;
-                        if (first !== undefined) focusNode(first);
+                        if (first !== undefined) showDetails(first);
                     }
                 });
+                let pendingSelection;
                 document.getElementById('details-close').addEventListener('click', closeDetails);
                 document.addEventListener('keydown', event => {
-                    if (event.key === 'Escape') closeDetails();
+                    if (event.key !== 'Escape') return;
+                    clearTimeout(pendingSelection);
+                    if (!details.hidden) closeDetails();
+                    else if (domainFocus) leaveDomainFocus();
                 });
-                network.on('click', ({ nodes }) => showDetails(nodes[0]));
+                network.on('click', ({ nodes }) => {
+                    clearTimeout(pendingSelection);
+                    // Keep the canvas in place while a second click can still open the file or cluster.
+                    pendingSelection = setTimeout(() => showDetails(nodes[0]), 250);
+                });
 
                 for (const cluster of componentClusters) collapseGroup(cluster);
                 clusterButton.hidden = componentClusters.length === 0;
-                clusterButton.addEventListener('click', () => {
-                    const expand = componentClusters.some(({ id }) => isCollapsed(id));
-                    network.unselectAll();
+                if (componentClusters.length) {
+                    document.getElementById('hint').textContent = 'Click for details · Double-click to open a file or expand a bubble';
+                }
+
+                function focusDomain(cluster) {
                     closeDetails();
+                    restorePositions();
+                    domainFocus = { cluster, domains: visibleDomains, position: network.getPosition(cluster.id) };
+                    expandGroup(cluster);
+                    visibleDomains = new Set([cluster.domain]);
+                    applyFilters();
+                }
+
+                function leaveDomainFocus() {
+                    const { cluster, domains, position } = domainFocus;
+                    domainFocus = undefined;
+                    visibleDomains = domains;
+                    collapseGroup(cluster);
+                    network.moveNode(cluster.id, position.x, position.y);
+                    applyFilters();
+                }
+
+                clusterButton.addEventListener('click', () => {
+                    if (domainFocus) {
+                        leaveDomainFocus();
+                        return;
+                    }
+                    closeDetails();
+                    const expand = componentClusters.some(({ id }) => isCollapsed(id));
+                    restorePositions();
                     for (const cluster of componentClusters) {
                         if (expand && isCollapsed(cluster.id)) expandGroup(cluster);
                         else if (!expand) collapseGroup(cluster);
                     }
-                    updateClusterButton(clusterButton);
-                    fitGraph();
+                    applyFilters();
                 });
 
                 const labelControl = document.getElementById('label-levels');
@@ -1254,7 +1269,7 @@ export class GraphVisualizer {
                 network.on('afterDrawing', ctx => {
                     const scale = network.getScale();
                     const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
-                        : routesMode || !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
+                        : routesMode || domainFocus || !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
                     if (currentLevel !== level) {
                         currentLevel = level;
                         for (const button of levelButtons) {
@@ -1282,7 +1297,7 @@ export class GraphVisualizer {
                         if (x < 0 || x > width || y < 0 || y > height) continue;
                         const domain = node?.group ?? cluster.domain;
                         const point = { x, y };
-                        const radius = (cluster ? 32 : node.size) * scale + 2;
+                        const radius = (cluster?.size ?? node.size) * scale + 2;
                         markers.push({ left: x - radius, top: y - radius, right: x + radius, bottom: y + radius });
                         if (level === 'Map' && !rowNodes.has(id)) {
                             const points = positionsByDomain.get(domain) ?? [];
@@ -1393,6 +1408,7 @@ export class GraphVisualizer {
                 function switchLayout(toRoutes) {
                     if (routesMode === toRoutes) return;
                     if (toRoutes) {
+                        restorePositions();
                         resumeGraphPhysics = physicsEnabled;
                         graphPositions = network.getPositions(network.body.nodeIndices);
                         setPhysicsEnabled(false);
@@ -1442,25 +1458,22 @@ export class GraphVisualizer {
                 network.once('stabilizationIterationsDone', pauseAfterStabilization);
                 document.getElementById('btn-physics').addEventListener('click', () => {
                     network.off('stabilizationIterationsDone', pauseAfterStabilization);
+                    if (!physicsEnabled) {
+                        restorePositions();
+                        rowNodes.clear();
+                        rowHeading = undefined;
+                    }
                     setPhysicsEnabled(!physicsEnabled);
                     if (!physicsEnabled) fitGraph();
                 });
 
-                network.on("doubleClick", function (params) {
-                    if (params.nodes.length > 0) {
-                        const nodeId = params.nodes[0];
-                        if (network.isCluster(nodeId)) {
-                            const cluster = componentClusters.find(({ id }) => id === nodeId);
-                            if (cluster) {
-                                network.unselectAll();
-                                expandGroup(cluster);
-                                updateClusterButton(clusterButton);
-                                fitGraph();
-                            }
-                            return;
-                        }
-                        openNodeFile(graphNodes.get(nodeId));
-                    }
+                network.on('doubleClick', ({ nodes }) => {
+                    clearTimeout(pendingSelection);
+                    const id = nodes[0];
+                    if (!id) return;
+                    const cluster = clustersById.get(id);
+                    if (cluster) focusDomain(cluster);
+                    else openNodeFile(graphNodes.get(id));
                 });
             }
         } catch (e) {

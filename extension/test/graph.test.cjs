@@ -70,7 +70,9 @@ test('graph domain palette seeds are distinct and deterministic', () => {
     'marketing', 'pages', 'profile', 'reports', 'search', 'settings', 'other', 'shared-ui'];
   const groupsFor = names => {
     const graph = {
-      routes: names.map(domain => ({ id: domain, path: '/' + domain, domain })),
+      routes: names.map(domain => ({
+        id: domain, path: '/' + domain, file: 'app/' + domain + '/page.tsx', type: 'page', domain
+      })),
       components: [], actions: [], edges: []
     };
     const html = visualizer._getHtmlForWebview(webview, graph);
