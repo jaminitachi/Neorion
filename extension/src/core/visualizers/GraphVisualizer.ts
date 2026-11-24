@@ -543,14 +543,21 @@ export class GraphVisualizer {
             });
         }
 
-        function expandGroups(clusters) {
+        const largeCluster = 40;
+        function expandGroups(clusters, answer) {
             if (!clusters.length) return;
             withoutRedraw(() => {
-                for (const { id } of clusters) {
+                for (const { id, count } of clusters) {
                     network.openCluster(id, {
                         // Give members distinct positions even when layout is paused.
                         releaseFunction: (center, positions) => Object.fromEntries(
-                            Object.keys(positions).sort().map((nodeId, index) => {
+                            Object.keys(positions).sort((a, b) => {
+                                if (answer && count > largeCluster) {
+                                    const priority = Number(answer.has(b)) - Number(answer.has(a));
+                                    if (priority) return priority;
+                                }
+                                return a.localeCompare(b);
+                            }).map((nodeId, index) => {
                                 const angle = index * Math.PI * (3 - Math.sqrt(5));
                                 const radius = 41 * Math.sqrt(index);
                                 return [nodeId, { x: center.x + radius * Math.cos(angle), y: center.y + radius * Math.sin(angle) }];
@@ -926,7 +933,10 @@ export class GraphVisualizer {
                     const top = Math.min(...boxes.map(box => box.top));
                     const bottom = Math.max(...boxes.map(box => box.bottom));
                     const padding = 34;
-                    const rowHeight = rowNodes.size ? 112 : 0;
+                    const rowStep = 22;
+                    const rowWidth = Math.max(1, width - padding * 2);
+                    const bands = Math.min(6, Math.ceil(rowNodes.size / Math.max(1, Math.floor(rowWidth / 25))));
+                    const rowHeight = bands ? 112 + (bands - 1) * rowStep : 0;
                     const scale = Math.min(1.2, Math.max(1, width - padding * 2) / Math.max(1, right - left),
                         Math.max(1, height - padding * 2 - rowHeight) / Math.max(1, bottom - top));
                     fitScale = scale;
@@ -938,22 +948,24 @@ export class GraphVisualizer {
                     if (rowNodes.size) {
                         const positions = [];
                         let slot = 0;
-                        const totalSlots = rowNodes.size + (small.length - 1) * 0.35;
-                        const spacing = Math.max(1, width - padding * 2) / totalSlots;
+                        const groupGap = bands === 1 ? 0.35 : 0;
+                        const slotsPerBand = bands === 1 ? rowNodes.size + (small.length - 1) * groupGap
+                            : Math.ceil(rowNodes.size / bands);
+                        const spacing = rowWidth / slotsPerBand;
                         for (const group of small) {
                             for (const id of group) {
                                 if (!unpinned.has(id)) unpinned.set(id, network.getPosition(id));
                                 const point = network.DOMtoCanvas({
-                                    x: padding + (slot + 0.5) * spacing,
-                                    y: height - 35
+                                    x: padding + (slot % slotsPerBand + 0.5) * spacing,
+                                    y: height - 35 - (bands - 1 - Math.floor(slot / slotsPerBand)) * rowStep
                                 });
                                 positions.push([id, point]);
                                 slot++;
                             }
-                            slot += 0.35;
+                            slot += groupGap;
                         }
                         placeNodes(positions);
-                        rowHeading = network.DOMtoCanvas({ x: padding, y: height - 80 });
+                        rowHeading = network.DOMtoCanvas({ x: padding, y: height - rowHeight + 32 });
                     }
                     if (view) {
                         const inView = id => {
@@ -1022,7 +1034,7 @@ export class GraphVisualizer {
                             collapse.push(cluster);
                         }
                     }
-                    expandGroups(expand);
+                    expandGroups(expand, answer);
                     collapseGroups(collapse);
                     updateClusterButton(clusterButton);
                 }
@@ -1046,8 +1058,13 @@ export class GraphVisualizer {
                             checkbox.checked = visibleDomains.has(domain);
                             label.setAttribute('aria-pressed', String(visibleDomains.size === 1 && visibleDomains.has(domain)));
                         }
+                        const answer = hopNodes ?? focusIds;
+                        const concealed = new Set(componentClusters
+                            .filter(cluster => cluster.count > largeCluster && temporarilyOpened.has(cluster.id))
+                            .flatMap(cluster => cluster.componentIds.filter(id => !answer.has(id))));
                         const nodeUpdates = Array.from(graphNodes.values(), node => ({
-                            id: node.id, hidden: !visibleDomains.has(node.group) || (hopNodes !== null && !hopNodes.has(node.id)),
+                            id: node.id, hidden: !visibleDomains.has(node.group) || concealed.has(node.id) ||
+                                (hopNodes !== null && !hopNodes.has(node.id)),
                             opacity: nodeOpacity(node.id)
                         }));
                         for (const cluster of componentClusters) {
@@ -1163,7 +1180,7 @@ export class GraphVisualizer {
                     else updateNodeOpacity();
                 }
 
-                function closeDetails() {
+                function closeDetails(updateGraph = true) {
                     if (details.hidden) return;
                     selectedId = undefined;
                     focusIds = null;
@@ -1171,7 +1188,7 @@ export class GraphVisualizer {
                     network.unselectAll();
                     details.hidden = true;
                     document.getElementById('details-open').onclick = null;
-                    applyFilters();
+                    if (updateGraph) applyFilters();
                 }
 
                 function openNodeFile(node) {
@@ -1311,8 +1328,9 @@ export class GraphVisualizer {
                         leaveDomainFocus();
                         return;
                     }
-                    closeDetails();
                     const expand = componentClusters.some(({ id }) => isCollapsed(id));
+                    closeDetails(false);
+                    temporarilyOpened.clear();
                     restorePositions();
                     if (expand) expandGroups(componentClusters.filter(({ id }) => isCollapsed(id)));
                     else collapseGroups(componentClusters);
