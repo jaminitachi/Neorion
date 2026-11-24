@@ -68,10 +68,10 @@ The impact and call path rows were rerun after adding the `impact`, `callees` an
 
 ## Install
 
-Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
+Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
 
 ```sh
-npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
+npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.6.0/neorion-0.6.0.tgz
 ```
 
 From your project root, build the graph and ask a question.
@@ -87,8 +87,6 @@ in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 Use `neorion query api_consumers signOut` to find a server action’s caller files
 and lines. Use `path#Name` to qualify an action name shared by multiple files.
-
-[Build from source](#build-from-source) for JavaScript project discovery, the agent setup behavior documented below, and the `impact`, `callees`, `path`, and `changes` queries.
 
 ## Codex
 
