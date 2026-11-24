@@ -100,3 +100,7 @@ npx vsce package
 ```
 
 In VS Code, run **Extensions: Install from VSIX...** and select the generated `.vsix` file. See the [extension README](extension/README.md) for commands and local tests.
+
+## License
+
+[MIT](LICENSE) © 2026 Tachi Lim (jaminitachi)
