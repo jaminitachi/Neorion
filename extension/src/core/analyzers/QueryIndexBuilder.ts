@@ -8,9 +8,19 @@ import {
   type GraphReference, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
+import { visitKinds } from './CompilerWalk';
+import { endLine, lineAt, startLine } from './SourceLines';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner'> & { route: string; node: Node };
+
+const REFERENCE_KINDS = new Set([
+  SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
+  SyntaxKind.ExportSpecifier, SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.TaggedTemplateExpression,
+  SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.ShorthandPropertyAssignment,
+  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier
+]);
+const MOCK_KEY_KINDS = new Set([SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.MethodDeclaration]);
 
 function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
   if (specifier.startsWith('.')) return [path.resolve(path.dirname(source.getFilePath()), specifier)];
@@ -119,8 +129,8 @@ export class QueryIndexBuilder {
       if (byNode.has(node)) return byNode.get(node)!;
       const id = index.symbols.length + 1;
       const file = relativePath(node.getSourceFile());
-      const line = node.getStartLineNumber();
-      const end = node.getEndLineNumber();
+      const line = startLine(node);
+      const end = endLine(node);
       index.symbols.push({ id, file, name, kind, line, end: end > line ? end : undefined, exported: exported.has(node) || undefined,
         aliasOf: aliasOf ?? undefined, typeOnly: Node.isInterfaceDeclaration(node) || Node.isTypeAliasDeclaration(node) || undefined });
       byNode.set(node, id);
@@ -227,9 +237,9 @@ export class QueryIndexBuilder {
         const id = methodNodes.map(node => byNode.get(node)).find(value => value !== undefined);
         if (id !== undefined) handlers[method] = id;
       }
+      const site = entry ?? handler;
       index.routes.push({
-        id, url: route.path, file: route.file, kind: route.type, line: symbol && symbol.file === route.file ? symbol.line :
-          (entry ?? handler ?? undefined)?.getStartLineNumber() ?? 1,
+        id, url: route.path, file: route.file, kind: route.type, line: symbol && symbol.file === route.file ? symbol.line : site ? startLine(site) : 1,
         component, fileSymbol: byGraphId.get(`file:${route.file}`),
         layouts: page?.layouts.flatMap(layout => byGraphId.get(layout) ?? []), methods: route.methods,
         handlers: Object.keys(handlers).length ? handlers : undefined
@@ -323,7 +333,7 @@ export class QueryIndexBuilder {
         graphReferences.set(key, ref);
       };
       const record = (node: Node, declarations: Node[], kind: string, detail?: string, caller?: number, graphOwner?: number) => {
-        const line = node.getStartLineNumber();
+        const line = startLine(node);
         let found = false;
         for (const declaration of declarations) {
           const id = byNode.get(declaration);
@@ -389,14 +399,14 @@ export class QueryIndexBuilder {
               module = index.externalModules!.push(imported.module) - 1;
               externalModules.set(imported.module, module);
             }
-            calls.set(key, [owner, node.getStartLineNumber(), module, graphName(name)]);
+            calls.set(key, [owner, startLine(node), module, graphName(name)]);
           }
           externalCalls.set(owner, calls);
           return;
         }
         if (found) return;
         const targets = members.length ? declarationsOf(root).flatMap(target => byNode.get(target) ?? []) : [];
-        for (const id of targets) recordGraph(id, node.getStartLineNumber(), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
+        for (const id of targets) recordGraph(id, startLine(node), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
@@ -426,13 +436,13 @@ export class QueryIndexBuilder {
         }
         for (const target of targets) {
           const id = byNode.get(target);
-          if (id !== undefined) recordGraph(id, node.getStartLineNumber(), GraphReferenceKind.DynamicImport, owner);
+          if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
         }
       };
       const scanComment = (range: ts.CommentRange) => {
         if (comments.has(range.pos)) return;
         comments.add(range.pos);
-        const line = file.getLineAndColumnAtPos(range.pos).line;
+        const line = lineAt(file, range.pos);
         for (const [offset, text] of content.slice(range.pos, range.end).split('\n').entries()) {
           for (const name of new Set(text.match(/[\w$]+/g))) {
             if (!names.has(name)) continue;
@@ -442,9 +452,11 @@ export class QueryIndexBuilder {
           }
         }
       };
-      file.forEachDescendant(node => {
+      const scanNodeComments = (node: ts.Node) => {
         for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
-        for (const comment of ts.getTrailingCommentRanges(content, node.getEnd()) ?? []) scanComment(comment);
+        for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+      };
+      visitKinds(file, REFERENCE_KINDS, node => {
         if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
@@ -490,7 +502,7 @@ export class QueryIndexBuilder {
           const resolved = imported?.getModuleSpecifierSourceFile() ?? fileByName.get(ts.resolveModuleName(
             moduleName, file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
           ).resolvedModule?.resolvedFileName ?? '');
-          if (resolved) factory.forEachDescendant(key => {
+          if (resolved) visitKinds(factory, MOCK_KEY_KINDS, key => {
             if (!Node.isPropertyAssignment(key) && !Node.isShorthandPropertyAssignment(key) && !Node.isMethodDeclaration(key)) return;
             const object = key.getParent();
             if (!Node.isObjectLiteralExpression(object)) return;
@@ -501,7 +513,7 @@ export class QueryIndexBuilder {
           });
         } else if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
           (Node.isIdentifier(node.getTagNameNode()) || Node.isPropertyAccessExpression(node.getTagNameNode()))) {
-          renderSites.push({ node, owner: owners(node)[1], line: node.getStartLineNumber(), file: relative });
+          renderSites.push({ node, owner: owners(node)[1], line: startLine(node), file: relative });
         } else if (Node.isShorthandPropertyAssignment(node)) {
           const symbol = node.getValueSymbol();
           if (symbol) record(node, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
@@ -517,7 +529,7 @@ export class QueryIndexBuilder {
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
-      });
+      }, { visitRaw: scanNodeComments });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {

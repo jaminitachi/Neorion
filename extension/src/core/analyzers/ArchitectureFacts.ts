@@ -4,6 +4,8 @@ import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
+import { visitKinds } from './CompilerWalk';
+import { startLine } from './SourceLines';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
@@ -215,7 +217,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         const source = providerTag ? tag : definition ?? tag;
         const location: Wrapper = {
           file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
-          line: source.getStartLineNumber(), conditional, provider, providerTag, external,
+          line: startLine(source), conditional, provider, providerTag, external,
           definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
             ? relativePath(definition.getSourceFile()) : undefined
         };
@@ -311,7 +313,7 @@ export function collectRenderFacts(
         const paths = body ? wrappedChains(body, !!app, relativePath, bodies, projectFiles) : [];
         wrapperLocations.set(wrapper, {
           file: wrapper, symbol,
-          line: definition?.getSourceFile() === source ? definition?.getStartLineNumber() ?? 1 : 1, conditional: false,
+          line: definition && definition.getSourceFile() === source ? startLine(definition) : 1, conditional: false,
           provider: paths.length > 0 && providerName(symbol), providerTag: false
         });
         wrapperChains.set(wrapper, paths);
@@ -576,6 +578,11 @@ function isSwrFallbackKey(node: Node): boolean {
   return origin.module === 'swr' && origin.name === 'SWRConfig';
 }
 
+const API_REFERENCE_KINDS = new Set([
+  SyntaxKind.CallExpression, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
+  SyntaxKind.TemplateExpression, SyntaxKind.BinaryExpression
+]);
+
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
   actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
@@ -656,7 +663,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
-    file.forEachDescendant(node => {
+    visitKinds(file, API_REFERENCE_KINDS, node => {
       if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node) || addition(node))) {
         literals.push(node);
       }
@@ -694,7 +701,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           const mapFact = markdown && matchesMethod && origin?.name !== 'mutate';
           if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
-            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'),
+            file: source, line: startLine(node), node, route: route.id, method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'),
             url: route.path, via: isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
             partial: partial || undefined, dynamic
           });
@@ -713,7 +720,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
       for (const { route, partial, dynamic } of matches.values()) {
         index?.fetch({
-          file: source, line: node.getStartLineNumber(), node, route: route.id, method: '?',
+          file: source, line: startLine(node), node, route: route.id, method: '?',
           url: route.path, via, partial: partial || undefined, dynamic
         });
       }

@@ -44,6 +44,27 @@ function fixture(t, reverse = false) {
 
 const stable = output => output.replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
 
+test('cached source lines match ts-morph at newline boundaries', () => {
+  const { buildSync } = require('esbuild');
+  const { Project } = require('ts-morph');
+  const { outputFiles } = buildSync({
+    entryPoints: [path.join(__dirname, '../src/core/analyzers/SourceLines.ts')],
+    bundle: true, platform: 'node', write: false
+  });
+  const linesModule = { exports: {} };
+  new Function('module', outputFiles[0].text)(linesModule);
+  const { lineAt, startLine, endLine } = linesModule.exports;
+  const text = '/** docs */\r\nexport function foo() {\r\n  return 1;\r}\nconst bar = foo();\u2028bar;\u2029\n';
+  const file = new Project({ useInMemoryFileSystem: true }).createSourceFile('mixed.ts', text);
+  for (let offset = 0; offset <= text.length; offset++) {
+    assert.equal(lineAt(file, offset), file.getLineAndColumnAtPos(offset).line, `offset ${offset}`);
+  }
+  file.forEachDescendant(node => {
+    assert.equal(startLine(node), node.getStartLineNumber());
+    assert.equal(endLine(node), node.getEndLineNumber());
+  });
+});
+
 test('impact and callees trace indexed behavior consistently across CLI, MCP and file order', { timeout: 40_000 }, async t => {
   const { root, env, query, build } = fixture(t);
   const reversed = fixture(t, true);
