@@ -110,7 +110,7 @@ export class GraphVisualizer {
                     ...(r.methods?.includes('ALL') ? ['HTTP methods undetermined'] : []),
                     ...(r.wraps?.length ? ['Wraps:', ...r.wraps.map(id => id.slice('route:'.length))] : [])
                 ].join('\n'),
-                shape: 'box',
+                shape: 'square',
                 path: r.file
             };
         });
@@ -121,7 +121,7 @@ export class GraphVisualizer {
             label: c.name, 
             group: c.domain || 'other', 
             title: `Component: ${c.name}\nPath: ${c.path}\nDomain: ${c.domain}\n\n${c.description ? '📝 ' + c.description : ''}`,
-            shape: 'ellipse', 
+            shape: 'dot',
             path: c.path 
         }));
 
@@ -131,7 +131,7 @@ export class GraphVisualizer {
             const label = id.slice(separator + 1);
             return {
                 id, label, kind: 'action', path: file, group: DomainExtractor.extract('/' + file),
-                title: `Server action: ${label}\nPath: ${file}`, shape: 'box'
+                title: `Server action: ${label}\nPath: ${file}`, shape: 'square'
             };
         });
         const callerNodes = [...new Set(graph.edges.map(edge => edge.from).filter(id => id.startsWith('file:')))]
@@ -139,7 +139,7 @@ export class GraphVisualizer {
                 const file = id.slice('file:'.length);
                 return {
                     id, kind: 'file', label: path.posix.basename(file), path: file,
-                    group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'box'
+                    group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'square'
                 };
             });
         const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes, ...callerNodes];
@@ -148,7 +148,7 @@ export class GraphVisualizer {
         
         const componentCounts = new Map<string, number>();
         for (const node of nodes) {
-            if (node.shape === 'ellipse') {
+            if (node.kind === 'component') {
                 componentCounts.set(node.group, (componentCounts.get(node.group) ?? 0) + 1);
             }
         }
@@ -209,26 +209,13 @@ export class GraphVisualizer {
         }, Object.create(null) as Record<string, string>);
 
         const denseGraph = nodes.length > 100;
-        // A dense graph fits at a much smaller scale than a handful of nodes.
-        const routeFontSize = denseGraph ? 62 : 18;
-        const displayNodes = nodes.map(node => {
-            const prominent = node.id.startsWith('route:') || node.id.startsWith('action:');
-            const degree = neighbors.get(node.id)?.size ?? 0;
-            const padding = (denseGraph ? 18 : 10) + Math.min(20, Math.sqrt(degree) * 4);
-            return {
-                ...node,
-                fullLabel: node.label,
-                label: truncateLabel(node.label),
-                ...(prominent ? {
-                    margin: padding,
-                    font: { size: routeFontSize, bold: { size: routeFontSize } },
-                    scaling: { label: { drawThreshold: 0 } }
-                } : node.shape === 'ellipse' ? {
-                    // Keep the ellipse dimensions stable as labels appear and disappear.
-                    font: { size: 12, color: 'transparent', bold: { color: 'transparent' } }
-                } : {})
-            };
-        });
+        const displayNodes = nodes.map(node => ({
+            ...node,
+            fullLabel: node.label,
+            shortLabel: truncateLabel(node.label),
+            label: '',
+            size: node.kind === 'component' ? 13 : 18
+        }));
         const graphPayload = {
             nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, bigGroups,
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]])
@@ -284,6 +271,12 @@ export class GraphVisualizer {
         
         #controls { display: flex; flex-wrap: wrap; gap: 8px; }
         .btn { background: var(--vscode-button-secondaryBackground, var(--bg-color)); color: var(--vscode-button-secondaryForeground, var(--fg-color)); border: 1px solid var(--vscode-button-border, var(--border-color)); padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 12px; transition: background 0.2s; }
+        .segments { display: inline-flex; }
+        .segments .btn { border-radius: 0; padding-inline: 9px; }
+        .segments .btn:first-child { border-radius: 4px 0 0 4px; }
+        .segments .btn:last-child { border-radius: 0 4px 4px 0; }
+        .segments .btn + .btn { margin-left: -1px; }
+        .segments .btn[aria-pressed="true"] { box-shadow: inset 0 -2px var(--vscode-focusBorder, #007acc); font-weight: 600; }
         .btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--border-color)); }
         
         #error-overlay { display: none; position: absolute; inset: 0; background: var(--bg-color); z-index: 2000; align-items: center; justify-content: center; flex-direction: column; }
@@ -298,6 +291,11 @@ export class GraphVisualizer {
             <span id="search-count" role="status"></span>
         </div>
         <div id="controls">
+            <div id="label-levels" class="segments" role="group" aria-label="Label detail">
+                <button class="btn" data-level="Map" aria-pressed="false">Map</button>
+                <button class="btn" data-level="Read" aria-pressed="false">Read</button>
+                <button class="btn" data-level="Full" aria-pressed="false">Full</button>
+            </div>
             <button id="btn-physics" class="btn">Pause layout</button>
             <button id="btn-clusters" class="btn" hidden>Expand all</button>
             <button id="btn-fit" class="btn">Fit Graph</button>
@@ -422,14 +420,11 @@ export class GraphVisualizer {
             // Remove tethers before clustering so vis never redirects them to the cluster.
             network.body.data.edges.remove(hubEdges.map(edge => edge.id));
             network.cluster({
-                joinCondition: node => node.group === domain && node.shape === 'ellipse',
+                joinCondition: node => node.group === domain && node.kind === 'component',
                 clusterNodeProperties: {
                     id, group: domain,
-                    label: domain + ' (' + count + ' components)',
-                    shape: 'box', margin: 20, mass: 12,
-                    opacity: clusterOpacity(cluster),
-                    font: { size: ${routeFontSize + 6}, bold: { size: ${routeFontSize + 6} } },
-                    scaling: { label: { drawThreshold: 0 } }
+                    label: '', shape: 'dot', size: 32, mass: 12,
+                    opacity: clusterOpacity(cluster)
                 }
             });
         }
@@ -551,8 +546,7 @@ export class GraphVisualizer {
                 },
                 nodes: {
                     font: { size: 14, ...theme.font },
-                    borderWidth: 2,
-                    shadow: true
+                    borderWidth: 2
                 },
                 groups: theme.groups,
                 edges: {
@@ -619,7 +613,7 @@ export class GraphVisualizer {
                         connections.get(to).incoming.add(from);
                     }
                 }
-                const components = nodes.filter(node => node.shape === 'ellipse');
+                const components = nodes.filter(node => node.kind === 'component');
                 const clusterButton = document.getElementById('btn-clusters');
                 componentClusters = bigGroups.map(([domain, count], index) => {
                     const componentIds = components.filter(node => node.group === domain).map(node => node.id);
@@ -631,6 +625,7 @@ export class GraphVisualizer {
                 });
                 let rowNodes = new Set();
                 let rowHeading;
+                let fitScale = 1;
                 function visibleComponents() {
                     const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
                     const links = new Map(Array.from(visible, id => [id, new Set()]));
@@ -682,6 +677,7 @@ export class GraphVisualizer {
                     const rowHeight = rowNodes.size ? 112 : 0;
                     const scale = Math.min(1.2, Math.max(1, width - padding * 2) / Math.max(1, right - left),
                         Math.max(1, height - padding * 2 - rowHeight) / Math.max(1, bottom - top));
+                    fitScale = scale;
                     network.moveTo({
                         scale,
                         position: { x: (left + right) / 2, y: (top + bottom) / 2 },
@@ -829,60 +825,133 @@ export class GraphVisualizer {
                     fitGraph();
                 });
 
+                const labelControl = document.getElementById('label-levels');
+                const levelButtons = [...labelControl.querySelectorAll('button')];
+                let labelOverride;
+                let currentLevel;
                 let hoveredNode;
-                let showComponentLabels = false;
-                let showLabelScale = 0.8;
+                const rankedRoutes = nodes.filter(node => node.kind === 'route' || node.kind === 'layout')
+                    .sort((a, b) => adjacency.get(b.id).length - adjacency.get(a.id).length);
+                const mapRoutes = new Set(rankedRoutes.slice(0, 12).map(node => node.id));
+                const clustersById = new Map(componentClusters.map(cluster => [cluster.id, cluster]));
+                labelControl.addEventListener('click', event => {
+                    const level = event.target.dataset.level;
+                    if (!level) return;
+                    labelOverride = labelOverride === level ? undefined : level;
+                    network.redraw();
+                });
 
-                function updateLabelVisibility() {
-                    const scale = network.getScale();
-                    if (scale >= showLabelScale) showComponentLabels = true;
-                    else if (scale <= showLabelScale * 0.875) showComponentLabels = false;
-                }
-
-                network.on('zoom', updateLabelVisibility);
-                network.on('hoverNode', ({ node }) => { hoveredNode = node; });
-                network.on('blurNode', () => { hoveredNode = undefined; });
+                network.on('hoverNode', ({ node }) => { hoveredNode = node; network.redraw(); });
+                network.on('blurNode', () => { hoveredNode = undefined; network.redraw(); });
                 network.on('afterDrawing', ctx => {
-                    // Fits can change the scale without emitting a zoom event.
-                    updateLabelVisibility();
-                    if (rowHeading) {
-                        const scale = network.getScale();
-                        ctx.save();
-                        ctx.fillStyle = theme.font.color;
-                        ctx.font = 12 / scale + 'px system-ui';
-                        ctx.fillText('Unconnected (' + rowNodes.size + ')', rowHeading.x, rowHeading.y);
-                        ctx.restore();
-                    }
-                    const active = network.getSelectedNodes();
-                    if (hoveredNode !== undefined) active.push(hoveredNode);
-                    if (!showComponentLabels && active.length === 0) return;
-                    const focused = new Set();
-                    for (const id of active) {
-                        focused.add(id);
-                        for (const adjacent of adjacency.get(id) ?? []) focused.add(adjacent);
-                    }
                     const scale = network.getScale();
+                    const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
+                        : !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
+                    if (currentLevel !== level) {
+                        currentLevel = level;
+                        for (const button of levelButtons) {
+                            button.setAttribute('aria-pressed', String(button.dataset.level === level));
+                        }
+                    }
+                    labelControl.title = labelOverride ? 'Click the active level to return to Auto' : 'Auto · follows zoom';
+
+                    const focused = new Set(network.getSelectedNodes());
+                    if (hoveredNode !== undefined) focused.add(hoveredNode);
+                    for (const id of [...focused]) {
+                        for (const member of adjacency.get(id) ?? []) focused.add(network.findNode(member)[0]);
+                    }
+                    const { clientWidth: width, clientHeight: height } = container;
+                    const labels = [];
+                    const positionsByDomain = new Map();
+                    const markers = [];
+                    for (const id of network.body.nodeIndices) {
+                        const node = graphNodes.get(id);
+                        const cluster = clustersById.get(id);
+                        if (!node && !cluster) continue;
+                        const { x, y } = network.canvasToDOM(network.getPosition(id));
+                        if (x < 0 || x > width || y < 0 || y > height) continue;
+                        const domain = node?.group ?? cluster.domain;
+                        const point = { x, y };
+                        const radius = (cluster ? 32 : node.size) * scale + 2;
+                        markers.push({ left: x - radius, top: y - radius, right: x + radius, bottom: y + radius });
+                        if (level === 'Map' && !rowNodes.has(id)) {
+                            const points = positionsByDomain.get(domain) ?? [];
+                            points.push(point);
+                            positionsByDomain.set(domain, points);
+                        }
+                        const isRoute = node?.kind === 'route' || node?.kind === 'layout';
+                        const isFocused = focused.has(id);
+                        const eligible = isFocused || cluster || level === 'Full' ||
+                            (level === 'Map' && mapRoutes.has(id)) ||
+                            (level === 'Read' && (isRoute || node.kind !== 'component' || adjacency.get(id).length >= 2));
+                        if (!eligible) continue;
+                        labels.push({
+                            ...point, radius, size: cluster || isRoute ? 13 : 11,
+                            text: cluster ? domain + ' (' + cluster.count + ')' : node.shortLabel,
+                            alpha: cluster ? clusterOpacity(cluster) : nodeOpacity(id, domain),
+                            priority: isFocused ? 0 : cluster ? 1 : isRoute ? 2 : 4,
+                            inRow: rowNodes.has(id)
+                        });
+                    }
+                    for (const [domain, positions] of positionsByDomain) {
+                        if (positions.length < 2 || componentClusters.some(cluster => cluster.domain === domain && isCollapsed(cluster.id))) continue;
+                        const center = positions.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), { x: 0, y: 0 });
+                        labels.push({ x: center.x / positions.length, y: center.y / positions.length,
+                            radius: 16, size: 13, text: domain, alpha: domainOpacity(domain), priority: 3 });
+                    }
+                    labels.sort((a, b) => a.priority - b.priority);
+
+                    // Work in screen pixels, leaving vis in control of the canvas transform.
                     ctx.save();
-                    ctx.textAlign = 'center';
+                    const pixelRatio = ctx.getTransform().a / scale;
+                    ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+                    ctx.textAlign = 'left';
                     ctx.textBaseline = 'middle';
-                    for (const node of components) {
-                        const isFocused = focused.has(node.id);
-                        if (!showComponentLabels && !isFocused) continue;
-                        if (isInsideCluster(node.id)) continue;
-                        const { x, y } = network.getPosition(node.id);
-                        const fontSize = Math.min(14 / scale, Math.max(12, (isFocused ? 12 : 10) / scale));
-                        ctx.font = fontSize + 'px arial';
-                        ctx.globalAlpha = nodeOpacity(node.id, node.group);
-                        if (fontSize > 12) {
-                            const width = ctx.measureText(node.label).width + 8 / scale;
-                            const height = fontSize + 4 / scale;
+                    const occupied = [];
+                    if (rowHeading) {
+                        const { x, y } = network.canvasToDOM(rowHeading);
+                        ctx.fillStyle = theme.font.color;
+                        ctx.font = '12px system-ui';
+                        const text = 'Unconnected (' + rowNodes.size + ')';
+                        ctx.fillText(text, x, y);
+                        occupied.push({ left: x, top: y - 8, right: x + ctx.measureText(text).width, bottom: y + 8 });
+                    }
+                    const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+                    for (const label of labels) {
+                        const { x, y, radius, size } = label;
+                        ctx.font = size + 'px system-ui';
+                        const w = ctx.measureText(label.text).width + 8;
+                        const h = size + 5;
+                        const centered = Math.max(3, Math.min(width - w - 3, x - w / 2));
+                        const sides = [[x + radius, y - h / 2], [x - radius - w, y - h / 2]];
+                        const vertical = [[centered, y + radius], [centered, y - radius - h]];
+                        const candidates = label.inRow ? [...vertical, ...sides] : [...sides, ...vertical];
+                        for (const extra of [h + 3, (h + 3) * 2, (h + 3) * 3]) {
+                            candidates.push([centered, y - radius - h - extra], [centered, y + radius + extra]);
+                        }
+                        for (const [left, top] of candidates) {
+                            const box = { left, top, right: left + w, bottom: top + h };
+                            if (left < 2 || top < 2 || box.right > width - 2 || box.bottom > height - 2) continue;
+                            if (occupied.some(other => intersects(box, other)) || markers.some(other => intersects(box, other))) continue;
+                            occupied.push(box);
+                            ctx.globalAlpha = label.alpha;
+                            const nearestY = Math.max(top, Math.min(y, box.bottom));
+                            if (Math.abs(nearestY - y) > radius + 3) {
+                                ctx.strokeStyle = theme.edge.color;
+                                ctx.lineWidth = 1;
+                                ctx.beginPath();
+                                ctx.moveTo(x, y + Math.sign(nearestY - y) * radius);
+                                ctx.lineTo(Math.max(left, Math.min(x, box.right)), nearestY);
+                                ctx.stroke();
+                            }
                             ctx.fillStyle = theme.font.background;
                             ctx.beginPath();
-                            ctx.roundRect(x - width / 2, y - height / 2, width, height, 3 / scale);
+                            ctx.roundRect(left, top, w, h, 3);
                             ctx.fill();
+                            ctx.fillStyle = theme.font.color;
+                            ctx.fillText(label.text, left + 4, top + h / 2);
+                            break;
                         }
-                        ctx.fillStyle = theme.font.color;
-                        ctx.fillText(node.label, x, y);
                     }
                     ctx.restore();
                 });
@@ -895,10 +964,7 @@ export class GraphVisualizer {
                     log('Stabilization finished. Layout paused.');
                     setPhysicsEnabled(false);
                     fitGraph();
-                    if (denseGraph) {
-                        // Dense graphs start farther out, so reveal labels after a modest zoom in.
-                        showLabelScale = Math.min(0.8, network.getScale() * 1.4);
-                    }
+
                 };
                 network.once('stabilizationIterationsDone', pauseAfterStabilization);
                 document.getElementById('btn-physics').addEventListener('click', () => {
