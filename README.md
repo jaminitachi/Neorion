@@ -1,8 +1,70 @@
 # Neorion
 
+Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
+
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
-Neorion turns a Next.js project written in TypeScript or JavaScript into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
+## Real output
+
+Neorion 0.5.2 on [shadcn-ui/taxonomy](https://github.com/shadcn-ui/taxonomy), copied from the terminal:
+
+```text
+$ neorion query wrappers /dashboard
+Project: taxonomy
+# wrappers /dashboard : 3 files, 1 page (index 2026-11-24T13:42Z, fresh)
+# not wrappers: rendered inside the page
+# providers (outermost first): ThemeProvider, NextThemesProvider (external: next-themes)
+1 app/layout.tsx:74 RootLayout
+2 components/theme-provider.tsx:7 ThemeProvider providers: NextThemesProvider (external: next-themes)
+3 app/(dashboard)/dashboard/layout.tsx:14 DashboardLayout
+page app/(dashboard)/dashboard/page.tsx:16
+# complete: indexed wrapper chains
+
+$ neorion query who_renders UserAvatar
+Project: taxonomy
+# who_renders components/user-avatar.tsx#UserAvatar : 3 routes (index 2026-11-24T13:42Z, fresh)
+/dashboard  app/(dashboard)/dashboard/page.tsx:16  depth 2 via UserAccountNav [via layout] [cond]
+/dashboard/billing  app/(dashboard)/dashboard/billing/page.tsx:25  depth 2 via UserAccountNav [via layout] [cond]
+/dashboard/settings  app/(dashboard)/dashboard/settings/page.tsx:14  depth 2 via UserAccountNav [via layout] [cond]
+# complete: indexed JSX paths
+```
+
+The last line says whether the answer is complete. When it is not, it reads `# partial: <reason>`.
+
+## What you can ask
+
+| Kind | Question |
+| --- | --- |
+| `wrappers` | Which layouts and providers wrap `/dashboard`, outermost first? |
+| `who_renders` | Which pages render `UserAvatar`, including through a layout? |
+| `api_consumers` | Which files call the `/api/posts` route, or a server action? |
+| `rename_impact` | Which files reference `buttonVariants`? |
+| `search` | Which components, routes or declarations match `billing`? |
+| `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
+| `callees` | What does a symbol call, render, or fetch? |
+| `path` | What is the shortest directed dependency chain from a page or symbol to a symbol or API route? |
+| `changes` | Which symbols, routes, and wrappers are affected by a Git diff? |
+
+Use `--depth <n>` to set the traversal depth for `impact` or `callees`. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination. For `changes`, use `--staged` or `--unstaged` to narrow the diff, or `--base <ref>` to compare against the merge base of `HEAD` and that ref.
+
+The CLI runs on Node.js 18 or later without native modules or Python. CLI queries refresh the graph when needed.
+
+Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also draws an interactive graph that opens source files from their nodes.
+
+## How it compares
+
+We asked 30 questions about 3 lesser-known Next.js App Router apps, using only each tool's built-in commands with no LLM.
+
+| | Neorion | Graphify 0.9.115 | GitNexus 1.6.12 |
+| --- | ---: | ---: | ---: |
+| Total | 25/30 | 17.5/30 | 14/30 |
+| Held-out apps only (rep-deck, sharetab) | 16/20 | 11/20 | 8.5/20 |
+| Wrappers (layouts and providers of a route) | 6/6 | 0/6 | 0/6 |
+| Transitive impact | 5/6 | 5/6 | 4/6 |
+| Call paths and callees | 4/6 | 3.5/6 | 3/6 |
+| Index build, sum of 3 apps | 26.164 s (0.5.2) | 15.919 s | 56.632 s |
+
+The impact and call path rows were rerun after adding the `impact`, `callees` and `path` queries (commit `a70c2a6`). The total and held-out rows combine those rerun scores with the 0.5.2 wrapper, renderer and caller scores. The wrappers and index build rows come from 0.5.2. slugy was used while building those queries, so the held-out row leaves it out. Neorion ties Graphify on impact questions, still misses tRPC procedure questions in sharetab, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
 
 ## Install
 
@@ -25,6 +87,8 @@ in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 Use `neorion query api_consumers signOut` to find a server action’s caller files
 and lines. Use `path#Name` to qualify an action name shared by multiple files.
+
+[Build from source](#build-from-source) for JavaScript project discovery, the agent setup behavior documented below, and the `impact`, `callees`, `path`, and `changes` queries.
 
 ## Codex
 
