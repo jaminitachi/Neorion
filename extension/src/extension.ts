@@ -2,7 +2,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { findProject, generateGraph } from './core/Generate';
-import { AGENT_FILES, CLAUDE_HINT, updateAgentFiles } from './core/AgentInstructions';
+import { missingProject } from './core/FindProject';
+import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
 
@@ -38,7 +39,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => {
         // Only trigger for relevant files
-        if (doc.languageId === 'typescript' || doc.languageId === 'typescriptreact' || doc.fileName.endsWith('package.json')) {
+        if (['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(doc.languageId) ||
+            ['tsconfig.json', 'jsconfig.json', 'package.json'].includes(path.basename(doc.fileName))) {
             debouncedUpdate();
         }
     }));
@@ -87,8 +89,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
         const mcp = planMcp(root, project, mcpTargets, bundled,
             bundleSource, connect);
-        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured,
-            mcp.configured ? CLAUDE_HINT : undefined);
+        const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
         mcp.commit();
         const approval = mcpTargets.includes('Claude Code') ?
             ' Claude Code asks for approval before using a project MCP server for the first time.' : '';
@@ -114,7 +115,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
     const workspaceRoot = workspaceFolders[0].uri.fsPath;
     const projectPath = findProject(workspaceRoot);
     if (!projectPath) {
-        if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
+        if (!silent) vscode.window.showErrorMessage(missingProject(workspaceRoot));
         return;
     }
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {

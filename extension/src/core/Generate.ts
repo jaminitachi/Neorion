@@ -1,7 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
-import { Project } from 'ts-morph';
+import { Project, ts } from 'ts-morph';
+import { ignoredProjectDirectories, projectConfig } from './FindProject';
 import { projectSnapshot } from './ProjectSnapshot';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
@@ -17,8 +18,6 @@ interface GenerateOptions {
 }
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
-    const tsConfigPath = path.join(projectPath, 'tsconfig.json');
-
     const packageJsonPath = path.join(projectPath, 'package.json');
     const routerDirectory = (name: string) => {
         const root = path.join(projectPath, name);
@@ -30,9 +29,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     options.onProgress?.("Analyzing project structure...");
 
     const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
-    const project = new Project({
-        tsConfigFilePath: tsConfigPath,
-    });
+    const project = openProject(projectPath);
 
     const sourceFiles = project.getSourceFiles().filter(file => {
         const filePath = file.getFilePath();
@@ -92,6 +89,32 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     if (!options.markdown) return { graph };
     options.onProgress?.("Generating Markdown...");
     return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
+}
+
+function openProject(root: string): Project {
+    const configPath = projectConfig(root);
+    if (configPath && path.basename(configPath) === 'tsconfig.json') {
+        return new Project({ tsConfigFilePath: configPath });
+    }
+
+    const config = configPath ? ts.readConfigFile(configPath, ts.sys.readFile) : { config: {} };
+    if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+    const parse = (host: ts.ParseConfigHost) => ts.parseJsonConfigFileContent({ ...config.config }, host, root,
+        { allowJs: true, checkJs: false }, configPath ?? path.join(root, 'jsconfig.json'));
+    // Resolve inherited file selection before applying defaults to wildcard discovery.
+    const selection = config.config.extends ? parse({ ...ts.sys, readDirectory: () => [] }).raw : config.config;
+    const host: ts.ParseConfigHost = selection.files === undefined && selection.include === undefined && selection.exclude === undefined
+        ? {
+            ...ts.sys,
+            readDirectory(directory, extensions, excludes, includes, depth) {
+                return ts.sys.readDirectory(directory, extensions, [...(excludes ?? []), ...ignoredProjectDirectories], includes, depth);
+            }
+        } : ts.sys;
+    const { options, fileNames } = parse(host);
+    const project = new Project({ compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
+    for (const file of fileNames) project.addSourceFileAtPath(file);
+    project.resolveSourceFileDependencies();
+    return project;
 }
 
 function staticMetadataFiles(directory: string): string[] {

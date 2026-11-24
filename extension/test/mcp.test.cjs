@@ -1,4 +1,4 @@
-const { cachePath } = require('./workspace-cache.cjs');
+const { cachePath, indexFile } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -8,10 +8,9 @@ const { execFileSync } = require('node:child_process');
 const { generate } = require('./run.cjs');
 const { openMcp } = require('./mcp-helpers.cjs');
 
-const indexFile = '.neorion/index.v1.json';
 const stamp = '2026-11-19T06:00:00.000Z';
 const emptyIndex = () => ({
-  schema: 1, coverage: 2, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
+  schema: 2, coverage: 2, generator: 'neorion 0.4.0', generatedAt: stamp, root: '.',
   files: {}, symbols: [], routes: [], renderEdges: [], wrapChains: {}, routeWrap: {}, references: [], fetches: []
 });
 
@@ -98,7 +97,7 @@ for (const fixture of ['create-next-app', 'ai-chatbot']) {
   });
 }
 
-test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts', async t => {
+test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts on a legacy index', async t => {
   const root = temporary(t);
   const index = emptyIndex();
   const wide = '한'.repeat(700);
@@ -115,7 +114,7 @@ test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts
     index.wrapChains.chain.push({ file, symbol: wide, line: 1, conditional: false });
     index.fetches.push({ file, line: 5, fn: wide, method: 'GET', via: 'fetch', url: '/api/test', route: 20_000 });
   }
-  saveIndex(root, index);
+  write(cachePath(root), '.neorion/index.v1.json', JSON.stringify({ ...index, schema: 1 }));
   const client = await openMcp(t, root);
   for (const [tool, args, count, max] of [
     ['who_renders', { component: 'Target', direct: true, limit: 100 }, 20_000, 100],
@@ -201,7 +200,7 @@ test('U11 returns tool errors for absent or invalid indexes and escaping or inva
   assert.equal(missing.isError, true);
   assert.equal(missing.content[0].text,
     'Neorion index missing or invalid. Run "Neorion: Generate Architecture Map" in VS Code.');
-  saveIndex(root, { ...emptyIndex(), schema: 2 });
+  saveIndex(root, { ...emptyIndex(), schema: 3 });
   assert.deepEqual(await client.call('search', { text: 'thing' }), missing);
   saveIndex(root, emptyIndex());
   fs.symlinkSync(os.tmpdir(), path.join(root, 'escape'), 'dir');
@@ -310,8 +309,14 @@ test('helper-wrapped server actions appear in the graph and resolve to their run
   assert.match(await query('literal'), /^# partial: target unresolved$/m);
 
   const files = ['app/actions.ts', 'lib/other-actions.ts', 'app/page.tsx', 'app/panels.tsx', 'lib/call.ts', 'lib/reex.ts'];
-  const reexports = () => JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8')).serverActions
-    .filter(action => action.name.startsWith('reexported')).sort((a, b) => a.name.localeCompare(b.name));
+  const reexports = () => {
+    const { serverActions, symbols } = JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8'));
+    const owners = new Map(symbols.map(({ id, file, name, line }) => [id, `${file}:${line}#${name}`]));
+    return serverActions.filter(action => action.name.startsWith('reexported')).sort((a, b) => a.name.localeCompare(b.name))
+      .map(({ symbol, callers, ...action }) => ({
+        ...action, symbol: owners.get(symbol), callers: callers.map(([file, line, owner]) => [file, line, owners.get(owner)])
+      }));
+  };
   const expected = reexports();
   for (const order of [files, [...files].reverse()]) {
     write(root, 'tsconfig.json', JSON.stringify({ compilerOptions: { jsx: 'preserve' }, files: order }));
@@ -341,13 +346,41 @@ test('star re-exported actions get a unique ID when the base ID is already regis
   // Pass the barrel twice to exercise a collision at the star re-export registration.
   const { actions, index } = new ComponentAnalyzer(root).analyze([barrel, ...files], [], true);
   assert.deepEqual(actions, ['action:actions.ts#run', 'action:actions.ts#run~2']);
-  assert.deepEqual(index.serverActions, [
+  assert.deepEqual(index.serverActions.map(({ symbol, ...action }) => action), [
     { name: 'run', file: 'actions.ts', line: 2, callers: [] },
     { name: 'run', file: 'actions.ts', line: 2, callers: [['caller.ts', 2]] }
   ]);
 });
 
-test('API consumers flag generated sends and count distinct generated sender files', async t => {
+test('rename impact lists same-file calls and references once without duplicating the declaration', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'queries.ts', [
+    'export function getUser() {}',
+    'export function first() { getUser(); }',
+    'export const callbacks = [getUser, getUser];',
+    'export const object = { getUser };',
+    'export function other(getUser: () => void) { getUser(); }',
+    'export function second() { getUser(); getUser(); }',
+    'export function recurse(n: number) { if (n) recurse(n - 1); }'
+  ].join('\n'));
+  write(root, 'caller.ts', 'import { getUser } from "./queries";\ngetUser();');
+  await generate(root);
+  const index = JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8'));
+  const getUser = index.symbols.find(symbol => symbol.file === 'queries.ts' && symbol.name === 'getUser');
+  assert.deepEqual(getUser.localUses, [3, 4]);
+  assert.ok(index.references.some(([id, file, line, kind]) => id === getUser.id && file === null && line === 2 && kind === 'call'));
+  const client = await openMcp(t, root);
+  const output = await client.text('rename_impact', { symbol: 'getUser' });
+  assert.match(output, /^# rename_impact queries\.ts#getUser : 2 files /m);
+  assert.deepEqual(output.split('\n').filter(line => /^(decl|use )/.test(line)), [
+    'decl queries.ts:1', 'use  caller.ts:1,2', 'use  queries.ts:2,3,4,6'
+  ]);
+  const recurse = await client.text('rename_impact', { symbol: 'recurse' });
+  assert.match(recurse, / : 1 file .*\ndecl queries\.ts:7\nuse  queries\.ts:7\n/);
+});
+
+test('API consumers count request sites and flag distinct generated files', async t => {
   const root = temporary(t);
   const index = emptyIndex();
   index.routes = [{ id: 1, url: '/api/data', file: 'app/api/data/route.ts', kind: 'api' }];
@@ -358,7 +391,7 @@ test('API consumers flag generated sends and count distinct generated sender fil
   saveIndex(root, index);
   const client = await openMcp(t, root);
   const output = await client.text('api_consumers', { route: '/api/data' });
-  assert.match(output, /13 senders \(11 generated\), 0 callers/);
+  assert.match(output, /14 sites in 13 files: 14 requests \(11 generated files\)/);
   const sends = output.split('\n').filter(line => line.startsWith('send'));
   assert.deepEqual(sends.slice(0, 2), ['send   not-generated/b.ts:14 GET fetch', 'send   z.ts:12 GET fetch']);
   assert.deepEqual(sends.slice(2).map(line => /^send +([^:]+):\d+ GET fetch \[generated\]$/.exec(line)?.[1]),
@@ -366,7 +399,37 @@ test('API consumers flag generated sends and count distinct generated sender fil
   index.fetches = index.fetches.slice(0, 1);
   saveIndex(root, index);
   const single = await openMcp(t, root);
-  assert.match(await single.text('api_consumers', { route: '/api/data' }), /1 sender \(1 generated\), 0 callers/);
+  assert.match(await single.text('api_consumers', { route: '/api/data' }), /1 site in 1 file: 1 request \(1 generated file\)/);
+});
+
+test('API consumers count and label SWR reads, mutates, fallback keys, and other literals', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'app/api/user/route.ts', 'export function GET() {}');
+  write(root, 'app/page.tsx', [
+    'import useSWR, { mutate as invalidate, SWRConfig as Config } from "swr";',
+    'export default function Page() {',
+    '  useSWR("/api/user");',
+    '  useSWR(["/api/user", 1]);',
+    '  useSWR("/api/user");',
+    '  invalidate("/api/user");',
+    '  return <Config value={{ fallback: { "/api/user": {} } }} />;',
+    '}'
+  ].join('\n'));
+  write(root, 'unrelated.test.ts', 'const value = { fallback: { "/api/user": {} } };');
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = args => client.text('query', { kind: 'api_consumers', target: '/api/user', ...args });
+  const output = await query({ includeTests: false });
+  assert.match(output, / : 5 sites in 1 file: 3 reads, 1 mutate, 1 fallback key \(index/);
+  assert.deepEqual(output.split('\n').filter(line => line.startsWith('send')), [
+    'send   app/page.tsx:3 Page GET SWR key', 'send   app/page.tsx:4 Page GET SWR key',
+    'send   app/page.tsx:5 Page GET SWR key', 'send   app/page.tsx:6 Page ? SWR mutate',
+    'send   app/page.tsx:7 Page ? SWR fallback key'
+  ]);
+  const limited = await query({ limit: 1 });
+  assert.match(limited, / : 6 sites in 2 files: 3 reads, 1 mutate, 1 fallback key, 1 other mention, showing 1 /);
+  assert.match(await query(), /^send +unrelated\.test\.ts:1 \? route literal \[test\]$/m);
 });
 
 test('compact API queries cover route literals, SWR keys, wrappers, and uncertainty', async t => {
@@ -382,7 +445,8 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
     'declare function request(input: string): void;',
     'export function wrapped(id: string) { request(`/api/widgets/${id}`); }',
     'export const key = `/api/widgets/456`;',
-    'export function ping() { return fetch("/api/ping"); }'
+    'export function ping() { return fetch("/api/ping"); }',
+    'export function openWidget() { return wrapped("123"); }'
   ].join('\n'));
   write(root, 'caller.ts', 'import { wrapped } from "./widget"; export const open = () => wrapped("123");');
   write(root, 'widget.test.ts', 'export const fixture = "/api/widgets/789";');
@@ -396,12 +460,14 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
     return result.content[0].text;
   };
   const widgets = await query('/api/widgets/[id]');
-  assert.match(widgets, /^send +widget\.ts:2 update \? SWR key \[partial url\]$/m);
+  assert.match(widgets, /7 sites in 3 files: 1 read, 1 mutate, 3 other mentions, 2 callers/);
+  assert.match(widgets, /^send +widget\.ts:2 update \? SWR mutate \[partial url\]$/m);
   assert.match(widgets, /^send +widget\.ts:3 useWidget GET SWR key$/m);
   assert.match(widgets, /^send +widget\.ts:5 wrapped \? route literal \[partial url\]$/m);
   assert.match(widgets, /^send +widget\.ts:6 \? route literal$/m);
   assert.match(widgets, /^send +widget\.test\.ts:1 .*\[test\]$/m);
   assert.match(widgets, /^call1 +caller\.ts:1 wrapped$/m);
+  assert.match(widgets, /^call1 +widget\.ts:8 wrapped$/m);
   assert.match(widgets, /^# partial: uncertain URL matches$/m);
   assert.match(await query('/api/widgets/reserved'), /^# partial: uncertain URL matches$/m);
   assert.match(await query('/api/ping'), /^# complete: indexed route literals/m);
@@ -530,7 +596,7 @@ test('API URL patterns retain literal segments after unknown path parameters', a
   const rotate = await query('groups/[group]/files/[file]/rotate');
   assert.match(rotate, /^send +patterns\.ts:3 GET fetch \[partial url\]$/m);
   assert.match(rotate, /^send +patterns\.ts:15 GET fetch \[partial url\]$/m);
-  assert.match(await query('groups/[group]/stores/[store]/files'), /^send +patterns\.ts:5 \? SWR key \[partial url\]$/m);
+  assert.match(await query('groups/[group]/stores/[store]/files'), /^send +patterns\.ts:5 \? SWR mutate \[partial url\]$/m);
   assert.match(await query('spanning/[...path]'), /^send +patterns\.ts:6 GET fetch \[partial url\]$/m);
   const staticRotate = await query('groups/static/files/[file]/rotate');
   assert.match(staticRotate, /^send +patterns\.ts:3 GET fetch \[partial url\]$/m);

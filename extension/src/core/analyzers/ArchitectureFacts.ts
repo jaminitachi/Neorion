@@ -561,6 +561,21 @@ function importOrigin(expression: Node) {
   };
 }
 
+function isSwrFallbackKey(node: Node): boolean {
+  const name = node.getParentIfKind(SyntaxKind.ComputedPropertyName) ?? node;
+  const property = name.getParentIfKind(SyntaxKind.PropertyAssignment);
+  if (!property || property.getNameNode() !== name) return false;
+  const fallback = property.getParentIfKind(SyntaxKind.ObjectLiteralExpression)?.getParentIfKind(SyntaxKind.PropertyAssignment);
+  const config = fallback?.getParentIfKind(SyntaxKind.ObjectLiteralExpression);
+  if (!fallback || config?.getProperty('fallback') !== fallback) return false;
+  const attribute = config.getParentIfKind(SyntaxKind.JsxExpression)?.getParentIfKind(SyntaxKind.JsxAttribute);
+  if (attribute?.getNameNode().getText() !== 'value') return false;
+  const tag = attribute.getParent().getParent();
+  if (!Node.isJsxOpeningElement(tag) && !Node.isJsxSelfClosingElement(tag)) return false;
+  const origin = importOrigin(tag.getTagNameNode());
+  return origin.module === 'swr' && origin.name === 'SWRConfig';
+}
+
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
   actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
@@ -652,6 +667,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
       const isSwr = (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
         ['default', 'useSWR', 'mutate'].includes(origin.name);
+      const isSwrMutate = isSwr && origin.name === 'mutate';
       const axiosMethod = origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
@@ -678,8 +694,8 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           const mapFact = markdown && matchesMethod && origin?.name !== 'mutate';
           if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
-            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr && origin?.name !== 'mutate' ? 'GET' : '?'),
-            url: route.path, via: isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
+            file: source, line: node.getStartLineNumber(), node, route: route.id, method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'),
+            url: route.path, via: isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
             partial: partial || undefined, dynamic
           });
           if (isSwr || !mapFact) continue;
@@ -694,10 +710,11 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const matches = matchesFor(node);
       if (!matches) continue;
       classify(node);
+      const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
       for (const { route, partial, dynamic } of matches.values()) {
         index?.fetch({
           file: source, line: node.getStartLineNumber(), node, route: route.id, method: '?',
-          url: route.path, via: 'route literal', partial: partial || undefined, dynamic
+          url: route.path, via, partial: partial || undefined, dynamic
         });
       }
     }

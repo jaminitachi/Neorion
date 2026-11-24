@@ -542,7 +542,7 @@ export class ComponentAnalyzer {
               const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
               const line = node.getStartLineNumber();
               addEdge(owner, id, 'uses-action');
-              index?.useAction(id, relative, line);
+              index?.useAction(id, relative, line, node);
             }
           }
         }
@@ -578,6 +578,6 @@ export class ComponentAnalyzer {
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
       collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

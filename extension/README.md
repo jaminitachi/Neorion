@@ -1,14 +1,14 @@
 # Neorion
 
-Neorion generates a local architecture map for Next.js projects written in TypeScript.
+Neorion generates a local architecture map for Next.js projects written in JavaScript or TypeScript.
 
 ## Use in VS Code
 
-1. Open the project folder containing `tsconfig.json`.
+1. Open your project folder. Neorion reads `tsconfig.json` or `jsconfig.json` and uses defaults for Next.js projects without a config.
 2. Run **Neorion: Generate Architecture Map** from the Command Palette to write `codebase_graph.md` and area details under `neorion/graph/` in the local workspace cache, along with the query index, and open the overview.
 3. Run **Neorion: Show Architecture Graph (Beta)** to explore routes, components, and server action callers and open their source files.
 
-After running either Neorion command once in the current editor session, saving a TypeScript file or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
+After running either Neorion command once in the current editor session, saving a JavaScript or TypeScript source file, `tsconfig.json`, `jsconfig.json`, or `package.json` regenerates the map and refreshes the graph if its panel is open. You can share the generated Markdown with your coding assistant as a starting point for navigating the source.
 
 After the first map is generated, choose **Yes** to connect AI tools, then select
 the instruction files to update. Existing `AGENTS.md`, `CLAUDE.md`, and
@@ -33,15 +33,19 @@ installed bundle and the project. Paste it into the global configuration for
 Codex CLI, Windsurf, or Gemini CLI. Copy a fresh snippet if the extension
 installation moves.
 
-Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/file, or search text).
+Call `neorion_query` with `kind` and, for queries that take a target, `target` (a name, `path#Name`, route URL/file, or search text).
 
 | Kind | Answers |
 | --- | --- |
 | `who_renders` | Which page routes can render a component, including via a layout? |
-| `wrappers` | Which layouts and providers wrap a page, in outermost-first order? Third-party wrappers are included by default. Set `includeExternal: false` to hide third-party non-provider wrappers. |
+| `wrappers` | Which layouts and providers wrap a page, in outermost-first order? Third-party wrappers are included by default. Set `includeExternal: false` to hide third-party non-provider wrappers. Providers stay visible. |
 | `rename_impact` | Which files contain checker-resolved references to a declaration? |
 | `api_consumers` | Which files use an API route or a server action? Pass the action name or `path#Name` to see caller files and lines. |
 | `search` | Which declarations or routes match a name or path fragment? |
+| `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
+| `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
+| `path` | What is the shortest directed chain from a page or symbol to a symbol or API route? Pass `target` and `to`. |
+| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits, or `base` for a merge-base comparison. |
 
 The server returns project-relative `path:line` locations. Results have a
 6,000-byte cap and default to 40 rows (20 for search). `complete` describes the
