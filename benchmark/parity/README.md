@@ -1,6 +1,6 @@
 # Parity benchmark: Neorion vs Graphify vs GitNexus
 
-Across three apps, **Neorion scored 21/30, Graphify 17.5/30, and GitNexus 14/30**. All 90 question cells ran (2026-11-24).
+Across three apps, **Neorion scored 25/30, Graphify 17.5/30, and GitNexus 14/30** after the impact and call path rerun. On the two held-out apps alone, Neorion scored 16/20, Graphify 11/20, and GitNexus 8.5/20. Neorion 0.5.2 scored 21/30 in the original run. All 90 question cells ran (2026-11-24).
 
 ## Method
 
@@ -42,7 +42,26 @@ Each app has two questions per category. The all-app maximum is six points per c
 | **All apps** | **Graphify** | **0** | **6** | **3** | **5** | **3.5** | **17.5/30** |
 | **All apps** | **GitNexus** | **0** | **5** | **2** | **4** | **3** | **14/30** |
 
-Where Neorion wins: wrappers (6/6, the other two 0/6) and server or API callers. Where it ties: renderers. Where it loses: transitive impact (I) and call paths or callees (P), behind both other tools.
+Where Neorion wins: wrappers (6/6, the other two 0/6) and server or API callers. Where it ties: renderers. In the original 0.5.2 run it lost on transitive impact (I) and call paths or callees (P), behind both other tools. See the rerun below.
+
+## Rerun of impact and call path questions (`a70c2a6`)
+
+After the original run, Neorion gained `impact`, `callees` and `path` queries. The 12 Neorion I and P cells were rerun with a CLI built from commit `a70c2a6`, using the same rubric and reviewed ground truth. The W, R and S scores and the Graphify and GitNexus scores are unchanged from the original run. slugy questions were used during development of the new queries, so rep-deck and sharetab are the held-out apps.
+
+| App or cohort | Neorion, 0.5.2 → `a70c2a6` | Graphify | GitNexus |
+| --- | ---: | ---: | ---: |
+| rep-deck | 7.5/10 → 10/10 | 7.5/10 | 4.5/10 |
+| sharetab | 6/10 → 6/10 | 3.5/10 | 4/10 |
+| slugy (development checks) | 7.5/10 → 9/10 | 6.5/10 | 5.5/10 |
+| **All apps** | **21/30 → 25/30** | **17.5/30** | **14/30** |
+
+| Tool | W /6 | R /6 | S /6 | I /6 | P /6 | Overall /30 | Held-out /20 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Neorion `a70c2a6` | 6 | 6 | 4 | 5 | 4 | **25** | **16** |
+| Graphify | 0 | 6 | 3 | 5 | 3.5 | **17.5** | **11** |
+| GitNexus | 0 | 5 | 2 | 4 | 3 | **14** | **8.5** |
+
+The three sharetab I and P cells that still score 0 involve tRPC procedures, which the rerun build did not trace.
 
 ## Index build times
 

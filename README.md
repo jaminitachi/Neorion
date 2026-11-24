@@ -49,15 +49,16 @@ Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also dr
 
 We asked 30 questions about 3 lesser-known Next.js App Router apps, using only each tool's built-in commands with no LLM.
 
-| | Neorion 0.5.2 | Graphify 0.9.115 | GitNexus 1.6.12 |
+| | Neorion | Graphify 0.9.115 | GitNexus 1.6.12 |
 | --- | ---: | ---: | ---: |
-| Total | 21/30 | 17.5/30 | 14/30 |
+| Total | 25/30 | 17.5/30 | 14/30 |
+| Held-out apps only (rep-deck, sharetab) | 16/20 | 11/20 | 8.5/20 |
 | Wrappers (layouts and providers of a route) | 6/6 | 0/6 | 0/6 |
-| Transitive impact | 3/6 | 5/6 | 4/6 |
-| Call paths and callees | 2/6 | 3.5/6 | 3/6 |
-| Index build, sum of 3 apps | 26.164 s | 15.919 s | 56.632 s |
+| Transitive impact | 5/6 | 5/6 | 4/6 |
+| Call paths and callees | 4/6 | 3.5/6 | 3/6 |
+| Index build, sum of 3 apps | 26.164 s (0.5.2) | 15.919 s | 56.632 s |
 
-Neorion loses on impact and call path questions, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
+The impact and call path rows were rerun after adding the `impact`, `callees` and `path` queries (commit `a70c2a6`). The other Neorion rows come from 0.5.2. slugy was used while building those queries, so the held-out row leaves it out. Neorion ties Graphify on impact questions, still misses tRPC procedure questions in sharetab, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
 
 ## Install
 
