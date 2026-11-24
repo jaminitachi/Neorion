@@ -162,6 +162,8 @@ Direct setup from a clone records the clone's path when `neorion` is unavailable
 
 ## VS Code extension
 
+![Taxonomy in Routes view with the layouts that wrap /login highlighted](docs/graph-view/after-taxonomy-routes.png)
+
 ```sh
 cd extension
 npm ci

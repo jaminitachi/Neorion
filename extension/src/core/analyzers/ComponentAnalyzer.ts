@@ -357,13 +357,17 @@ export class ComponentAnalyzer {
       return components.get(node) ?? aliases.get(node)?.map(target => resolveComponent(target, seen)).find(Boolean);
     };
 
+    const pagesApps: { file: string; componentId?: string }[] = [];
     for (const file of files) {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
-      if (!route || route.type === 'api' || isMetadata(route) || route.componentId) continue;
+      const isPagesApp = /^(?:src\/)?pages\/_app\.[jt]sx?$/.test(relative);
+      if (!isPagesApp && (!route || route.type === 'api' || isMetadata(route) || route.componentId)) continue;
       const exported = file.getExportedDeclarations().get('default');
-      route.componentId = exported?.flatMap(node => aliases.get(node) ?? [node])
+      const componentId = exported?.flatMap(node => aliases.get(node) ?? [node])
         .map(node => resolveComponent(node)).find(Boolean)?.id;
+      if (isPagesApp) pagesApps.push({ file: relative, componentId });
+      else if (route) route.componentId = componentId;
     }
 
     const edges = new Map<string, ComponentEdge>();
@@ -574,6 +578,6 @@ export class ComponentAnalyzer {
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
       collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

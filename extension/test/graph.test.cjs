@@ -1,10 +1,12 @@
 const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { pathToFileURL } = require('node:url');
 const { count, assertOverviewLinks, overviewBudget } = require('./graph-output.cjs');
 const { generate, visualize, register } = require('./run.cjs');
 const { augmentScaffold } = require('./augment-scaffold.cjs');
@@ -51,6 +53,60 @@ function readMap(project, overview, name) {
   }
   return files;
 }
+
+test('graph domain colors are deterministic and adapt to the webview theme', t => {
+  const { outputFiles } = require('esbuild').buildSync({
+    entryPoints: [path.join(__dirname, '../src/core/visualizers/GraphVisualizer.ts')],
+    bundle: true,
+    platform: 'node',
+    external: ['vscode'],
+    write: false
+  });
+  const visualizerModule = { exports: {} };
+  const mockRequire = name => name === 'vscode' ? { Uri: { joinPath: path.join } } : require(name);
+  new Function('module', 'require', outputFiles[0].text)(visualizerModule, mockRequire);
+  const visualizer = Object.create(visualizerModule.exports.GraphVisualizer.prototype);
+  visualizer._extensionUri = path.resolve(__dirname, '..');
+  const webview = { asWebviewUri: pathToFileURL, cspSource: 'file:' };
+  const domains = ['api', 'auth', 'billing', 'dashboard', 'docs', 'editor', 'hooks',
+    'marketing', 'pages', 'profile', 'reports', 'search', 'settings', 'other', 'shared-ui'];
+  const render = names => {
+    const graph = {
+      routes: names.map(domain => ({
+        id: domain, path: '/' + domain, file: 'app/' + domain + '/page.tsx', type: 'page', domain
+      })),
+      components: [], actions: [], edges: []
+    };
+    return visualizer._getHtmlForWebview(webview, graph);
+  };
+  const groupsFor = html => {
+    const [, payload] = /const rawData = "([^"]+)"/.exec(html);
+    return JSON.parse(Buffer.from(payload, 'base64').toString('utf8')).groupsConfig;
+  };
+  const html = render(domains);
+  const groups = groupsFor(html);
+  assert.deepEqual(groups, groupsFor(render([...domains].reverse())));
+  const fills = Object.values(groups).map(color => color.toLowerCase());
+  assert.equal(new Set(fills).size, domains.length);
+
+  if (process.env.NEORION_BROWSER_PYTHON) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-webview-'));
+    t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const themedHtml = html.replace('</head>', `<style>
+      body.vscode-light {
+        --vscode-editor-background: #fff;
+        --vscode-editor-foreground: #333;
+      }
+    </style></head>`).replace(/<script nonce="[^"]+">/, tag => tag + `
+      window.acquireVsCodeApi = () => ({ postMessage() {} });
+      document.body.className = 'vscode-' + new URLSearchParams(location.search).get('theme');
+    `);
+    const fixture = path.join(directory, 'theme.html');
+    fs.writeFileSync(fixture, themedHtml);
+    execFileSync(process.env.NEORION_BROWSER_PYTHON, [path.join(__dirname, 'graph-theme-smoke.py'), fixture],
+      { stdio: 'inherit', timeout: 60_000 });
+  }
+});
 
 test('taxonomy maps APIs, special routes, duplicate component names, and hooks', { skip: !externalFixtures }, async t => {
   const { project } = copyFixture(t, 'taxonomy');
