@@ -57,7 +57,7 @@ function validate(name: string, value: unknown) {
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
     api_consumers: ['callers', 'includeTests'], search: [filterKey],
-    impact: ['depth', 'includeTests'], callees: ['depth', 'uses']
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to']
   }[tool];
   for (const key of Object.keys(input)) {
     if (![targetKey, 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
@@ -68,6 +68,8 @@ function validate(name: string, value: unknown) {
   if ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300)) {
     throw new Error('Invalid query target.');
   }
+  const to = typeof input.to === 'string' ? input.to.trim() : '';
+  if (tool === 'path' && (!to || [...to].length > 300)) throw new Error('Invalid argument to.');
   const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false, depth = tool === 'callees' ? 1 : 3, uses = false,
     includeExternal = true, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
   const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
@@ -81,7 +83,7 @@ function validate(name: string, value: unknown) {
   for (const key of ['direct', 'includeExternal', 'includeTests', 'uses']) {
     if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new Error(`Invalid argument ${key}.`);
   }
-  return { tool, target, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth, uses: !!uses };
+  return { tool, target, to, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth, uses: !!uses };
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -204,6 +206,29 @@ export class QueryEngine {
       (route.url === (text.replace(/\/$/, '') || '/') || route.file === path.posix.normalize(text))).sort(byRoute);
   }
 
+  private matchPathRoute(text: string, kind: 'page' | 'api') {
+    const exact = this.matchRoute(text, kind);
+    if (exact.length || !text.startsWith('/')) return exact;
+    const segments = text.replace(/\/$/, '').split('/').slice(1);
+    let best = '';
+    let matches: Route[] = [];
+    for (const route of this.index.routes) {
+      if (route.kind !== kind) continue;
+      const pattern = route.url.split('/').slice(1);
+      const compatible = pattern.every((part, i) => part.startsWith('[[...') ||
+        (part.startsWith('[') ? !!segments[i] : part === segments[i])) &&
+        (pattern.length === segments.length || pattern.at(-1)?.includes('...'));
+      if (!compatible) continue;
+      const rank = pattern.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
+        part.startsWith('[') ? '2' : '3').join('');
+      if (rank < best) continue;
+      if (rank > best) matches = [];
+      best = rank;
+      matches.push(route);
+    }
+    return matches.sort(byRoute);
+  }
+
   private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
     const needle = text.toLowerCase().slice(0, 100);
     const candidates: { name: string; label: string; file: string; aliases?: string[] }[] = kind === 'page' || kind === 'api'
@@ -237,7 +262,7 @@ export class QueryEngine {
 
   private search(text: string, kind: string, expired: () => boolean): Result {
     const needle = text.toLowerCase();
-    const hits: { row: Row; score: number; references: number; file: string }[] = [];
+    const hits: { row: Row; score: number; references: number; file: string; symbol?: SymbolEntry }[] = [];
     const match = (text: string) => {
       text = text.toLowerCase();
       return text === needle ? 0 : text.startsWith(needle) ? 1 : text.includes(needle) ? 2 : 3;
@@ -250,7 +275,7 @@ export class QueryEngine {
       const renders = new Set(this.incoming.get(symbol.id)?.map(edge => edge[0])).size;
       const references = this.references.get(symbol.id)?.length ?? 0;
       const label = `${symbol.kind} ${declaration(symbol)}`;
-      hits.push({ score, references, file: symbol.file, row: {
+      hits.push({ score, references, file: symbol.file, symbol, row: {
         ...row(label + (symbol.aliasOf ? ` alias of ${symbol.aliasOf}` : '') +
           (renders ? `  rendered by ${renders} components` : '') + flagTest(symbol.file), symbol.file),
         pathEnd: label.length
@@ -268,9 +293,12 @@ export class QueryEngine {
     }
     hits.sort((a, b) => a.score - b.score || b.references - a.references ||
       compare(a.file, b.file) || compare(a.row.text, b.row.text));
+    const single = hits.length === 1 ? hits[0].symbol : undefined;
+    const neighbors = !expired() && single?.name.toLowerCase() === needle ? this.graph()?.neighbors(single.id, expired) : undefined;
     return {
       title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row),
-      notes: hits.length || expired() ? [] : this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired)
+      notes: neighbors ? [neighbors] : hits.length || expired() ? [] :
+        this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired)
     };
   }
 
@@ -552,6 +580,7 @@ export class QueryEngine {
     const { tool, target, depth, includeTests, limit, uses } = args;
     const graph = this.graph();
     if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
+    if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
     if (tool === 'impact' && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
       const file = path.posix.normalize(target);
@@ -568,10 +597,38 @@ export class QueryEngine {
     return { result: { ...result, title: `${symbol.file}#${symbol.name}`, targets: [symbol.file] } };
   }
 
+  private pathQuery(from: string, to: string, graph: DependencyGraph, expired: () => boolean) {
+    const routeTarget = (text: string) => text.startsWith('/') || (!text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
+    const resolve = (target: string, kind: 'page' | 'api') => {
+      if (routeTarget(target)) {
+        const routes = this.matchPathRoute(target, kind);
+        const [route] = routes;
+        return { route, ids: route ? kind === 'page' ? graph.routeStarts(route) : graph.apiTargets(route) : [],
+          label: route?.url ?? target, file: route?.file,
+          candidates: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)),
+          notes: () => this.suggestions(target, kind, expired) };
+      }
+      const matches = this.matchGraphSymbol(target, graph);
+      const [symbol] = matches;
+      return { route: undefined, ids: symbol ? [symbol.id] : [], label: symbol ? `${symbol.file}#${symbol.name}` : target, file: symbol?.file,
+        candidates: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)),
+        notes: () => this.suggestions(target.split('#').pop()!, undefined, expired) };
+    };
+    const source = resolve(from, 'page');
+    const destination = resolve(to, 'api');
+    const title = `${source.label} -> ${destination.label}`;
+    for (const endpoint of [source, destination]) {
+      if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
+      if (!endpoint.file) return { result: { title, rows: [], notes: endpoint.notes() } };
+    }
+    const result = graph.path(source.ids, destination.ids, expired, source.route);
+    return { result: { ...result, title, targets: [source.file!, destination.file!] } };
+  }
+
   query(name: string, value: unknown) {
     const args = validate(name, value);
     const { tool, target } = args;
-    const graphKind = tool === 'impact' || tool === 'callees';
+    const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
     const deadline = performance.now() + (configured > 0 ? Math.min(1850, configured) : 1850);
     const expired = () => performance.now() >= deadline;
@@ -689,7 +746,8 @@ export class QueryEngine {
       const scope = result.scope ?? {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),
-        search: 'indexed name and path matches', impact: 'indexed dependency edges', callees: 'indexed outgoing edges'
+        search: 'indexed name and path matches', impact: 'indexed dependency edges', callees: 'indexed outgoing edges',
+        path: 'indexed directed edges'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),

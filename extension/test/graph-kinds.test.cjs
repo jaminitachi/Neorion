@@ -115,3 +115,34 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   assert.match(query('impact', 'cn'), /# partial: regenerate legacy index/);
   assert.match(run(['query', 'impact', 'cn']), /# complete/);
 });
+
+test('path gives the shortest directed chain from a page, symbol, or layout', { timeout: 30_000 }, async t => {
+  const { root, env, query, build } = fixture(t);
+  build();
+  const directly = query('path', '/items', 'createItem');
+  assert.match(directly, /: 2 hops /);
+  assert.match(directly, /^0 route \/items.* Items$/m);
+  assert.match(directly, /^1 render .*CreateItem \[cond\]$/m);
+  assert.match(directly, /^2 action .*createItem -> server\/actions\.ts:6$/m);
+  const fromFile = query('path', 'app/(main)/items/page.tsx', 'server/actions.ts#submitItem');
+  assert.equal(fromFile, directly);
+  const layout = query('path', '/other', 'createItem');
+  assert.match(layout, /^1 wrap .*layout\.tsx:\d+ MainLayout$/m);
+  assert.match(layout, /^5 action .*sidebar\.tsx:3 createItem/m);
+  const noPath = query('path', '/other', '/api/items/1');
+  assert.match(noPath, /no directed path/);
+  assert.match(noPath, /to is reached from routes: \/b\/\[id\]/);
+  assert.match(query('path', 'normalize', 'CreateItem'), /no directed path/);
+  assert.match(query('path', '/b/review', '/api/items/1'), /^2 fetch .*GET \/api\/items\/\[id\]/m);
+  assert.match(query('path', 'useItems', 'app/api/items/[id]/route.ts#GET'), /^1 fetch .*GET \/api\/items\/\[id\]/m);
+  assert.match(query('path', 'normalize', 'normalize'), /: 0 hops /);
+  assert.match(query('path', '/other', 'formatDate'), /# ambiguous path/);
+  assert.match(query('search', 'getData'), /# neighbors: 2 caller files, 1 callees, reaches 2 routes/);
+  assert.doesNotMatch(query('search', 'formatDate'), /# neighbors/);
+
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assert.equal(await mcp.text('query', { kind: 'path', target: '/items', to: 'createItem' }), directly);
+  assert.equal((await mcp.call('query', { kind: 'path', target: '/items' })).isError, true);
+});

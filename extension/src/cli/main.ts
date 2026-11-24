@@ -19,6 +19,7 @@ const help = `Usage:
   neorion query wrappers <route> [--no-external | --include-external]
   neorion query impact <symbol|file> [--depth n] [--include-tests]
   neorion query callees <symbol> [--depth n] [--uses]
+  neorion query path <from> <to>
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
@@ -124,8 +125,8 @@ async function main([command, ...args]: string[]) {
   });
   const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
   if (!query) return serve(root, { autoBuild: true });
-  if (positionals.length !== 2) throw new Error(help);
-  const [kind, target] = positionals;
+  const [kind, target, to] = positionals;
+  if (positionals.length !== (kind === 'path' ? 3 : 2)) throw new Error(help);
   if (values['no-external'] && values['include-external']) throw new Error('Choose either --no-external or --include-external.');
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
@@ -138,6 +139,7 @@ async function main([command, ...args]: string[]) {
   if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
   const limit = values.limit === undefined ? undefined : Number(values.limit);
   const graphOptions = {
+    ...(to === undefined ? {} : { to }),
     ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),
     ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
     ...(values.uses === undefined ? {} : { uses: values.uses })

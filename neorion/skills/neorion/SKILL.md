@@ -11,6 +11,7 @@ Call `neorion_query` with `kind` and `target`:
 - `search` with a name or path: where it is defined or used.
 - `impact` with a symbol or file identifies upstream callers and affected routes. Set `depth` or `--depth` to extend the trace, and `includeTests` or `--include-tests` to include test callers.
 - `callees` with a symbol lists its calls, renders, fetches, and package calls. Set `depth` or `--depth` to follow up to three hops, and `uses` or `--uses` to include symbols used as values.
+- `path` traces the shortest directed chain from a page URL/file or symbol to a symbol or API URL. Pass `target` and `to` in MCP or run `neorion query path <from> <to>`.
 
 The last line tells you how far to trust the result.
 - `# complete`: answer from the result. Open a file only to confirm a specific detail.

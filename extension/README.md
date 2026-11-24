@@ -44,6 +44,7 @@ Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/fi
 | `search` | Which declarations or routes match a name or path fragment? |
 | `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
 | `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
+| `path` | What is the shortest directed chain from a page or symbol to a symbol or API route? Pass `target` and `to`. |
 
 The server returns project-relative `path:line` locations. Results have a
 6,000-byte cap and default to 40 rows (20 for search). `complete` describes the

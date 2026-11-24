@@ -7,13 +7,14 @@ type Edge = {
   from: NodeId; to: NodeId; label: Label; file: string; line: number;
   detail?: string; conditional?: boolean; partial?: boolean;
 };
+type PathEdge = Omit<Edge, 'label'> & { label: Label | 'wrap' };
 type Visit = { depth: number; edge?: Edge; conditional?: boolean; via?: string[] };
 export type QueryRow = { text: string; files: string[]; pathEnd?: number };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
   notes?: QueryRow[]; limit?: number; partial?: string; scope?: string;
 };
-export type Terminal = { kind: string; name: string; file: string; line?: number; route?: Route; pages?: Route[] };
+export type Terminal = { kind: string; name: string; file: string; line?: number; route?: Route; pages?: Route[]; handler?: number };
 type Reached = { terminal: Terminal; visit: Visit; node: NodeId; metadata: boolean };
 const rank: Record<Label, number> = { call: 0, action: 1, render: 2, fetch: 3, dyn: 4, use: 5 };
 const outgoingRank: Record<Label, number> = { render: 0, call: 1, action: 1, fetch: 2, dyn: 3, use: 4 };
@@ -25,6 +26,9 @@ export const graphRow = (text: string, ...files: string[]): QueryRow => ({ text,
 const location = (file: string, line?: number) => file + (line === undefined ? '' : ':' + line);
 const edgeOrder = (a: Edge, b: Edge) => rank[a.label] - rank[b.label] || compare(a.file, b.file) ||
   a.line - b.line || compare(String(a.from), String(b.from)) || compare(String(a.to), String(b.to));
+const pathEdgeOrder = (a: PathEdge, b: PathEdge) =>
+  (a.label === 'wrap' ? 6 : rank[a.label]) - (b.label === 'wrap' ? 6 : rank[b.label]) ||
+  compare(a.file, b.file) || a.line - b.line || compare(String(a.from), String(b.from)) || compare(String(a.to), String(b.to));
 const terminalKey = (terminal: Terminal) => JSON.stringify([terminal.kind, terminal.file, terminal.name]);
 const terminalOrder = (a: Reached, b: Reached) => a.visit.depth - b.visit.depth ||
   compare(a.terminal.file, b.terminal.file) || (a.terminal.line ?? 0) - (b.terminal.line ?? 0) ||
@@ -79,7 +83,7 @@ export class DependencyGraph {
       } else {
         for (const method of route.methods?.length ? route.methods : ['?']) {
           const name = method === '?' ? route.url : method + ' ' + route.url;
-          const terminal = { kind: 'api', name, file: route.file, route };
+          const terminal = { kind: 'api', name, file: route.file, route, handler: route.handlers?.[method] };
           this.api.set(this.apiId(route, method), terminal);
           append(this.routesByFile, route.file, terminal);
           const handler = route.handlers?.[method];
@@ -399,6 +403,134 @@ export class DependencyGraph {
       `${actions} server action${actions === 1 ? '' : 's'}, ${layouts} layouts; ${symbols} symbols in ${files.size} files; max depth ${used}; ${trace.tests.size} tests`));
     return { rows, notes, count: `${routeCount} routes, ${actions} ${actions === 1 ? 'action' : 'actions'}, ${symbols} symbols, depth ${used}` +
       (trace.hubs.length ? ', hub collapsed' : ''), partial: trace.partial, scope: 'indexed call, render, action, use, dyn, fetch edges' };
+  }
+
+  routeStarts(route: Route): NodeId[] {
+    return [...new Set([
+      route.component ?? this.defaultSymbol(route.file)?.id ?? this.fileNode(route.file),
+      route.fileSymbol ?? this.fileNode(route.file)
+    ])];
+  }
+
+  apiTargets(route: Route): NodeId[] {
+    return [...(route.methods?.length ? route.methods : ['?']).map(method => this.apiId(route, method)),
+      ...Object.values(route.handlers ?? {})];
+  }
+
+  path(starts: NodeId[], goals: NodeId[], expired: () => boolean, route?: Route): QueryResult {
+    type Step = { id: NodeId; depth: number; weak: number; previous?: Step; edge?: PathEdge; alternatives: number; alternate?: Step };
+    const depthBudget = 12;
+    const targets = new Set(goals);
+    const initial = starts.map(id => ({ id, depth: 0, weak: 0, alternatives: 0 }));
+    let layer: Step[] = initial;
+    const seen = new Set(starts);
+    let goal: Step | undefined;
+    let partial: string | undefined;
+    const wraps: PathEdge[] = [];
+    if (route) for (const [file, terminals] of this.routesByFile) {
+      if (!terminals.some(terminal => terminal.pages?.includes(route))) continue;
+      const id = this.index.routeFiles![file]?.[3] ?? this.defaultSymbol(file)?.id ?? this.fileNode(file);
+      const line = typeof id === 'number' ? this.symbols.get(id)?.line ?? 1 : 1;
+      wraps.push({ from: starts[0], to: id, label: 'wrap', file, line });
+    }
+    const stepOrder = (a: Step, b: Step) => a.weak - b.weak ||
+      (a.edge && b.edge ? pathEdgeOrder(a.edge, b.edge) : 0) || compare(this.file(a.id), this.file(b.id)) ||
+      compare(this.name(a.id), this.name(b.id));
+    const alternatives = (chosen: Step, alternate: Step) => {
+      if (alternate.previous?.id !== chosen.previous?.id || (alternate.id !== chosen.id && alternate.edge !== chosen.edge)) {
+        chosen.alternatives += 1;
+        chosen.alternate ??= alternate.previous ?? alternate;
+      }
+    };
+
+    while (layer.length && !expired()) {
+      layer.sort(stepOrder);
+      const reached = layer.filter(step => targets.has(step.id));
+      if (reached.length) {
+        goal = reached[0];
+        for (const other of reached.slice(1)) alternatives(goal, other);
+        break;
+      }
+      const next = new Map<NodeId, Step>();
+      for (const current of layer) {
+        if (expired()) break;
+        const outgoing: PathEdge[] = [...this.outgoing.get(current.id) ?? []];
+        if (current.depth === 0 && current.id === starts[0]) outgoing.push(...wraps);
+        for (const edge of outgoing) {
+          if (expired()) break;
+          if (isTestFile(edge.file) && !isTestFile(this.file(starts[0])) && !isTestFile(this.file(goals[0]))) continue;
+          const handler = edge.label === 'fetch' ? this.api.get(String(edge.to))?.handler : undefined;
+          for (const id of handler === undefined ? [edge.to] : [edge.to, handler]) {
+            if (seen.has(id)) continue;
+            if (current.depth === depthBudget) {
+              partial ??= 'hop budget (12)';
+              continue;
+            }
+            const candidate: Step = {
+              id, depth: current.depth + 1, weak: current.weak + Number(edge.label === 'use' || edge.label === 'dyn'),
+              previous: current, edge, alternatives: 0
+            };
+            const earlier = next.get(id);
+            if (!earlier && seen.size + next.size >= nodeBudget) {
+              partial = 'node budget';
+              continue;
+            }
+            if (!earlier) next.set(id, candidate);
+            else if (stepOrder(candidate, earlier) < 0) {
+              candidate.alternatives = earlier.alternatives;
+              candidate.alternate = earlier.alternate;
+              alternatives(candidate, earlier);
+              next.set(id, candidate);
+            } else alternatives(earlier, candidate);
+          }
+        }
+      }
+      layer = [...next.values()];
+      for (const step of layer) seen.add(step.id);
+    }
+
+    const scope = 'over indexed render, call, action, fetch, dyn, use and wrap edges';
+    if (!goal) {
+      const trace = this.traceImpact(goals, 6, false, expired);
+      const pages = new Set(trace.terminals.flatMap(({ terminal }) => terminal.kind === 'page' ? [terminal.name] :
+        terminal.pages?.map(page => page.url) ?? []));
+      const notes = [graphRow(`# from reaches ${seen.size} nodes` +
+        (pages.size ? `; to is reached from routes: ${[...pages].slice(0, 5).join(', ')}${pages.size > 5 ? ', +' + (pages.size - 5) : ''}` : ''))];
+      const boundary = trace.partial?.startsWith('tRPC client proxy') ? trace.partial : undefined;
+      return { rows: [], notes, count: 'no directed path', partial: partial ?? boundary,
+        scope: 'no directed path ' + scope };
+    }
+
+    const rows: QueryRow[] = [];
+    for (let step = goal; step.edge && step.previous; step = step.previous) {
+      const edge = step.edge;
+      const file = this.file(step.id);
+      const symbol = typeof step.id === 'number' ? this.symbols.get(step.id) : undefined;
+      const name = edge.label === 'fetch' ? this.name(edge.to) + (symbol ? ' (' + symbol.name + ')' : '') :
+        this.name(step.id) + (edge.detail?.startsWith('.') ? edge.detail : '');
+      rows.unshift(graphRow(`${step.depth} ${edge.label} ${location(edge.file, edge.line)} ${name}` +
+        (step === goal && file !== edge.file ? ' -> ' + location(file, symbol?.line) : '') +
+        (edge.conditional ? ' [cond]' : '') + (edge.partial ? ' [partial url]' : ''), edge.file, file));
+    }
+    let origin = goal;
+    while (origin.previous) origin = origin.previous;
+    const symbol = typeof origin.id === 'number' ? this.symbols.get(origin.id) : undefined;
+    if (route) rows.unshift(graphRow(`0 route ${route.url}  ${location(route.file, route.line)} ${this.name(starts[0])}`, route.file));
+    else rows.unshift(graphRow(`0 ${symbol?.kind ?? 'module'} ${location(this.file(origin.id), symbol?.line)} ${this.name(origin.id)}`, this.file(origin.id)));
+    const notes = goal.alternatives && goal.alternate ? [graphRow(`# alternatives: ${goal.alternatives} other shortest ` +
+      `predecessor${goal.alternatives === 1 ? '' : 's'} (via ${this.name(goal.alternate.id)})`)] : [];
+    return { rows, notes, count: `${goal.depth} ${goal.depth === 1 ? 'hop' : 'hops'}`, partial,
+      scope: 'shortest directed path ' + scope };
+  }
+
+  neighbors(id: number, expired: () => boolean): QueryRow {
+    const callers = new Set(this.predecessors(id).filter(edge => edge.from !== id && !isTestFile(edge.file)).map(edge => edge.file));
+    const callees = new Set((this.outgoing.get(id) ?? []).filter(edge => edge.label !== 'use' && edge.to !== id).map(edge => edge.to));
+    const trace = this.traceImpact([id], 3, false, expired);
+    const routes = new Set(trace.terminals.flatMap(({ terminal }) => terminal.pages?.map(route => route.file) ??
+      (terminal.kind === 'action' || terminal.kind === 'middleware' ? [] : [terminal.file])));
+    return graphRow(`# neighbors: ${callers.size} caller ${callers.size === 1 ? 'file' : 'files'}, ${callees.size} callees, reaches ${routes.size} routes` +
+      (this.action(id) ? '; server action' : '') + '. Next: impact | callees');
   }
 
   callees(seed: number, depth: number, uses: boolean, expired: () => boolean): QueryResult {
