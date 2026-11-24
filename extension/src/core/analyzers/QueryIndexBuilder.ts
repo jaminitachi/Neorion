@@ -456,6 +456,7 @@ export class QueryIndexBuilder {
         for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
         for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
       };
+      // Keep REFERENCE_KINDS in sync with the node kinds handled below.
       visitKinds(file, REFERENCE_KINDS, node => {
         if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
@@ -502,6 +503,7 @@ export class QueryIndexBuilder {
           const resolved = imported?.getModuleSpecifierSourceFile() ?? fileByName.get(ts.resolveModuleName(
             moduleName, file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
           ).resolvedModule?.resolvedFileName ?? '');
+          // Keep MOCK_KEY_KINDS in sync with the node kinds handled below.
           if (resolved) visitKinds(factory, MOCK_KEY_KINDS, key => {
             if (!Node.isPropertyAssignment(key) && !Node.isShorthandPropertyAssignment(key) && !Node.isMethodDeclaration(key)) return;
             const object = key.getParent();

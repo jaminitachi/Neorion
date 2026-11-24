@@ -663,6 +663,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
+    // Keep API_REFERENCE_KINDS in sync with the literal, addition, and call branches below.
     visitKinds(file, API_REFERENCE_KINDS, node => {
       if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node) || addition(node))) {
         literals.push(node);

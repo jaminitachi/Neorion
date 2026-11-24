@@ -180,6 +180,7 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
     cached.set(symbol, id);
     return id;
   };
+  // ACTION_SCAN_KINDS includes the node kinds resolved by this callback.
   return (node: Node): string | undefined => {
     if (Node.isPropertyAccessExpression(node)) {
       const namespace = node.getExpression().getSymbol()?.compilerSymbol;
@@ -281,6 +282,7 @@ export class ComponentAnalyzer {
         }
       }
       if (file.getFullText().includes('use server')) {
+        // Keep ACTION_DECLARATION_KINDS in sync with the node kinds handled below.
         visitKinds(file, ACTION_DECLARATION_KINDS, node => {
           if (!Node.isFunctionDeclaration(node) && !Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return;
           const body = node.getBody();
@@ -443,6 +445,7 @@ export class ComponentAnalyzer {
     const renderTargets = new Map<Node, ComponentNode[]>();
     const callbackBodies = new Set<ts.Node>();
     for (const file of files) {
+      // Keep RENDER_KINDS in sync with the render sites handled here and in the file scan below.
       visitKinds(file, RENDER_KINDS, node => {
         let tag: Node | undefined;
         if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) {
@@ -505,6 +508,7 @@ export class ComponentAnalyzer {
       const imports = importsFor(file);
 
       const usedHooks = new Set<string>();
+      // Keep COMPONENT_BODY_KINDS in sync with the node kinds handled below.
       const inspect = (child: Node) => {
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
           componentTags.add(child);
@@ -537,6 +541,7 @@ export class ComponentAnalyzer {
       const usedHooks = new Set<string>();
       const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
+      // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
       visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
         if (actionReference && !actionNames.has(node)) {
           const id = actionReference(node);

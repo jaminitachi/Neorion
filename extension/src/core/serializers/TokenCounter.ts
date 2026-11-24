@@ -43,6 +43,7 @@ export class TokenCounter {
     // As in js-tiktoken, merge the lowest-ranked adjacent pair, taking the
     // leftmost pair when ranks tie. Each remaining part has a rank because
     // o200k_base contains all single bytes and every merge requires a rank.
+    // Rescanning pairs on each merge takes up to quadratic time in the piece's byte length.
     const ends = Array.from(bytes, (_, index) => index + 1);
     while (ends.length > 1) {
       let bestRank = Infinity;
