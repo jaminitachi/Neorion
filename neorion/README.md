@@ -6,10 +6,10 @@ Neorion maps Next.js projects written in TypeScript or JavaScript and answers ar
 
 ## Install
 
-Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
+Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
 
 ```sh
-npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
+npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.6.0/neorion-0.6.0.tgz
 ```
 
 From your project root, build the graph and ask a question.
