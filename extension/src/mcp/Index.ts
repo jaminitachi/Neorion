@@ -1,4 +1,5 @@
 export const WRAPPER_INDEX_REVISION = 2;
+export const QUERY_INDEX_REVISION = 1;
 export const INDEX_PATH = '.neorion/index.v1.json';
 export { version as VERSION } from '../../../neorion/package.json';
 
@@ -13,6 +14,7 @@ export interface SymbolEntry {
   line: number;
   exported?: boolean;
   aliasOf?: string | null;
+  localUses?: number[];
 }
 
 export interface Wrapper {
@@ -64,6 +66,7 @@ export interface QueryIndex {
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number][];
   wrapperRevision?: number;
+  queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
   routeWrap: Record<string, string>;
   branches?: Record<string, string[]>;

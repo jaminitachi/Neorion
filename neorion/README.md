@@ -2,7 +2,7 @@
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](https://raw.githubusercontent.com/jaminitachi/Neorion/master/docs/demo.gif)
 
-Neorion maps Next.js and React TypeScript projects and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
+Neorion maps Next.js and React projects and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
 
 ## Install
 
@@ -12,7 +12,7 @@ Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs t
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
 ```
 
-From your TypeScript project, build the graph and ask a question.
+From your project root, build the graph and ask a question.
 
 ```sh
 neorion graph
@@ -20,8 +20,8 @@ neorion query wrappers /
 ```
 
 `wrappers` includes third-party components on the page’s wrapper chain and labels
-them with their package. Pass `--no-external` to hide third-party non-provider wrappers, or set
-`includeExternal: false` in the MCP tool.
+them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
+in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 Use `neorion query api_consumers signOut` to find a server action’s caller files
 and lines. Use `path#Name` to qualify an action name shared by multiple files.
@@ -62,7 +62,8 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your TypeScript project, run the CLI directly from the clone.
+From your project root, run the CLI directly from the clone. Neorion reads `tsconfig.json` or
+`jsconfig.json` and uses defaults for Next.js projects without a config.
 
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph

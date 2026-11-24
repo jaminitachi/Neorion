@@ -3,7 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
-  WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  QUERY_INDEX_REVISION, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { declarationsOf } from './ArchitectureFacts';
 
@@ -46,7 +46,8 @@ export class QueryIndexBuilder {
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
     const index: QueryIndex = {
-      schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.', wrapperRevision: WRAPPER_INDEX_REVISION,
+      schema: 1, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
+      wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null)
     };
@@ -155,7 +156,7 @@ export class QueryIndexBuilder {
         const line = node.getStartLineNumber();
         for (const declaration of declarations) {
           const id = byNode.get(declaration);
-          if (!id || (kind === 'use' && index.symbols[id - 1].file === relative)) continue;
+          if (!id) continue;
           const lines = references.get(id) ?? new Map<number, Reference[]>();
           const entries = lines.get(line) ?? [];
           const same = entries.some(entry => entry[3] === kind && entry[4] === detail && entry[5] === caller);
@@ -250,7 +251,16 @@ export class QueryIndexBuilder {
         }
       });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
-      for (const lines of references.values()) for (const entries of lines.values()) index.references.push(...entries);
+      // Same-file uses need only a line number and do not affect cross-file search ranking.
+      for (const [id, lines] of references) {
+        const symbol = index.symbols[id - 1];
+        for (const [line, entries] of lines) {
+          for (const entry of entries) {
+            if (symbol.file === relative && entry[3] === 'use') (symbol.localUses ??= []).push(line);
+            else index.references.push(entry);
+          }
+        }
+      }
       // Keep the first ten diagnostic comment matches in each test category.
       // The tool can only show ten exclusions and can filter out tests.
       const test = isTestFile(relative);

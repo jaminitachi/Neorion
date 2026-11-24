@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { findProject, missingTsconfig } from '../core/FindProject';
+import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText, waitForBuild } from './Build';
 import { legacyKind, queryName, tools } from './Tools';
 
@@ -125,7 +125,7 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
-    if (!project) return reply(missingTsconfig(root), true);
+    if (!project) return reply(missingProject(root), true);
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);

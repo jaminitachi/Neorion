@@ -6,7 +6,7 @@ import { delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { CLAUDE_HINT, updateAgentFiles } from '../core/AgentInstructions';
-import { findProject, missingTsconfig } from '../core/FindProject';
+import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
 import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
@@ -22,12 +22,13 @@ const help = `Usage:
   neorion setup claude [--no-hint]
   neorion --version | --help
 
-Query kinds: ${kinds.join(', ')}`;
+Query kinds: ${kinds.join(', ')}
+--no-external hides third-party non-provider wrappers. Providers stay visible.`;
 
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();
-  if (!['tsconfig.json', 'package.json'].some(name => existsSync(join(root, name)))) {
-    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json or package.json.`);
+  if (!['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)))) {
+    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json, jsconfig.json, or package.json.`);
     return false;
   }
   const changed = updateAgentFiles(root, root, [file], true, false, instruction);
@@ -122,7 +123,7 @@ async function main([command, ...args]: string[]) {
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
   const project = findProject(root);
-  if (!project) throw new Error(missingTsconfig(root));
+  if (!project) throw new Error(missingProject(root));
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();

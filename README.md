@@ -2,7 +2,7 @@
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
-Neorion turns a Next.js TypeScript project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
+Neorion turns a Next.js project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
 
 ## Install
 
@@ -12,7 +12,7 @@ Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs t
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
 ```
 
-From your TypeScript project, build the graph and ask a question.
+From your project root, build the graph and ask a question.
 
 ```sh
 neorion graph
@@ -20,8 +20,8 @@ neorion query wrappers /
 ```
 
 `wrappers` includes third-party components on the page’s wrapper chain and labels
-them with their package. Pass `--no-external` to hide third-party non-provider wrappers, or set
-`includeExternal: false` in the MCP tool.
+them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
+in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 Use `neorion query api_consumers signOut` to find a server action’s caller files
 and lines. Use `path#Name` to qualify an action name shared by multiple files.
@@ -42,7 +42,7 @@ It does three things.
 
 The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. The rest of the file is left as it is. Running the command again replaces that block. It never adds a second copy. To remove the hint, delete the block. The VS Code extension’s **Connect AI tools** and **Disconnect AI tools** commands manage the same marked block in `AGENTS.md` and `CLAUDE.md`.
 
-Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json` or `package.json`.
+Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
 
 ## Claude Code
 
@@ -68,7 +68,7 @@ Ask a normal architecture question such as “Which layouts or providers wrap th
 claude -p --model haiku --plugin-dir "$(npm root -g)/neorion" "Which layouts or providers wrap the / route?" --allowedTools mcp__plugin_neorion_neorion__neorion_query
 ```
 
-Pass `--no-hint` to skip updating `CLAUDE.md`, which setup updates only in folders containing `tsconfig.json` or `package.json`.
+Pass `--no-hint` to skip updating `CLAUDE.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
 
 ## Build from source
 
@@ -82,7 +82,8 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your TypeScript project, run the CLI directly from the clone.
+From your project root, run the CLI directly from the clone. Neorion reads `tsconfig.json` or
+`jsconfig.json` and uses defaults for Next.js projects without a config.
 
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph

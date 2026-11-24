@@ -1,7 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
-import { Project } from 'ts-morph';
+import { Project, ts } from 'ts-morph';
+import { projectConfig } from './FindProject';
 import { projectSnapshot } from './ProjectSnapshot';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
@@ -17,8 +18,6 @@ interface GenerateOptions {
 }
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
-    const tsConfigPath = path.join(projectPath, 'tsconfig.json');
-
     const packageJsonPath = path.join(projectPath, 'package.json');
     const routerDirectory = (name: string) => {
         const root = path.join(projectPath, name);
@@ -30,9 +29,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     options.onProgress?.("Analyzing project structure...");
 
     const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
-    const project = new Project({
-        tsConfigFilePath: tsConfigPath,
-    });
+    const project = openProject(projectPath);
 
     const sourceFiles = project.getSourceFiles().filter(file => {
         const filePath = file.getFilePath();
@@ -92,6 +89,22 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     if (!options.markdown) return { graph };
     options.onProgress?.("Generating Markdown...");
     return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
+}
+
+function openProject(root: string): Project {
+    const configPath = projectConfig(root);
+    if (configPath && path.basename(configPath) === 'tsconfig.json') {
+        return new Project({ tsConfigFilePath: configPath });
+    }
+
+    const config = configPath ? ts.readConfigFile(configPath, ts.sys.readFile) : { config: {} };
+    if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
+    const { options, fileNames } = ts.parseJsonConfigFileContent(config.config, ts.sys, root,
+        { allowJs: true, checkJs: false }, configPath ?? path.join(root, 'jsconfig.json'));
+    const project = new Project({ compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
+    for (const file of fileNames) project.addSourceFileAtPath(file);
+    project.resolveSourceFileDependencies();
+    return project;
 }
 
 function staticMetadataFiles(directory: string): string[] {

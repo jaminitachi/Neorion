@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { findProject, generateGraph } from './core/Generate';
+import { missingProject } from './core/FindProject';
 import { AGENT_FILES, CLAUDE_HINT, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
@@ -38,7 +39,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => {
         // Only trigger for relevant files
-        if (doc.languageId === 'typescript' || doc.languageId === 'typescriptreact' || doc.fileName.endsWith('package.json')) {
+        if (['typescript', 'typescriptreact', 'javascript', 'javascriptreact'].includes(doc.languageId) ||
+            ['tsconfig.json', 'jsconfig.json', 'package.json'].includes(path.basename(doc.fileName))) {
             debouncedUpdate();
         }
     }));
@@ -114,7 +116,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
     const workspaceRoot = workspaceFolders[0].uri.fsPath;
     const projectPath = findProject(workspaceRoot);
     if (!projectPath) {
-        if (!silent) vscode.window.showErrorMessage('No tsconfig.json found in workspace!');
+        if (!silent) vscode.window.showErrorMessage(missingProject(workspaceRoot));
         return;
     }
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {

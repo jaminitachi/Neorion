@@ -347,7 +347,31 @@ test('star re-exported actions get a unique ID when the base ID is already regis
   ]);
 });
 
-test('API consumers flag generated sends and count distinct generated sender files', async t => {
+test('rename impact lists same-file calls and references once without duplicating the declaration', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'queries.ts', [
+    'export function getUser() {}',
+    'export function first() { getUser(); }',
+    'export const callback = getUser;',
+    'export const object = { getUser };',
+    'export function other(getUser: () => void) { getUser(); }',
+    'export function second() { getUser(); getUser(); }',
+    'export function recurse(n: number) { if (n) recurse(n - 1); }'
+  ].join('\n'));
+  write(root, 'caller.ts', 'import { getUser } from "./queries";\ngetUser();');
+  await generate(root);
+  const client = await openMcp(t, root);
+  const output = await client.text('rename_impact', { symbol: 'getUser' });
+  assert.match(output, /^# rename_impact queries\.ts#getUser : 2 files /m);
+  assert.deepEqual(output.split('\n').filter(line => /^(decl|use )/.test(line)), [
+    'decl queries.ts:1', 'use  caller.ts:1,2', 'use  queries.ts:2,3,4,6'
+  ]);
+  const recurse = await client.text('rename_impact', { symbol: 'recurse' });
+  assert.match(recurse, / : 1 file .*\ndecl queries\.ts:7\nuse  queries\.ts:7\n/);
+});
+
+test('API consumers count request sites and flag distinct generated files', async t => {
   const root = temporary(t);
   const index = emptyIndex();
   index.routes = [{ id: 1, url: '/api/data', file: 'app/api/data/route.ts', kind: 'api' }];
@@ -358,7 +382,7 @@ test('API consumers flag generated sends and count distinct generated sender fil
   saveIndex(root, index);
   const client = await openMcp(t, root);
   const output = await client.text('api_consumers', { route: '/api/data' });
-  assert.match(output, /13 senders \(11 generated\), 0 callers/);
+  assert.match(output, /14 requests \(11 generated files\)/);
   const sends = output.split('\n').filter(line => line.startsWith('send'));
   assert.deepEqual(sends.slice(0, 2), ['send   not-generated/b.ts:14 GET fetch', 'send   z.ts:12 GET fetch']);
   assert.deepEqual(sends.slice(2).map(line => /^send +([^:]+):\d+ GET fetch \[generated\]$/.exec(line)?.[1]),
@@ -366,7 +390,37 @@ test('API consumers flag generated sends and count distinct generated sender fil
   index.fetches = index.fetches.slice(0, 1);
   saveIndex(root, index);
   const single = await openMcp(t, root);
-  assert.match(await single.text('api_consumers', { route: '/api/data' }), /1 sender \(1 generated\), 0 callers/);
+  assert.match(await single.text('api_consumers', { route: '/api/data' }), /1 request \(1 generated file\)/);
+});
+
+test('API consumers count and label SWR reads, mutates, fallback keys, and other literals', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'app/api/user/route.ts', 'export function GET() {}');
+  write(root, 'app/page.tsx', [
+    'import useSWR, { mutate as invalidate, SWRConfig as Config } from "swr";',
+    'export default function Page() {',
+    '  useSWR("/api/user");',
+    '  useSWR(["/api/user", 1]);',
+    '  useSWR("/api/user");',
+    '  invalidate("/api/user");',
+    '  return <Config value={{ fallback: { "/api/user": {} } }} />;',
+    '}'
+  ].join('\n'));
+  write(root, 'unrelated.test.ts', 'const value = { fallback: { "/api/user": {} } };');
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = args => client.text('query', { kind: 'api_consumers', target: '/api/user', ...args });
+  const output = await query({ includeTests: false });
+  assert.match(output, / : 3 reads, 1 mutate, 1 fallback key \(index/);
+  assert.deepEqual(output.split('\n').filter(line => line.startsWith('send')), [
+    'send   app/page.tsx:3 Page GET SWR key', 'send   app/page.tsx:4 Page GET SWR key',
+    'send   app/page.tsx:5 Page GET SWR key', 'send   app/page.tsx:6 Page ? SWR mutate',
+    'send   app/page.tsx:7 Page ? SWR fallback key'
+  ]);
+  const limited = await query({ limit: 1 });
+  assert.match(limited, / : 3 reads, 1 mutate, 1 fallback key, 1 route literal, showing 1 /);
+  assert.match(await query(), /^send +unrelated\.test\.ts:1 \? route literal \[test\]$/m);
 });
 
 test('compact API queries cover route literals, SWR keys, wrappers, and uncertainty', async t => {
@@ -396,7 +450,7 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
     return result.content[0].text;
   };
   const widgets = await query('/api/widgets/[id]');
-  assert.match(widgets, /^send +widget\.ts:2 update \? SWR key \[partial url\]$/m);
+  assert.match(widgets, /^send +widget\.ts:2 update \? SWR mutate \[partial url\]$/m);
   assert.match(widgets, /^send +widget\.ts:3 useWidget GET SWR key$/m);
   assert.match(widgets, /^send +widget\.ts:5 wrapped \? route literal \[partial url\]$/m);
   assert.match(widgets, /^send +widget\.ts:6 \? route literal$/m);
@@ -530,7 +584,7 @@ test('API URL patterns retain literal segments after unknown path parameters', a
   const rotate = await query('groups/[group]/files/[file]/rotate');
   assert.match(rotate, /^send +patterns\.ts:3 GET fetch \[partial url\]$/m);
   assert.match(rotate, /^send +patterns\.ts:15 GET fetch \[partial url\]$/m);
-  assert.match(await query('groups/[group]/stores/[store]/files'), /^send +patterns\.ts:5 \? SWR key \[partial url\]$/m);
+  assert.match(await query('groups/[group]/stores/[store]/files'), /^send +patterns\.ts:5 \? SWR mutate \[partial url\]$/m);
   assert.match(await query('spanning/[...path]'), /^send +patterns\.ts:6 GET fetch \[partial url\]$/m);
   const staticRotate = await query('groups/static/files/[file]/rotate');
   assert.match(staticRotate, /^send +patterns\.ts:3 GET fetch \[partial url\]$/m);
