@@ -402,7 +402,7 @@ export class GraphVisualizer {
                 <dt>Domain</dt><dd id="details-domain"></dd>
             </dl>
             <button id="details-open" class="btn">Open file</button>
-            <p class="passport-counts"><span id="upstream"></span> upstream · <span id="downstream"></span> downstream</p>
+            <p class="passport-counts">Direct edges · <span id="upstream"></span> in · <span id="downstream"></span> out</p>
             <div id="hop-levels" class="segments" role="group" aria-label="Neighborhood depth" title="Click the active depth to return to the query answer">
                 <button class="btn" data-hops="1" aria-pressed="false">1 hop</button>
                 <button class="btn" data-hops="2" aria-pressed="false">2 hops</button>
