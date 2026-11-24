@@ -6,6 +6,7 @@ const path = require('node:path');
 const { test } = require('node:test');
 const { openMcp } = require('./mcp-helpers.cjs');
 const { mcpCommand } = require('./mcp-command.cjs');
+const { indexFile } = require('./workspace-cache.cjs');
 
 const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
@@ -126,6 +127,100 @@ test('CLI graph and query use the workspace cache', t => {
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'tsconfig.json']);
 });
 
+test('CLI and MCP index JSX with jsconfig paths, baseUrl, and inherited include', async t => {
+  const { root, env, run } = fixture(t);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  fs.unlinkSync(path.join(root, 'app/page.tsx'));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.mkdirSync(path.join(root, 'public'));
+  fs.writeFileSync(path.join(root, 'base.json'), '{"include":["app/**/*.jsx","src/**/*.jsx","public/explicit.jsx"]}');
+  fs.writeFileSync(path.join(root, 'jsconfig.json'), `{
+    // Neorion applies the JavaScript project defaults.
+    "compilerOptions": {"allowJs": false, "checkJs": true, "baseUrl": "./src", "paths": {"@ui/*": ["*"]}},
+    "extends": "./base.json",
+  }`);
+  fs.writeFileSync(path.join(root, 'app/page.jsx'),
+    'import { Card } from "@ui/card";\nimport { Label } from "label";\n' +
+    'export default function Page() { return <Card><Label /></Card>; }');
+  fs.writeFileSync(path.join(root, 'src/card.jsx'), 'export function Card({children}) { return <main>{children}</main>; }');
+  fs.writeFileSync(path.join(root, 'src/label.jsx'), 'export function Label() { return <span />; }');
+  fs.writeFileSync(path.join(root, 'public/explicit.jsx'), 'export const Explicit = 1;');
+  fs.writeFileSync(path.join(root, 'ignored.jsx'), 'export function Ignored() { return <aside />; }');
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  for (const target of ['Card', 'Label']) {
+    const result = await server.text('query', { kind: 'who_renders', target });
+    assert.match(result, /^\/  app\/page\.jsx:3/m);
+    assert.equal(run(['query', 'who_renders', target]).stdout.trimEnd(), result);
+  }
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /app router · 4 source files/);
+  assert.ok(fs.existsSync(/^Overview: (.+)$/m.exec(graph.stdout)[1]));
+  assert.ok(!fs.existsSync(path.join(root, 'tsconfig.json')));
+});
+
+test('CLI discovers configless Next.js projects and diagnoses missing projects', t => {
+  const { root, run } = fixture(t);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(root, 'app/page.jsx'));
+  const missing = run(['graph']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /no tsconfig\.json, jsconfig\.json, or package\.json with a next dependency/);
+  fs.writeFileSync(path.join(root, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
+  const dynamic = path.join(root, 'app', '[id]');
+  fs.mkdirSync(dynamic);
+  fs.writeFileSync(path.join(dynamic, 'page.jsx'), 'export default function Item() { return <article />; }');
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /app router · 2 source files/);
+  assert.match(fs.readFileSync(/^Overview: (.+)$/m.exec(graph.stdout)[1], 'utf8'), /\[id\].*page\.jsx=Item/);
+  const query = run(['query', 'who_renders', 'DashboardShell']);
+  assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /^\/  app\/page\.jsx:2/m);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json']);
+});
+
+test('CLI and MCP prefer a configured Next.js app to a workspace root with hoisted Next.js', async t => {
+  const { root, env, run } = fixture(t);
+  const web = path.join(root, 'apps/web');
+  fs.mkdirSync(web, { recursive: true });
+  fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
+  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"devDependencies":{"next":"15.0.0"},"workspaces":["apps/*","packages/*"]}');
+  fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages/ui/a.js'), 'export const Shared = 1;');
+
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /web · app router · 1 source files/);
+  const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  const result = await client.text('query', { kind: 'who_renders', target: 'DashboardShell' });
+  assert.match(result, /^Project: web$/m);
+  assert.match(result, /^\/  app\/page\.tsx:2/m);
+  assert.equal(run(['query', 'who_renders', 'DashboardShell']).stdout.trimEnd(), result);
+});
+
+for (const withConfig of [true, false]) {
+  test(`JavaScript ${withConfig ? 'jsconfig' : 'configless'} defaults exclude build outputs and public assets`, t => {
+    const { root, run } = fixture(t);
+    fs.unlinkSync(path.join(root, 'tsconfig.json'));
+    fs.renameSync(path.join(root, 'app/page.tsx'), path.join(root, 'app/page.jsx'));
+    fs.writeFileSync(path.join(root, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
+    if (withConfig) fs.writeFileSync(path.join(root, 'jsconfig.json'), '{"compilerOptions":{"paths":{"@app/*":["./app/*"]}}}');
+    for (const directory of ['out/_next/static', 'build', 'dist', 'coverage', 'vendor', 'public']) {
+      fs.mkdirSync(path.join(root, directory), { recursive: true });
+      fs.writeFileSync(path.join(root, directory, 'bundled.js'), 'export const BundledSymbol = 1;');
+    }
+
+    const graph = run(['graph']);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /app router · 1 source files/);
+    const query = run(['query', 'search', 'BundledSymbol']);
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /0 results/);
+  });
+}
+
 test('wrapper queries include only third-party components on the page chain by default', async t => {
   const { root, env, run } = fixture(t);
   fs.cpSync(path.join(__dirname, 'fixtures/external-wrappers'), root, { recursive: true });
@@ -145,6 +240,7 @@ test('wrapper queries include only third-party components on the page chain by d
   assert.match(hidden.stdout, /^1 app\/layout\.tsx:8 RootLayout, LocalContext, LocalConfig, theme\.Consumer providers:/m);
   assert.ok(hidden.stdout.split('\n').includes(providers));
   assert.doesNotMatch(hidden.stdout, /\b(?:Grid|Tabs|widgets\.Root)\b/);
+  assert.match(run(['--help']).stdout, /Wrapper flags:\n  --no-external hides third-party non-provider wrappers\. Providers stay visible\.\n  --include-external includes third-party wrappers \(default\)\./);
 
   const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
   const args = { kind: 'wrappers', target: '/' };
@@ -172,7 +268,7 @@ test('CLI MCP rebuilds an index without the wrapper revision', { timeout: 20_000
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
   const overview = /^Overview: (.+)$/m.exec(graph.stdout)[1];
-  const file = path.join(path.dirname(overview), '.neorion/index.v1.json');
+  const file = path.join(path.dirname(overview), indexFile);
   const index = readJson(file);
   const revision = index.wrapperRevision;
   assert.ok(Number.isInteger(revision));
@@ -188,6 +284,27 @@ test('CLI MCP rebuilds an index without the wrapper revision', { timeout: 20_000
   const result = await server.text('query', { kind: 'wrappers', target: '/' });
   assert.match(result, / providers: ShellProvider$/m);
   assert.equal(readJson(file).wrapperRevision, revision);
+});
+
+test('CLI query refreshes an older same-version index missing same-file use sites', t => {
+  const { root, run } = fixture(t);
+  fs.appendFileSync(path.join(root, 'app/page.tsx'), 'const Shell = DashboardShell;\n');
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  const overview = /^Overview: (.+)$/m.exec(graph.stdout)[1];
+  const file = path.join(path.dirname(overview), indexFile);
+  const index = readJson(file);
+  const revision = index.queryRevision;
+  assert.ok(Number.isInteger(revision));
+  index.queryRevision = revision - 1;
+  index.references = [];
+  for (const symbol of index.symbols) delete symbol.localUses;
+  fs.writeFileSync(file, JSON.stringify(index));
+
+  const result = run(['query', 'rename_impact', 'DashboardShell'], { NEORION_AUTOBUILD: '1' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^use  app\/page\.tsx:2,3$/m);
+  assert.equal(readJson(file).queryRevision, revision);
 });
 
 test('Codex setup installs the skill and prints config when Codex is unavailable', t => {
@@ -566,6 +683,16 @@ test('Both setup targets honor --no-hint and skip directories without project ma
   fs.writeFileSync(path.join(root, 'package.json'), '{}');
   assert.equal(run(['setup', 'claude'], env).status, 0);
   assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')));
+});
+
+test('Both setup targets write the project hint in a folder with only jsconfig.json', t => {
+  const { home, root, run } = fixture(t);
+  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(root, 'jsconfig.json'));
+  for (const [agent, file] of [['codex', 'AGENTS.md'], ['claude', 'CLAUDE.md']]) {
+    const setup = run(['setup', agent], { PATH: home, Path: home });
+    assert.equal(setup.status, 0, setup.stderr);
+    assert.match(fs.readFileSync(path.join(root, file), 'utf8'), /<!-- neorion:start -->/);
+  }
 });
 
 test('CLI indexes a new page and waits for the updated graph after an edit', t => {

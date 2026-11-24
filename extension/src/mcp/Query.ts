@@ -22,6 +22,10 @@ const byRoute = (a: Route, b: Route) => compare(a.url, b.url) || compare(a.file,
 const flagTest = (file: string) => testFile(file) ? ' [test]' : '';
 const generatedFile = (file: string) =>
   /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
+const apiEvidence = new Map([
+  ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
+  ['fetch', 'request'], ['axios', 'request']
+]);
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
   return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
@@ -134,7 +138,12 @@ export class QueryEngine {
       return compare(left?.file ?? '', right?.file ?? '') || compare(left?.name ?? '', right?.name ?? '') ||
         a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
     });
-    this.references = group(index.references, reference => reference[0]);
+    const references = index.references.map((reference): Reference => {
+      if (reference[1] !== null) return reference;
+      const [id, , ...site] = reference;
+      return [id, this.symbols.get(id)?.file ?? '', ...site];
+    });
+    this.references = group(references, reference => reference[0]);
     this.fetches = group(index.fetches, fetch => fetch.route);
     for (const route of index.routes) {
       if (route.kind !== 'page') continue;
@@ -372,6 +381,7 @@ export class QueryEngine {
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
     const label = `decl ${location(symbol.file, symbol.line)}`;
     const rows = [{ ...row(label + flagTest(symbol.file), symbol.file), pathEnd: label.length }];
+    const files = new Set([symbol.file]);
     const references = this.references.get(symbol.id) ?? [];
     const sourceLines = new Map<string, string[]>();
     const exportStar = (ref: Reference) => {
@@ -386,15 +396,20 @@ export class QueryEngine {
       }
       return /^\s*export\s+(?:type\s+)?\*\s+from\b/.test(sourceLines.get(ref[1])!.slice(ref[2] - 1, ref[2] + 3).join('\n'));
     };
-    const scoped = references.filter(ref => ref[1] !== symbol.file && (includeTests || !testFile(ref[1])));
+    const scoped = references.filter(ref => includeTests || !testFile(ref[1]));
     const passthrough = scoped.filter(exportStar);
     const uses = group(scoped.filter(ref => !exportStar(ref)), ref => ref[1]);
+    const localUses = (includeTests || !testFile(symbol.file)) ? symbol.localUses ?? [] : [];
+    if (localUses.length && !uses.has(symbol.file)) uses.set(symbol.file, []);
     for (const [file, refs] of [...uses].sort(([a], [b]) => Number(testFile(a)) - Number(testFile(b)) || compare(a, b))) {
       if (expired()) break;
-      const lines = [...new Set(refs.map(ref => ref[2]))].sort((a, b) => a - b);
-      const label = `use  ${file}:${lines.slice(0, 5).join(',')}`;
+      files.add(file);
+      const lines = new Set(refs.map(ref => ref[2]));
+      if (file === symbol.file) for (const line of localUses) lines.add(line);
+      const sortedLines = [...lines].sort((a, b) => a - b);
+      const label = `use  ${file}:${sortedLines.slice(0, 5).join(',')}`;
       const details = [...new Set(refs.flatMap(ref => ref[4] ?? (ref[3] === 're-export' ? 're-export' : [])))].sort();
-      rows.push({ ...row(label + (lines.length > 5 ? ` +${lines.length - 5}` : '') +
+      rows.push({ ...row(label + (lines.size > 5 ? ` +${lines.size - 5}` : '') +
         flagTest(file) + (details.length ? '  ' + details.join(', ') : ''), file), pathEnd: label.length });
     }
     const traps = (this.names.get(symbol.name) ?? []).filter(other => other.id !== symbol.id)
@@ -421,25 +436,28 @@ export class QueryEngine {
     for (const [, file, line] of passthrough.sort((a, b) => compare(a[1], b[1]) || a[2] - b[2])) {
       if (!uses.has(file)) notes.push(row(`# pass-through ${location(file, line)} (no edit)`, file));
     }
-    return { rows, count: `${rows.length} files`, notes };
+    return { rows, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}`, notes };
   }
 
   private consumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
     const rows: Row[] = [];
-    const senders = new Set<string>();
-    const generatedSenders = new Set<string>();
-    const calls = new Set<string>();
+    const evidence = new Map<string, number>();
+    const files = new Set<string>();
+    const generatedFiles = new Set<string>();
     let owners = new Set<number>();
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
       .sort((a, b) => Number(generatedFile(a.file)) - Number(generatedFile(b.file)) ||
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
     for (const fetch of fetches) {
       if (expired()) break;
-      senders.add(fetch.file);
+      files.add(fetch.file);
       const generated = generatedFile(fetch.file);
-      if (generated) generatedSenders.add(fetch.file);
+      if (generated) generatedFiles.add(fetch.file);
+      const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
+      const kind = apiEvidence.get(via) ?? 'other mention';
+      evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const label = `send   ${location(fetch.file, fetch.line)}`;
-      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${fetch.via}` +
+      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${via}` +
         (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
       rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
@@ -463,7 +481,7 @@ export class QueryEngine {
         const key = `${file}:${line} ${name}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        calls.add(file);
+        files.add(file);
         const label = `call${level}  ${location(file, line)}`;
         rows.push({ ...row(`${label} ${name}${flagTest(file)}`, file), pathEnd: label.length });
       }
@@ -477,11 +495,17 @@ export class QueryEngine {
       (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/') ||
         other.url.slice(0, other.url.lastIndexOf('/')) === route.url.slice(0, route.url.lastIndexOf('/'))))
       .map(other => other.url))].sort().slice(0, 5);
-    const senderCount = `${senders.size} sender${senders.size === 1 ? '' : 's'}` +
-      (generatedSenders.size ? ` (${generatedSenders.size} generated)` : '');
+    evidence.set('caller', seen.size);
+    const breakdown = ['read', 'mutate', 'fallback key', 'request', 'other mention', 'caller'].flatMap(kind => {
+      const total = evidence.get(kind);
+      return total ? [`${total} ${kind}${total === 1 ? '' : 's'}`] : [];
+    }).join(', ');
+    const count = `${rows.length} ${rows.length === 1 ? 'site' : 'sites'} in ${files.size} ${files.size === 1 ? 'file' : 'files'}` +
+      (breakdown ? `: ${breakdown}` : '') +
+      (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
-      count: rows.length ? `${senderCount}, ${calls.size} callers` : undefined,
+      count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
         fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
         fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
