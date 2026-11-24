@@ -17,6 +17,8 @@ const help = `Usage:
   neorion graph [dir]
   neorion query <kind> <target> [--limit n] [--root dir]
   neorion query wrappers <route> [--no-external | --include-external]
+  neorion query impact <symbol|file> [--depth n] [--include-tests]
+  neorion query callees <symbol> [--depth n] [--uses]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
@@ -73,7 +75,7 @@ function setupCodex(local: boolean, noHint: boolean) {
       : __filename;
     const cli = !local && isTemporaryCliInstall(__filename) ? `npx -y ${packageSpec}` :
       !local && runsCurrentEntry() ? 'neorion' : `node ${entry}`;
-    skippedHint = !writeHint('AGENTS.md', `For architecture questions (who renders/wraps/calls/imports X, rename impact), run \`${cli} query <kind> <target>\` in the shell first (kinds: who_renders, wrappers, rename_impact, api_consumers, search) and trust a result that ends with \`# complete\`. Only open files to confirm specifics, or when the result ends with \`# partial\`.`);
+    skippedHint = !writeHint('AGENTS.md', `For architecture questions (who renders/wraps/calls/imports X, rename impact), run \`${cli} query <kind> <target>\` in the shell first (kinds: ${kinds.join(', ')}) and trust a result that ends with \`# complete\`. Only open files to confirm specifics, or when the result ends with \`# partial\`.`);
   }
 
   const { command, args } = mcpCommand({ localEntry: __filename, detectCache: !local });
@@ -112,6 +114,9 @@ async function main([command, ...args]: string[]) {
     args,
     options: { root: { type: 'string' }, ...(query ? {
       limit: { type: 'string' as const },
+      depth: { type: 'string' as const },
+      'include-tests': { type: 'boolean' as const },
+      uses: { type: 'boolean' as const },
       'no-external': { type: 'boolean' as const },
       'include-external': { type: 'boolean' as const }
     } : {}) },
@@ -132,7 +137,12 @@ async function main([command, ...args]: string[]) {
   const engine = indexReader(project)();
   if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
   const limit = values.limit === undefined ? undefined : Number(values.limit);
-  console.log(projectText(project, engine.query(queryName, { kind, target, limit, ...externalOption })));
+  const graphOptions = {
+    ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),
+    ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
+    ...(values.uses === undefined ? {} : { uses: values.uses })
+  };
+  console.log(projectText(project, engine.query(queryName, { kind, target, limit, ...externalOption, ...graphOptions })));
 }
 
 if (isMainThread) {

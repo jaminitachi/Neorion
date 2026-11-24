@@ -538,7 +538,7 @@ export class ComponentAnalyzer {
               const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
               const line = node.getStartLineNumber();
               addEdge(owner, id, 'uses-action');
-              index?.useAction(id, relative, line);
+              index?.useAction(id, relative, line, node);
             }
           }
         }

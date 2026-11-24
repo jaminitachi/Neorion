@@ -9,6 +9,8 @@ Call `neorion_query` with `kind` and `target`:
 - `api_consumers` lists caller files and lines for an API route or server action. Pass an action name such as `signOut` or a qualified target such as `app/actions.ts#signOut`.
 - `rename_impact` with a symbol: which files must change if it is renamed.
 - `search` with a name or path: where it is defined or used.
+- `impact` with a symbol or file identifies upstream callers and affected routes. Set `depth` or `--depth` to extend the trace, and `includeTests` or `--include-tests` to include test callers.
+- `callees` with a symbol lists its calls, renders, fetches, and package calls. Set `depth` or `--depth` to follow up to three hops, and `uses` or `--uses` to include symbols used as values.
 
 The last line tells you how far to trust the result.
 - `# complete`: answer from the result. Open a file only to confirm a specific detail.
