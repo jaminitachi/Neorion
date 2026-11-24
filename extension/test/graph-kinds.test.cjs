@@ -146,3 +146,134 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   assert.equal(await mcp.text('query', { kind: 'path', target: '/items', to: 'createItem' }), directly);
   assert.equal((await mcp.call('query', { kind: 'path', target: '/items' })).isError, true);
 });
+
+function gitFixture(t) {
+  const project = fixture(t);
+  const { root, env } = project;
+  const file = name => path.join(root, name);
+  const edit = (name, transform) => fs.writeFileSync(file(name), transform(fs.readFileSync(file(name), 'utf8')));
+  const git = (...args) => {
+    const result = spawnSync('git', ['-c', 'user.name=Neorion Tests', '-c', 'user.email=tests@neorion.local', ...args], {
+      cwd: root, env: { ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull },
+      encoding: 'utf8', timeout: 10_000
+    });
+    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    return result.stdout;
+  };
+  for (const name of ['trpc.ts', 'trpc-module.d.ts', 'router.ts']) fs.unlinkSync(file('server/' + name));
+  git('init', '-q', '-b', 'main');
+  git('add', '-A');
+  git('commit', '-qm', 'Fixture');
+  const changes = (...flags) => project.run(['query', 'changes', ...flags]);
+  return { ...project, file, edit, git, changes };
+}
+
+test('changes maps code hunks, wrapper components, CSS, and config to affected routes', { timeout: 65_000 }, async t => {
+  const { root, env, file, edit, git, changes } = gitFixture(t);
+  const blank = changes();
+  assert.match(blank, /0 files, 0 symbols, 0 routes/);
+  assert.match(blank, /# complete: git diff HEAD/);
+
+  edit('server/actions.ts', text => text.replace('  const label', '  // Preserve the item label.\n  const label'));
+  const comments = changes();
+  assert.match(comments, /comment server\/actions\.ts:7 createItem \[comment only\]/);
+  assert.match(comments, /1 files, 0 symbols, 0 routes/);
+  assert.match(comments, /# complete: git diff HEAD/);
+  git('restore', 'server/actions.ts');
+
+  edit('lib/normalize.ts', text => text.replace('value.trim()', 'value.toLowerCase().trim()'));
+  const body = changes();
+  assert.match(body, /changed lib\/normalize\.ts:1-3 normalize \+1 -1/);
+  assert.match(body, /route api GET \/api\/items\/\[id\]/);
+  assert.doesNotMatch(body, /route api POST/);
+  assert.match(body, /route page \/items /);
+  assert.match(body, /route sitemap \/sitemap\.xml /);
+  assert.match(body, /route page \/other /);
+  git('restore', 'lib/normalize.ts');
+
+  edit('components/providers.tsx', text => text.replace('<section>', '<section data-theme="dark">'));
+  edit('app/(main)/layout.tsx', text => text.replace('<Sidebar />', '<Sidebar key="layout" />'));
+  const wrappers = changes();
+  assert.match(wrappers, /wraps components\/providers\.tsx#Providers : 2 routes/);
+  assert.match(wrappers, /wraps app\/\(main\)\/layout\.tsx : 2 routes/);
+  assert.match(wrappers, /route page \/items .* <- MainLayout d0, Providers d0/);
+  git('restore', '.');
+
+  edit('app/(main)/main.css', text => text.replace('black', 'white'));
+  const stylesheet = changes();
+  assert.match(stylesheet, /wraps app\/\(main\)\/layout\.tsx : 2 routes/);
+  assert.match(stylesheet, /file app\/\(main\)\/main\.css \[layout stylesheet\]/);
+  assert.match(stylesheet, /route page \/other/);
+  git('restore', '.');
+
+  edit('next.config.ts', text => text.replace('true', 'false'));
+  edit('middleware.ts', text => text.replace('/items/', '/other/'));
+  fs.mkdirSync(file('prisma'));
+  fs.writeFileSync(file('prisma/schema.prisma'), 'model User { id Int @id }\n');
+  const config = changes();
+  assert.match(config, /file next\.config\.ts \[config: all routes\]/);
+  assert.match(config, /middleware middleware\.ts.*matcher: '\/other\/:path\*'/);
+  assert.match(config, /file prisma\/schema\.prisma \[schema\]/);
+  const mcp = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.equal(await mcp.text('query', { kind: 'changes' }), config);
+  assert.equal((await mcp.call('query', { kind: 'changes', scope: 'staged', base: 'main' })).isError, true);
+  for (const base of ['--output=x', '-x', 'a b', '$(id)']) {
+    assert.equal((await mcp.call('query', { kind: 'changes', base })).isError, true);
+  }
+});
+
+test('changes supports Git scopes, renames, removed exports, and untracked components', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  edit('lib/normalize.ts', text => text.replace('value.trim()', 'value.toLowerCase()'));
+  git('add', 'lib/normalize.ts');
+  edit('components/providers.tsx', text => text.replace('<section>', '<section id="scope">'));
+  const staged = changes('--staged');
+  assert.match(staged, /changed lib\/normalize\.ts:1-3 normalize/);
+  assert.doesNotMatch(staged, /providers\.tsx/);
+  const worktree = changes('--unstaged');
+  assert.match(worktree, /changed components\/providers\.tsx:1 Providers/);
+  assert.doesNotMatch(worktree, /changed lib\/normalize\.ts/);
+
+  edit('lib/normalize.ts', text => text.replace('value.toLowerCase()', 'value.toUpperCase()'));
+  assert.match(changes('--staged'), /changed lib\/normalize\.ts:1-3 normalize.*\[worktree differs\]/);
+  git('switch', '-qc', 'topic');
+  git('add', 'lib/normalize.ts');
+  git('commit', '-qm', 'Normalize casing');
+  const base = changes('--base', 'main');
+  assert.match(base, /# changes merge-base main/);
+  assert.match(base, /changed lib\/normalize\.ts:1-3 normalize/);
+  assert.match(base, /changed components\/providers\.tsx:1 Providers/);
+  assert.match(changes('--base', 'missing-ref'), /# partial: invalid base ref missing-ref/);
+  git('restore', '.');
+
+  git('mv', 'lib/format-a.ts', 'lib/format with space.ts');
+  assert.match(changes(), /renamed lib\/format-a\.ts -> lib\/format with space\.ts/);
+  git('commit', '-qm', 'Rename definition');
+  edit('lib/format with space.ts', () => '');
+  fs.unlinkSync(file('lib/format-b.ts'));
+  const removed = changes();
+  assert.match(removed, /removed lib\/format with space\.ts formatDate/);
+  assert.match(removed, /deleted lib\/format-b\.ts/);
+  git('restore', '.');
+
+  fs.writeFileSync(file('components/added.tsx'), 'export function Added() { return <p>New</p>; }\n');
+  edit('app/(main)/other/page.tsx', text => "import { Added } from '../../../components/added';\n" + text.replace('<main />', '<Added />'));
+  const untracked = changes('--unstaged');
+  assert.match(untracked, /changed components\/added\.tsx:1 Added/);
+  assert.match(untracked, /route page \/other .*Added d1/);
+});
+
+test('changes returns a partial result outside Git and scopes a nested project', { timeout: 40_000 }, t => {
+  const plain = fixture(t);
+  assert.match(plain.run(['query', 'changes']), /# partial: not a git repository/);
+  const { root, file, git, run } = gitFixture(t);
+  fs.mkdirSync(file('nested'));
+  git('mv', 'tsconfig.json', 'app', 'components', 'lib', 'hooks', 'server', 'nested');
+  git('commit', '-qm', 'Nest the project');
+  fs.writeFileSync(file('outside.ts'), 'export const outside = true;\n');
+  fs.appendFileSync(file('nested/lib/normalize.ts'), '\nexport const fresh = 1;\n');
+  const nested = run(['query', 'changes', '--root', path.join(root, 'nested')]);
+  assert.match(nested, /# outside project: 1 files/);
+  assert.match(nested, /changed lib\/normalize\.ts:10 fresh/);
+  assert.doesNotMatch(nested, /outside\.ts/);
+});

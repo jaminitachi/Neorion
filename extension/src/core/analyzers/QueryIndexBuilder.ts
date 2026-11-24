@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
+import * as path from 'node:path';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
@@ -10,6 +11,23 @@ import { conditionalAt, declarationsOf, isPackageSpecifier } from './Architectur
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner'> & { route: string; node: Node };
+
+function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
+  if (specifier.startsWith('.')) return [path.resolve(path.dirname(source.getFilePath()), specifier)];
+  const options = source.getProject().getCompilerOptions();
+  const matches = Object.entries(options.paths ?? {}).flatMap(([pattern, targets]) => {
+    const star = pattern.indexOf('*');
+    if (star === -1) return pattern === specifier ? [{ targets, wildcard: '', rank: Infinity }] : [];
+    const prefix = pattern.slice(0, star);
+    const suffix = pattern.slice(star + 1);
+    if (specifier.length >= prefix.length + suffix.length && specifier.startsWith(prefix) && specifier.endsWith(suffix)) {
+      return [{ targets, wildcard: specifier.slice(prefix.length, specifier.length - suffix.length), rank: prefix.length }];
+    }
+    return [];
+  }).sort((a, b) => b.rank - a.rank);
+  const match = matches[0];
+  return match ? match.targets.map(target => path.resolve(root, options.baseUrl ?? '.', target.replace('*', match.wildcard))) : [];
+}
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
   return remaining > 0 && Node.isCallExpression(node) && node.getArguments().some(argument =>
@@ -80,7 +98,7 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string): QueryIndex {
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
       wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
@@ -88,7 +106,7 @@ export class QueryIndexBuilder {
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null),
       graphRevision: GRAPH_INDEX_REVISION, graphReferences: {}, graphNames: [], externalCalls: [], externalModules: [],
       unresolvedCalls: {}, fileSymbols: [],
-      defaultSymbols: Object.create(null), routeFiles: Object.create(null), trpcFiles: []
+      defaultSymbols: Object.create(null), routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
     };
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
@@ -101,7 +119,9 @@ export class QueryIndexBuilder {
       if (byNode.has(node)) return byNode.get(node)!;
       const id = index.symbols.length + 1;
       const file = relativePath(node.getSourceFile());
-      index.symbols.push({ id, file, name, kind, line: node.getStartLineNumber(), exported: exported.has(node) || undefined,
+      const line = node.getStartLineNumber();
+      const end = node.getEndLineNumber();
+      index.symbols.push({ id, file, name, kind, line, end: end > line ? end : undefined, exported: exported.has(node) || undefined,
         aliasOf: aliasOf ?? undefined, typeOnly: Node.isInterfaceDeclaration(node) || Node.isTypeAliasDeclaration(node) || undefined });
       byNode.set(node, id);
       names.add(name);
@@ -256,6 +276,19 @@ export class QueryIndexBuilder {
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
       const imports = file.getImportDeclarations();
+      const routeKind = index.routeFiles![relative]?.[0];
+      if (routeKind === 'layout' || routeKind === 'template' || routeKind === 'app-shell') {
+        for (const entry of imports) {
+          const specifier = entry.getModuleSpecifierValue();
+          if (!specifier.endsWith('.css') || entry.isTypeOnly()) continue;
+          for (const absolute of stylesheetPaths(file, root, specifier)) {
+            const style = path.relative(root, absolute).split(path.sep).join('/');
+            if (!style || style.startsWith('../') || path.isAbsolute(style)) continue;
+            const layouts = index.layoutStyles![style] ??= [];
+            if (!layouts.includes(relative)) layouts.push(relative);
+          }
+        }
+      }
       if (trpcSources.has(file) || trpcSources.size && imports.some(entry => trpcSources.has(entry.getModuleSpecifierSourceFile()!))) {
         index.trpcFiles!.push(relative);
       }

@@ -5,6 +5,8 @@ import { performance } from 'node:perf_hooks';
 import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
+import { unpackGraph } from './GraphStorage';
+import { changes, validBase, type ChangeScope } from './Changes';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
@@ -57,19 +59,23 @@ function validate(name: string, value: unknown) {
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
     api_consumers: ['callers', 'includeTests'], search: [filterKey],
-    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to']
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base']
   }[tool];
   for (const key of Object.keys(input)) {
-    if (![targetKey, 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
+    if (![...(tool === 'changes' ? [] : [targetKey]), 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
       throw new Error(`Unexpected argument ${oneLine(key).slice(0, 80)}.`);
     }
   }
   const target = typeof input[targetKey] === 'string' ? (input[targetKey] as string).trim() : '';
-  if ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300)) {
+  if (tool !== 'changes' && ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300))) {
     throw new Error('Invalid query target.');
   }
   const to = typeof input.to === 'string' ? input.to.trim() : '';
   if (tool === 'path' && (!to || [...to].length > 300)) throw new Error('Invalid argument to.');
+  const { scope = 'all', base } = input;
+  if (scope !== 'all' && scope !== 'staged' && scope !== 'unstaged') throw new Error('Invalid argument scope.');
+  if (base !== undefined && !validBase(base)) throw new Error('Invalid argument base.');
+  if (base !== undefined && scope !== 'all') throw new Error('Choose either base or staged/unstaged scope.');
   const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false, depth = tool === 'callees' ? 1 : 3, uses = false,
     includeExternal = true, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
   const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
@@ -83,7 +89,8 @@ function validate(name: string, value: unknown) {
   for (const key of ['direct', 'includeExternal', 'includeTests', 'uses']) {
     if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new Error(`Invalid argument ${key}.`);
   }
-  return { tool, target, to, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth, uses: !!uses };
+  return { tool, target, to, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth,
+    uses: !!uses, scope: scope as ChangeScope, base };
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -129,7 +136,7 @@ export class QueryEngine {
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
-  private dependencyGraph?: DependencyGraph;
+  private dependencyGraph?: DependencyGraph | null;
 
   constructor(root: string, private index: QueryIndex) {
     this.root = realpathSync(root);
@@ -562,7 +569,20 @@ export class QueryEngine {
   }
 
   private graph() {
-    return hasGraph(this.index) ? this.dependencyGraph ??= new DependencyGraph(this.index, this.symbols) : undefined;
+    if (this.dependencyGraph !== undefined) return this.dependencyGraph;
+    let index: QueryIndex;
+    try {
+      index = unpackGraph(this.index);
+    } catch {
+      this.dependencyGraph = null;
+      return null;
+    }
+    if (hasGraph(index)) {
+      const symbols = index === this.index ? this.symbols : new Map(index.symbols.map(symbol => [symbol.id, symbol]));
+      this.index = index;
+      this.dependencyGraph = new DependencyGraph(index, symbols);
+    } else this.dependencyGraph = null;
+    return this.dependencyGraph;
   }
 
   private matchGraphSymbol(target: string, graph: DependencyGraph) {
@@ -576,11 +596,14 @@ export class QueryEngine {
     return graph.actionMatches(name, file).sort(bySymbol);
   }
 
-  private graphQuery(args: ReturnType<typeof validate>, expired: () => boolean): { result: Result; ambiguous?: boolean } {
+  private graphQuery(args: ReturnType<typeof validate>, expired: () => boolean, deadline: number): { result: Result; ambiguous?: boolean } {
     const { tool, target, depth, includeTests, limit, uses } = args;
     const graph = this.graph();
     if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
     if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
+    if (tool === 'changes') return {
+      result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
+    };
     if (tool === 'impact' && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
       const file = path.posix.normalize(target);
@@ -628,14 +651,14 @@ export class QueryEngine {
   query(name: string, value: unknown) {
     const args = validate(name, value);
     const { tool, target } = args;
-    const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path';
+    const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
     const deadline = performance.now() + (configured > 0 ? Math.min(1850, configured) : 1850);
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
     if (graphKind) {
-      const answer = this.graphQuery(args, expired);
+      const answer = this.graphQuery(args, expired, deadline);
       result = answer.result;
       ambiguous = !!answer.ambiguous;
     } else if (tool === 'search') result = this.search(target, args.filter, expired);
@@ -740,14 +763,15 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
+        staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
+        omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),
         search: 'indexed name and path matches', impact: 'indexed dependency edges', callees: 'indexed outgoing edges',
-        path: 'indexed directed edges'
+        path: 'indexed directed edges', changes: 'git diff and indexed impacts'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),

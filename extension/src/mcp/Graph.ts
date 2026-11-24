@@ -5,7 +5,7 @@ type NodeId = number | string;
 type Label = 'call' | 'action' | 'render' | 'fetch' | 'dyn' | 'use';
 type Edge = {
   from: NodeId; to: NodeId; label: Label; file: string; line: number;
-  detail?: string; conditional?: boolean; partial?: boolean;
+  detail?: string; conditional?: boolean; partial?: boolean; url?: string; method?: string;
 };
 type PathEdge = Omit<Edge, 'label'> & { label: Label | 'wrap' };
 type Visit = { depth: number; edge?: Edge; conditional?: boolean; via?: string[] };
@@ -14,6 +14,7 @@ export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
   notes?: QueryRow[]; limit?: number; partial?: string; scope?: string;
 };
+export type ChangeOrigin = { file: string; name: string; ids: NodeId[] };
 export type Terminal = { kind: string; name: string; file: string; line?: number; route?: Route; pages?: Route[]; handler?: number };
 type Reached = { terminal: Terminal; visit: Visit; node: NodeId; metadata: boolean };
 const rank: Record<Label, number> = { call: 0, action: 1, render: 2, fetch: 3, dyn: 4, use: 5 };
@@ -44,7 +45,7 @@ export function hasGraph(index: QueryIndex) {
   return index.graphRevision === GRAPH_INDEX_REVISION && Array.isArray(index.externalCalls) &&
     Array.isArray(index.externalModules) && Array.isArray(index.graphNames) && Array.isArray(index.fileSymbols) &&
     Array.isArray(index.trpcFiles) && Array.isArray(index.serverActions) &&
-    !!(index.routeFiles && index.defaultSymbols && index.unresolvedCalls && index.graphReferences);
+    !!(index.routeFiles && index.defaultSymbols && index.unresolvedCalls && index.graphReferences && index.layoutStyles);
 }
 
 export class DependencyGraph {
@@ -157,7 +158,7 @@ export class DependencyGraph {
       const method = route.methods?.includes('ALL') ? 'ALL' : route.methods?.length ? fetch.method : '?';
       const to = this.apiId(route, method);
       add({ from: fetch.graphOwner ?? fetch.owner ?? this.fileNode(fetch.file), to, label: 'fetch', file: fetch.file,
-        line: fetch.line, detail: fetch.via, partial: fetch.partial || fetch.dynamic });
+        line: fetch.line, detail: fetch.via, url: route.url, method: fetch.method, partial: fetch.partial || fetch.dynamic });
     }
     for (const call of index.externalCalls!) append(this.external, call[0], call);
     for (const entries of this.incoming.values()) entries.sort(edgeOrder);
@@ -198,9 +199,12 @@ export class DependencyGraph {
     return [...new Set(matches.map(({ id }) => id))].map(id => this.symbols.get(id)!);
   }
 
+  moduleSeeds(file: string): NodeId[] {
+    return this.fileIds.has(file) || this.routesByFile.has(file) ? [this.fileNode(file)] : [];
+  }
+
   fileSeeds(file: string): NodeId[] {
-    if (!this.index.files[file] && !this.routesByFile.has(file)) return [];
-    return [this.fileNode(file), ...(this.symbolsByFile.get(file) ?? []).filter(symbol => !symbol.typeOnly).map(symbol => symbol.id)];
+    return [...this.moduleSeeds(file), ...(this.symbolsByFile.get(file) ?? []).filter(symbol => !symbol.typeOnly).map(symbol => symbol.id)];
   }
 
   private terminals(id: NodeId): Terminal[] {
@@ -315,6 +319,7 @@ export class DependencyGraph {
     const directPages = reached.filter(entry => entry.terminal.kind === 'page');
     const groupPages = directPages.length > 15 && limit <= 40;
     const groups = new Map<string, Route[]>();
+    const listed = new Set(directPages.map(entry => entry.terminal.route?.id));
     for (const { terminal, visit, metadata } of reached) {
       const { kind, name, file, line, pages } = terminal;
       const suffix = `  d${visit.depth}` + (visit.depth > 1 && visit.via?.length ? ` via ${visit.via.slice(0, visit.depth - 1).join(' > ')}` : '') +
@@ -326,7 +331,12 @@ export class DependencyGraph {
         const layout = layouts.length ? this.file(layouts[layouts.length - 1]) : file.slice(0, file.lastIndexOf('/')) || '.';
         append(groups, layout, terminal.route);
       } else if (pages) {
-        rows.push(graphRow(`${kind} ${file}  wraps ${pages.length} ${kind === 'app-shell' ? 'pages ' : ''}routes${this.pageList(pages, limit)}${suffix}`, file));
+        rows.push(graphRow(`${kind} ${file}  wraps ${pages.length} ${kind === 'app-shell' ? 'pages ' : ''}routes${this.pageList(pages)}${suffix}`, file));
+        if (limit > 40 && pages.length > 5) for (const page of pages) {
+          if (listed.has(page.id)) continue;
+          listed.add(page.id);
+          rows.push(graphRow(`page ${page.url}  ${location(page.file, page.line)}  d${visit.depth} via ${file}`, page.file, file));
+        }
       } else if (kind === 'middleware') {
         rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}${suffix}`, file));
       } else {
@@ -336,13 +346,13 @@ export class DependencyGraph {
       }
     }
     for (const [layout, routes] of groups) {
-      rows.push(graphRow(`group ${layout} : ${routes.length} routes${this.pageList(routes, limit)}`, layout));
+      rows.push(graphRow(`group ${layout} : ${routes.length} routes${this.pageList(routes)}`, layout));
     }
     return rows;
   }
 
-  private pageList(pages: Route[], limit: number) {
-    const count = limit > 40 ? pages.length : pages.length <= 5 ? pages.length : 3;
+  private pageList(pages: Route[]) {
+    const count = pages.length <= 5 ? pages.length : 3;
     if (!count) return '';
     const urls = [...pages].sort((a, b) => compare(a.url, b.url)).slice(0, count).map(page => page.url);
     return ` (${urls.join(', ')}${pages.length > count ? ', +' + (pages.length - count) : ''})`;
@@ -405,6 +415,117 @@ export class DependencyGraph {
       (trace.hubs.length ? ', hub collapsed' : ''), partial: trace.partial, scope: 'indexed call, render, action, use, dyn, fetch edges' };
   }
 
+  changeRoutes(origins: ChangeOrigin[], expired: () => boolean) {
+    type Impact = { origin: ChangeOrigin; depth: number; fetch?: string };
+    type State = { id: NodeId; origin: number; depth: number; fetch?: string };
+    const routes = new Map<string, { terminal: Terminal; origins: Impact[] }>();
+    const wrappers = new Map<string, { name: string; file: string; pages: Route[] }>();
+    const reached = new Map<NodeId, Set<number>>();
+    const pending: State[] = [];
+    const skipped: Set<NodeId>[] = [];
+    const cached = new Map<NodeId, Edge[]>();
+    let nodeLimited = false;
+    let uncertain = false;
+    let trpc: SymbolEntry | undefined;
+    const visit = (state: State) => {
+      const seen = reached.get(state.id);
+      if (seen?.has(state.origin)) return;
+      if ((!seen && reached.size >= nodeBudget) || pending.length >= nodeBudget * 4) {
+        nodeLimited = true;
+        return;
+      }
+      if (seen) seen.add(state.origin);
+      else reached.set(state.id, new Set([state.origin]));
+      pending.push(state);
+    };
+    const remember = (terminal: Terminal, impact: Impact) => {
+      if (terminal.kind === 'action') return;
+      const key = terminalKey(terminal);
+      const result = routes.get(key);
+      if (result) {
+        const previous = result.origins.findIndex(item => item.origin === impact.origin);
+        if (previous < 0) result.origins.push(impact);
+        else if (result.origins[previous].depth > impact.depth) result.origins[previous] = impact;
+      } else routes.set(key, { terminal, origins: [impact] });
+    };
+    const pageTerminal = (page: Route) => ({ kind: 'page', name: page.url, file: page.file, line: page.line, route: page });
+    const wrap = (name: string, file: string, pages: Route[]) => {
+      wrappers.set(name, { name, file, pages });
+    };
+    origins.forEach((origin, i) => {
+      for (const id of origin.ids) visit({ id, origin: i, depth: 0 });
+      for (const terminal of this.routesByFile.get(origin.file) ?? []) {
+        if (terminal.pages) wrap(origin.file, origin.file, terminal.pages);
+      }
+    });
+    const providerOrigins = new Map<string, ChangeOrigin>();
+    for (const origin of origins) for (const id of origin.ids) {
+      if (typeof id !== 'number' || this.symbols.get(id)?.kind !== 'component') continue;
+      const file = this.file(id);
+      const key = `${file}#${this.name(id)}`;
+      providerOrigins.set(key, origin);
+    }
+    if (providerOrigins.size) {
+      const routesByProvider = new Map<string, Route[]>();
+      for (const route of this.index.routes) {
+        if (expired()) break;
+        if (route.kind !== 'page') continue;
+        const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
+        const hits = new Set<string>();
+        for (const chain of chains) for (const wrapper of this.index.wrapChains[chain] ?? []) {
+          const key = `${wrapper.definitionFile ?? wrapper.file}#${wrapper.symbol}`;
+          if (providerOrigins.has(key)) hits.add(key);
+        }
+        for (const key of hits) append(routesByProvider, key, route);
+      }
+      for (const [name, pages] of routesByProvider) {
+        const origin = providerOrigins.get(name)!;
+        wrap(name, origin.file, pages);
+        for (const page of pages) remember(pageTerminal(page), { origin, depth: 0 });
+      }
+    }
+    for (let i = 0; i < pending.length && !expired(); i++) {
+      const { id, origin, depth, fetch } = pending[i];
+      const source = origins[origin];
+      const impact = { origin: source, depth, fetch };
+      const terminals = this.terminals(id);
+      for (const terminal of terminals) {
+        if (terminal.pages) for (const page of terminal.pages) remember(pageTerminal(page), impact);
+        else remember(terminal, impact);
+        if (terminal.kind === 'api') uncertain ||= (this.fetches.get(terminal.file) ?? []).some(entry => entry.dynamic || entry.partial);
+      }
+      let edges = cached.get(id);
+      if (!edges) {
+        edges = this.predecessors(id).filter(edge => edge.from !== id && !isTestFile(edge.file));
+        cached.set(id, edges);
+      }
+      let expands = false;
+      for (const edge of edges) {
+        if (reached.get(edge.from)?.has(origin)) continue;
+        if (depth >= 3 && edge.label !== 'render') {
+          if (depth === 3) (skipped[origin] ??= new Set()).add(edge.from);
+          continue;
+        }
+        expands = true;
+        const via = edge.label === 'fetch' ? `${edge.url ?? this.name(id)} (${edge.detail})` : fetch;
+        visit({ id: edge.from, origin, depth: depth + 1, fetch: via });
+      }
+      if (!expands && typeof id === 'number' && this.trpc.has(this.file(id))) trpc ??= this.symbols.get(id);
+    }
+    const unexplored = new Set<NodeId>();
+    skipped.forEach((ids, origin) => {
+      for (const id of ids) if (!reached.get(id)?.has(origin)) unexplored.add(id);
+    });
+    const ordered = [...routes.values()];
+    for (const result of ordered) result.origins.sort((a, b) => a.depth - b.depth ||
+      compare(a.origin.file, b.origin.file) || compare(a.origin.name, b.origin.name));
+    ordered.sort((a, b) => a.origins[0].depth - b.origins[0].depth ||
+      compare(a.terminal.file, b.terminal.file) || compare(a.terminal.name, b.terminal.name));
+    const partial = nodeLimited ? 'node budget' : unexplored.size ? `depth limit (${unexplored.size} unexplored callers at d=3)` :
+      trpc ? `tRPC client proxy not traced (procedure ${location(trpc.file, trpc.line)})` : uncertain ? 'dynamic URL fetch' : undefined;
+    return { routes: ordered, wrappers: [...wrappers.values()].sort((a, b) => compare(a.name, b.name)), partial };
+  }
+
   routeStarts(route: Route): NodeId[] {
     return [...new Set([
       route.component ?? this.defaultSymbol(route.file)?.id ?? this.fileNode(route.file),
@@ -429,9 +550,10 @@ export class DependencyGraph {
     const wraps: PathEdge[] = [];
     if (route) for (const [file, terminals] of this.routesByFile) {
       if (!terminals.some(terminal => terminal.pages?.includes(route))) continue;
-      const id = this.index.routeFiles![file]?.[3] ?? this.defaultSymbol(file)?.id ?? this.fileNode(file);
-      const line = typeof id === 'number' ? this.symbols.get(id)?.line ?? 1 : 1;
-      wraps.push({ from: starts[0], to: id, label: 'wrap', file, line });
+      const fileId = this.fileNode(file);
+      const component = this.index.routeFiles![file]?.[3] ?? this.defaultSymbol(file)?.id;
+      if (component !== undefined) wraps.push({ from: starts[0], to: component, label: 'wrap', file, line: this.symbols.get(component)?.line ?? 1 });
+      if (this.outgoing.has(fileId)) wraps.push({ from: starts[0], to: fileId, label: 'wrap', file, line: 1 });
     }
     const stepOrder = (a: Step, b: Step) => a.weak - b.weak ||
       (a.edge && b.edge ? pathEdgeOrder(a.edge, b.edge) : 0) || compare(this.file(a.id), this.file(b.id)) ||
@@ -506,7 +628,7 @@ export class DependencyGraph {
       const edge = step.edge;
       const file = this.file(step.id);
       const symbol = typeof step.id === 'number' ? this.symbols.get(step.id) : undefined;
-      const name = edge.label === 'fetch' ? this.name(edge.to) + (symbol ? ' (' + symbol.name + ')' : '') :
+      const name = edge.label === 'fetch' ? `${edge.method} ${edge.url}` + (symbol ? ' (' + symbol.name + ')' : '') :
         this.name(step.id) + (edge.detail?.startsWith('.') ? edge.detail : '');
       rows.unshift(graphRow(`${step.depth} ${edge.label} ${location(edge.file, edge.line)} ${name}` +
         (step === goal && file !== edge.file ? ' -> ' + location(file, symbol?.line) : '') +
@@ -560,14 +682,19 @@ export class DependencyGraph {
         rows.push(graphRow(`d${d} ${neighbours.size} callees in ${files.length} files (top: ${files.slice(0, 3).join(', ')})${parent}`, ...files.slice(0, 3)));
         collapsed = true;
       }
+      let self = false;
       for (const edge of edges) {
         if (expired()) break;
+        if (edge.from === edge.to) {
+          if (self) continue;
+          self = true;
+        }
         if (edge.label === 'render') renders++;
         else if (edge.label === 'fetch') fetches++;
         else if (edge.label === 'call' || edge.label === 'action') project++;
         const target = this.file(edge.to);
         const name = this.name(edge.to);
-        const label = edge.detail?.startsWith('.') ? name + edge.detail : name;
+        const label = edge.label === 'fetch' ? `${edge.method} ${edge.url}` : edge.detail?.startsWith('.') ? name + edge.detail : name;
         const site = (d === 1 && edge.file === file ? '' : edge.file) + ':' + edge.line;
         const flags = (edge.label === 'action' ? ' [action]' : '') + (edge.conditional ? ' [cond]' : '') +
           (edge.partial ? ' [partial url]' : '') + (edge.from === edge.to ? ' [self]' : '') +

@@ -574,6 +574,6 @@ export class ComponentAnalyzer {
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
       collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks };
   }
 }

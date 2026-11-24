@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 1;
+export const GRAPH_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -15,6 +15,7 @@ export interface SymbolEntry {
   name: string;
   kind: 'component' | 'hook' | 'function' | 'constant';
   line: number;
+  end?: number;
   exported?: boolean;
   aliasOf?: string | null;
   localUses?: number[];
@@ -88,6 +89,7 @@ export interface QueryIndex {
   serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;
   graphRevision?: number;
+  packedGraph?: string;
   graphReferences?: Record<number, GraphReference[]>;
   graphNames?: string[];
   externalCalls?: ExternalCall[];
@@ -96,5 +98,6 @@ export interface QueryIndex {
   fileSymbols?: number[]; // In the same order as the keys of files.
   defaultSymbols?: Record<number, number>;
   routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number]>;
+  layoutStyles?: Record<string, string[]>;
   trpcFiles?: string[];
 }
