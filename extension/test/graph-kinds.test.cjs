@@ -130,6 +130,9 @@ test('graph callbacks give the same results with and without their kind filters'
     }
   });
   fs.writeFileSync(path.join(root, '__tests__/kind-walk.test.tsx'), `
+    import { html } from 'lit';
+    import * as UI from '../components/providers';
+    import * as helpers from '../lib/normalize';
     import { normalize } from '../lib/normalize';
 
     /** The normalize helper trims labels. */
@@ -138,8 +141,26 @@ test('graph callbacks give the same results with and without their kind filters'
       'use server';
       return normalize(label);
     }
+    export const act = async (id: string) => {
+      'use server';
+      return fetch('/api/items/' + id);
+    };
+
+    // A standalone URL exercises the route-literal scan outside a fetch call.
+    export const sampleItemUrl = '/api/items/' + 'example';
+
+    function ActionButton({ actions }: { actions: { act: typeof act } }) {
+      return <button onClick={() => actions.act('test')}>Fetch item</button>;
+    }
     export function InlineButton() {
-      return <button onClick={() => InlineAction('test')}>Send</button>;
+      const trim = helpers['normalize'];
+      return <UI.Providers>
+        <button onClick={() => InlineAction(trim('test'))}>Send</button>
+        <ActionButton actions={{ act }} />
+      </UI.Providers>;
+    }
+    export function renderPreview() {
+      return html\`<span>Preview</span>\`;
     }
   `);
   const project = new Project({ tsConfigFilePath: path.join(root, 'tsconfig.json') });
