@@ -462,8 +462,6 @@ export class GraphVisualizer {
         function setPhysicsEnabled(enabled) {
             physicsEnabled = enabled;
             network.setOptions({ physics: { enabled: physicsEnabled } });
-            if (!physicsEnabled) network.storePositions();
-            
             const btn = document.getElementById('btn-physics');
             btn.textContent = physicsEnabled ? 'Pause layout' : 'Layout paused (click to resume)';
             btn.title = physicsEnabled ? 'Click to pause layout' : 'Click to re-run layout';
@@ -787,12 +785,24 @@ export class GraphVisualizer {
                 let rowNodes = new Set();
                 let rowHeading;
                 const unpinned = new Map();
+                function placeNodes(positions) {
+                    // Keep coordinates on the live vis nodes, including cluster bubbles.
+                    // moveNode queues a simulation start and redraw for every coordinate pair.
+                    for (const [id, { x, y }] of positions) {
+                        const node = network.body.nodes[id];
+                        if (!node) continue;
+                        node.x = x;
+                        node.y = y;
+                    }
+                }
                 function restorePositions(keepInRow = new Set()) {
+                    const positions = new Map();
                     for (const [id, point] of unpinned) {
                         if (keepInRow.has(id)) continue;
-                        if (network.body.nodes[id]) network.moveNode(id, point.x, point.y);
+                        positions.set(id, point);
                         unpinned.delete(id);
                     }
+                    placeNodes(positions);
                 }
                 let fitScale = 1;
                 function visibleComponents() {
@@ -852,11 +862,13 @@ export class GraphVisualizer {
                             column.push({ id, y: network.getPosition(id).y });
                             columns.set(level, column);
                         }
+                        const positions = [];
                         for (const [level, column] of columns) {
                             column.sort((a, b) => a.y - b.y).forEach(({ id }, index) => {
-                                network.moveNode(id, level * 410, (index - (column.length - 1) / 2) * 52);
+                                positions.push([id, { x: level * 410, y: (index - (column.length - 1) / 2) * 52 }]);
                             });
                         }
+                        placeNodes(positions);
                     }
                     network.setSize(container.clientWidth + 'px', container.clientHeight + 'px');
                     network.redraw();
@@ -878,6 +890,7 @@ export class GraphVisualizer {
                         offset: { x: 0, y: -rowHeight / 2 }
                     });
                     if (rowNodes.size) {
+                        const positions = [];
                         let slot = 0;
                         const totalSlots = rowNodes.size + (small.length - 1) * 0.35;
                         const spacing = Math.max(1, width - padding * 2) / totalSlots;
@@ -888,11 +901,12 @@ export class GraphVisualizer {
                                     x: padding + (slot + 0.5) * spacing,
                                     y: height - 35
                                 });
-                                network.moveNode(id, point.x, point.y);
+                                positions.push([id, point]);
                                 slot++;
                             }
                             slot += 0.35;
                         }
+                        placeNodes(positions);
                         rowHeading = network.DOMtoCanvas({ x: padding, y: height - 80 });
                     }
                     network.redraw();
@@ -1218,7 +1232,7 @@ export class GraphVisualizer {
                     domainFocus = undefined;
                     visibleDomains = domains;
                     collapseGroup(cluster);
-                    network.moveNode(cluster.id, position.x, position.y);
+                    placeNodes([[cluster.id, position]]);
                     applyFilters();
                 }
 
@@ -1431,9 +1445,7 @@ export class GraphVisualizer {
                         physics: { enabled: false }
                     });
                     if (!toRoutes) {
-                        for (const [id, point] of Object.entries(graphPositions)) {
-                            if (network.body.nodes[id]) network.moveNode(id, point.x, point.y);
-                        }
+                        placeNodes(Object.entries(graphPositions));
                         setPhysicsEnabled(resumeGraphPhysics);
                     }
                     graphButton.setAttribute('aria-pressed', String(!toRoutes));
