@@ -309,8 +309,14 @@ test('helper-wrapped server actions appear in the graph and resolve to their run
   assert.match(await query('literal'), /^# partial: target unresolved$/m);
 
   const files = ['app/actions.ts', 'lib/other-actions.ts', 'app/page.tsx', 'app/panels.tsx', 'lib/call.ts', 'lib/reex.ts'];
-  const reexports = () => JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8')).serverActions
-    .filter(action => action.name.startsWith('reexported')).sort((a, b) => a.name.localeCompare(b.name));
+  const reexports = () => {
+    const { serverActions, symbols } = JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8'));
+    const owners = new Map(symbols.map(({ id, file, name, line }) => [id, `${file}:${line}#${name}`]));
+    return serverActions.filter(action => action.name.startsWith('reexported')).sort((a, b) => a.name.localeCompare(b.name))
+      .map(({ symbol, callers, ...action }) => ({
+        ...action, symbol: owners.get(symbol), callers: callers.map(([file, line, owner]) => [file, line, owners.get(owner)])
+      }));
+  };
   const expected = reexports();
   for (const order of [files, [...files].reverse()]) {
     write(root, 'tsconfig.json', JSON.stringify({ compilerOptions: { jsx: 'preserve' }, files: order }));
@@ -340,7 +346,7 @@ test('star re-exported actions get a unique ID when the base ID is already regis
   // Pass the barrel twice to exercise a collision at the star re-export registration.
   const { actions, index } = new ComponentAnalyzer(root).analyze([barrel, ...files], [], true);
   assert.deepEqual(actions, ['action:actions.ts#run', 'action:actions.ts#run~2']);
-  assert.deepEqual(index.serverActions, [
+  assert.deepEqual(index.serverActions.map(({ symbol, ...action }) => action), [
     { name: 'run', file: 'actions.ts', line: 2, callers: [] },
     { name: 'run', file: 'actions.ts', line: 2, callers: [['caller.ts', 2]] }
   ]);

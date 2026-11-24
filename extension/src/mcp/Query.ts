@@ -4,11 +4,12 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
+import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
+import { unpackGraph } from './GraphStorage';
+import { changes, validBase, type ChangeScope } from './Changes';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
-type Row = { text: string; files: string[]; pathEnd?: number };
-type Result = { rows: Row[]; title?: string; count?: string; targets?: string[]; notes?: Row[]; limit?: number; partial?: string; scope?: string };
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const actionShortName = (name: string) => name.slice(name.lastIndexOf('.') + 1);
 const actionLocation = (action: ServerAction) => `${location(action.file, action.line)}#${action.name}`;
@@ -57,30 +58,39 @@ function validate(name: string, value: unknown) {
   const filterKey = legacy ? 'kind' : 'filter';
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
-    api_consumers: ['callers', 'includeTests'], search: [filterKey]
+    api_consumers: ['callers', 'includeTests'], search: [filterKey],
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base']
   }[tool];
   for (const key of Object.keys(input)) {
-    if (![targetKey, 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
+    if (![...(tool === 'changes' ? [] : [targetKey]), 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
       throw new Error(`Unexpected argument ${oneLine(key).slice(0, 80)}.`);
     }
   }
   const target = typeof input[targetKey] === 'string' ? (input[targetKey] as string).trim() : '';
-  if ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300)) {
+  if (tool !== 'changes' && ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300))) {
     throw new Error('Invalid query target.');
   }
-  const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false,
+  const to = typeof input.to === 'string' ? input.to.trim() : '';
+  if (tool === 'path' && (!to || [...to].length > 300)) throw new Error('Invalid argument to.');
+  const { scope = 'all', base } = input;
+  if (scope !== 'all' && scope !== 'staged' && scope !== 'unstaged') throw new Error('Invalid argument scope.');
+  if (base !== undefined && !validBase(base)) throw new Error('Invalid argument base.');
+  if (base !== undefined && scope !== 'all') throw new Error('Choose either base or staged/unstaged scope.');
+  const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false, depth = tool === 'callees' ? 1 : 3, uses = false,
     includeExternal = true, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
   const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
   const integerInRange = (value: unknown, min: number, max: number): value is number =>
     typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
   if (!integerInRange(limit, 1, tool === 'search' ? 50 : 100)) throw new Error('Invalid argument limit.');
   if (!integerInRange(callers, 0, 2)) throw new Error('Invalid argument callers.');
+  if (!integerInRange(depth, 1, tool === 'callees' ? 3 : 6)) throw new Error('Invalid argument depth.');
   if (tool === 'search' && ((rawFilter === null) || typeof filter !== 'string' ||
       !tools[0].inputSchema.properties.filter.enum.includes(filter))) throw new Error('Invalid search filter.');
-  for (const key of ['direct', 'includeExternal', 'includeTests']) {
+  for (const key of ['direct', 'includeExternal', 'includeTests', 'uses']) {
     if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new Error(`Invalid argument ${key}.`);
   }
-  return { tool, target, limit, callers, direct, includeExternal, includeTests, filter: String(filter) };
+  return { tool, target, to, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth,
+    uses: !!uses, scope: scope as ChangeScope, base };
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -126,6 +136,7 @@ export class QueryEngine {
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
+  private dependencyGraph?: DependencyGraph | null;
 
   constructor(root: string, private index: QueryIndex) {
     this.root = realpathSync(root);
@@ -202,6 +213,29 @@ export class QueryEngine {
       (route.url === (text.replace(/\/$/, '') || '/') || route.file === path.posix.normalize(text))).sort(byRoute);
   }
 
+  private matchPathRoute(text: string, kind: 'page' | 'api') {
+    const exact = this.matchRoute(text, kind);
+    if (exact.length || !text.startsWith('/')) return exact;
+    const segments = text.replace(/\/$/, '').split('/').slice(1);
+    let best = '';
+    let matches: Route[] = [];
+    for (const route of this.index.routes) {
+      if (route.kind !== kind) continue;
+      const pattern = route.url.split('/').slice(1);
+      const compatible = pattern.every((part, i) => part.startsWith('[[...') ||
+        (part.startsWith('[') ? !!segments[i] : part === segments[i])) &&
+        (pattern.length === segments.length || pattern.at(-1)?.includes('...'));
+      if (!compatible) continue;
+      const rank = pattern.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
+        part.startsWith('[') ? '2' : '3').join('');
+      if (rank < best) continue;
+      if (rank > best) matches = [];
+      best = rank;
+      matches.push(route);
+    }
+    return matches.sort(byRoute);
+  }
+
   private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
     const needle = text.toLowerCase().slice(0, 100);
     const candidates: { name: string; label: string; file: string; aliases?: string[] }[] = kind === 'page' || kind === 'api'
@@ -235,7 +269,7 @@ export class QueryEngine {
 
   private search(text: string, kind: string, expired: () => boolean): Result {
     const needle = text.toLowerCase();
-    const hits: { row: Row; score: number; references: number; file: string }[] = [];
+    const hits: { row: Row; score: number; references: number; file: string; symbol?: SymbolEntry }[] = [];
     const match = (text: string) => {
       text = text.toLowerCase();
       return text === needle ? 0 : text.startsWith(needle) ? 1 : text.includes(needle) ? 2 : 3;
@@ -248,7 +282,7 @@ export class QueryEngine {
       const renders = new Set(this.incoming.get(symbol.id)?.map(edge => edge[0])).size;
       const references = this.references.get(symbol.id)?.length ?? 0;
       const label = `${symbol.kind} ${declaration(symbol)}`;
-      hits.push({ score, references, file: symbol.file, row: {
+      hits.push({ score, references, file: symbol.file, symbol, row: {
         ...row(label + (symbol.aliasOf ? ` alias of ${symbol.aliasOf}` : '') +
           (renders ? `  rendered by ${renders} components` : '') + flagTest(symbol.file), symbol.file),
         pathEnd: label.length
@@ -266,9 +300,12 @@ export class QueryEngine {
     }
     hits.sort((a, b) => a.score - b.score || b.references - a.references ||
       compare(a.file, b.file) || compare(a.row.text, b.row.text));
+    const single = hits.length === 1 ? hits[0].symbol : undefined;
+    const neighbors = !expired() && single?.name.toLowerCase() === needle ? this.graph()?.neighbors(single.id, expired) : undefined;
     return {
       title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row),
-      notes: hits.length || expired() ? [] : this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired)
+      notes: neighbors ? [neighbors] : hits.length || expired() ? [] :
+        this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired)
     };
   }
 
@@ -531,14 +568,100 @@ export class QueryEngine {
     };
   }
 
+  private graph() {
+    if (this.dependencyGraph !== undefined) return this.dependencyGraph;
+    let index: QueryIndex;
+    try {
+      index = unpackGraph(this.index);
+    } catch {
+      this.dependencyGraph = null;
+      return null;
+    }
+    if (hasGraph(index)) {
+      const symbols = index === this.index ? this.symbols : new Map(index.symbols.map(symbol => [symbol.id, symbol]));
+      this.index = index;
+      this.dependencyGraph = new DependencyGraph(index, symbols);
+    } else this.dependencyGraph = null;
+    return this.dependencyGraph;
+  }
+
+  private matchGraphSymbol(target: string, graph: DependencyGraph) {
+    const matches = this.matchSymbol(target, false);
+    if (matches.length) return matches;
+    const { name, file } = this.symbolTarget(target);
+    if (name === 'default' && file) {
+      const symbol = graph.defaultSymbol(file);
+      if (symbol) return [symbol];
+    }
+    return graph.actionMatches(name, file).sort(bySymbol);
+  }
+
+  private graphQuery(args: ReturnType<typeof validate>, expired: () => boolean, deadline: number): { result: Result; ambiguous?: boolean } {
+    const { tool, target, depth, includeTests, limit, uses } = args;
+    const graph = this.graph();
+    if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
+    if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
+    if (tool === 'changes') return {
+      result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
+    };
+    if (tool === 'impact' && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
+      this.checkPath(target);
+      const file = path.posix.normalize(target);
+      const seeds = graph.fileSeeds(file);
+      if (seeds.length) return { result: { ...graph.impact(seeds, depth, !!includeTests, limit, expired), targets: [file] } };
+      return { result: { rows: [], notes: this.suggestions(path.posix.basename(file).split('.')[0], undefined, expired) } };
+    }
+    const matches = this.matchGraphSymbol(target, graph);
+    if (matches.length > 1) return { ambiguous: true, result: { limit: 10,
+      rows: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)) } };
+    const [symbol] = matches;
+    if (!symbol) return { result: { rows: [], notes: this.suggestions(target.split('#').pop()!, undefined, expired) } };
+    const result = tool === 'impact' ? graph.impact([symbol.id], depth, !!includeTests, limit, expired) : graph.callees(symbol.id, depth, uses, expired);
+    return { result: { ...result, title: `${symbol.file}#${symbol.name}`, targets: [symbol.file] } };
+  }
+
+  private pathQuery(from: string, to: string, graph: DependencyGraph, expired: () => boolean) {
+    const routeTarget = (text: string) => text.startsWith('/') || (!text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
+    const resolve = (target: string, kind: 'page' | 'api') => {
+      if (routeTarget(target)) {
+        const routes = this.matchPathRoute(target, kind);
+        const [route] = routes;
+        return { route, ids: route ? kind === 'page' ? graph.routeStarts(route) : graph.apiTargets(route) : [],
+          label: route?.url ?? target, file: route?.file,
+          candidates: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)),
+          notes: () => this.suggestions(target, kind, expired) };
+      }
+      const matches = this.matchGraphSymbol(target, graph);
+      const [symbol] = matches;
+      return { route: undefined, ids: symbol ? [symbol.id] : [], label: symbol ? `${symbol.file}#${symbol.name}` : target, file: symbol?.file,
+        candidates: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)),
+        notes: () => this.suggestions(target.split('#').pop()!, undefined, expired) };
+    };
+    const source = resolve(from, 'page');
+    const destination = resolve(to, 'api');
+    const title = `${source.label} -> ${destination.label}`;
+    for (const endpoint of [source, destination]) {
+      if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
+      if (!endpoint.file) return { result: { title, rows: [], notes: endpoint.notes() } };
+    }
+    const result = graph.path(source.ids, destination.ids, expired, source.route);
+    return { result: { ...result, title, targets: [source.file!, destination.file!] } };
+  }
+
   query(name: string, value: unknown) {
     const args = validate(name, value);
     const { tool, target } = args;
-    const deadline = performance.now() + 1850;
+    const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
+    const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
+    const deadline = performance.now() + (configured > 0 ? Math.min(1850, configured) : 1850);
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
-    if (tool === 'search') result = this.search(target, args.filter, expired);
+    if (graphKind) {
+      const answer = this.graphQuery(args, expired, deadline);
+      result = answer.result;
+      ambiguous = !!answer.ambiguous;
+    } else if (tool === 'search') result = this.search(target, args.filter, expired);
     else if (tool === 'who_renders' || tool === 'rename_impact') {
       const matches = this.matchSymbol(target, tool === 'who_renders');
       if (matches.length > 1) {
@@ -640,13 +763,15 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
+        staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
+        omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),
-        search: 'indexed name and path matches'
+        search: 'indexed name and path matches', impact: 'indexed dependency edges', callees: 'indexed outgoing edges',
+        path: 'indexed directed edges', changes: 'git diff and indexed impacts'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),

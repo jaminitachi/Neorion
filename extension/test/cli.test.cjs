@@ -90,11 +90,14 @@ if (action === 'get') {
 function assertQueryHint(hint) {
   const block = hint.split('<!-- neorion:start -->')[1].split('<!-- neorion:end -->')[0];
   assert.match(block, /rename affects.*`neorion_query` tool before grepping/);
-  for (const kind of ['wrappers', 'who_renders', 'rename_impact', 'api_consumers', 'search']) {
+  for (const kind of ['wrappers', 'who_renders', 'rename_impact', 'api_consumers', 'search', 'impact', 'callees']) {
     assert.ok(block.includes(`\x60${kind} <`), kind);
   }
+  assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`\./);
+  assert.match(block, /For `path`, pass `target` and `to` in MCP\. For `changes`, omit `target`\./);
   assert.match(block, /# partial: <reason>.*verify against the source/);
   assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
+  assert.match(block, /`.+ query path <from> <to>`.*`.+ query changes`/);
 }
 
 function copyCli(directory) {
@@ -314,8 +317,11 @@ test('Codex setup installs the skill and prints config when Codex is unavailable
   assert.match(setup.stdout, /\[mcp_servers\.neorion\]/);
   assert.ok(setup.stdout.includes(`command = ${JSON.stringify(process.execPath)}`));
   assert.ok(setup.stdout.includes(`args = ${JSON.stringify([entry, 'mcp'])}`));
-  assert.equal(fs.readFileSync(path.join(home, '.agents/skills/neorion/SKILL.md'), 'utf8'),
-    fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
+  const skill = fs.readFileSync(path.join(home, '.agents/skills/neorion/SKILL.md'), 'utf8');
+  assert.equal(skill, fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
+  const listedKinds = [...skill.matchAll(/^- `(\w+)`/gm)].map(([, kind]) => kind);
+  const helpKinds = run(['--help']).stdout.match(/^Query kinds: (.+)$/m)[1].split(', ');
+  assert.deepEqual(listedKinds.sort(), helpKinds.sort());
   const agents = path.join(root, 'AGENTS.md');
   const hint = fs.readFileSync(agents, 'utf8');
   assertQueryHint(hint);
@@ -418,10 +424,14 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
   const legacySkill = path.join(__dirname, 'fixtures/neorion-0.5.2-skill.md');
   for (const mode of ['upgrade', 'direct removal', 'preserve customized server']) {
     await t.test(mode, t => {
-      const { home, run } = fixture(t);
+      const { home, root, run } = fixture(t);
       const { config, calls } = fakeAgent(home, 'codex');
       const directory = path.join(home, '.agents/skills/neorion');
       const skill = path.join(directory, 'SKILL.md');
+      const hintFile = path.join(root, 'AGENTS.md');
+      const projectInstructions = '# Project instructions\n';
+      const oldHint = 'For architecture questions, run `neorion query <kind> <target>` in the shell first.';
+      fs.writeFileSync(hintFile, `<!-- neorion:start -->\n${oldHint}\n<!-- neorion:end -->\n${projectInstructions}`);
       const legacyEntry = mode === 'direct removal' ? mcpCommand({ registryVersion: '0.5.2' })
         : { command: process.execPath, args: [path.join(home, 'old/neorion/dist/neorion.cjs'), 'mcp'] };
       const customized = mode === 'preserve customized server';
@@ -436,11 +446,15 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
         assert.equal(upgraded.status, 0, upgraded.stderr);
         assert.match(upgraded.stdout, /Skill installed/);
         assert.deepEqual(fs.readFileSync(skill), fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md')));
+        const hint = fs.readFileSync(hintFile, 'utf8');
+        assertQueryHint(hint);
+        assert.ok(!hint.includes(oldHint));
         if (!customized) assert.deepEqual(readJson(config).mcpServers.neorion.args, [entry, 'mcp']);
       }
       const removed = run(['setup', 'codex', '--remove'], env);
       assert.equal(removed.status, 0, removed.stderr);
       assert.ok(!fs.existsSync(skill));
+      assert.equal(fs.readFileSync(hintFile, 'utf8'), projectInstructions);
       assert.deepEqual(readJson(config).mcpServers, customized ? { neorion: server } : {});
       assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action),
         customized ? [] : mode === 'upgrade' ? ['remove', 'add', 'remove'] : ['remove']);

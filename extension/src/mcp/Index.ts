@@ -1,5 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
+export const GRAPH_INDEX_REVISION = 3;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -14,9 +15,11 @@ export interface SymbolEntry {
   name: string;
   kind: 'component' | 'hook' | 'function' | 'constant';
   line: number;
+  end?: number;
   exported?: boolean;
   aliasOf?: string | null;
   localUses?: number[];
+  typeOnly?: boolean;
 }
 
 export interface Wrapper {
@@ -39,21 +42,26 @@ export interface FetchEntry {
   via: string;
   route: number;
   owner?: number;
+  graphOwner?: number;
   partial?: boolean;
   dynamic?: boolean;
 }
 
-type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number];
+type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number];
 export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 // A null path reuses the referenced symbol's defining file.
 export type IndexedReference = Reference | [symbol: number, file: null, ...site: ReferenceSite];
+export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
+export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
+export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 
 export interface ServerAction {
   file: string;
   name: string;
   aliases?: string[];
   line: number;
-  callers: [file: string, line: number][];
+  symbol?: number;
+  callers: [file: string, line: number, owner?: number][];
 }
 
 export interface QueryIndex {
@@ -68,6 +76,7 @@ export interface QueryIndex {
   routes: {
     id: number; url: string; file: string; kind: string; line?: number;
     component?: number; fileSymbol?: number; layouts?: number[];
+    methods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number][];
   wrapperRevision?: number;
@@ -79,4 +88,17 @@ export interface QueryIndex {
   fetches: FetchEntry[];
   serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;
+  graphRevision?: number;
+  packedGraph?: string;
+  graphReferences?: Record<number, GraphReference[]>;
+  graphNames?: string[];
+  externalCalls?: ExternalCall[];
+  externalModules?: string[];
+  unresolvedCalls?: Record<number, number>;
+  fileSymbols?: number[]; // In the same order as the keys of files.
+  defaultSymbols?: Record<number, number>;
+  routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number]>;
+  layoutStyles?: Record<string, string[]>;
+  trpcFiles?: string[];
+  trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }

@@ -33,7 +33,7 @@ installed bundle and the project. Paste it into the global configuration for
 Codex CLI, Windsurf, or Gemini CLI. Copy a fresh snippet if the extension
 installation moves.
 
-Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/file, or search text).
+Call `neorion_query` with `kind` and, for queries that take a target, `target` (a name, `path#Name`, route URL/file, or search text).
 
 | Kind | Answers |
 | --- | --- |
@@ -42,6 +42,10 @@ Call `neorion_query` with `kind` and `target` (a name, `path#Name`, route URL/fi
 | `rename_impact` | Which files contain checker-resolved references to a declaration? |
 | `api_consumers` | Which files use an API route or a server action? Pass the action name or `path#Name` to see caller files and lines. |
 | `search` | Which declarations or routes match a name or path fragment? |
+| `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
+| `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
+| `path` | What is the shortest directed chain from a page or symbol to a symbol or API route? Pass `target` and `to`. |
+| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits, or `base` for a merge-base comparison. |
 
 The server returns project-relative `path:line` locations. Results have a
 6,000-byte cap and default to 40 rows (20 for search). `complete` describes the

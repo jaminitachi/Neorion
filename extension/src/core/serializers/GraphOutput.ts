@@ -1,5 +1,6 @@
 import { workspaceCache } from '../WorkspaceCache';
 import { INDEX_PATH, LEGACY_INDEX_PATH } from '../../mcp/Index';
+import { packGraph } from '../../mcp/GraphStorage';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
@@ -11,7 +12,7 @@ function fileList(root: string): string {
   const generated = (file: string) => file === 'codebase_graph.md' ||
     file.startsWith(DETAIL_DIRECTORY + '/') || file.startsWith('.neorion/');
   try {
-    return execFileSync('git', ['ls-files', '-z'], {
+    return execFileSync('git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000
     }).split('\0').filter(file => file && !generated(file)).join('\n') + '\n';
   } catch {
@@ -65,7 +66,7 @@ export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = t
     fs.mkdirSync(parent, { recursive: true });
     const temporary = target + '.' + randomUUID();
     try {
-      fs.writeFileSync(temporary, JSON.stringify(graph.index), { flag: 'wx', mode: 0o600 });
+      fs.writeFileSync(temporary, JSON.stringify(packGraph(graph.index)), { flag: 'wx', mode: 0o600 });
       fs.renameSync(temporary, target);
     } finally {
       fs.rmSync(temporary, { force: true });

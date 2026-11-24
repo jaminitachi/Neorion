@@ -16,6 +16,10 @@ const help = `Usage:
   neorion graph [dir]
   neorion query <kind> <target> [--limit n] [--root dir]
   neorion query wrappers <route> [--no-external | --include-external]
+  neorion query impact <symbol|file> [--depth n] [--include-tests]
+  neorion query callees <symbol> [--depth n] [--uses]
+  neorion query path <from> <to>
+  neorion query changes [--base ref | --staged | --unstaged]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
@@ -115,6 +119,12 @@ async function main([command, ...args]: string[]) {
     args,
     options: { root: { type: 'string' }, ...(query ? {
       limit: { type: 'string' as const },
+      depth: { type: 'string' as const },
+      'include-tests': { type: 'boolean' as const },
+      uses: { type: 'boolean' as const },
+      base: { type: 'string' as const },
+      staged: { type: 'boolean' as const },
+      unstaged: { type: 'boolean' as const },
       'no-external': { type: 'boolean' as const },
       'include-external': { type: 'boolean' as const }
     } : {}) },
@@ -122,8 +132,11 @@ async function main([command, ...args]: string[]) {
   });
   const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
   if (!query) return serve(root, { autoBuild: true });
-  if (positionals.length !== 2) throw new Error(help);
-  const [kind, target] = positionals;
+  const [kind, target, to] = positionals;
+  if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
+  if (Number(!!values.staged) + Number(!!values.unstaged) + Number(values.base !== undefined) > 1) {
+    throw new Error('Choose only one of --base, --staged, or --unstaged.');
+  }
   if (values['no-external'] && values['include-external']) throw new Error('Choose either --no-external or --include-external.');
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
@@ -135,7 +148,16 @@ async function main([command, ...args]: string[]) {
   const engine = indexReader(project)();
   if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
   const limit = values.limit === undefined ? undefined : Number(values.limit);
-  console.log(projectText(project, engine.query(queryName, { kind, target, limit, ...externalOption })));
+  const options = {
+    ...(target === undefined ? {} : { target }),
+    ...(to === undefined ? {} : { to }),
+    ...(values.base === undefined ? {} : { base: values.base }),
+    ...(values.staged || values.unstaged ? { scope: values.staged ? 'staged' : 'unstaged' } : {}),
+    ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),
+    ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
+    ...(values.uses === undefined ? {} : { uses: values.uses })
+  };
+  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options })));
 }
 
 if (isMainThread) {
