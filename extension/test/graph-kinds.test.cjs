@@ -180,7 +180,7 @@ test('tRPC resolves router paths, client aliases and server callers while report
   const create = query('api_consumers', 'invoices.create');
   assert.match(create, /2 caller sites/);
   assert.match(create, /InvoicePanel \(useMutation\)/);
-  assert.match(create, /writeThroughFactory \(create\)/);
+  assert.match(create, /writeThroughFactory \(createCaller\)/);
   assert.match(create, /# complete: indexed tRPC callers/);
   const mcp = await openMcp(t, root, {
     command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
@@ -193,7 +193,8 @@ test('tRPC resolves router paths, client aliases and server callers while report
   const upstream = query('impact', 'calculateTotal');
   assert.match(upstream, /invoices.total/);
   assert.match(upstream, /page \/trpc-check/);
-  assert.doesNotMatch(upstream, /trpc-cache|useDynamic|unrelated/);
+  assert.match(upstream, /page \/trpc-cache/);
+  assert.doesNotMatch(upstream, /useDynamic|unrelated/);
   assert.match(query('callees', 'useDynamic'), /# partial: tRPC procedure target unresolved/);
   assert.match(query('path', 'useDynamic', 'calculateTotal'), /# partial: tRPC procedure target unresolved/);
 
@@ -201,16 +202,68 @@ test('tRPC resolves router paths, client aliases and server callers while report
   assert.match(dynamic, /0 caller sites/);
   assert.match(dynamic, /# partial: tRPC procedure target unresolved/);
   const total = query('api_consumers', target);
-  assert.match(total, /4 caller sites, 3 cache-only/);
-  assert.match(total, /readThroughRouter \(total\)/);
+  assert.match(total, /6 caller sites, 2 cache-only/);
+  assert.match(total, /readThroughRouter \(createCaller\)/);
   assert.match(total, /readThroughTransport \(query\)/);
   assert.match(total, /InvoicePanel \(useQuery\)/);
   assert.match(total, /InvoicePanel \(useSuspenseQuery\)/);
-  for (const operation of ['invalidate', 'fetch', 'prefetch']) {
+  for (const operation of ['invalidate', 'prefetch']) {
     assert.ok(total.split('\n').some(line => line.startsWith('cache-only app/trpc-cache/page.tsx:') && line.endsWith(`(${operation})`)));
   }
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(ensureData\)$/m);
+  assert.match(query('api_consumers', target, '--limit', '1'), /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
   assert.doesNotMatch(total, /unrelated/);
-  assert.match(query('path', '/trpc-cache', target), /no directed path/);
+  assert.match(query('path', '/trpc-cache', target), /1 trpc .*invoices\.total .*\(fetch\)/);
+  assert.match(query('path', '/trpc-cache', 'history.total'), /no directed path/);
+});
+
+test('tRPC traces batch hooks, TanStack options and hydration through merged and inline routers', { timeout: 40_000 }, t => {
+  const { query, build } = fixture(t);
+  build();
+  const count = query('api_consumers', 'feed.count');
+  assert.match(count, /2 caller sites, 2 cache-only/);
+  assert.match(count, /^call .*useClassicBatch \(useQueries\)$/m);
+  assert.match(count, /^call .*TrpcReviewPage \(count\)$/m);
+  assert.match(count, /^cache-only .*useReactQueryOptions \(queryKey\)$/m);
+  assert.match(count, /^cache-only .*useReactQueryOptions \(pathFilter\)$/m);
+  assert.match(count, /# complete: indexed tRPC callers/);
+  assert.doesNotMatch(count, /unrelatedBatch/);
+
+  const item = query('api_consumers', 'feed.nested.deep.item');
+  assert.match(item, /^call .*useClassicBatch \(useSuspenseQueries\)$/m);
+  assert.match(item, /^cache-only .*TrpcReviewPage \(prefetch\)$/m);
+  assert.match(item, /^cache-only .*useReactQueryOptions \(pathFilter\)$/m);
+  assert.match(query('path', '/trpc-review', 'countFeed'), /1 trpc .*feed\.count[^\n]*\n2 call .*countFeed/);
+
+  const stats = query('api_consumers', 'admin.stats');
+  assert.match(stats, /3 caller sites/);
+  assert.match(stats, /^call .*useClassicBatch \(useQueries\)$/m);
+  assert.match(stats, /^call .*useReactQueryOptions \(queryOptions\)$/m);
+  assert.match(stats, /^call .*useReactQueryOptions \(query\)$/m);
+  assert.match(stats, /# complete: indexed tRPC callers/);
+  assert.doesNotMatch(stats, /unrelatedBatch/);
+  assert.match(query('api_consumers', 'admin.update'), /^call .*useReactQueryOptions \(mutationOptions\)$/m);
+  assert.doesNotMatch(query('search', 'getRemoteCount'), /#getRemoteCount/);
+});
+
+test('tRPC reports skipped client forms and helper-built procedures as partial', { timeout: 40_000 }, t => {
+  const { query, build } = fixture(t);
+  build();
+  const batch = query('api_consumers', 'batch.item');
+  assert.match(batch, /0 caller sites/);
+  assert.match(batch, /# partial: tRPC procedure target unresolved \(components\/trpc\/review-partial\.ts:/);
+  assert.match(query('callees', 'useOpaqueBatch'), /# partial: tRPC procedure target unresolved/);
+
+  const options = query('api_consumers', 'options.item');
+  assert.match(options, /1 caller site/);
+  assert.match(options, /^call .*useMixedOptions \(useQuery\)$/m);
+  assert.match(options, /# partial: tRPC procedure target unresolved \(components\/trpc\/review-partial\.ts:/);
+  assert.match(query('callees', 'useDynamicKey'), /# partial: tRPC procedure target unresolved/);
+
+  assert.match(query('api_consumers', 'helper.direct'), /# partial: tRPC procedure target unresolved \(server\/trpc-review\.ts:/);
+  assert.match(query('callees', 'useHelper'), /# partial: tRPC procedure target unresolved/);
+  assert.doesNotMatch(query('search', 'helper.built'), /#helper\.built/);
 });
 
 function gitFixture(t) {

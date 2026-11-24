@@ -2,17 +2,24 @@ import { Node, SyntaxKind, type CallExpression, type SourceFile } from 'ts-morph
 import { declarationsOf } from './ArchitectureFacts';
 
 const serverPackage = /^@trpc\/server(?:\/|$)/;
-const proxyPackage = /^@trpc\/(?:client|react-query|next)(?:\/|$)/;
-const proxyFactories = /^(?:createTRPCReact|createTRPCNext|createTRPCProxyClient|createTRPCClient)$/;
+const proxyPackage = /^@trpc\/(?:client|react-query|next|tanstack-react-query)(?:\/|$)/;
+const tanstackPackage = /^@trpc\/tanstack-react-query$/;
+const proxyFactories = /^(?:createTRPCProxyClient|createTRPCClient)$/;
+const reactFactories = /^(?:createTRPCReact|createTRPCNext)$/;
 const hookOperations = /^(?:useQuery|useMutation|useSuspenseQuery|useInfiniteQuery|useSuspenseInfiniteQuery|useSubscription)$/;
-const cacheOperations = /^(?:invalidate|fetch|prefetch|ensureData|fetchInfinite|prefetchInfinite|refetch|cancel|reset|setData|getData|setInfiniteData|getInfiniteData)$/;
+const batchHooks = /^(?:useQueries|useSuspenseQueries)$/;
+const cacheOperations = /^(?:invalidate|prefetch|prefetchInfinite|refetch|cancel|reset|setData|getData|setInfiniteData|getInfiniteData)$/;
+const queryOperations = /^(?:fetch|fetchInfinite|ensureData)$/;
+const optionsOperations = /^(?:queryOptions|infiniteQueryOptions|mutationOptions|subscriptionOptions)$/;
+const keyOperations = /^(?:queryKey|infiniteQueryKey|mutationKey|pathKey|queryFilter|infiniteQueryFilter|pathFilter)$/;
 const clientOperations = /^(?:query|mutate|subscribe)$/;
 const procedureOperations = /^(?:query|mutation|subscription)$/;
 
 type Procedure = { property: Node; body: CallExpression; resolver: Node };
 type Router = { entries: Map<string, Procedure | Router>; unresolved?: Node };
-type Proxy = { kind: 'react' | 'client' | 'caller' | 'cache' | 'hydration'; router?: Router; prefix: (string | undefined)[] };
+type Proxy = { kind: 'react' | 'client' | 'caller' | 'cache' | 'hydration' | 'context' | 'options'; router?: Router; prefix: (string | undefined)[] };
 type ProcedurePath = Procedure & { name: string; clientsKnown: boolean; unresolved?: Node };
+type ProcedureUse = { site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
 
 function unwrap(node: Node | undefined): Node | undefined {
   while (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node) ||
@@ -56,6 +63,7 @@ function imported(node: Node, modulePattern: RegExp, names: RegExp) {
 }
 
 export class TrpcFacts {
+  readonly active: boolean;
   private routers = new Map<CallExpression, Router>();
   private files: Set<SourceFile>;
   private nested = new Set<Router>();
@@ -64,33 +72,40 @@ export class TrpcFacts {
   private allPaths = new Map<Router, Map<string, ProcedurePath[]>>();
 
   constructor(files: SourceFile[], sources: Set<SourceFile>) {
-    this.files = new Set(sources.size ? files : []);
-    if (!sources.size) return;
+    const clientFiles = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
+      !entry.isTypeOnly() && proxyPackage.test(entry.getModuleSpecifierValue()))));
+    this.active = sources.size > 0 || clientFiles.size > 0;
+    this.files = new Set(this.active ? files : []);
+    if (!this.active) return;
 
-    const factories: CallExpression[] = [];
+    const factories = new Map<CallExpression, Proxy['kind']>();
     const clientRoots = new Set<Router>();
     for (const file of files) {
       const content = file.getFullText();
       const imports = file.getImportDeclarations();
-      const server = /\b(?:createTRPCRouter|router|mergeRouters)\b/.test(content) || imports.some(entry =>
-        sources.has(entry.getModuleSpecifierSourceFile()!));
-      const client = imports.some(entry => proxyPackage.test(entry.getModuleSpecifierValue()));
+      const server = sources.size > 0 && (/\b(?:createTRPCRouter|router|mergeRouters)\b/.test(content) || imports.some(entry =>
+        sources.has(entry.getModuleSpecifierSourceFile()!)));
+      const client = clientFiles.has(file);
       if (!server && !client) continue;
       file.forEachDescendant(node => {
         if (!Node.isCallExpression(node)) return;
         if (server && this.isRouterCall(node)) this.router(node);
-        if (client && imported(node.getExpression(), proxyPackage, proxyFactories)) factories.push(node);
+        if (!client) return;
+        const expression = node.getExpression();
+        const kind = imported(expression, proxyPackage, reactFactories) ? 'react' :
+          imported(expression, proxyPackage, proxyFactories) ? 'client' :
+          imported(expression, tanstackPackage, /^createTRPCContext$/) ? 'context' : undefined;
+        if (kind) factories.set(node, kind);
       });
     }
-    const clients = factories.map(factory => {
+    const clients = [...factories].map(([factory, kind]) => {
       const type = factory.getTypeArguments()[0];
-      return { factory, type, router: this.typeRouter(type) };
+      return { factory, kind, type, router: this.typeRouter(type) };
     });
     const roots = [...this.routers.values()].filter(router => !this.nested.has(router));
-    for (const { factory, type, router: typedRouter } of clients) {
+    for (const { factory, kind, type, router: typedRouter } of clients) {
       const router = type ? typedRouter : roots.length === 1 ? roots[0] : undefined;
-      const react = imported(factory.getExpression(), proxyPackage, /^(?:createTRPCReact|createTRPCNext)$/);
-      this.proxies.set(factory, { kind: react ? 'react' : 'client', router, prefix: [] });
+      this.proxies.set(factory, { kind, router, prefix: [] });
       if (router) clientRoots.add(router);
     }
     for (const root of new Set([...roots, ...clientRoots])) {
@@ -125,10 +140,6 @@ export class TrpcFacts {
 
   procedures() {
     return [...this.rootPaths.values()].flatMap(paths => [...paths.values()]);
-  }
-
-  get hasRouters() {
-    return this.routers.size > 0;
   }
 
   private isInit(node: Node | undefined, seen = new Set<Node>()): boolean {
@@ -293,12 +304,17 @@ export class TrpcFacts {
   private resolveProxy(node: Node, seen: Set<Node>): Proxy | undefined {
     if (Node.isCallExpression(node)) {
       const expression = node.getExpression();
-      const access = member(expression);
       const router = this.callerRouter(expression);
       if (router) return { kind: 'caller', router, prefix: [] };
-      if (access?.key === 'useUtils' || access?.key === 'useContext') {
-        const base = this.proxy(access.base, seen);
-        if (base?.kind === 'react' && !base.prefix.length) return { ...base, kind: 'cache' };
+      const hook = this.proxy(expression, seen);
+      if (hook?.prefix.length === 1) {
+        const [operation] = hook.prefix;
+        if (hook.kind === 'react' && (operation === 'useUtils' || operation === 'useContext')) {
+          return { kind: 'cache', router: hook.router, prefix: [] };
+        }
+        if (hook.kind === 'context' && (operation === 'useTRPC' || operation === 'useTRPCClient')) {
+          return { kind: operation === 'useTRPC' ? 'options' : 'client', router: hook.router, prefix: [] };
+        }
       }
       return;
     }
@@ -308,11 +324,12 @@ export class TrpcFacts {
     if (value) return this.proxy(value, seen);
     if (Node.isBindingElement(declaration) && Node.isObjectBindingPattern(declaration.getParent())) {
       const key = declaration.getPropertyNameNode() ?? declaration.getNameNode();
-      const base = this.proxy(initializer(declaration.getParent().getParent()), seen);
-      if (base && Node.isIdentifier(key)) return { ...base, prefix: [...base.prefix, key.getText()] };
-      // The T3 App Router template exports its server-side proxy from this helper.
-      const init = initializer(declaration.getParent().getParent());
-      if (key.getText() === 'trpc' && Node.isCallExpression(init) &&
+      const name = Node.isIdentifier(key) ? key.getText() : Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
+      const init = unwrap(initializer(declaration.getParent().getParent()));
+      const base = this.proxy(init, seen);
+      if (base && !declaration.getDotDotDotToken()) return { ...base, prefix: [...base.prefix, name] };
+      // createHydrationHelpers exposes the server-side proxy as its `trpc` property.
+      if (name === 'trpc' && Node.isCallExpression(init) &&
           imported(init.getExpression(), /^@trpc\/react-query\/rsc$/, /^createHydrationHelpers$/)) {
         const caller = this.proxy(init.getArguments()[0], seen);
         const router = caller?.router ?? this.typeRouter(init.getTypeArguments()[0]);
@@ -326,10 +343,9 @@ export class TrpcFacts {
     }
   }
 
-  use(call: CallExpression) {
-    const expression = call.getExpression();
-    const access = member(expression);
-    if (!access && !Node.isIdentifier(expression)) return;
+  uses(call: CallExpression): ProcedureUse[] | undefined {
+    const expression = unwrap(call.getExpression());
+    if (!member(expression) && !Node.isIdentifier(expression)) return;
     if (Node.isIdentifier(expression)) {
       const binding = localValue(expression);
       if (!Node.isBindingElement(binding) && !Node.isVariableDeclaration(binding)) return;
@@ -337,32 +353,89 @@ export class TrpcFacts {
     const proxy = this.proxy(expression);
     if (!proxy || !proxy.prefix.length) return;
     const path = [...proxy.prefix];
-    const operation = path.at(-1);
-    const callerCache = proxy.kind === 'hydration' && operation === 'prefetch' &&
-      !(proxy.router && this.rootPaths.get(proxy.router)?.has(path.join('.')));
-    const cache = proxy.kind === 'cache' || callerCache;
-    if (operation !== undefined && (cache ? !cacheOperations.test(operation) :
-      proxy.kind === 'react' ? !hookOperations.test(operation) :
-      proxy.kind === 'client' ? !clientOperations.test(operation) : false)) return;
-    if (cache || proxy.kind === 'react' || proxy.kind === 'client') path.pop();
-    if (!path.length && !cache && operation !== undefined) return;
+    if (proxy.kind === 'caller') return [this.pathUse(call, proxy, path, 'createCaller', false)];
+    if (proxy.kind === 'hydration') {
+      const prefetch = path.at(-1) === 'prefetch' && !(proxy.router && this.rootPaths.get(proxy.router)?.has(path.join('.')));
+      return [this.pathUse(call, proxy, prefetch ? path.slice(0, -1) : path,
+        prefetch ? 'prefetch' : path.at(-1) ?? 'call', prefetch)];
+    }
+    const operation = path.pop();
+    if (operation === undefined) return [this.unresolvedUse(call, proxy, path, 'call', false)];
+    if (proxy.kind === 'context') return;
+    if (proxy.kind === 'react' && !path.length && batchHooks.test(operation)) {
+      return this.batchUses(call, proxy, operation);
+    }
+    const cache = proxy.kind === 'cache' && cacheOperations.test(operation) ||
+      proxy.kind === 'options' && keyOperations.test(operation);
+    if (!cache) {
+      if (proxy.kind === 'cache' && !queryOperations.test(operation) ||
+          proxy.kind === 'react' && !hookOperations.test(operation) ||
+          proxy.kind === 'client' && !clientOperations.test(operation)) return;
+      if (proxy.kind === 'options' && !optionsOperations.test(operation)) {
+        return [this.unresolvedUse(call, proxy, path, operation, false)];
+      }
+    }
+    return [this.pathUse(call, proxy, path, operation, cache)];
+  }
+
+  private batchUses(call: CallExpression, proxy: Proxy, operation: string): ProcedureUse[] {
+    const callback = unwrap(call.getArguments()[0]);
+    const fn = Node.isArrowFunction(callback) || Node.isFunctionExpression(callback) ? callback : undefined;
+    const parameter = fn?.getParameters()[0];
+    const body = fn?.getBody();
+    const statements = Node.isBlock(body) ? body.getStatements() : [];
+    const returned = statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : body;
+    const array = unwrap(returned);
+    if (!parameter || !Node.isArrayLiteralExpression(array)) return [this.unresolvedUse(call, proxy, [], operation, false)];
+
+    const uses: ProcedureUse[] = [];
+    const elements = array.getElements();
+    for (const element of elements) {
+      const query = unwrap(element);
+      if (!Node.isCallExpression(query)) continue;
+      let base = unwrap(query.getExpression());
+      const path: Proxy['prefix'] = [];
+      for (let access = member(base); access; access = member(base)) {
+        path.unshift(access.key);
+        base = unwrap(access.base);
+      }
+      if (path.length && base && localValue(base) === parameter) {
+        uses.push(this.pathUse(query, proxy, path, operation, false));
+      }
+    }
+    if (uses.length !== elements.length) uses.push(this.unresolvedUse(call, proxy, [], operation, false));
+    return uses;
+  }
+
+  private pathUse(site: CallExpression, proxy: Proxy, path: Proxy['prefix'], operation: string, cache: boolean): ProcedureUse {
     const registry = proxy.router && (proxy.kind === 'caller' ? this.allPaths.get(proxy.router) : this.rootPaths.get(proxy.router));
     const key = path.join('.');
-    const staticPath = operation !== undefined && path.every(segment => segment !== undefined);
-    const exact = staticPath ? registry?.get(key) : undefined;
-    const under = (prefix: string) => registry
-      ? [...registry.entries()].filter(([key]) => !prefix || key === prefix || key.startsWith(prefix + '.')).flatMap(([, paths]) => paths)
-      : this.procedures().filter(candidate => !prefix || candidate.name === prefix || candidate.name.startsWith(prefix + '.'));
-    if (exact) return { operation: operation ?? 'call', cache, targets: Array.isArray(exact) ? exact : [exact] };
-    if (cache) {
-      if (!staticPath || !registry) return;
-      const targets = under(key);
-      if (targets.length) return { operation: operation!, cache, targets };
-      return;
+    if (registry && path.every(segment => segment !== undefined)) {
+      const exact = registry.get(key);
+      if (exact) return { site, operation, cache, targets: Array.isArray(exact) ? exact : [exact] };
+      if (cache && (proxy.kind === 'cache' || operation === 'pathFilter' || operation === 'pathKey')) {
+        const targets = this.under(registry, key);
+        if (targets.length) return { site, operation, cache, targets };
+      }
     }
+    return this.unresolvedUse(site, proxy, path, operation, cache);
+  }
 
+  private unresolvedUse(site: CallExpression, proxy: Proxy, path: Proxy['prefix'], operation: string, cache: boolean): ProcedureUse {
+    const registry = proxy.router && (proxy.kind === 'caller' ? this.allPaths.get(proxy.router) : this.rootPaths.get(proxy.router));
     const dynamic = path.indexOf(undefined);
-    const prefix = path.slice(0, dynamic < 0 ? path.length : dynamic).join('.');
-    return { operation: operation ?? 'call', cache, targets: [], unresolved: under(prefix) };
+    const scope = path.slice(0, dynamic < 0 ? path.length : dynamic);
+    let unresolved = this.under(registry, scope.join('.'));
+    while (!unresolved.length && registry && scope.length) {
+      scope.pop();
+      unresolved = this.under(registry, scope.join('.'));
+    }
+    return { site, operation, cache, targets: [], unresolved };
+  }
+
+  private under(registry: Map<string, ProcedurePath | ProcedurePath[]> | undefined, prefix: string) {
+    const matches = (key: string) => !prefix || key === prefix || key.startsWith(prefix + '.');
+    return registry ? [...registry.entries()].filter(([key]) => matches(key)).flatMap(([, paths]) => paths) :
+      this.procedures().filter(candidate => matches(candidate.name));
   }
 }

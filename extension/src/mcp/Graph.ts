@@ -278,7 +278,8 @@ export class DependencyGraph {
 
   procedureConsumers(symbol: SymbolEntry, includeTests: boolean): QueryResult {
     const sites = (this.procedureSites.get(symbol.id) ?? []).filter(site => includeTests || !isTestFile(site.file))
-      .sort((a, b) => compare(a.file, b.file) || a.use[1] - b.use[1] || compare(a.use[2], b.use[2]));
+      .sort((a, b) => Number(a.use[2].startsWith('cache:')) - Number(b.use[2].startsWith('cache:')) ||
+        compare(a.file, b.file) || a.use[1] - b.use[1] || compare(a.use[2], b.use[2]));
     let callers = 0;
     const rows = sites.map(({ file, use: [, line, operation, owner] }) => {
       const cache = operation.startsWith('cache:');

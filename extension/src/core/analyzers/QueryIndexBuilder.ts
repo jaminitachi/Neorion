@@ -348,8 +348,8 @@ export class QueryIndexBuilder {
       const graphReferences = new Map<string, GraphReference>();
       const trpcModuleUses = new Map<string, [number, number]>();
       const trpcUseKeys = new Set<string>();
-      const recordTrpcUse = (node: Node, use: NonNullable<ReturnType<TrpcFacts['use']>>, owner?: number) => {
-        const line = node.getStartLineNumber();
+      const recordTrpcUse = (use: NonNullable<ReturnType<TrpcFacts['uses']>>[number], owner?: number) => {
+        const line = use.site.getStartLineNumber();
         const operation = use.cache ? 'cache:' + use.operation : use.operation;
         for (const procedure of use.targets) {
           const id = procedureIds.get(procedure);
@@ -527,9 +527,9 @@ export class QueryIndexBuilder {
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             recordDynamic(node, node.getArguments()[0], graphOwner);
           }
-          const trpcUse = trpcFacts.hasRouters && Node.isCallExpression(node) ? trpcFacts.use(node) : undefined;
-          if (trpcUse) {
-            recordTrpcUse(node, trpcUse, graphOwner);
+          const trpcUses = trpcFacts.active && Node.isCallExpression(node) ? trpcFacts.uses(node) : undefined;
+          if (trpcUses) {
+            for (const use of trpcUses) recordTrpcUse(use, graphOwner);
             return;
           }
           const resolver = procedureResolvers.get(node);
@@ -541,17 +541,7 @@ export class QueryIndexBuilder {
               }
             }
           }
-          let found = false;
-          if (Node.isCallExpression(node)) {
-            const declarations = declarationsOf(expression);
-            // A call through a typed receiver can end at the named method contract.
-            if (trpcFacts.hasRouters && graphOwner !== undefined) for (const declaration of declarations) {
-              if (Node.isMethodSignature(declaration) && exports.has(declaration.getSourceFile())) {
-                add(declaration, declaration.getName(), 'function', null);
-              }
-            }
-            found = record(node, declarations, 'call', undefined, owner, graphOwner);
-          }
+          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression), 'call', undefined, owner, graphOwner);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found);
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
