@@ -234,6 +234,8 @@ export class GraphVisualizer {
         }));
         const graphPayload = {
             nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, bigGroups,
+            counts: { routes: graph.routes.length, components: graph.components.length, actions: graph.actions.length,
+                edges: codeEdges.length },
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]])
         };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
@@ -264,7 +266,8 @@ export class GraphVisualizer {
         #search-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--fg-color)); }
         :is(button, input):focus-visible { outline: 2px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
         #graph-area { position: relative; display: flex; flex: 1; min-height: 0; }
-        #hint { margin: 0; padding: 5px 10px; border-top: 1px solid var(--border-color); font-size: 12px; }
+        #graph-footer { display: flex; flex-wrap: wrap; gap: 4px 16px; justify-content: space-between; padding: 5px 10px; border-top: 1px solid var(--border-color); font-size: 12px; }
+        #stats { font-variant-numeric: tabular-nums; }
         #details { flex: 0 0 min(300px, 36%); min-width: 0; box-sizing: border-box; padding: 14px; overflow: auto; background: var(--vscode-sideBar-background, var(--bg-color)); color: var(--vscode-sideBar-foreground, var(--fg-color)); border-left: 1px solid var(--border-color); z-index: 1001; font-size: 13px; overflow-wrap: anywhere; }
         #details header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
         #details h2 { margin: 0; font-size: 16px; }
@@ -274,11 +277,20 @@ export class GraphVisualizer {
         #details ul { padding-left: 18px; margin: 0; }
         .connection { text-align: left; padding: 3px 0; border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--fg-color)); font: inherit; overflow-wrap: anywhere; cursor: pointer; }
         .connection:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--fg-color)); }
-        .legend { flex: 0 0 min(154px, 24%); min-width: 0; box-sizing: border-box; background: var(--vscode-sideBar-background, var(--bg-color)); overflow: auto; padding: 10px; border-right: 1px solid var(--border-color); }
-        .legend-item { display: flex; align-items: center; margin-bottom: 5px; font-size: 12px; cursor: pointer; padding: 2px 4px; border-radius: 3px; transition: background 0.2s; }
+        .legend { flex: 0 0 min(180px, 28%); min-width: 0; box-sizing: border-box; background: var(--vscode-sideBar-background, var(--bg-color)); overflow: auto; padding: 10px; border-right: 1px solid var(--border-color); }
+        .legend-heading { margin: 2px 0 7px; font-size: 12px; font-weight: 600; }
+        .legend-heading-row { display: flex; align-items: baseline; gap: 4px; justify-content: space-between; }
+        .legend-tools { display: flex; gap: 4px; }
+        .legend-action { border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--fg-color)); padding: 0; font: inherit; cursor: pointer; }
+        .legend-action:hover { text-decoration: underline; }
+        .legend-divider { border-top: 1px solid var(--border-color); margin: 10px 0 6px; padding-top: 8px; }
+        .legend-item { display: flex; align-items: center; min-height: 26px; gap: 6px; font-size: 12px; }
         .legend-item:hover { background: var(--vscode-list-hoverBackground, var(--border-color)); }
-        .legend-item.inactive { opacity: 0.3; }
-        .dot { box-sizing: border-box; width: 12px; height: 12px; border: 1px solid; border-radius: 50%; margin-right: 8px; }
+        .legend-item input { margin: 0 1px 0 0; flex: none; accent-color: var(--vscode-focusBorder, #007acc); cursor: pointer; }
+        .legend-label { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; padding: 2px 0; text-align: left; background: transparent; border: 0; color: inherit; font: inherit; overflow-wrap: anywhere; cursor: pointer; }
+        .legend-label[aria-pressed="true"] { font-weight: 700; }
+        .legend-count { margin-left: auto; font-variant-numeric: tabular-nums; }
+        .dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
         .shape-key { border-top: 1px solid var(--border-color); margin-top: 6px; padding: 6px 4px 0; font-size: 12px; }
         .shape-key-title { font-weight: 600; margin-bottom: 4px; }
         .shape-key-item { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
@@ -323,7 +335,16 @@ export class GraphVisualizer {
     </div>
     <div id="graph-area">
         <aside class="legend" aria-label="Graph legend">
+            <div class="legend-heading-row">
+                <h2 class="legend-heading">Domains</h2>
+                <div class="legend-tools">
+                    <button id="domains-all" class="legend-action">All</button>
+                    <button id="domains-none" class="legend-action">None</button>
+                </div>
+            </div>
             <div id="legend"></div>
+            <h2 class="legend-heading legend-divider">Edge types</h2>
+            <div id="edge-legend"></div>
             <div class="shape-key">
                 <div class="shape-key-title">Node shapes</div>
                 <div class="shape-key-item"><span class="shape-icon" aria-hidden="true"></span>Route / action</div>
@@ -347,7 +368,10 @@ export class GraphVisualizer {
         </aside>
     </div>
 
-    <p id="hint">Click a node for details, double-click to open file</p>
+    <footer id="graph-footer">
+        <span id="hint">Click a node for details, double-click to open file</span>
+        <span id="stats"></span>
+    </footer>
 
     <div id="error-overlay">
         <div id="error-content">
@@ -362,7 +386,7 @@ export class GraphVisualizer {
         const vscode = acquireVsCodeApi();
         let physicsEnabled = true;
         let routesMode = false;
-        let activeDomain = null;
+        let visibleDomains;
         let searchMatches = null;
 
 
@@ -393,10 +417,6 @@ export class GraphVisualizer {
             btn.title = physicsEnabled ? 'Click to pause layout' : 'Click to re-run layout';
         }
 
-        function domainOpacity(domain) {
-            return !activeDomain || domain === activeDomain || domain === 'hooks' ? 1 : 0.1;
-        }
-
         function isInsideCluster(id) {
             return network.findNode(id).length > 1;
         }
@@ -406,19 +426,18 @@ export class GraphVisualizer {
             return network.findNode(id).length > 0;
         }
 
-        function nodeOpacity(id, domain) {
-            return domainOpacity(domain) * (!searchMatches || searchMatches.has(id) ? 1 : 0.18);
+        function nodeOpacity(id) {
+            return !searchMatches || searchMatches.has(id) ? 1 : 0.18;
         }
 
         function clusterOpacity(cluster) {
-            return domainOpacity(cluster.domain) *
-                (!searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18);
+            return !searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18;
         }
 
         function updateNodeOpacity() {
             const updates = network.body.data.nodes.get()
                 .filter(node => node.kind && !isInsideCluster(node.id))
-                .map(node => ({ id: node.id, opacity: nodeOpacity(node.id, node.group) }));
+                .map(node => ({ id: node.id, opacity: nodeOpacity(node.id) }));
             network.body.data.nodes.update(updates);
 
             for (const cluster of componentClusters) {
@@ -426,14 +445,6 @@ export class GraphVisualizer {
                     network.updateClusteredNode(cluster.id, { opacity: clusterOpacity(cluster) });
                 }
             }
-        }
-
-        function toggleFilter(domain) {
-            activeDomain = activeDomain === domain ? null : domain;
-            updateNodeOpacity();
-            document.querySelectorAll('.legend-item').forEach(el => {
-                el.classList.toggle('inactive', activeDomain !== null && el.dataset.domain !== activeDomain);
-            });
         }
 
         function collapseGroup(cluster) {
@@ -445,7 +456,7 @@ export class GraphVisualizer {
                 clusterNodeProperties: {
                     id, group: domain,
                     label: '', shape: 'dot', size: 32, mass: 12,
-                    level: cluster.level,
+                    level: cluster.level, hidden: !visibleDomains.has(domain),
                     opacity: clusterOpacity(cluster)
                 }
             });
@@ -463,29 +474,13 @@ export class GraphVisualizer {
                     })
                 )
             });
-            network.body.data.edges.add(hubEdges);
-            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: nodeOpacity(id, domain) })));
+            network.body.data.edges.add(hubEdges.map(edge => ({ ...edge, hidden: routesMode })));
+            network.body.data.nodes.update(componentIds.map(id => ({ id, opacity: nodeOpacity(id) })));
         }
 
         function updateClusterButton(button) {
             button.textContent = componentClusters.some(({ id }) => isCollapsed(id))
                 ? 'Expand all' : 'Collapse big groups';
-        }
-
-        function initLegend(domains, groupsConfig) {
-            const legend = document.getElementById('legend');
-            for (const domain of domains) {
-                const item = document.createElement('div');
-                item.className = 'legend-item';
-                item.dataset.domain = domain;
-                item.addEventListener('click', () => toggleFilter(domain));
-                const dot = document.createElement('div');
-                dot.className = 'dot';
-                dot.style.backgroundColor = groupsConfig[domain].color.background;
-                dot.style.borderColor = groupsConfig[domain].color.border;
-                item.append(dot, document.createTextNode(domain));
-                legend.appendChild(item);
-            }
         }
 
         function withTextTooltip(item) {
@@ -554,7 +549,7 @@ export class GraphVisualizer {
         let componentClusters = [];
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors, counts } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -605,7 +600,7 @@ export class GraphVisualizer {
                     nodes: new vis.DataSet(nodes.map(withTextTooltip)),
                     edges: new vis.DataSet(edges.map(withTextTooltip))
                 }, options);
-                initLegend(domains, theme.groups);
+                visibleDomains = new Set(domains);
                 const graphColors = node => theme.groups[node.group].color;
                 const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
                 const wrapsColors = () => edges.filter(edge => edge.type === 'wraps').map(edge => ({
@@ -623,11 +618,10 @@ export class GraphVisualizer {
                     for (const cluster of componentClusters) {
                         if (isCollapsed(cluster.id)) network.updateClusteredNode(cluster.id, { color: graphColors({ group: cluster.domain }) });
                     }
-                    for (const item of document.querySelectorAll('.legend-item')) {
+                    for (const item of document.querySelectorAll('[data-domain]')) {
                         const color = graphColors({ group: item.dataset.domain });
                         const dot = item.querySelector('.dot');
                         dot.style.backgroundColor = color.background;
-                        dot.style.borderColor = color.border;
                     }
                     network.redraw();
                 }).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
@@ -657,8 +651,8 @@ export class GraphVisualizer {
                 function visibleComponents() {
                     const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
                     const links = new Map(Array.from(visible, id => [id, new Set()]));
-                    for (const { from, to } of edges) {
-                        if (!graphNodes.has(from) || !graphNodes.has(to)) continue;
+                    for (const { from, to, type } of edges) {
+                        if (!visibleEdgeTypes.has(type)) continue;
                         const [a] = network.findNode(from);
                         const [b] = network.findNode(to);
                         if (visible.has(a) && visible.has(b) && a !== b) {
@@ -687,8 +681,13 @@ export class GraphVisualizer {
                 function fitGraph() {
                     if (!container.clientWidth || !container.clientHeight) return;
                     const groups = visibleComponents();
-                    if (!groups.length) return;
-                    const cutoff = Math.max(2, Math.floor(network.body.nodeIndices.length / 10));
+                    if (!groups.length) {
+                        rowNodes.clear();
+                        rowHeading = undefined;
+                        network.redraw();
+                        return;
+                    }
+                    const cutoff = Math.max(2, Math.floor(groups.flat().length / 10));
                     const main = groups.filter((group, index) => routesMode || index === 0 || group.length >= cutoff).flat();
                     const small = routesMode ? [] : groups.slice(1).filter(group => group.length < cutoff);
                     rowNodes = new Set(small.flat());
@@ -752,6 +751,106 @@ export class GraphVisualizer {
                 const searchCount = document.getElementById('search-count');
                 const details = document.getElementById('details');
                 let searchTimer;
+
+                const domainRows = new Map();
+                const edgeTypes = ['wraps', 'renders', 'imports', 'uses-action'];
+                const visibleEdgeTypes = new Set(edgeTypes);
+                const codeEdges = edges.filter(edge => edge.type);
+                function applyFilters() {
+                    for (const [domain, { checkbox, label }] of domainRows) {
+                        checkbox.checked = visibleDomains.has(domain);
+                        label.setAttribute('aria-pressed', String(visibleDomains.size === 1 && visibleDomains.has(domain)));
+                    }
+                    const nodeUpdates = Array.from(graphNodes.values(), node => ({
+                        id: node.id, hidden: !visibleDomains.has(node.group)
+                    }));
+                    for (const cluster of componentClusters) {
+                        if (isCollapsed(cluster.id)) {
+                            network.body.nodes[cluster.id].setOptions({ hidden: !visibleDomains.has(cluster.domain) });
+                        }
+                    }
+                    network.body.data.nodes.update(nodeUpdates);
+                    const edgeUpdates = codeEdges.map(edge => ({ id: edge.id, hidden: !visibleEdgeTypes.has(edge.type) }));
+                    for (const update of edgeUpdates) {
+                        for (const id of network.getClusteredEdges(update.id)) {
+                            if (id !== update.id) network.body.edges[id].setOptions({ hidden: update.hidden });
+                        }
+                    }
+                    network.body.data.edges.update(edgeUpdates);
+                    if (network.getSelectedNodes().some(id => !network.body.nodeIndices.includes(id))) {
+                        network.unselectAll();
+                        closeDetails();
+                    }
+                    fitGraph();
+                }
+
+                function legendRow(name, count) {
+                    const row = document.createElement('div');
+                    row.className = 'legend-item';
+                    const checkbox = document.createElement('input');
+                    checkbox.type = 'checkbox';
+                    checkbox.checked = true;
+                    checkbox.setAttribute('aria-label', 'Show ' + name);
+                    const total = document.createElement('span');
+                    total.className = 'legend-count';
+                    total.textContent = String(count);
+                    row.append(checkbox, total);
+                    return { row, checkbox, total };
+                }
+
+                function initLegend() {
+                    const domainsPanel = document.getElementById('legend');
+                    const edgesPanel = document.getElementById('edge-legend');
+                    const domainTotals = new Map(domains.map(domain => [domain, 0]));
+                    for (const node of graphNodes.values()) domainTotals.set(node.group, domainTotals.get(node.group) + 1);
+                    for (const [domain, count] of domainTotals) {
+                        const { row, checkbox, total } = legendRow(domain, count);
+                        row.dataset.domain = domain;
+                        const label = document.createElement('button');
+                        label.className = 'legend-label';
+                        label.title = 'Solo ' + domain;
+                        label.setAttribute('aria-pressed', 'false');
+                        const dot = document.createElement('span');
+                        dot.className = 'dot';
+                        dot.style.backgroundColor = theme.groups[domain].color.background;
+                        label.append(dot, document.createTextNode(domain));
+                        row.insertBefore(label, total);
+                        domainRows.set(domain, { checkbox, label });
+                        checkbox.addEventListener('change', () => {
+                            if (checkbox.checked) visibleDomains.add(domain);
+                            else visibleDomains.delete(domain);
+                            applyFilters();
+                        });
+                        label.addEventListener('click', () => {
+                            visibleDomains = new Set(visibleDomains.size === 1 && visibleDomains.has(domain) ? domains : [domain]);
+                            applyFilters();
+                        });
+                        domainsPanel.append(row);
+                    }
+                    for (const type of edgeTypes) {
+                        const { row, checkbox, total } = legendRow(type, codeEdges.filter(edge => edge.type === type).length);
+                        const label = document.createElement('label');
+                        checkbox.id = 'show-edge-' + type;
+                        label.htmlFor = checkbox.id;
+                        label.textContent = type;
+                        row.insertBefore(label, total);
+                        checkbox.addEventListener('change', () => {
+                            if (checkbox.checked) visibleEdgeTypes.add(type);
+                            else visibleEdgeTypes.delete(type);
+                            applyFilters();
+                        });
+                        edgesPanel.append(row);
+                    }
+                    for (const [id, values] of [['domains-all', domains], ['domains-none', []]]) {
+                        document.getElementById(id).addEventListener('click', () => {
+                            visibleDomains = new Set(values);
+                            applyFilters();
+                        });
+                    }
+                    document.getElementById('stats').textContent = Object.entries(counts)
+                        .map(([label, count]) => count + ' ' + label).join(' · ');
+                }
+                initLegend();
 
                 function applySearch() {
                     clearTimeout(searchTimer);
@@ -933,7 +1032,7 @@ export class GraphVisualizer {
                         labels.push({
                             ...point, radius, size: cluster || isRoute ? 13 : 11,
                             text: cluster ? domain + ' (' + cluster.count + ')' : node.shortLabel,
-                            alpha: cluster ? clusterOpacity(cluster) : nodeOpacity(id, domain),
+                            alpha: cluster ? clusterOpacity(cluster) : nodeOpacity(id),
                             priority: isFocused ? 0 : cluster ? 1 : isRoute ? 2 : 4,
                             inRow: rowNodes.has(id)
                         });
@@ -942,7 +1041,7 @@ export class GraphVisualizer {
                         if (positions.length < 2 || componentClusters.some(cluster => cluster.domain === domain && isCollapsed(cluster.id))) continue;
                         const center = positions.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), { x: 0, y: 0 });
                         labels.push({ x: center.x / positions.length, y: center.y / positions.length,
-                            radius: 16, size: 13, text: domain, alpha: domainOpacity(domain), priority: 3 });
+                            radius: 16, size: 13, text: domain, alpha: 1, priority: 3 });
                     }
                     labels.sort((a, b) => a.priority - b.priority);
 
