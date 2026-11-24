@@ -1,17 +1,16 @@
 #!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-import { accessSync, constants, copyFileSync, existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
-import { CLAUDE_HINT, updateAgentFiles } from '../core/AgentInstructions';
+import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
 import { findProject, missingTsconfig } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
-import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
+import { isTemporaryCliInstall, packageSpec } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
+import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
   neorion graph [dir]
@@ -20,6 +19,7 @@ const help = `Usage:
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
+  neorion setup <codex|claude> --remove
   neorion --version | --help
 
 Query kinds: ${kinds.join(', ')}`;
@@ -56,33 +56,12 @@ function runsCurrentEntry() {
   return false;
 }
 
-function setupCodex(local: boolean, noHint: boolean) {
-  const skills = join(homedir(), '.agents', 'skills', 'neorion');
-  mkdirSync(skills, { recursive: true });
-  copyFileSync(join(__dirname, '../skills/neorion/SKILL.md'), join(skills, 'SKILL.md'));
-  console.log('✓ Skill installed: ~/.agents/skills/neorion');
-
-  let skippedHint = false;
-  if (!noHint) {
-    const entry = /[^\w./:\\-]/.test(__filename)
-      ? `"${process.platform === 'win32' ? __filename : __filename.replace(/(["\\$`])/g, '\\$1')}"`
-      : __filename;
-    const cli = !local && isTemporaryCliInstall(__filename) ? `npx -y ${packageSpec}` :
-      !local && runsCurrentEntry() ? 'neorion' : `node ${entry}`;
-    skippedHint = !writeHint('AGENTS.md', `For architecture questions (who renders/wraps/calls/imports X, rename impact), run \`${cli} query <kind> <target>\` in the shell first (kinds: who_renders, wrappers, rename_impact, api_consumers, search) and trust a result that ends with \`# complete\`. Only open files to confirm specifics, or when the result ends with \`# partial\`.`);
-  }
-
-  const { command, args } = mcpCommand({ localEntry: __filename, detectCache: !local });
-  const result = spawnSync('codex', ['mcp', 'add', 'neorion', '--', command, ...args], { encoding: 'utf8' });
-  if (result.error && (result.error as NodeJS.ErrnoException).code === 'ENOENT') {
-    console.log(`Add to ~/.codex/config.toml:\n[mcp_servers.neorion]\ncommand = ${JSON.stringify(command)}\nargs = ${JSON.stringify(args)}`);
-  } else {
-    if (result.error) throw result.error;
-    if (result.status !== 0) throw new Error(result.stderr.trim() || 'Could not register the Neorion MCP server.');
-    console.log('✓ MCP server registered: neorion  (check: codex mcp list)');
-  }
-  console.log(skippedHint ? 'Next: rerun setup from the project root to add the AGENTS.md hint.' :
-    'Next: start `codex` in this project and ask "which pages render <Component>?"');
+function hintCommand(local: boolean, detectCache: boolean) {
+  const entry = /[^\w./:\\-]/.test(__filename)
+    ? `"${process.platform === 'win32' ? __filename : __filename.replace(/(["\\$`])/g, '\\$1')}"`
+    : __filename;
+  if (!local && detectCache && isTemporaryCliInstall(__filename)) return `npx -y ${packageSpec}`;
+  return !local && runsCurrentEntry() ? 'neorion' : `node ${entry}`;
 }
 
 async function main([command, ...args]: string[]) {
@@ -94,13 +73,31 @@ async function main([command, ...args]: string[]) {
     return run(resolve(args[0] ?? '.'));
   }
   if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude')) {
+    const agent = args[0];
+    const codex = agent === 'codex';
     const { values } = parseArgs({
       args: args.slice(1),
-      options: { ...(args[0] === 'codex' ? { local: { type: 'boolean' as const } } : {}), 'no-hint': { type: 'boolean' } }
+      options: {
+        ...(codex ? { local: { type: 'boolean' as const } } : {}),
+        'no-hint': { type: 'boolean' },
+        remove: { type: 'boolean' }
+      }
     });
-    if (args[0] === 'codex') return setupCodex(!!values.local, !!values['no-hint']);
-    if (!values['no-hint']) writeHint('CLAUDE.md', CLAUDE_HINT);
-    return console.log(`claude --plugin-dir "${resolve(__dirname, '..')}"`);
+    const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
+    let skippedHint = false;
+    setupAgent(agent, __filename, !!values.local, !!values.remove, () => {
+      if (values.remove) {
+        const root = process.cwd();
+        if (updateAgentFiles(root, root, [file], false)) console.log(`${join(root, file)} (Neorion block removed)`);
+      } else if (!values['no-hint']) {
+        skippedHint = !writeHint(file, queryHint(hintCommand(!!values.local, codex)));
+      }
+    });
+    if (codex && !values.remove) {
+      console.log(skippedHint ? 'Next: rerun setup from the project root to add the AGENTS.md hint.' :
+        'Next: start \`codex\` in this project and ask "which pages render <Component>?"');
+    }
+    return;
   }
   if (command !== 'query' && command !== 'mcp') throw new Error(help);
   const query = command === 'query';

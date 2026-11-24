@@ -34,21 +34,26 @@ To register the MCP server and install the skill for Codex, run the following co
 neorion setup codex
 ```
 
+Run `neorion setup codex --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup.
+
 ## Claude Code
 
-The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.2` on npm, which is not published.
-
-The installed package contains the plugin. After the global install, start Claude Code with it from your project. The installed plugin passes `claude plugin validate`. Launching it and making an MCP query from Claude Code are not tested yet.
+From your project root, run setup once and then start Claude Code as usual.
 
 ```sh
-claude --plugin-dir "$(npm root -g)/neorion"
+neorion setup claude
+claude
 ```
 
-Ask a normal architecture question such as “Which layouts or providers wrap the / route?” Approve the Neorion MCP call if prompted. For headless use, allow the MCP tool explicitly. The prompt comes before `--allowedTools`.
+Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md` in folders with `tsconfig.json` or `package.json`. Use `--no-hint` to skip that update. If Claude cannot register the server, setup prints the exact registration command.
+
+Ask “Which layouts or providers wrap the / route?” For headless use, allow the registered tool explicitly.
 
 ```sh
-claude -p --model haiku --plugin-dir "$(npm root -g)/neorion" "Which layouts or providers wrap the / route?" --allowedTools mcp__plugin_neorion_neorion__neorion_query
+claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neorion__neorion_query
 ```
+
+Run `neorion setup claude --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup. As a per-session alternative, launch with `claude --plugin-dir "$(npm root -g)/neorion"`.
 
 ## Build from source
 
@@ -67,5 +72,6 @@ From your TypeScript project, run the CLI directly from the clone.
 ```sh
 node "$NEORION_DIR/neorion/dist/neorion.cjs" graph
 node "$NEORION_DIR/neorion/dist/neorion.cjs" setup codex --local
-claude --plugin-dir "$NEORION_DIR/neorion"
+node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
+claude
 ```

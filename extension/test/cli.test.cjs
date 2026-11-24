@@ -23,10 +23,60 @@ function fixture(t) {
   fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["app/**/*"],"compilerOptions":{"jsx":"preserve"}}');
   fs.writeFileSync(path.join(root, 'app/page.tsx'), 'function DashboardShell() { return <main />; }\nexport default function Page() { return <DashboardShell />; }\n');
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, HOME: home, USERPROFILE: home };
+  delete env.CLAUDE_CONFIG_DIR;
+  delete env.CODEX_HOME;
   const run = (args, overrides = {}, cliEntry = entry) => spawnSync(process.execPath, [cliEntry, ...args], {
     cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
   });
   return { root, cache, home, env, run };
+}
+
+function fakeAgent(home, agent) {
+  const config = path.join(home, agent === 'claude' ? '.claude.json' : '.codex/fake-mcp.json');
+  const log = path.join(home, agent + '.log');
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  fs.writeFileSync(path.join(home, agent), `#!${process.execPath}
+const fs = require('node:fs');
+const [group, action, ...args] = process.argv.slice(2);
+fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([group, action, ...args]) + '\\n');
+const file = ${JSON.stringify(config)};
+const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { mcpServers: {} };
+if (action === 'get') {
+  if (!data.mcpServers.neorion) {
+    console.error("Error: No MCP server named 'neorion' found.");
+    process.exit(1);
+  }
+  console.log(JSON.stringify(data.mcpServers.neorion));
+} else if (action === 'add') {
+  if (data.mcpServers.neorion) {
+    console.error('Server already exists');
+    process.exit(1);
+  }
+  const [command, ...launchArgs] = args.slice(args.indexOf('--') + 1);
+  data.mcpServers.neorion = { type: 'stdio', command, args: launchArgs, env: {} };
+  fs.writeFileSync(file, JSON.stringify(data));
+} else if (action === 'remove') {
+  delete data.mcpServers.neorion;
+  fs.writeFileSync(file, JSON.stringify(data));
+} else process.exit(2);
+`, { mode: 0o755 });
+  return {
+    config,
+    calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trimEnd().split('\n').map(JSON.parse) : []
+  };
+}
+
+function assertQueryHint(hint) {
+  const block = hint.split('<!-- neorion:start -->')[1].split('<!-- neorion:end -->')[0];
+  const lines = block.trim().split(/\r?\n/).filter(line => !line.startsWith('<!-- neorion:state'));
+  assert.ok(lines.length <= 8);
+  assert.match(block, /do not grep\. Ask Neorion first with the `neorion_query` tool/);
+  for (const example of ['wrappers /settings', 'who_renders DashboardShell', 'rename_impact DashboardShell',
+    'api_consumers /api/users', 'search DashboardShell']) assert.ok(block.includes(example), example);
+  assert.match(block, /Include this rule in prompts you give subagents/);
+  assert.match(block, /\x60# complete\x60 means trust the result/);
+  assert.match(block, /\x60# partial: <reason>\x60 means read the reason and verify/);
+  assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
 }
 
 test('CLI, extension, plugin and marketplace versions agree', () => {
@@ -126,6 +176,7 @@ test('Codex setup installs the skill and prints config when Codex is unavailable
     fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
   const agents = path.join(root, 'AGENTS.md');
   const hint = fs.readFileSync(agents, 'utf8');
+  assertQueryHint(hint);
   const hintEntry = /\s/.test(entry) ? `"${entry}"` : entry;
   assert.ok(hint.includes(`run \`node ${hintEntry} query <kind> <target>\``));
   assert.match(setup.stdout, /Next: start `codex` in this project/);
@@ -182,30 +233,127 @@ test('Codex setup chooses a temporary npm command or a quoted local entry', t =>
   assert.ok(hint().includes(`run \`node "${cachedEntry}" query`));
 });
 
-test('Claude setup adds an idempotent hint and prints the installed plugin path', t => {
+test('Claude setup registers at user scope once, installs the skill and reverses only its changes', {
+  skip: process.platform === 'win32'
+}, t => {
   const { home, root, run } = fixture(t);
+  const { config, calls } = fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  fs.symlinkSync(entry, path.join(home, 'neorion'));
+  const other = { mcpServers: { other: { command: 'keep' } }, projects: { '/any': { mcpServers: { neorion: { command: 'local' } } } } };
+  fs.writeFileSync(config, JSON.stringify(other));
   const file = path.join(root, 'CLAUDE.md');
+  const skill = path.join(home, '.claude/skills/neorion/SKILL.md');
   const original = '\uFEFF# Existing instructions\r\nKeep this text.\r\n';
   fs.writeFileSync(file, original);
-  const unsupported = run(['setup', 'claude', '--local']);
+  const unsupported = run(['setup', 'claude', '--local'], env);
   assert.equal(unsupported.status, 1);
   assert.match(unsupported.stderr, /Unknown option '--local'/);
-  const setup = run(['setup', 'claude']);
+  const setup = run(['setup', 'claude'], env);
   assert.equal(setup.status, 0, setup.stderr);
   assert.ok(setup.stdout.includes(file + ' (written)'));
-  assert.ok(setup.stdout.includes(`claude --plugin-dir "${packageRoot}"`));
-  const expected = ['\uFEFF<!-- neorion:start -->',
-    'For architecture questions (who renders/wraps/calls/imports X, rename impact), use the neorion_query tool first and trust its result; only open files to confirm specifics.',
-    '<!-- neorion:end -->', original.slice(1)].join('\r\n');
-  assert.equal(fs.readFileSync(file, 'utf8'), expected);
-  assert.ok(run(['setup', 'claude']).stdout.includes(file + ' (unchanged)'));
-  assert.equal(fs.readFileSync(file, 'utf8'), expected);
-  assert.deepEqual(fs.readdirSync(home), []);
+  assert.ok(setup.stdout.includes(skill));
+  assert.ok(setup.stdout.includes(config));
+  assert.deepEqual(fs.readFileSync(skill), fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md')));
+  const hint = fs.readFileSync(file, 'utf8');
+  assertQueryHint(hint);
+  assert.match(hint, /If MCP is unavailable, run `neorion query <kind> <target>`/);
+  assert.ok(hint.startsWith('\uFEFF<!-- neorion:start -->\r\n'));
+  assert.ok(hint.endsWith('<!-- neorion:end -->\r\n' + original.slice(1)));
+  assert.doesNotMatch(hint.replaceAll('\r\n', ''), /\n/);
+  assert.ok(run(['setup', 'claude'], env).stdout.includes(file + ' (unchanged)'));
+  assert.equal(fs.readFileSync(file, 'utf8'), hint);
+  const add = ['mcp', 'add', '--scope', 'user', 'neorion', '--', process.execPath, entry, 'mcp'];
+  assert.deepEqual(calls(), [add]);
+  assert.deepEqual(readJson(config).mcpServers.neorion.args, [entry, 'mcp']);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  for (let i = 0; i < 2; i++) {
+    const removed = run(['setup', 'claude', '--remove'], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(fs.readFileSync(file, 'utf8'), original);
+    assert.ok(!fs.existsSync(skill));
+    assert.deepEqual(readJson(config), other);
+  }
+  assert.deepEqual(calls(), [add, ['mcp', 'remove', '--scope', 'user', 'neorion']]);
+});
+
+test('Claude setup protects invalid hint markers and prints an exact fallback if registration fails', t => {
+  const { home, root, run } = fixture(t);
+  const env = { PATH: home, Path: home };
+  const file = path.join(root, 'CLAUDE.md');
   fs.writeFileSync(file, '<!-- neorion:start -->');
-  const malformed = run(['setup', 'claude']);
+  const malformed = run(['setup', 'claude'], env);
   assert.equal(malformed.status, 1);
   assert.match(malformed.stderr, /Invalid Neorion markers/);
   assert.equal(fs.readFileSync(file, 'utf8'), '<!-- neorion:start -->');
+  const config = path.join(home, '.claude.json');
+  const original = '{"mcpServers":{"other":{"command":"keep"}}}';
+  fs.writeFileSync(config, original);
+  for (const hasBinary of process.platform === 'win32' ? [false] : [false, true]) {
+    if (hasBinary) fs.writeFileSync(path.join(home, 'claude'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    const fallback = run(['setup', 'claude', '--no-hint'], env);
+    assert.equal(fallback.status, 0, fallback.stderr);
+    assert.match(fallback.stdout, /^claude mcp add --scope user neorion -- .+ mcp$/m);
+    assert.ok(fallback.stdout.includes(process.execPath));
+    assert.ok(fallback.stdout.includes(entry));
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+  }
+});
+
+test('Codex setup and remove preserve unrelated servers and project text', { skip: process.platform === 'win32' }, t => {
+  const { home, root, run } = fixture(t);
+  const { config, calls } = fakeAgent(home, 'codex');
+  const env = { PATH: home };
+  const skill = path.join(home, '.agents/skills/neorion/SKILL.md');
+  const file = path.join(root, 'AGENTS.md');
+  const original = '# Other instructions\n';
+  const other = { mcpServers: { other: { command: 'keep' } } };
+  fs.writeFileSync(config, JSON.stringify(other));
+  fs.writeFileSync(file, original);
+  for (const args of [['--local'], ['--local'], ['--remove'], ['--remove']]) {
+    const result = run(['setup', 'codex', ...args], env);
+    assert.equal(result.status, 0, result.stderr);
+    if (args.includes('--local')) {
+      assertQueryHint(fs.readFileSync(file, 'utf8'));
+      assert.ok(fs.existsSync(skill));
+    }
+  }
+  assert.deepEqual(calls().filter(([, action]) => action !== 'get'), [
+    ['mcp', 'add', 'neorion', '--', process.execPath, entry, 'mcp'],
+    ['mcp', 'remove', 'neorion']
+  ]);
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  assert.ok(!fs.existsSync(skill));
+  assert.deepEqual(readJson(config), other);
+});
+
+test('Setup and remove preserve preexisting or modified Neorion skills and servers', { skip: process.platform === 'win32' }, t => {
+  const { home, root, run } = fixture(t);
+  for (const [agent, file, skills] of [['claude', 'CLAUDE.md', '.claude'], ['codex', 'AGENTS.md', '.agents']]) {
+    const { config, calls } = fakeAgent(home, agent);
+    const skill = path.join(home, skills, 'skills/neorion/SKILL.md');
+    fs.mkdirSync(path.dirname(skill), { recursive: true });
+    const env = { PATH: home };
+    const custom = { mcpServers: { neorion: { command: 'custom' } } };
+    for (const preexisting of [false, true]) {
+      if (preexisting) {
+        fs.writeFileSync(config, JSON.stringify(custom));
+        fs.writeFileSync(skill, 'Custom skill');
+      }
+      const added = run(['setup', agent], env);
+      assert.equal(added.status, 0, added.stderr);
+      if (!preexisting) {
+        fs.writeFileSync(config, JSON.stringify(custom));
+        fs.writeFileSync(skill, 'Custom skill');
+      }
+      const removed = run(['setup', agent, '--remove'], env);
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.ok(!fs.existsSync(path.join(root, file)));
+      assert.equal(fs.readFileSync(skill, 'utf8'), 'Custom skill');
+      assert.deepEqual(readJson(config), custom);
+    }
+    assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action), ['add']);
+  }
 });
 
 test('Both setup targets honor --no-hint and skip directories without project markers', t => {
@@ -226,7 +374,7 @@ test('Both setup targets honor --no-hint and skip directories without project ma
     assert.ok(!fs.existsSync(path.join(root, file)));
   }
   fs.writeFileSync(path.join(root, 'package.json'), '{}');
-  assert.equal(run(['setup', 'claude']).status, 0);
+  assert.equal(run(['setup', 'claude'], env).status, 0);
   assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')));
 });
 

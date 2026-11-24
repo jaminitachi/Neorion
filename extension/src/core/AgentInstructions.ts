@@ -3,7 +3,20 @@ import * as path from 'path';
 import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
-export const CLAUDE_HINT = 'For architecture questions (who renders/wraps/calls/imports X, rename impact), use the neorion_query tool first and trust its result; only open files to confirm specifics.';
+export function queryHint(cli = 'neorion') {
+  return [
+    'For Next.js layout, provider, or route questions, do not grep. Ask Neorion first with the `neorion_query` tool.',
+    '- What layouts or providers wrap this route? `wrappers /settings`',
+    '- Which pages render this component? `who_renders DashboardShell`',
+    '- What changes if I rename this symbol? `rename_impact DashboardShell`',
+    '- Who calls this API route or server action? `api_consumers /api/users`',
+    '- Where is this symbol or route defined or used? `search DashboardShell`',
+    'Include this rule in prompts you give subagents.',
+    '`# complete` means trust the result. `# partial: <reason>` means read the reason and verify.' +
+      ` If MCP is unavailable, run \`${cli} query <kind> <target>\`.`
+  ].join('\n');
+}
+export const CLAUDE_HINT = queryHint();
 const START = '<!-- neorion:start -->';
 const END = '<!-- neorion:end -->';
 const STATE = /^<!-- neorion:state (\{.*\}|[\w+/=]+) -->\r?$/m;
@@ -73,7 +86,7 @@ export function updateAgentFiles(root: string, graphRoot: string, targets: strin
       if (separator) state.headerEof = true;
       const block = [
         START,
-        instruction ?? (mcp ? 'Use neorion_query for rendering, wrappers, rename impact, API consumers, and symbol or route search.' :
+        instruction?.replace(/\n/g, nl) ?? (mcp ? queryHint().replace(/\n/g, nl) :
           `For architecture questions, read the Neorion overview at \`${path.join(workspaceCache(graphRoot), 'codebase_graph.md')}\`.`),
         ...(Object.keys(state).length ? [
           `<!-- neorion:state ${JSON.stringify(state).replace(/</g, '\\u003c').replace(/>/g, '\\u003e')} -->`
