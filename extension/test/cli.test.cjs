@@ -25,30 +25,48 @@ function fixture(t) {
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, HOME: home, USERPROFILE: home };
   delete env.CLAUDE_CONFIG_DIR;
   delete env.CODEX_HOME;
+  for (const key of Object.keys(env)) if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete env[key];
+  env.PATH = process.env.PATH;
   const run = (args, overrides = {}, cliEntry = entry) => spawnSync(process.execPath, [cliEntry, ...args], {
     cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
   });
   return { root, cache, home, env, run };
 }
 
-function fakeAgent(home, agent) {
-  const config = path.join(home, agent === 'claude' ? '.claude.json' : '.codex/fake-mcp.json');
+function fakeAgent(home, agent, { claudeHome = home, oldCodex = '' } = {}) {
+  const config = agent === 'claude' ? path.join(claudeHome, '.claude.json') : path.join(home, '.codex/fake-mcp.json');
   const log = path.join(home, agent + '.log');
+  const windows = process.platform === 'win32';
+  const program = path.join(home, agent + (windows ? '.cjs' : ''));
   fs.mkdirSync(path.dirname(config), { recursive: true });
-  fs.writeFileSync(path.join(home, agent), `#!${process.execPath}
+  fs.writeFileSync(program, `#!${process.execPath}
 const fs = require('node:fs');
 const [group, action, ...args] = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify([group, action, ...args]) + '\\n');
 const file = ${JSON.stringify(config)};
 const data = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : { mcpServers: {} };
 if (action === 'get') {
+  if (${JSON.stringify(oldCodex)}) {
+    console.error("error: unrecognized subcommand 'get'");
+    process.exit(2);
+  }
   if (!data.mcpServers.neorion) {
     console.error("Error: No MCP server named 'neorion' found.");
     process.exit(1);
   }
   console.log(JSON.stringify(data.mcpServers.neorion));
+} else if (action === 'list') {
+  if (!args.includes('--json')) {
+    console.log('Name  Command');
+    for (const [name, entry] of Object.entries(data.mcpServers)) console.log(name + '  ' + entry.command);
+  } else if (${JSON.stringify(oldCodex)} === 'text-list') {
+    console.error("error: unexpected argument '--json' found");
+    process.exit(2);
+  } else {
+    console.log(JSON.stringify(Object.entries(data.mcpServers).map(([name, entry]) => ({ name, ...entry }))));
+  }
 } else if (action === 'add') {
-  if (data.mcpServers.neorion) {
+  if (${JSON.stringify(agent)} === 'claude' && data.mcpServers.neorion) {
     console.error('Server already exists');
     process.exit(1);
   }
@@ -56,10 +74,12 @@ if (action === 'get') {
   data.mcpServers.neorion = { type: 'stdio', command, args: launchArgs, env: {} };
   fs.writeFileSync(file, JSON.stringify(data));
 } else if (action === 'remove') {
+  if (process.env.FAKE_REMOVE_FAILURE) process.exit(1);
   delete data.mcpServers.neorion;
   fs.writeFileSync(file, JSON.stringify(data));
 } else process.exit(2);
 `, { mode: 0o755 });
+  if (windows) fs.writeFileSync(path.join(home, agent + '.cmd'), `@echo off\r\n"${process.execPath}" "${program}" %*\r\n`);
   return {
     config,
     calls: () => fs.existsSync(log) ? fs.readFileSync(log, 'utf8').trimEnd().split('\n').map(JSON.parse) : []
@@ -68,15 +88,20 @@ if (action === 'get') {
 
 function assertQueryHint(hint) {
   const block = hint.split('<!-- neorion:start -->')[1].split('<!-- neorion:end -->')[0];
-  const lines = block.trim().split(/\r?\n/).filter(line => !line.startsWith('<!-- neorion:state'));
-  assert.ok(lines.length <= 8);
-  assert.match(block, /do not grep\. Ask Neorion first with the `neorion_query` tool/);
-  for (const example of ['wrappers /settings', 'who_renders DashboardShell', 'rename_impact DashboardShell',
-    'api_consumers /api/users', 'search DashboardShell']) assert.ok(block.includes(example), example);
-  assert.match(block, /Include this rule in prompts you give subagents/);
-  assert.match(block, /\x60# complete\x60 means trust the result/);
-  assert.match(block, /\x60# partial: <reason>\x60 means read the reason and verify/);
+  assert.match(block, /rename affects.*`neorion_query` tool before grepping/);
+  for (const kind of ['wrappers', 'who_renders', 'rename_impact', 'api_consumers', 'search']) {
+    assert.ok(block.includes(`\x60${kind} <`), kind);
+  }
+  assert.match(block, /# partial: <reason>.*verify against the source/);
   assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
+}
+
+function copyCli(directory) {
+  const copied = path.join(directory, 'dist/neorion.cjs');
+  fs.mkdirSync(path.dirname(copied), { recursive: true });
+  fs.copyFileSync(entry, copied);
+  fs.cpSync(path.join(packageRoot, 'skills'), path.join(directory, 'skills'), { recursive: true });
+  return copied;
 }
 
 test('CLI, extension, plugin and marketplace versions agree', () => {
@@ -216,10 +241,7 @@ test('Codex setup writes the hint before failed registration', { skip: process.p
 test('Codex setup chooses a temporary npm command or a quoted local entry', t => {
   const { home, root, run } = fixture(t);
   const cachedPackage = path.join(home, 'cache with spaces', '_npx', 'abc', 'node_modules', 'neorion');
-  const cachedEntry = path.join(cachedPackage, 'dist/neorion.cjs');
-  fs.mkdirSync(path.dirname(cachedEntry), { recursive: true });
-  fs.copyFileSync(entry, cachedEntry);
-  fs.cpSync(path.join(packageRoot, 'skills'), path.join(cachedPackage, 'skills'), { recursive: true });
+  const cachedEntry = copyCli(cachedPackage);
   const env = { PATH: home, Path: home };
   const hint = () => fs.readFileSync(path.join(root, 'AGENTS.md'), 'utf8');
   const cached = run(['setup', 'codex'], env, cachedEntry);
@@ -233,13 +255,10 @@ test('Codex setup chooses a temporary npm command or a quoted local entry', t =>
   assert.ok(hint().includes(`run \`node "${cachedEntry}" query`));
 });
 
-test('Claude setup registers at user scope once, installs the skill and reverses only its changes', {
-  skip: process.platform === 'win32'
-}, t => {
+test('Claude setup registers at user scope once, installs the skill and reverses only its changes', t => {
   const { home, root, run } = fixture(t);
   const { config, calls } = fakeAgent(home, 'claude');
   const env = { PATH: home };
-  fs.symlinkSync(entry, path.join(home, 'neorion'));
   const other = { mcpServers: { other: { command: 'keep' } }, projects: { '/any': { mcpServers: { neorion: { command: 'local' } } } } };
   fs.writeFileSync(config, JSON.stringify(other));
   const file = path.join(root, 'CLAUDE.md');
@@ -257,7 +276,7 @@ test('Claude setup registers at user scope once, installs the skill and reverses
   assert.deepEqual(fs.readFileSync(skill), fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md')));
   const hint = fs.readFileSync(file, 'utf8');
   assertQueryHint(hint);
-  assert.match(hint, /If MCP is unavailable, run `neorion query <kind> <target>`/);
+  assert.match(hint, /If MCP is unavailable, run `node .+ query <kind> <target>`/);
   assert.ok(hint.startsWith('\uFEFF<!-- neorion:start -->\r\n'));
   assert.ok(hint.endsWith('<!-- neorion:end -->\r\n' + original.slice(1)));
   assert.doesNotMatch(hint.replaceAll('\r\n', ''), /\n/);
@@ -275,6 +294,174 @@ test('Claude setup registers at user scope once, installs the skill and reverses
     assert.deepEqual(readJson(config), other);
   }
   assert.deepEqual(calls(), [add, ['mcp', 'remove', '--scope', 'user', 'neorion']]);
+  assert.ok(!fs.existsSync(path.dirname(skill)));
+});
+
+test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked legacy registration', async t => {
+  const legacySkill = path.join(__dirname, 'fixtures/neorion-0.5.2-skill.md');
+  for (const mode of ['upgrade', 'direct removal', 'preserve customized server']) {
+    await t.test(mode, t => {
+      const { home, run } = fixture(t);
+      const { config, calls } = fakeAgent(home, 'codex');
+      const directory = path.join(home, '.agents/skills/neorion');
+      const skill = path.join(directory, 'SKILL.md');
+      const legacyEntry = mode === 'direct removal' ? mcpCommand({ registryVersion: '0.5.2' })
+        : { command: process.execPath, args: [path.join(home, 'old/neorion/dist/neorion.cjs'), 'mcp'] };
+      const customized = mode === 'preserve customized server';
+      const server = { name: 'neorion', enabled: true, disabled_reason: null, enabled_tools: null,
+        transport: { type: 'stdio', ...legacyEntry, env: customized ? { USER_SET: '1' } : null, env_vars: [], cwd: null } };
+      fs.mkdirSync(directory, { recursive: true });
+      fs.copyFileSync(legacySkill, skill);
+      fs.writeFileSync(config, JSON.stringify({ mcpServers: { neorion: server } }));
+      const env = { PATH: home };
+      if (mode !== 'direct removal') {
+        const upgraded = run(['setup', 'codex', '--local'], env);
+        assert.equal(upgraded.status, 0, upgraded.stderr);
+        assert.match(upgraded.stdout, /Skill installed/);
+        assert.deepEqual(fs.readFileSync(skill), fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md')));
+        if (!customized) assert.deepEqual(readJson(config).mcpServers.neorion.args, [entry, 'mcp']);
+      }
+      const removed = run(['setup', 'codex', '--remove'], env);
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.ok(!fs.existsSync(skill));
+      assert.deepEqual(readJson(config).mcpServers, customized ? { neorion: server } : {});
+      assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action),
+        customized ? [] : mode === 'upgrade' ? ['remove', 'add', 'remove'] : ['remove']);
+    });
+  }
+});
+
+test('Claude repairs a stale owned registration and uses the installed CLI on POSIX', {
+  skip: process.platform === 'win32'
+}, t => {
+  const { home, root, run } = fixture(t);
+  const { config, calls } = fakeAgent(home, 'claude');
+  const checkout = path.join(home, 'old checkout', 'neorion');
+  const stale = copyCli(checkout);
+  const env = { PATH: home };
+  assert.equal(run(['setup', 'claude'], env, stale).status, 0);
+  fs.renameSync(checkout, path.join(home, 'moved'));
+  assert.ok(!fs.existsSync(stale));
+  fs.symlinkSync(entry, path.join(home, 'neorion'));
+  const repaired = run(['setup', 'claude'], env);
+  assert.equal(repaired.status, 0, repaired.stderr);
+  const add = ['mcp', 'add', '--scope', 'user', 'neorion', '--'];
+  assert.deepEqual(calls(), [[...add, process.execPath, stale, 'mcp'],
+    ['mcp', 'remove', '--scope', 'user', 'neorion'], [...add, 'neorion', 'mcp']]);
+  const registered = { type: 'stdio', command: 'neorion', args: ['mcp'], env: {} };
+  assert.deepEqual(readJson(config).mcpServers.neorion, registered);
+  assert.deepEqual(readJson(path.join(home, '.claude/skills/neorion/.neorion-setup.json')).mcp.entry, registered);
+  assert.match(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8'), /run `neorion query <kind> <target>`/);
+  assert.match(run(['setup', 'claude'], env).stdout, /MCP server unchanged/);
+  assert.equal(calls().length, 3);
+});
+
+test('Claude setup from the npx cache pins both server and fallback to the package version', t => {
+  const { home, root, run } = fixture(t);
+  const { config } = fakeAgent(home, 'claude');
+  const cached = copyCli(path.join(home, 'cache with spaces/_npx/abc/node_modules/neorion'));
+  const setup = run(['setup', 'claude'], { PATH: home }, cached);
+  assert.equal(setup.status, 0, setup.stderr);
+  assert.deepEqual(readJson(config).mcpServers.neorion, { type: 'stdio', ...mcpCommand(), env: {} });
+  const hint = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+  assert.ok(hint.includes(`run \x60npx -y ${name}@${version} query`));
+  assert.ok(!hint.includes('_npx'));
+});
+
+test('Claude setup honors CLAUDE_CONFIG_DIR and --remove --no-hint preserves the project hint', t => {
+  const { home, root, run } = fixture(t);
+  const claudeHome = path.join(home, 'custom config');
+  const { config } = fakeAgent(home, 'claude', { claudeHome });
+  const env = { PATH: home, CLAUDE_CONFIG_DIR: claudeHome };
+  const file = path.join(root, 'CLAUDE.md');
+  const directory = path.join(claudeHome, 'skills/neorion');
+  const setup = run(['setup', 'claude'], env);
+  assert.equal(setup.status, 0, setup.stderr);
+  assert.ok(fs.existsSync(path.join(directory, 'SKILL.md')));
+  assert.ok(readJson(config).mcpServers.neorion);
+  assert.ok(!fs.existsSync(path.join(home, '.claude')));
+  assert.ok(!fs.existsSync(path.join(home, '.claude.json')));
+  const hint = fs.readFileSync(file, 'utf8');
+  const removed = run(['setup', 'claude', '--remove', '--no-hint'], env);
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.equal(fs.readFileSync(file, 'utf8'), hint);
+  assert.deepEqual(readJson(config).mcpServers, {});
+  assert.ok(!fs.existsSync(directory));
+  assert.equal(run(['setup', 'claude', '--remove'], env).status, 0);
+  assert.ok(!fs.existsSync(file));
+});
+
+test('A leftover setup lock reports a recovery path and leaves the project untouched', t => {
+  const { home, root, run } = fixture(t);
+  const lock = path.join(home, '.claude/skills/neorion/.neorion-setup.lock');
+  fs.mkdirSync(lock, { recursive: true });
+  const failed = run(['setup', 'claude'], { PATH: home });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /If no setup process is running, delete the lock directory and rerun setup/);
+  assert.ok(failed.stderr.includes(lock));
+  assert.ok(!fs.existsSync(path.join(root, 'CLAUDE.md')));
+  fs.rmdirSync(lock);
+  assert.equal(run(['setup', 'claude'], { PATH: home }).status, 0);
+  assert.ok(fs.existsSync(path.join(root, 'CLAUDE.md')));
+});
+
+test('A temporarily unreadable Claude config gets a retry message and preserves the file', t => {
+  const { home, run } = fixture(t);
+  const config = path.join(home, '.claude.json');
+  fs.writeFileSync(config, '{');
+  const failed = run(['setup', 'claude'], { PATH: home });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /wait and rerun setup/);
+  assert.ok(failed.stderr.includes(config));
+  assert.equal(fs.readFileSync(config, 'utf8'), '{');
+  fs.writeFileSync(config, '{}');
+  assert.equal(run(['setup', 'claude'], { PATH: home }).status, 0);
+});
+
+test('Removal tells the user how to retry a missing or broken agent and keeps its ownership record', t => {
+  const { home, run } = fixture(t);
+  const empty = path.join(home, 'empty');
+  fs.mkdirSync(empty);
+  for (const [agent, settings, scope] of [['claude', '.claude', ' --scope user'], ['codex', '.agents', '']]) {
+    const { config } = fakeAgent(home, agent);
+    const state = path.join(home, settings, 'skills/neorion/.neorion-setup.json');
+    assert.equal(run(['setup', agent], { PATH: home }).status, 0);
+    const original = readJson(state).mcp;
+    for (const env of [{ PATH: empty }, { PATH: home, FAKE_REMOVE_FAILURE: '1' }]) {
+      const failed = run(['setup', agent, '--remove'], env);
+      assert.equal(failed.status, 1);
+      assert.ok(failed.stderr.includes(`${agent} mcp remove${scope} neorion`));
+      assert.doesNotMatch(failed.stderr, /spawnSync|ENOENT/);
+      assert.deepEqual(readJson(state).mcp, original);
+      assert.ok(readJson(config).mcpServers.neorion);
+    }
+    assert.equal(run(['setup', agent, '--remove'], { PATH: home }).status, 0);
+    assert.deepEqual(readJson(config).mcpServers, {});
+  }
+});
+
+test('An older Codex can use mcp add while an existing unowned entry stays intact', async t => {
+  for (const oldCodex of ['json-list', 'text-list']) {
+    await t.test(oldCodex, t => {
+      const { home, run } = fixture(t);
+      const { config, calls } = fakeAgent(home, 'codex', { oldCodex });
+      const env = { PATH: home };
+      const setup = run(['setup', 'codex'], env);
+      assert.equal(setup.status, 0, setup.stderr);
+      assert.match(setup.stdout, /MCP server registered/);
+      const removed = run(['setup', 'codex', '--remove'], env);
+      const custom = { mcpServers: { neorion: { command: 'custom' } } };
+      assert.equal(removed.status, 0, removed.stderr);
+      if (oldCodex === 'json-list') assert.deepEqual(readJson(config).mcpServers, {});
+      else assert.match(removed.stdout, /Keeping existing MCP server/);
+      fs.writeFileSync(config, JSON.stringify(custom));
+      const preserved = run(['setup', 'codex'], env);
+      assert.equal(preserved.status, 0, preserved.stderr);
+      assert.match(preserved.stdout, /Keeping existing MCP server/);
+      assert.deepEqual(readJson(config), custom);
+      assert.equal(calls().filter(([, action]) => action === 'add').length, 1);
+    });
+  }
 });
 
 test('Claude setup protects invalid hint markers and prints an exact fallback if registration fails', t => {
@@ -294,13 +481,14 @@ test('Claude setup protects invalid hint markers and prints an exact fallback if
     const fallback = run(['setup', 'claude', '--no-hint'], env);
     assert.equal(fallback.status, 0, fallback.stderr);
     assert.match(fallback.stdout, /^claude mcp add --scope user neorion -- .+ mcp$/m);
+    if (process.platform === 'win32') assert.match(fallback.stdout, /Run this command in PowerShell/);
     assert.ok(fallback.stdout.includes(process.execPath));
     assert.ok(fallback.stdout.includes(entry));
     assert.equal(fs.readFileSync(config, 'utf8'), original);
   }
 });
 
-test('Codex setup and remove preserve unrelated servers and project text', { skip: process.platform === 'win32' }, t => {
+test('Codex setup and remove preserve unrelated servers and project text', t => {
   const { home, root, run } = fixture(t);
   const { config, calls } = fakeAgent(home, 'codex');
   const env = { PATH: home };
@@ -327,7 +515,7 @@ test('Codex setup and remove preserve unrelated servers and project text', { ski
   assert.deepEqual(readJson(config), other);
 });
 
-test('Setup and remove preserve preexisting or modified Neorion skills and servers', { skip: process.platform === 'win32' }, t => {
+test('Setup and remove preserve preexisting or modified Neorion skills and servers', t => {
   const { home, root, run } = fixture(t);
   for (const [agent, file, skills] of [['claude', 'CLAUDE.md', '.claude'], ['codex', 'AGENTS.md', '.agents']]) {
     const { config, calls } = fakeAgent(home, agent);
@@ -342,12 +530,14 @@ test('Setup and remove preserve preexisting or modified Neorion skills and serve
       }
       const added = run(['setup', agent], env);
       assert.equal(added.status, 0, added.stderr);
+      if (preexisting) assert.match(added.stdout, /Keeping existing skill \(not installed by this setup\)/);
       if (!preexisting) {
         fs.writeFileSync(config, JSON.stringify(custom));
         fs.writeFileSync(skill, 'Custom skill');
       }
       const removed = run(['setup', agent, '--remove'], env);
       assert.equal(removed.status, 0, removed.stderr);
+      assert.match(removed.stdout, preexisting ? /Keeping existing MCP server \(not registered by this setup\)/ : /Keeping modified MCP server/);
       assert.ok(!fs.existsSync(path.join(root, file)));
       assert.equal(fs.readFileSync(skill, 'utf8'), 'Custom skill');
       assert.deepEqual(readJson(config), custom);

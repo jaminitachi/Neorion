@@ -34,7 +34,7 @@ To register the MCP server and install the skill for Codex, run the following co
 neorion setup codex
 ```
 
-Run `neorion setup codex --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup.
+Run `neorion setup codex --remove` from the project to clear its marked block and remove the user-wide skill and MCP registration that setup still owns. Setup recognizes older installations by their released skill and default MCP command. Rerun `--remove` in other projects to clear their blocks, or use `--remove --no-hint` to keep the current project's block.
 
 ## Claude Code
 
@@ -45,7 +45,7 @@ neorion setup claude
 claude
 ```
 
-Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md` in folders with `tsconfig.json` or `package.json`. Use `--no-hint` to skip that update. If Claude cannot register the server, setup prints the exact registration command.
+Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md` in folders with `tsconfig.json` or `package.json`. If `CLAUDE_CONFIG_DIR` is set, the skill goes under `$CLAUDE_CONFIG_DIR/skills/neorion/`. Use `--no-hint` to skip the project hint. If registration fails, setup prints a manual command for your shell (PowerShell on Windows).
 
 Ask “Which layouts or providers wrap the / route?” For headless use, allow the registered tool explicitly.
 
@@ -53,7 +53,9 @@ Ask “Which layouts or providers wrap the / route?” For headless use, allow t
 claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neorion__neorion_query
 ```
 
-Run `neorion setup claude --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup. As a per-session alternative, launch with `claude --plugin-dir "$(npm root -g)/neorion"`.
+Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
+
+For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
 
 ## Build from source
 
@@ -75,3 +77,5 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup codex --local
 node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
+
+Direct setup from a clone records the clone's path when `neorion` is unavailable on `PATH`. Rerun setup from the new location after moving the clone.

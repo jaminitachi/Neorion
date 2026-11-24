@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
 import { findProject, missingTsconfig } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
-import { isTemporaryCliInstall, packageSpec } from '../core/McpCommand';
+import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
@@ -19,7 +19,7 @@ const help = `Usage:
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
-  neorion setup <codex|claude> --remove
+  neorion setup <codex|claude> --remove [--no-hint]
   neorion --version | --help
 
 Query kinds: ${kinds.join(', ')}`;
@@ -56,12 +56,13 @@ function runsCurrentEntry() {
   return false;
 }
 
-function hintCommand(local: boolean, detectCache: boolean) {
+function hintCommand(temporary: boolean, onPath: boolean) {
+  if (temporary) return `npx -y ${packageSpec}`;
+  if (onPath) return 'neorion';
   const entry = /[^\w./:\\-]/.test(__filename)
     ? `"${process.platform === 'win32' ? __filename : __filename.replace(/(["\\$`])/g, '\\$1')}"`
     : __filename;
-  if (!local && detectCache && isTemporaryCliInstall(__filename)) return `npx -y ${packageSpec}`;
-  return !local && runsCurrentEntry() ? 'neorion' : `node ${entry}`;
+  return `node ${entry}`;
 }
 
 async function main([command, ...args]: string[]) {
@@ -84,18 +85,23 @@ async function main([command, ...args]: string[]) {
       }
     });
     const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
+    const temporary = !values.local && isTemporaryCliInstall(__filename);
+    const onPath = !values.local && !temporary && runsCurrentEntry();
+    const launch = onPath && process.platform !== 'win32' ? { command: 'neorion', args: ['mcp'] }
+      : mcpCommand({ localEntry: temporary ? undefined : __filename });
     let skippedHint = false;
-    setupAgent(agent, __filename, !!values.local, !!values.remove, () => {
+    setupAgent(agent, __filename, launch, !!values.remove, () => {
+      if (values['no-hint']) return;
       if (values.remove) {
         const root = process.cwd();
         if (updateAgentFiles(root, root, [file], false)) console.log(`${join(root, file)} (Neorion block removed)`);
-      } else if (!values['no-hint']) {
-        skippedHint = !writeHint(file, queryHint(hintCommand(!!values.local, codex)));
+      } else {
+        skippedHint = !writeHint(file, queryHint(hintCommand(temporary, onPath)));
       }
     });
     if (codex && !values.remove) {
       console.log(skippedHint ? 'Next: rerun setup from the project root to add the AGENTS.md hint.' :
-        'Next: start \`codex\` in this project and ask "which pages render <Component>?"');
+        'Next: start `codex` in this project and ask "which pages render <Component>?"');
     }
     return;
   }

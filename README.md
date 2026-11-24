@@ -40,7 +40,7 @@ It does three things.
 * It writes a short hint into `./AGENTS.md` in the current folder. The hint tells Codex to query Neorion first for architecture questions and gives the CLI command as a fallback. Setup creates `AGENTS.md` if needed.
 * It registers the Neorion MCP server with Codex, or prints the config if Codex is unavailable on PATH.
 
-The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. The rest of the file is left as it is. Running the command again replaces that block. It never adds a second copy. Run `neorion setup codex --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup. The VS Code extension’s **Connect AI tools** and **Disconnect AI tools** commands manage the same marked block in `AGENTS.md` and `CLAUDE.md`.
+The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. Running the command again replaces that block. Run `neorion setup codex --remove` from the project to clear its block and remove the user-wide skill and MCP registration that setup still owns. Setup recognizes older installations by their released skill and default MCP command. Rerun `--remove` in other projects to clear their blocks, or use `--remove --no-hint` to keep the current project's block. The VS Code extension’s **Connect AI tools** and **Disconnect AI tools** commands manage the same marked block in `AGENTS.md` and `CLAUDE.md`.
 
 Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json` or `package.json`.
 
@@ -53,7 +53,7 @@ neorion setup claude
 claude
 ```
 
-Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md` in folders with `tsconfig.json` or `package.json`. Use `--no-hint` to skip that update. If Claude cannot register the server, setup prints the exact registration command.
+Setup registers the Neorion MCP server at user scope, installs the skill in `~/.claude/skills/neorion/SKILL.md`, and updates the marked block in `CLAUDE.md` in folders with `tsconfig.json` or `package.json`. If `CLAUDE_CONFIG_DIR` is set, the skill goes under `$CLAUDE_CONFIG_DIR/skills/neorion/`. Use `--no-hint` to skip the project hint. If registration fails, setup prints a manual command for your shell (PowerShell on Windows).
 
 Ask “Which layouts or providers wrap the / route?” For headless use, allow the registered tool explicitly.
 
@@ -61,7 +61,9 @@ Ask “Which layouts or providers wrap the / route?” For headless use, allow t
 claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neorion__neorion_query
 ```
 
-Run `neorion setup claude --remove` from the same project to remove its marked block and the skill and MCP entry installed by setup. As a per-session alternative, launch with `claude --plugin-dir "$(npm root -g)/neorion"`.
+Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
+
+For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
 
 ## Build from source
 
@@ -83,6 +85,8 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup codex --local
 node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
+
+Direct setup from a clone records the clone's path when `neorion` is unavailable on `PATH`. Rerun setup from the new location after moving the clone.
 
 ## VS Code extension
 

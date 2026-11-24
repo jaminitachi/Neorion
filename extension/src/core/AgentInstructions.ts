@@ -3,20 +3,15 @@ import * as path from 'path';
 import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
-export function queryHint(cli = 'neorion') {
+export function queryHint(cli?: string) {
   return [
-    'For Next.js layout, provider, or route questions, do not grep. Ask Neorion first with the `neorion_query` tool.',
-    '- What layouts or providers wrap this route? `wrappers /settings`',
-    '- Which pages render this component? `who_renders DashboardShell`',
-    '- What changes if I rename this symbol? `rename_impact DashboardShell`',
-    '- Who calls this API route or server action? `api_consumers /api/users`',
-    '- Where is this symbol or route defined or used? `search DashboardShell`',
+    'To find which pages render a component, what wraps a route, who calls an API or action, what a rename affects, or where a symbol is used, ask Neorion with the `neorion_query` tool before grepping.',
+    'Query kinds are `wrappers <route>`, `who_renders <Component>`, `rename_impact <Symbol>`, `api_consumers <route or action>`, and `search <text>`.',
     'Include this rule in prompts you give subagents.',
-    '`# complete` means trust the result. `# partial: <reason>` means read the reason and verify.' +
-      ` If MCP is unavailable, run \`${cli} query <kind> <target>\`.`
+    '`# complete` means trust the result. For `# partial: <reason>`, read the reason and verify against the source.',
+    ...(cli ? [`If MCP is unavailable, run \`${cli} query <kind> <target>\`.`] : [])
   ].join('\n');
 }
-export const CLAUDE_HINT = queryHint();
 const START = '<!-- neorion:start -->';
 const END = '<!-- neorion:end -->';
 const STATE = /^<!-- neorion:state (\{.*\}|[\w+/=]+) -->\r?$/m;
