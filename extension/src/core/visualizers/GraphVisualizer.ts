@@ -23,6 +23,14 @@ export class GraphVisualizer {
                     case 'openFile':
                         this.openFile(message.path);
                         return;
+                    case 'copyQuery':
+                        if (typeof message.text === 'string') {
+                            void vscode.env.clipboard.writeText(message.text).then(
+                                () => this._panel.webview.postMessage({ command: 'queryCopied', text: message.text }),
+                                () => vscode.window.showErrorMessage('Failed to copy the Neorion query.')
+                            );
+                        }
+                        return;
                     case 'error':
                         vscode.window.showErrorMessage(`Graph Error: ${message.text}`);
                         return;
@@ -97,6 +105,18 @@ export class GraphVisualizer {
             return characters.length > 28 ? characters.slice(0, 27).join('') + '…' : label;
         };
 
+        const query = (kind: string, target: string) => {
+            const argument = /^[a-zA-Z0-9_./-]+$/.test(target) && !target.startsWith('-')
+                ? target : "'" + target.replace(/'/g, "'\\''") + "'";
+            return `neorion query ${kind} ${argument}`;
+        };
+        const renderSymbols = new Map((graph.index?.symbols ?? []).filter(symbol => symbol.kind === 'component')
+            .map(symbol => [symbol.file + '#' + symbol.name, symbol.id]));
+        const pageIds = new Map(graph.routes.filter(route => route.type === 'page').map(route => [route.file, route.id]));
+        const renderRoots = (graph.index?.routes ?? []).filter(route => route.kind === 'page' && pageIds.has(route.file)).map(route => ({
+            id: pageIds.get(route.file),
+            roots: [route.component, route.fileSymbol, ...(route.layouts ?? [])].filter(id => id !== undefined)
+        }));
         const layouts = graph.routes.filter(route => route.type === 'layout' || route.type === 'template');
         const layoutDepth = new Map(layouts.map(layout => {
             const directory = path.posix.dirname(layout.file);
@@ -114,6 +134,10 @@ export class GraphVisualizer {
                 id: r.id,
                 kind: r.type === 'layout' || r.type === 'template' ? 'layout' : 'route',
                 level: layoutDepth.get(r.id) ?? pageLevel,
+                routeType: r.type,
+                componentId: r.componentId,
+                query: r.type === 'page' ? query('wrappers', r.path)
+                    : r.type === 'api' ? query('api_consumers', r.path) : query('search', r.file),
                 label,
                 group: r.domain || 'other',
                 title: [`Route: ${label}`, `File: ${r.file}`, `Domain: ${r.domain}`,
@@ -129,6 +153,8 @@ export class GraphVisualizer {
             id: c.id,
             kind: 'component',
             level: componentLevel,
+            renderSymbol: renderSymbols.get(c.path + '#' + c.name),
+            query: query('who_renders', c.path + '#' + c.name),
             label: c.name, 
             group: c.domain || 'other', 
             title: `Component: ${c.name}\nPath: ${c.path}\nDomain: ${c.domain}\n\n${c.description ? '📝 ' + c.description : ''}`,
@@ -142,6 +168,7 @@ export class GraphVisualizer {
             const label = id.slice(separator + 1);
             return {
                 id, label, kind: 'action', level: componentLevel + 1, path: file, group: DomainExtractor.extract('/' + file),
+                query: query('api_consumers', file + '#' + label),
                 title: `Server action: ${label}\nPath: ${file}`, shape: 'square'
             };
         });
@@ -150,7 +177,7 @@ export class GraphVisualizer {
                 const file = id.slice('file:'.length);
                 return {
                     id, kind: 'file', level: componentLevel, label: path.posix.basename(file), path: file,
-                    group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'square'
+                    group: DomainExtractor.extract('/' + file), query: query('search', file), title: `Server action caller: ${file}`, shape: 'square'
                 };
             });
         const rawNodes = [...routeNodes, ...componentNodes, ...actionNodes, ...callerNodes];
@@ -236,7 +263,9 @@ export class GraphVisualizer {
             nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, bigGroups,
             counts: { routes: graph.routes.length, components: graph.components.length, actions: graph.actions.length,
                 edges: codeEdges.length },
-            neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]])
+            neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]]),
+            renderRoots,
+            renderEdges: graph.index?.renderEdges.map(([from, to]) => [from, to]) ?? []
         };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
         const nonce = randomBytes(16).toString('base64');
@@ -274,7 +303,10 @@ export class GraphVisualizer {
         #details h3 { margin: 16px 0 4px; font-size: 13px; }
         #details dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; }
         #details dd { margin: 0; }
-        #details ul { padding-left: 18px; margin: 0; }
+        #details :is(ul, ol) { padding-left: 20px; margin: 0; }
+        .passport-counts { padding-block: 9px; margin: 14px 0 0; border-block: 1px solid var(--border-color); }
+        .query-command { width: 100%; box-sizing: border-box; margin: 4px 0 7px; padding: 6px; color: var(--fg-color); background: var(--bg-color); border: 1px solid var(--border-color); font: 12px var(--vscode-editor-font-family, monospace); }
+        #copy-status { margin-left: 6px; }
         .connection { text-align: left; padding: 3px 0; border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--fg-color)); font: inherit; overflow-wrap: anywhere; cursor: pointer; }
         .connection:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--fg-color)); }
         .legend { flex: 0 0 min(180px, 28%); min-width: 0; box-sizing: border-box; background: var(--vscode-sideBar-background, var(--bg-color)); overflow: auto; padding: 10px; border-right: 1px solid var(--border-color); }
@@ -363,8 +395,22 @@ export class GraphVisualizer {
                 <dt>Domain</dt><dd id="details-domain"></dd>
             </dl>
             <button id="details-open" class="btn">Open file</button>
-            <h3>Incoming</h3><ul id="details-incoming"></ul>
-            <h3>Outgoing</h3><ul id="details-outgoing"></ul>
+            <p class="passport-counts"><span id="upstream"></span> upstream · <span id="downstream"></span> downstream</p>
+            <section id="wrapper-section" hidden>
+                <h3>Wrapped by (outer → inner)</h3>
+                <ol id="details-wrappers"></ol>
+            </section>
+            <section id="render-section" hidden>
+                <h3 id="render-heading"></h3>
+                <ul id="details-pages"></ul>
+            </section>
+            <section id="callers-section" hidden>
+                <h3 id="callers-heading"></h3>
+                <ul id="details-callers"></ul>
+            </section>
+            <h3><label for="details-query">Neorion query</label></h3>
+            <input id="details-query" class="query-command" type="text" readonly>
+            <button id="copy-query" class="btn">Copy query</button><span id="copy-status" role="status"></span>
         </aside>
     </div>
 
@@ -388,6 +434,7 @@ export class GraphVisualizer {
         let routesMode = false;
         let visibleDomains;
         let searchMatches = null;
+        let focusIds = null;
 
 
         function log(msg) {
@@ -427,10 +474,12 @@ export class GraphVisualizer {
         }
 
         function nodeOpacity(id) {
+            if (focusIds) return focusIds.has(id) ? 1 : 0.15;
             return !searchMatches || searchMatches.has(id) ? 1 : 0.18;
         }
 
         function clusterOpacity(cluster) {
+            if (focusIds) return cluster.componentIds.some(id => focusIds.has(id)) ? 1 : 0.15;
             return !searchMatches || cluster.componentIds.some(id => searchMatches.has(id)) ? 1 : 0.18;
         }
 
@@ -549,7 +598,7 @@ export class GraphVisualizer {
         let componentClusters = [];
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors, counts } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, denseGraph, bigGroups, neighbors, counts, renderRoots, renderEdges } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -603,15 +652,28 @@ export class GraphVisualizer {
                 visibleDomains = new Set(domains);
                 const graphColors = node => theme.groups[node.group].color;
                 const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
-                const wrapsColors = () => edges.filter(edge => edge.type === 'wraps').map(edge => ({
-                    id: edge.id,
-                    color: { color: graphColors(graphNodes.get(edge.from)).background, inherit: false, opacity: 1 }
-                }));
-                network.body.data.edges.update(wrapsColors());
+                const codeEdges = edges.filter(edge => edge.type);
+                function edgeColor(edge) {
+                    const color = edge.type === 'wraps'
+                        ? { color: graphColors(graphNodes.get(edge.from)).background, inherit: false, opacity: 1 }
+                        : theme.edge;
+                    const focused = !focusIds || (focusIds.has(edge.from) && focusIds.has(edge.to));
+                    return { ...color, opacity: color.opacity * (focused ? 1 : 0.15) };
+                }
+                function updateEdgeColors() {
+                    const updates = codeEdges.map(edge => ({ id: edge.id, color: edgeColor(edge) }));
+                    for (const update of updates) {
+                        for (const id of network.getClusteredEdges(update.id)) {
+                            if (id !== update.id) network.body.edges[id].setOptions({ color: update.color });
+                        }
+                    }
+                    network.body.data.edges.update(updates);
+                }
+                updateEdgeColors();
                 new MutationObserver(() => {
                     theme = readTheme(groupsConfig);
                     network.setOptions({ nodes: { font: theme.font }, groups: theme.groups, edges: { color: theme.edge } });
-                    network.body.data.edges.update(wrapsColors());
+                    updateEdgeColors();
                     network.body.data.nodes.update(nodes.filter(node => node.kind).map(node => ({
                         id: node.id, color: graphColors(node)
                     })));
@@ -645,6 +707,49 @@ export class GraphVisualizer {
                         hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
                     };
                 });
+                const layoutsByPage = new Map();
+                const edgeById = new Map(codeEdges.map(edge => [edge.id, edge]));
+                const incomingRenders = new Map();
+                const pagesByRoot = new Map();
+                for (const edge of codeEdges) {
+                    if (edge.type !== 'wraps') continue;
+                    const chain = layoutsByPage.get(edge.to) ?? [];
+                    chain.push(edge);
+                    layoutsByPage.set(edge.to, chain);
+                }
+                for (const chain of layoutsByPage.values()) {
+                    chain.sort((a, b) => graphNodes.get(a.from).path.length - graphNodes.get(b.from).path.length);
+                }
+                for (const [from, to] of renderEdges) {
+                    const parents = incomingRenders.get(to) ?? new Set();
+                    parents.add(from);
+                    incomingRenders.set(to, parents);
+                }
+                for (const { id, roots } of renderRoots) {
+                    for (const root of roots) {
+                        const pages = pagesByRoot.get(root) ?? new Set();
+                        pages.add(id);
+                        pagesByRoot.set(root, pages);
+                    }
+                }
+                function renderedBy(symbol) {
+                    const pages = new Set();
+                    const visited = new Set([symbol]);
+                    const pending = [symbol];
+                    for (const current of pending) {
+                        if (current !== symbol) {
+                            for (const page of pagesByRoot.get(current) ?? []) pages.add(page);
+                        }
+                        for (const parent of incomingRenders.get(current) ?? []) {
+                            if (visited.has(parent)) continue;
+                            visited.add(parent);
+                            pending.push(parent);
+                        }
+                    }
+                    return [...pages].sort((a, b) => graphNodes.get(a).fullLabel.localeCompare(graphNodes.get(b).fullLabel));
+                }
+
+                let selectedId;
                 let rowNodes = new Set();
                 let rowHeading;
                 let fitScale = 1;
@@ -755,7 +860,6 @@ export class GraphVisualizer {
                 const domainRows = new Map();
                 const edgeTypes = ['wraps', 'renders', 'imports', 'uses-action'];
                 const visibleEdgeTypes = new Set(edgeTypes);
-                const codeEdges = edges.filter(edge => edge.type);
                 function applyFilters() {
                     for (const [domain, { checkbox, label }] of domainRows) {
                         checkbox.checked = visibleDomains.has(domain);
@@ -858,7 +962,7 @@ export class GraphVisualizer {
                     searchMatches = query ? new Set() : null;
                     if (searchMatches) {
                         for (const node of graphNodes.values()) {
-                            if ([node.fullLabel, node.path].some(value => value.toLowerCase().includes(query))) {
+                            if (visibleDomains.has(node.group) && [node.fullLabel, node.path].some(value => value.toLowerCase().includes(query))) {
                                 searchMatches.add(node.id);
                             }
                         }
@@ -882,16 +986,56 @@ export class GraphVisualizer {
                 }
 
                 function closeDetails() {
-                    if (!details.hidden) {
-                        details.hidden = true;
-                        fitGraph();
-                    }
+                    if (details.hidden) return;
+                    selectedId = undefined;
+                    focusIds = null;
+                    network.unselectAll();
+                    details.hidden = true;
                     document.getElementById('details-open').onclick = null;
+                    updateNodeOpacity();
+                    updateEdgeColors();
+                    fitGraph();
                 }
 
                 function openNodeFile(node) {
                     if (node?.path) vscode.postMessage({ command: 'openFile', path: node.path });
                 }
+
+                function listNodes(id, ids, empty) {
+                    const list = document.getElementById(id);
+                    list.replaceChildren();
+                    for (const nodeId of ids) {
+                        const neighbor = graphNodes.get(nodeId);
+                        const item = document.createElement('li');
+                        const button = document.createElement('button');
+                        button.className = 'connection';
+                        button.textContent = neighbor.fullLabel;
+                        button.title = neighbor.path;
+                        button.addEventListener('click', () => {
+                            if (!visibleDomains.has(neighbor.group)) {
+                                visibleDomains.add(neighbor.group);
+                                applyFilters();
+                            }
+                            focusNode(nodeId);
+                        });
+                        item.appendChild(button);
+                        list.appendChild(item);
+                    }
+                    if (!ids.length) {
+                        const item = document.createElement('li');
+                        item.textContent = empty;
+                        list.appendChild(item);
+                    }
+                }
+
+                const queryInput = document.getElementById('details-query');
+                const copyStatus = document.getElementById('copy-status');
+                document.getElementById('copy-query').addEventListener('click', () => {
+                    vscode.postMessage({ command: 'copyQuery', text: queryInput.value });
+                });
+                window.addEventListener('message', ({ data }) => {
+                    if (data?.command === 'queryCopied' && data.text === queryInput.value) copyStatus.textContent = 'Copied';
+                });
 
                 function showDetails(id) {
                     const node = graphNodes.get(id);
@@ -899,38 +1043,39 @@ export class GraphVisualizer {
                         closeDetails();
                         return;
                     }
+                    selectedId = id;
+                    const wrappers = (layoutsByPage.get(id) ?? []).map(edge => edge.from);
+                    const pages = node.kind === 'component' ? renderedBy(node.renderSymbol) : [];
+                    const callers = node.kind === 'action' ? [...connections.get(id).incoming] : [];
+                    focusIds = new Set([id, ...wrappers, ...pages, ...callers]);
+                    if (node.componentId) focusIds.add(node.componentId);
+
                     document.getElementById('details-label').textContent = node.fullLabel;
-                    document.getElementById('details-kind').textContent = node.kind;
+                    document.getElementById('details-kind').textContent = node.routeType ?? node.kind;
                     document.getElementById('details-path').textContent = node.path;
                     document.getElementById('details-domain').textContent = node.group;
                     const openButton = document.getElementById('details-open');
                     openButton.disabled = !node.path;
                     openButton.onclick = () => openNodeFile(node);
+                    document.getElementById('upstream').textContent = connections.get(id).incoming.size;
+                    document.getElementById('downstream').textContent = connections.get(id).outgoing.size;
+                    document.getElementById('wrapper-section').hidden = node.routeType !== 'page';
+                    document.getElementById('render-section').hidden = node.kind !== 'component';
+                    document.getElementById('callers-section').hidden = node.kind !== 'action';
+                    listNodes('details-wrappers', wrappers, 'No layouts');
+                    listNodes('details-pages', pages, 'No indexed pages');
+                    listNodes('details-callers', callers, 'No callers');
+                    document.getElementById('render-heading').textContent = 'Rendered by ' + pages.length + (pages.length === 1 ? ' page' : ' pages');
+                    document.getElementById('callers-heading').textContent = 'Called by ' + callers.length + (callers.length === 1 ? ' node' : ' nodes');
+                    queryInput.value = node.query;
+                    queryInput.scrollLeft = 0;
+                    copyStatus.textContent = '';
 
-                    for (const [direction, ids] of Object.entries(connections.get(id))) {
-                        const list = document.getElementById('details-' + direction);
-                        list.replaceChildren();
-                        if (ids.size === 0) {
-                            const empty = document.createElement('li');
-                            empty.textContent = 'None';
-                            list.appendChild(empty);
-                        }
-                        for (const adjacent of ids) {
-                            const neighbor = graphNodes.get(adjacent);
-                            const item = document.createElement('li');
-                            const button = document.createElement('button');
-                            button.className = 'connection';
-                            button.textContent = neighbor.fullLabel;
-                            button.title = neighbor.path;
-                            button.addEventListener('click', () => focusNode(adjacent));
-                            item.appendChild(button);
-                            list.appendChild(item);
-                        }
-                    }
-                    if (details.hidden) {
-                        details.hidden = false;
-                        fitGraph();
-                    }
+                    const opened = details.hidden;
+                    details.hidden = false;
+                    updateNodeOpacity();
+                    updateEdgeColors();
+                    if (opened || routesMode) fitGraph();
                 }
 
                 searchInput.addEventListener('input', () => {
@@ -949,9 +1094,9 @@ export class GraphVisualizer {
                         if (first !== undefined) focusNode(first);
                     }
                 });
-                document.getElementById('details-close').addEventListener('click', () => {
-                    network.unselectAll();
-                    closeDetails();
+                document.getElementById('details-close').addEventListener('click', closeDetails);
+                document.addEventListener('keydown', event => {
+                    if (event.key === 'Escape') closeDetails();
                 });
                 network.on('click', ({ nodes }) => showDetails(nodes[0]));
 
@@ -999,9 +1144,11 @@ export class GraphVisualizer {
                     }
                     labelControl.title = labelOverride ? 'Click the active level to return to Auto' : 'Auto · follows zoom';
 
-                    const focused = new Set(network.getSelectedNodes());
+                    const focused = new Set(focusIds ?? network.getSelectedNodes());
+                    for (const id of [...focused]) focused.add(network.findNode(id)[0]);
                     if (hoveredNode !== undefined) focused.add(hoveredNode);
                     for (const id of [...focused]) {
+                        if (focusIds) break;
                         for (const member of adjacency.get(id) ?? []) focused.add(network.findNode(member)[0]);
                     }
                     const { clientWidth: width, clientHeight: height } = container;
@@ -1041,7 +1188,7 @@ export class GraphVisualizer {
                         if (positions.length < 2 || componentClusters.some(cluster => cluster.domain === domain && isCollapsed(cluster.id))) continue;
                         const center = positions.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), { x: 0, y: 0 });
                         labels.push({ x: center.x / positions.length, y: center.y / positions.length,
-                            radius: 16, size: 13, text: domain, alpha: 1, priority: 3 });
+                            radius: 16, size: 13, text: domain, alpha: focusIds ? 0.15 : 1, priority: 3 });
                     }
                     labels.sort((a, b) => a.priority - b.priority);
 
@@ -1059,6 +1206,26 @@ export class GraphVisualizer {
                         const text = 'Unconnected (' + rowNodes.size + ')';
                         ctx.fillText(text, x, y);
                         occupied.push({ left: x, top: y - 8, right: x + ctx.measureText(text).width, bottom: y + 8 });
+                    }
+                    if (selectedId) {
+                        const wrapperNumbers = new Map((layoutsByPage.get(selectedId) ?? []).map((edge, index) => [edge.id, index + 1]));
+                        for (const id of network.body.edgeIndices) {
+                            if (!wrapperNumbers.has(id)) continue;
+                            const edge = network.body.edges[id];
+                            const { x, y } = network.canvasToDOM(edge.edgeType.getPoint(0.55));
+                            ctx.beginPath();
+                            ctx.arc(x, y, 9, 0, Math.PI * 2);
+                            ctx.fillStyle = theme.font.background;
+                            ctx.fill();
+                            ctx.strokeStyle = edgeColor(edgeById.get(id)).color;
+                            ctx.stroke();
+                            ctx.fillStyle = theme.font.color;
+                            ctx.textAlign = 'center';
+                            ctx.font = '11px system-ui';
+                            ctx.fillText(String(wrapperNumbers.get(id)), x, y);
+                            ctx.textAlign = 'left';
+                            occupied.push({ left: x - 9, right: x + 9, top: y - 9, bottom: y + 9 });
+                        }
                     }
                     const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
                     for (const label of labels) {
