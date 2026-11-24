@@ -254,15 +254,15 @@ export class GraphVisualizer {
         }
         body { margin: 0; padding: 0; width: 100%; height: 100vh; background-color: var(--bg-color); color: var(--fg-color); overflow: hidden; font-family: system-ui, -apple-system, sans-serif; }
         body { display: flex; flex-direction: column; }
-        #mynetwork { flex: 1; min-height: 0; width: 100%; }
+        #mynetwork { flex: 1; min-width: 0; min-height: 0; }
         #top-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border-color); }
         #search-controls { display: flex; align-items: center; gap: 8px; font-size: 12px; }
         #search-input { box-sizing: border-box; width: min(220px, 55vw); padding: 6px 8px; font: inherit; background: var(--vscode-input-background, var(--bg-color)); color: var(--vscode-input-foreground, var(--fg-color)); border: 1px solid var(--vscode-input-border, var(--border-color)); border-radius: 4px; }
         #search-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--fg-color)); }
         :is(button, input):focus-visible { outline: 2px solid var(--vscode-focusBorder, #007acc); outline-offset: 1px; }
         #graph-area { position: relative; display: flex; flex: 1; min-height: 0; }
-        #hint { position: absolute; bottom: 10px; left: 10px; margin: 0; padding: 5px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-color); font-size: 12px; pointer-events: none; }
-        #details { position: absolute; top: 0; right: 0; bottom: 0; box-sizing: border-box; width: min(300px, 100%); padding: 14px; overflow: auto; background: var(--vscode-sideBar-background, var(--bg-color)); color: var(--vscode-sideBar-foreground, var(--fg-color)); border-left: 1px solid var(--border-color); z-index: 1001; font-size: 13px; overflow-wrap: anywhere; }
+        #hint { margin: 0; padding: 5px 10px; border-top: 1px solid var(--border-color); font-size: 12px; }
+        #details { flex: 0 0 min(300px, 36%); min-width: 0; box-sizing: border-box; padding: 14px; overflow: auto; background: var(--vscode-sideBar-background, var(--bg-color)); color: var(--vscode-sideBar-foreground, var(--fg-color)); border-left: 1px solid var(--border-color); z-index: 1001; font-size: 13px; overflow-wrap: anywhere; }
         #details header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
         #details h2 { margin: 0; font-size: 16px; }
         #details h3 { margin: 16px 0 4px; font-size: 13px; }
@@ -271,7 +271,7 @@ export class GraphVisualizer {
         #details ul { padding-left: 18px; margin: 0; }
         .connection { text-align: left; padding: 3px 0; border: 0; background: transparent; color: var(--vscode-textLink-foreground, var(--fg-color)); font: inherit; overflow-wrap: anywhere; cursor: pointer; }
         .connection:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--fg-color)); }
-        .legend { position: absolute; top: 10px; left: 10px; background: var(--bg-color); opacity: 0.9; max-height: 80vh; overflow-y: auto; padding: 10px; border-radius: 5px; z-index: 1000; border: 1px solid var(--border-color); }
+        .legend { flex: 0 0 min(154px, 24%); min-width: 0; box-sizing: border-box; background: var(--vscode-sideBar-background, var(--bg-color)); overflow: auto; padding: 10px; border-right: 1px solid var(--border-color); }
         .legend-item { display: flex; align-items: center; margin-bottom: 5px; font-size: 12px; cursor: pointer; padding: 2px 4px; border-radius: 3px; transition: background 0.2s; }
         .legend-item:hover { background: var(--vscode-list-hoverBackground, var(--border-color)); }
         .legend-item.inactive { opacity: 0.3; }
@@ -304,17 +304,15 @@ export class GraphVisualizer {
         </div>
     </div>
     <div id="graph-area">
-        <div id="mynetwork"></div>
-        <div class="legend">
+        <aside class="legend" aria-label="Graph legend">
             <div id="legend"></div>
             <div class="shape-key">
                 <div class="shape-key-title">Node shapes</div>
                 <div class="shape-key-item"><span class="shape-icon" aria-hidden="true"></span>Route / action</div>
                 <div class="shape-key-item"><span class="shape-icon ellipse" aria-hidden="true"></span>Component</div>
             </div>
-        </div>
-    
-        <p id="hint">Click a node for details, double-click to open file</p>
+        </aside>
+        <div id="mynetwork"></div>
         <aside id="details" aria-labelledby="details-label" hidden>
             <header>
                 <h2 id="details-label"></h2>
@@ -330,6 +328,8 @@ export class GraphVisualizer {
             <h3>Outgoing</h3><ul id="details-outgoing"></ul>
         </aside>
     </div>
+
+    <p id="hint">Click a node for details, double-click to open file</p>
 
     <div id="error-overlay">
         <div id="error-content">
@@ -566,7 +566,7 @@ export class GraphVisualizer {
                         enabled: true,
                         iterations: bigGroups.length ? 4000 : 2000,
                         updateInterval: 50,
-                        fit: true
+                        fit: false
                     },
                     solver: 'barnesHut', 
                     barnesHut: {
@@ -629,6 +629,84 @@ export class GraphVisualizer {
                         hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
                     };
                 });
+                let rowNodes = new Set();
+                let rowHeading;
+                function visibleComponents() {
+                    const visible = new Set(network.body.nodeIndices.filter(id => !id.startsWith('hub_')));
+                    const links = new Map(Array.from(visible, id => [id, new Set()]));
+                    for (const { from, to } of edges) {
+                        if (!graphNodes.has(from) || !graphNodes.has(to)) continue;
+                        const [a] = network.findNode(from);
+                        const [b] = network.findNode(to);
+                        if (visible.has(a) && visible.has(b) && a !== b) {
+                            links.get(a).add(b);
+                            links.get(b).add(a);
+                        }
+                    }
+                    const groups = [];
+                    const visited = new Set();
+                    for (const id of visible) {
+                        if (visited.has(id)) continue;
+                        const group = [id];
+                        visited.add(id);
+                        for (const member of group) {
+                            for (const next of links.get(member)) {
+                                if (visited.has(next)) continue;
+                                visited.add(next);
+                                group.push(next);
+                            }
+                        }
+                        groups.push(group);
+                    }
+                    return groups.sort((a, b) => b.length - a.length);
+                }
+
+                function fitGraph() {
+                    if (!container.clientWidth || !container.clientHeight) return;
+                    const groups = visibleComponents();
+                    if (!groups.length) return;
+                    const cutoff = Math.max(2, Math.floor(network.body.nodeIndices.length / 10));
+                    const main = groups.filter((group, index) => index === 0 || group.length >= cutoff).flat();
+                    const small = groups.slice(1).filter(group => group.length < cutoff);
+                    rowNodes = new Set(small.flat());
+                    rowHeading = undefined;
+                    network.setSize(container.clientWidth + 'px', container.clientHeight + 'px');
+                    network.fit({ nodes: main });
+                    const boxes = main.map(id => network.getBoundingBox(id));
+                    const left = Math.min(...boxes.map(box => box.left));
+                    const right = Math.max(...boxes.map(box => box.right));
+                    const top = Math.min(...boxes.map(box => box.top));
+                    const bottom = Math.max(...boxes.map(box => box.bottom));
+                    const { clientWidth: width, clientHeight: height } = container;
+                    const padding = 34;
+                    const rowHeight = rowNodes.size ? 112 : 0;
+                    const scale = Math.min(1.2, Math.max(1, width - padding * 2) / Math.max(1, right - left),
+                        Math.max(1, height - padding * 2 - rowHeight) / Math.max(1, bottom - top));
+                    network.moveTo({
+                        scale,
+                        position: { x: (left + right) / 2, y: (top + bottom) / 2 },
+                        offset: { x: 0, y: -rowHeight / 2 }
+                    });
+                    if (rowNodes.size) {
+                        let slot = 0;
+                        const totalSlots = rowNodes.size + (small.length - 1) * 0.35;
+                        const spacing = Math.max(1, width - padding * 2) / totalSlots;
+                        for (const group of small) {
+                            for (const id of group) {
+                                const point = network.DOMtoCanvas({
+                                    x: padding + (slot + 0.5) * spacing,
+                                    y: height - 35
+                                });
+                                network.moveNode(id, point.x, point.y);
+                                slot++;
+                            }
+                            slot += 0.35;
+                        }
+                        rowHeading = network.DOMtoCanvas({ x: padding, y: height - 80 });
+                    }
+                    network.redraw();
+                }
+
                 const searchInput = document.getElementById('search-input');
                 const searchCount = document.getElementById('search-count');
                 const details = document.getElementById('details');
@@ -660,16 +738,14 @@ export class GraphVisualizer {
                     }
                     network.selectNodes([id], false);
                     showDetails(id);
-                    network.focus(id, {
-                        animation: { duration: 350, easingFunction: 'easeInOutQuad' },
-                        locked: false,
-                        // Leave space for the details panel without moving the canvas.
-                        offset: { x: -details.offsetWidth / 2, y: 0 }
-                    });
+                    if (!rowNodes.has(id)) network.focus(id, { locked: false });
                 }
 
                 function closeDetails() {
-                    details.hidden = true;
+                    if (!details.hidden) {
+                        details.hidden = true;
+                        fitGraph();
+                    }
                     document.getElementById('details-open').onclick = null;
                 }
 
@@ -711,7 +787,10 @@ export class GraphVisualizer {
                             list.appendChild(item);
                         }
                     }
-                    details.hidden = false;
+                    if (details.hidden) {
+                        details.hidden = false;
+                        fitGraph();
+                    }
                 }
 
                 searchInput.addEventListener('input', () => {
@@ -747,7 +826,7 @@ export class GraphVisualizer {
                         else if (!expand) collapseGroup(cluster);
                     }
                     updateClusterButton(clusterButton);
-                    network.fit();
+                    fitGraph();
                 });
 
                 let hoveredNode;
@@ -766,6 +845,14 @@ export class GraphVisualizer {
                 network.on('afterDrawing', ctx => {
                     // Fits can change the scale without emitting a zoom event.
                     updateLabelVisibility();
+                    if (rowHeading) {
+                        const scale = network.getScale();
+                        ctx.save();
+                        ctx.fillStyle = theme.font.color;
+                        ctx.font = 12 / scale + 'px system-ui';
+                        ctx.fillText('Unconnected (' + rowNodes.size + ')', rowHeading.x, rowHeading.y);
+                        ctx.restore();
+                    }
                     const active = network.getSelectedNodes();
                     if (hoveredNode !== undefined) active.push(hoveredNode);
                     if (!showComponentLabels && active.length === 0) return;
@@ -799,12 +886,15 @@ export class GraphVisualizer {
                     }
                     ctx.restore();
                 });
-                document.getElementById('btn-fit').addEventListener('click', () => network.fit({ animation: true }));
+                document.getElementById('btn-fit').addEventListener('click', () => fitGraph());
+                new ResizeObserver(() => {
+                    if (!physicsEnabled) fitGraph();
+                }).observe(container);
                 
                 const pauseAfterStabilization = () => {
                     log('Stabilization finished. Layout paused.');
                     setPhysicsEnabled(false);
-                    network.fit();
+                    fitGraph();
                     if (denseGraph) {
                         // Dense graphs start farther out, so reveal labels after a modest zoom in.
                         showLabelScale = Math.min(0.8, network.getScale() * 1.4);
@@ -814,6 +904,7 @@ export class GraphVisualizer {
                 document.getElementById('btn-physics').addEventListener('click', () => {
                     network.off('stabilizationIterationsDone', pauseAfterStabilization);
                     setPhysicsEnabled(!physicsEnabled);
+                    if (!physicsEnabled) fitGraph();
                 });
 
                 network.on("doubleClick", function (params) {
@@ -825,7 +916,7 @@ export class GraphVisualizer {
                                 network.unselectAll();
                                 expandGroup(cluster);
                                 updateClusterButton(clusterButton);
-                                network.fit();
+                                fitGraph();
                             }
                             return;
                         }
