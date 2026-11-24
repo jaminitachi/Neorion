@@ -1,8 +1,63 @@
 # Neorion
 
+Neorion answers the Next.js App Router questions that general code graphs don't: which layouts and providers wrap a route, which pages render a component, and who calls a server action, deterministically and offline.
+
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
-Neorion turns a Next.js TypeScript project into a local architecture map. Use the CLI, the Claude Code plugin, or Codex to ask which pages render a component, which layouts wrap a route, or which files call an API. The VS Code extension also provides an interactive graph that opens source files from their nodes.
+## Real output
+
+Neorion 0.5.2 on [shadcn-ui/taxonomy](https://github.com/shadcn-ui/taxonomy), copied from the terminal:
+
+```text
+$ neorion query wrappers /dashboard
+Project: taxonomy
+# wrappers /dashboard : 3 files, 1 page (index 2026-11-24T13:42Z, fresh)
+# not wrappers: rendered inside the page
+# providers (outermost first): ThemeProvider, NextThemesProvider (external: next-themes)
+1 app/layout.tsx:74 RootLayout
+2 components/theme-provider.tsx:7 ThemeProvider providers: NextThemesProvider (external: next-themes)
+3 app/(dashboard)/dashboard/layout.tsx:14 DashboardLayout
+page app/(dashboard)/dashboard/page.tsx:16
+# complete: indexed wrapper chains
+
+$ neorion query who_renders UserAvatar
+Project: taxonomy
+# who_renders components/user-avatar.tsx#UserAvatar : 3 routes (index 2026-11-24T13:42Z, fresh)
+/dashboard  app/(dashboard)/dashboard/page.tsx:16  depth 2 via UserAccountNav [via layout] [cond]
+/dashboard/billing  app/(dashboard)/dashboard/billing/page.tsx:25  depth 2 via UserAccountNav [via layout] [cond]
+/dashboard/settings  app/(dashboard)/dashboard/settings/page.tsx:14  depth 2 via UserAccountNav [via layout] [cond]
+# complete: indexed JSX paths
+```
+
+The last line says whether the answer is complete. When it is not, it reads `# partial: <reason>`.
+
+## What you can ask
+
+| Kind | Example question |
+| --- | --- |
+| `wrappers` | Which layouts and providers wrap `/dashboard`, outermost first? |
+| `who_renders` | Which pages render `UserAvatar`, including through a layout? |
+| `api_consumers` | Which files call the `/api/posts` route, or a server action? |
+| `rename_impact` | Which files reference `buttonVariants`? |
+| `search` | Which components, routes or declarations match `billing`? |
+
+One JS file, Node 18+, no native modules, no Python, works offline; queries refresh the graph themselves.
+
+Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also draws an interactive graph that opens source files from their nodes.
+
+## How it compares
+
+We asked 30 questions about 3 lesser-known Next.js App Router apps, using only each tool's built-in commands with no LLM.
+
+| | Neorion 0.5.2 | Graphify 0.9.115 | GitNexus 1.6.12 |
+| --- | ---: | ---: | ---: |
+| Total | 21/30 | 17.5/30 | 14/30 |
+| Wrappers (layouts and providers of a route) | 6/6 | 0/6 | 0/6 |
+| Transitive impact | 3/6 | 5/6 | 4/6 |
+| Call paths and callees | 2/6 | 3.5/6 | 3/6 |
+| Index build, sum of 3 apps | 26.2 s | 15.9 s | 56.6 s |
+
+Neorion loses on impact and call path questions, and Graphify builds its index faster. Each cell is one run, and the questions lean toward Next.js features. Method, all categories and caveats: [benchmark/parity](benchmark/parity/README.md).
 
 ## Install
 
