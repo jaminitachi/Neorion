@@ -12,7 +12,7 @@ function fileList(root: string): string {
   const generated = (file: string) => file === 'codebase_graph.md' ||
     file.startsWith(DETAIL_DIRECTORY + '/') || file.startsWith('.neorion/');
   try {
-    return execFileSync('git', ['ls-files', '-z'], {
+    return execFileSync('git', ['-c', 'core.fsmonitor=false', 'ls-files', '-z'], {
       cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 5000
     }).split('\0').filter(file => file && !generated(file)).join('\n') + '\n';
   } catch {

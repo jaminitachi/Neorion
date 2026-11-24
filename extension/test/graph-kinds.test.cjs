@@ -236,6 +236,12 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
 
   edit('lib/normalize.ts', text => text.replace('value.toLowerCase()', 'value.toUpperCase()'));
   assert.match(changes('--staged'), /changed lib\/normalize\.ts:1-3 normalize.*\[worktree differs\]/);
+  edit('lib/normalize.ts', text => '\n'.repeat(30) + text);
+  const drift = changes('--staged');
+  assert.match(drift, /\[worktree differs\]/);
+  assert.match(drift, /# partial: worktree differs from staged/);
+  assert.doesNotMatch(drift, /# complete/);
+  edit('lib/normalize.ts', text => text.slice(30));
   git('switch', '-qc', 'topic');
   git('add', 'lib/normalize.ts');
   git('commit', '-qm', 'Normalize casing');
@@ -261,6 +267,18 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
   const untracked = changes('--unstaged');
   assert.match(untracked, /changed components\/added\.tsx:1 Added/);
   assert.match(untracked, /route page \/other .*Added d1/);
+});
+
+test('changes disables the repository fsmonitor setting even when it rebuilds the graph', { timeout: 30_000 }, t => {
+  const { git, run, file } = gitFixture(t);
+  git('config', 'core.fsmonitor', 'true');
+  const traceFile = file('.git/trace.jsonl');
+  assert.match(run(['query', 'changes'], { GIT_TRACE2_EVENT: traceFile }), /# complete: git diff HEAD/);
+  const invocations = fs.readFileSync(traceFile, 'utf8').trim().split('\n').map(line => JSON.parse(line))
+    .filter(event => event.event === 'start').map(event => event.argv.slice(1));
+  assert.ok(invocations.some(args => args.includes('diff')));
+  assert.ok(invocations.filter(args => args.includes('ls-files')).length >= 2);
+  for (const args of invocations) assert.deepEqual(args.slice(0, 2), ['-c', 'core.fsmonitor=false']);
 });
 
 test('changes returns a partial result outside Git and scopes a nested project', { timeout: 40_000 }, t => {

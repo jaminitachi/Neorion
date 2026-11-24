@@ -76,7 +76,7 @@ function withinBlock(lines: string[], line: number) {
 export function changes(root: string, index: QueryIndex, graph: DependencyGraph, scope: ChangeScope, base: string | undefined,
   deadline: number, checkPath: (file: string) => string): QueryResult {
   const expired = () => performance.now() >= deadline;
-  const git = (args: string[], input?: string) => execFileSync('git', args, {
+  const git = (args: string[], input?: string) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
     cwd: root, encoding: 'utf8', input, timeout: Math.max(1, Math.min(3000, Math.floor(deadline - performance.now()))),
     maxBuffer, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, stdio: ['pipe', 'pipe', 'pipe']
   });
@@ -150,6 +150,9 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     return [{ ...entry, file, old, status: entry.status === 'R' && !old ? 'A' : entry.status }];
   }).sort((a, b) => compare(a.file, b.file));
   const totalFiles = files.length;
+  const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(prefix + file) ||
+    (old !== undefined && localChanges.has(prefix + old));
+  const stagedDrift = files.some(worktreeDiffers);
   const byFile = new Map<string, SymbolEntry[]>();
   const relevant = new Set(files.slice(0, maxFiles).map(entry => entry.file));
   for (const symbol of index.symbols) {
@@ -188,7 +191,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     if (expired()) break;
     const { file, status, old } = entry;
     const indexes = byFile.get(file) ?? [];
-    const worktree = localChanges.has(prefix + file) || old && localChanges.has(prefix + old) ? ' [worktree differs]' : '';
+    const worktree = worktreeDiffers(entry) ? ' [worktree differs]' : '';
     touched.add(file);
     if (status === 'D') {
       const isConfig = config.test(file);
@@ -340,10 +343,12 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   notes.push(graphRow(`# risk: ${changedSymbols.size} changed symbols (${actionCount} actions); ${routes} routes reached (${pageFiles.size} page, ${apiFiles.size} api${otherFiles.size ? `, ${otherFiles.size} special` : ''}); ` +
     `${wrapperRoutes} routes under touched wrappers; ${configFiles} config files`));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';
+  const tracePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : trace.partial;
+  const partial = [stagedDrift ? 'worktree differs from staged' : undefined, tracePartial].filter(Boolean).join('; ') || undefined;
   return {
     title, rows: [...rows, ...changes.slice(0, 500)], notes, targets: [...touched],
     count: `${totalFiles} files, ${changedSymbols.size} symbols, ${routes} routes, ${trace.wrappers.length} wrappers`,
-    partial: totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : trace.partial,
+    partial,
     scope: `git diff ${diffScope}, indexed edges, impact depth 3`
   };
 }
