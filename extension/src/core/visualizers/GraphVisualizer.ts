@@ -265,7 +265,7 @@ export class GraphVisualizer {
             };
         });
         const graphPayload = {
-            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, denseGraph, clusterGroups,
+            nodes: [...displayNodes, ...hubNodes], edges, groupsConfig, domains, clusterGroups,
             counts: { routes: graph.routes.length, components: graph.components.length, actions: graph.actions.length,
                 edges: codeEdges.length },
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]]),
@@ -617,7 +617,7 @@ export class GraphVisualizer {
         let componentClusters = [];
         try {
             const rawData = "${safeGraphData}";
-            const { nodes, edges, groupsConfig, domains, denseGraph, clusterGroups, neighbors, counts, renderRoots, renderEdges } = JSON.parse(
+            const { nodes, edges, groupsConfig, domains, clusterGroups, neighbors, counts, renderRoots, renderEdges } = JSON.parse(
                 new TextDecoder().decode(Uint8Array.from(atob(rawData), char => char.charCodeAt(0)))
             );
 
@@ -1292,7 +1292,8 @@ export class GraphVisualizer {
                 network.on('afterDrawing', ctx => {
                     const scale = network.getScale();
                     const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
-                        : routesMode || domainFocus || !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
+                        : routesMode || domainFocus || network.body.nodeIndices.length <= 150 || scale >= fitScale * 1.3
+                            ? 'Read' : 'Map');
                     if (currentLevel !== level) {
                         currentLevel = level;
                         for (const button of levelButtons) {
