@@ -97,13 +97,23 @@ export class GraphVisualizer {
             return characters.length > 28 ? characters.slice(0, 27).join('') + '…' : label;
         };
 
+        const layouts = graph.routes.filter(route => route.type === 'layout' || route.type === 'template');
+        const layoutDepth = new Map(layouts.map(layout => {
+            const directory = path.posix.dirname(layout.file);
+            const depth = layouts.filter(outer => directory.startsWith(path.posix.dirname(outer.file) + '/')).length;
+            return [layout.id, depth];
+        }));
+        const pageLevel = Math.max(0, ...layoutDepth.values()) + 1;
+        const componentLevel = pageLevel + 1;
+
         const routeNodes = graph.routes.map(r => {
             const label = r.type === 'layout' ? `layout ${r.scope ?? r.path}`
                 : ['loading', 'error', 'not-found', 'template', 'default', 'global-error'].includes(r.type) ? `${r.type} ${r.path}`
                 : r.methods?.length ? `${r.methods.join(", ").replace(/^ALL$/, "*")} ${r.path}` : r.path;
             return {
                 id: r.id,
-                kind: r.type === 'layout' ? 'layout' : 'route',
+                kind: r.type === 'layout' || r.type === 'template' ? 'layout' : 'route',
+                level: layoutDepth.get(r.id) ?? pageLevel,
                 label,
                 group: r.domain || 'other',
                 title: [`Route: ${label}`, `File: ${r.file}`, `Domain: ${r.domain}`,
@@ -118,6 +128,7 @@ export class GraphVisualizer {
         const componentNodes = graph.components.map(c => ({ 
             id: c.id,
             kind: 'component',
+            level: componentLevel,
             label: c.name, 
             group: c.domain || 'other', 
             title: `Component: ${c.name}\nPath: ${c.path}\nDomain: ${c.domain}\n\n${c.description ? '📝 ' + c.description : ''}`,
@@ -130,7 +141,7 @@ export class GraphVisualizer {
             const file = id.slice('action:'.length, separator);
             const label = id.slice(separator + 1);
             return {
-                id, label, kind: 'action', path: file, group: DomainExtractor.extract('/' + file),
+                id, label, kind: 'action', level: componentLevel + 1, path: file, group: DomainExtractor.extract('/' + file),
                 title: `Server action: ${label}\nPath: ${file}`, shape: 'square'
             };
         });
@@ -138,7 +149,7 @@ export class GraphVisualizer {
             .map(id => {
                 const file = id.slice('file:'.length);
                 return {
-                    id, kind: 'file', label: path.posix.basename(file), path: file,
+                    id, kind: 'file', level: componentLevel, label: path.posix.basename(file), path: file,
                     group: DomainExtractor.extract('/' + file), title: `Server action caller: ${file}`, shape: 'square'
                 };
             });
@@ -158,6 +169,7 @@ export class GraphVisualizer {
         // Hub nodes with reduced mass to prevent spinning
         const hubNodes = domains.map(d => ({
             id: `hub_${d}`,
+            level: componentLevel,
             label: '',
             group: d,
             shape: 'dot',
@@ -180,13 +192,17 @@ export class GraphVisualizer {
 
         const codeEdges = [
             ...graph.routes.flatMap(route => route.componentId ? [{
-                from: route.id, to: route.componentId, arrows: 'to', length: hasBigGroups ? 160 : 50, width: 2
+                from: route.id, to: route.componentId, type: 'renders', width: 2
             }] : []),
-            ...graph.edges.map(edge => ({
-                from: edge.from, to: edge.to, title: edge.type, arrows: 'to',
+            ...layouts.flatMap(layout => (layout.wraps ?? []).map(page => ({
+                from: layout.id, to: page, type: 'wraps', width: 3
+            }))),
+            ...graph.edges
+        ].filter(edge => nodeDomainMap.has(edge.from) && nodeDomainMap.has(edge.to))
+            .map((edge, index) => ({
+                ...edge, id: 'edge:' + index, title: edge.type, arrows: 'to',
                 dashes: edge.type === 'imports', length: getEdgeLength(edge.from, edge.to)
-            }))
-        ];
+            }));
         const neighbors = new Map(nodes.map(node => [node.id, new Set<string>()]));
         for (const { from, to } of codeEdges) {
             if (from !== to && neighbors.has(from) && neighbors.has(to)) {
@@ -291,6 +307,10 @@ export class GraphVisualizer {
             <span id="search-count" role="status"></span>
         </div>
         <div id="controls">
+            <div id="graph-mode" class="segments" role="group" aria-label="Graph layout">
+                <button id="mode-graph" class="btn" aria-pressed="true">Graph</button>
+                <button id="mode-routes" class="btn" aria-pressed="false">Routes</button>
+            </div>
             <div id="label-levels" class="segments" role="group" aria-label="Label detail">
                 <button class="btn" data-level="Map" aria-pressed="false">Map</button>
                 <button class="btn" data-level="Read" aria-pressed="false">Read</button>
@@ -341,6 +361,7 @@ export class GraphVisualizer {
     <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         let physicsEnabled = true;
+        let routesMode = false;
         let activeDomain = null;
         let searchMatches = null;
 
@@ -424,6 +445,7 @@ export class GraphVisualizer {
                 clusterNodeProperties: {
                     id, group: domain,
                     label: '', shape: 'dot', size: 32, mass: 12,
+                    level: cluster.level,
                     opacity: clusterOpacity(cluster)
                 }
             });
@@ -585,9 +607,16 @@ export class GraphVisualizer {
                 }, options);
                 initLegend(domains, theme.groups);
                 const graphColors = node => theme.groups[node.group].color;
+                const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
+                const wrapsColors = () => edges.filter(edge => edge.type === 'wraps').map(edge => ({
+                    id: edge.id,
+                    color: { color: graphColors(graphNodes.get(edge.from)).background, inherit: false, opacity: 1 }
+                }));
+                network.body.data.edges.update(wrapsColors());
                 new MutationObserver(() => {
                     theme = readTheme(groupsConfig);
                     network.setOptions({ nodes: { font: theme.font }, groups: theme.groups, edges: { color: theme.edge } });
+                    network.body.data.edges.update(wrapsColors());
                     network.body.data.nodes.update(nodes.filter(node => node.kind).map(node => ({
                         id: node.id, color: graphColors(node)
                     })));
@@ -603,7 +632,6 @@ export class GraphVisualizer {
                     network.redraw();
                 }).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
                 const adjacency = new Map(neighbors);
-                const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
                 const connections = new Map(Array.from(graphNodes.keys(), id => [
                     id, { incoming: new Set(), outgoing: new Set() }
                 ]));
@@ -619,7 +647,7 @@ export class GraphVisualizer {
                     const componentIds = components.filter(node => node.group === domain).map(node => node.id);
                     const members = new Set(componentIds);
                     return {
-                        id: 'component-cluster:' + index, domain, count, componentIds,
+                        id: 'component-cluster:' + index, domain, count, componentIds, level: components[0].level,
                         hubEdges: edges.filter(edge => edge.id?.startsWith('hub-edge:') && members.has(edge.from))
                     };
                 });
@@ -661,11 +689,28 @@ export class GraphVisualizer {
                     const groups = visibleComponents();
                     if (!groups.length) return;
                     const cutoff = Math.max(2, Math.floor(network.body.nodeIndices.length / 10));
-                    const main = groups.filter((group, index) => index === 0 || group.length >= cutoff).flat();
-                    const small = groups.slice(1).filter(group => group.length < cutoff);
+                    const main = groups.filter((group, index) => routesMode || index === 0 || group.length >= cutoff).flat();
+                    const small = routesMode ? [] : groups.slice(1).filter(group => group.length < cutoff);
                     rowNodes = new Set(small.flat());
                     rowHeading = undefined;
+                    if (routesMode) {
+                        // Vis orders the tree, but reserves separate vertical bands for disconnected subtrees.
+                        // Compact those bands so one sparse branch cannot shrink the whole Routes view.
+                        const columns = new Map();
+                        for (const id of main) {
+                            const level = graphNodes.get(id)?.level ?? componentClusters.find(cluster => cluster.id === id).level;
+                            const column = columns.get(level) ?? [];
+                            column.push({ id, y: network.getPosition(id).y });
+                            columns.set(level, column);
+                        }
+                        for (const [level, column] of columns) {
+                            column.sort((a, b) => a.y - b.y).forEach(({ id }, index) => {
+                                network.moveNode(id, level * 410, (index - (column.length - 1) / 2) * 52);
+                            });
+                        }
+                    }
                     network.setSize(container.clientWidth + 'px', container.clientHeight + 'px');
+                    network.redraw();
                     network.fit({ nodes: main });
                     const boxes = main.map(id => network.getBoundingBox(id));
                     const left = Math.min(...boxes.map(box => box.left));
@@ -846,7 +891,7 @@ export class GraphVisualizer {
                 network.on('afterDrawing', ctx => {
                     const scale = network.getScale();
                     const level = labelOverride || (graphNodes.size <= 6 || scale >= Math.max(0.85, fitScale * 2) ? 'Full'
-                        : !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
+                        : routesMode || !denseGraph || scale >= fitScale * 1.3 ? 'Read' : 'Map');
                     if (currentLevel !== level) {
                         currentLevel = level;
                         for (const button of levelButtons) {
@@ -955,6 +1000,49 @@ export class GraphVisualizer {
                     }
                     ctx.restore();
                 });
+                const graphButton = document.getElementById('mode-graph');
+                const routesButton = document.getElementById('mode-routes');
+                const physicsButton = document.getElementById('btn-physics');
+                let graphPositions;
+                let resumeGraphPhysics = false;
+                function switchLayout(toRoutes) {
+                    if (routesMode === toRoutes) return;
+                    if (toRoutes) {
+                        resumeGraphPhysics = physicsEnabled;
+                        graphPositions = network.getPositions(network.body.nodeIndices);
+                        setPhysicsEnabled(false);
+                    }
+                    routesMode = toRoutes;
+                    const hubs = nodes.filter(node => !node.kind);
+                    network.body.data.nodes.update(hubs.map(({ id }) => ({ id, hidden: toRoutes })));
+                    const activeTethers = network.body.data.edges.getIds({ filter: edge => edge.id.startsWith('hub-edge:') });
+                    network.body.data.edges.update(activeTethers.map(id => ({ id, hidden: toRoutes })));
+                    network.setOptions({
+                        layout: { hierarchical: {
+                            enabled: toRoutes,
+                            direction: 'LR',
+                            sortMethod: 'directed',
+                            levelSeparation: 410,
+                            nodeSpacing: 52,
+                            treeSpacing: 64
+                        } },
+                        edges: { smooth: toRoutes ? false : options.edges.smooth },
+                        physics: { enabled: false }
+                    });
+                    if (!toRoutes) {
+                        for (const [id, point] of Object.entries(graphPositions)) {
+                            if (network.body.nodes[id]) network.moveNode(id, point.x, point.y);
+                        }
+                        setPhysicsEnabled(resumeGraphPhysics);
+                    }
+                    graphButton.setAttribute('aria-pressed', String(!toRoutes));
+                    routesButton.setAttribute('aria-pressed', String(toRoutes));
+                    physicsButton.disabled = toRoutes;
+                    fitGraph();
+                }
+                graphButton.addEventListener('click', () => switchLayout(false));
+                routesButton.addEventListener('click', () => switchLayout(true));
+
                 document.getElementById('btn-fit').addEventListener('click', () => fitGraph());
                 new ResizeObserver(() => {
                     if (!physicsEnabled) fitGraph();
