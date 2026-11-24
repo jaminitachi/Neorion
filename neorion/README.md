@@ -6,10 +6,10 @@ Neorion maps Next.js and React TypeScript projects and answers architecture ques
 
 ## Install
 
-Neorion 0.5.1 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
+Neorion 0.5.2 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
 
 ```sh
-npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.1/neorion-0.5.1.tgz
+npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.5.2/neorion-0.5.2.tgz
 ```
 
 From your TypeScript project, build the graph and ask a question.
@@ -18,6 +18,13 @@ From your TypeScript project, build the graph and ask a question.
 neorion graph
 neorion query wrappers /
 ```
+
+`wrappers` includes third-party components on the page’s wrapper chain and labels
+them with their package. Pass `--no-external` to hide third-party non-provider wrappers, or set
+`includeExternal: false` in the MCP tool.
+
+Use `neorion query api_consumers signOut` to find a server action’s caller files
+and lines. Use `path#Name` to qualify an action name shared by multiple files.
 
 ## Codex
 
@@ -29,7 +36,7 @@ neorion setup codex
 
 ## Claude Code
 
-The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.1` on npm, which is not published.
+The marketplace install (`/plugin marketplace add jaminitachi/Neorion`, then `/plugin install neorion@neorion`) is not available yet. `/plugin install` fails because the marketplace entry points at `neorion@0.5.2` on npm, which is not published.
 
 The installed package contains the plugin. After the global install, start Claude Code with it from your project. The installed plugin passes `claude plugin validate`. Launching it and making an MCP query from Claude Code are not tested yet.
 

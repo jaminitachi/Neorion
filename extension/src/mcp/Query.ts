@@ -2,14 +2,16 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type SymbolEntry } from './Index';
+import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
 type Row = { text: string; files: string[]; pathEnd?: number };
-type Result = { rows: Row[]; title?: string; count?: string; targets?: string[]; notes?: Row[]; limit?: number; partial?: string };
+type Result = { rows: Row[]; title?: string; count?: string; targets?: string[]; notes?: Row[]; limit?: number; partial?: string; scope?: string };
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
+const actionShortName = (name: string) => name.slice(name.lastIndexOf('.') + 1);
+const actionLocation = (action: ServerAction) => `${location(action.file, action.line)}#${action.name}`;
 const bytes = (text: string) => Buffer.byteLength(text);
 const oneLine = (text: string) => text.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ');
 const row = (text: string, ...files: string[]): Row => ({ text, files });
@@ -63,7 +65,7 @@ function validate(name: string, value: unknown) {
     throw new Error('Invalid query target.');
   }
   const { limit = tool === 'search' ? 20 : 40, callers = 1, direct = false,
-    includeExternal = false, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
+    includeExternal = true, includeTests = tool === 'rename_impact' || (!legacy && tool === 'api_consumers'), [filterKey]: rawFilter } = input;
   const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
   const integerInRange = (value: unknown, min: number, max: number): value is number =>
     typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
@@ -166,12 +168,17 @@ export class QueryEngine {
     return absolute;
   }
 
-  private matchSymbol(text: string, component: boolean) {
+  private symbolTarget(text: string) {
     const delimiter = text.lastIndexOf('#');
     const file = delimiter < 0 ? undefined : path.posix.normalize(text.slice(0, delimiter));
     if (file !== undefined) this.checkPath(text.slice(0, delimiter));
     else if (/[\\/]/.test(text)) throw new Error('Use a name or an app-relative path#Name.');
-    return (this.names.get(text.slice(delimiter + 1)) ?? [])
+    return { file, name: text.slice(delimiter + 1) };
+  }
+
+  private matchSymbol(text: string, component: boolean) {
+    const { file, name } = this.symbolTarget(text);
+    return (this.names.get(name) ?? [])
       .filter(symbol => (file === undefined || symbol.file === file) && (!component || symbol.kind === 'component')).sort(bySymbol);
   }
 
@@ -186,20 +193,28 @@ export class QueryEngine {
       (route.url === (text.replace(/\/$/, '') || '/') || route.file === path.posix.normalize(text))).sort(byRoute);
   }
 
-  private suggestions(text: string, kind: string | undefined, expired: () => boolean): Row[] {
+  private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
     const needle = text.toLowerCase().slice(0, 100);
-    const candidates = kind === 'page' || kind === 'api'
+    const candidates: { name: string; label: string; file: string; aliases?: string[] }[] = kind === 'page' || kind === 'api'
       ? this.index.routes.filter(route => route.kind === kind).map(route =>
         ({ name: route.url, label: `${route.url} ${location(route.file, route.line ?? 1)}`, file: route.file }))
-      : this.index.symbols.filter(symbol => !kind || symbol.kind === kind).map(symbol =>
+      : kind === 'action'
+        ? (this.index.serverActions ?? []).filter(action => file === undefined || file === action.file).map(action => ({
+          name: action.name, aliases: [...(action.aliases ?? []), actionShortName(action.name)],
+          label: actionLocation(action), file: action.file
+        }))
+        : this.index.symbols.filter(symbol => !kind || symbol.kind === kind).map(symbol =>
         ({ name: symbol.name, label: declaration(symbol), file: symbol.file }));
     const matches: (typeof candidates[number] & { score: number })[] = [];
     const threshold = Math.max(2, Math.floor(needle.length / 3));
     for (const candidate of candidates) {
       if (expired()) break;
-      const name = candidate.name.toLowerCase().slice(0, 100);
-      if (Math.abs(name.length - needle.length) > threshold) continue;
-      const score = distance(needle, name);
+      const names = [candidate.name, ...(candidate.aliases ?? [])];
+      let score = threshold + 1;
+      for (const value of names) {
+        const name = value.toLowerCase().slice(0, 100);
+        if (Math.abs(name.length - needle.length) <= threshold) score = Math.min(score, distance(needle, name));
+      }
       if (score <= threshold) matches.push({ ...candidate, score });
     }
     return matches.sort((a, b) => a.score - b.score || compare(a.label, b.label)).slice(0, 5)
@@ -304,15 +319,15 @@ export class QueryEngine {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
     const notes = [row('# not wrappers: rendered inside the page')];
+    if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
+    const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
+      item.provider ?? item.symbol.endsWith('Provider');
     const rows = chains.flatMap((id, branch) => {
       if (expired()) return [];
-      const items = (this.index.wrapChains[id] ?? []).filter(item => includeExternal || item.provider || !item.external);
+      const items = (this.index.wrapChains[id] ?? []).filter(item => includeExternal || isProvider(item) || !item.external);
       const groups = group(items, item => item.file);
-      const name = (item: typeof items[number]) => {
-        const source = item.external ?? item.definitionFile;
-        return source && includeExternal ? `${source}#${item.symbol}` : item.symbol;
-      };
-      const providers = items.filter(item => item.provider || item.symbol.endsWith('Provider'));
+      const name = (item: typeof items[number]) => item.external ? `${item.symbol} (external: ${item.external})` : item.symbol;
+      const providers = items.filter(isProvider);
       const branchLabel = `branch ${String.fromCharCode(65 + branch)}`;
       if (providers.length) {
         const scope = chains.length > 1 ? `, ${branchLabel}` : '';
@@ -322,7 +337,7 @@ export class QueryEngine {
           const identity = `${item.external ?? item.definitionFile ?? item.file}#${item.symbol}`;
           if (seen.has(identity)) continue;
           seen.add(identity);
-          names.push(item.symbol);
+          names.push(name(item));
         }
         notes.push(row(`# providers (outermost first${scope}): ${names.join(', ')}`,
           ...new Set(providers.map(item => item.file))));
@@ -332,8 +347,8 @@ export class QueryEngine {
       let order = 0;
       for (const [file, items] of groups) {
         if (expired()) break;
-        const components = items.filter(item => !item.provider);
-        const providers = items.filter(item => item.provider);
+        const components = items.filter(item => !(item.providerTag ?? item.provider));
+        const providers = items.filter(item => item.providerTag ?? item.provider);
         const label = `${++order} ${location(file, (components[0] ?? items[0]).line)}`;
         files.add(file);
         const symbols = [...new Set(components.map(name))];
@@ -350,7 +365,7 @@ export class QueryEngine {
     const locations = label + (reexport ? ` -> ${location(page.file, page.line)}` : '');
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
-    return { rows, title: route.url, count: `${files.size} files, 1 page`, targets: [route.file],
+    return { rows, title: route.url, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}, 1 page`, targets: [route.file],
       notes };
   }
 
@@ -475,6 +490,23 @@ export class QueryEngine {
     };
   }
 
+  private actionConsumers(action: ServerAction, includeTests: boolean, expired: () => boolean): Result {
+    const callers = group(action.callers.filter(([file]) => includeTests || !testFile(file)), ([file]) => file);
+    const rows: Row[] = [];
+    for (const [file, uses] of [...callers].sort(([a], [b]) => compare(a, b))) {
+      if (expired()) break;
+      const lines = [...new Set(uses.map(([, line]) => line))].sort((a, b) => a - b);
+      const label = `call   ${location(file, lines[0])}`;
+      rows.push({ ...row(label + (lines.length > 1 ? ',' + lines.slice(1, 5).join(',') : '') +
+        (lines.length > 5 ? ` +${lines.length - 5}` : '') + flagTest(file), file), pathEnd: label.length });
+    }
+    return {
+      title: actionLocation(action),
+      rows, targets: [action.file], count: `${callers.size} caller ${callers.size === 1 ? 'file' : 'files'}`,
+      scope: 'indexed server action callers'
+    };
+  }
+
   query(name: string, value: unknown) {
     const args = validate(name, value);
     const { tool, target } = args;
@@ -496,14 +528,29 @@ export class QueryEngine {
       } else result.notes = this.suggestions(target.split('#').pop()!, tool === 'who_renders' ? 'component' : undefined, expired);
     } else {
       const kind = tool === 'wrappers' ? 'page' : 'api';
-      const routes = this.matchRoute(target, kind);
+      const actionPath = tool === 'api_consumers' && target.includes('#') && !target.startsWith('/');
+      const routes = actionPath ? [] : this.matchRoute(target, kind);
       if (routes.length > 1) {
         ambiguous = true;
         result = { rows: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)), limit: 10 };
       } else if (routes.length) result = tool === 'wrappers'
         ? this.wrappers(routes[0], !!args.includeExternal, expired)
         : this.consumers(routes[0], args.callers, !!args.includeTests, expired);
-      else result.notes = this.suggestions(target, kind, expired);
+      else if (tool === 'api_consumers' && (actionPath || !/[\\/]/.test(target))) {
+        const { file, name } = this.symbolTarget(target);
+        const candidates = (this.index.serverActions ?? []).filter(action => file === undefined || action.file === file);
+        const exact = candidates.filter(action => action.name === name || action.aliases?.includes(name));
+        const actions = (exact.length ? exact : candidates.filter(action => actionShortName(action.name) === name))
+          .sort((a, b) => compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name));
+        if (actions.length > 1) {
+          ambiguous = true;
+          result = { rows: actions.map(action => row(`${actionLocation(action)} server action`, action.file)), limit: 10 };
+        } else if (actions.length) result = this.actionConsumers(actions[0], !!args.includeTests, expired);
+        else {
+          result.notes = this.suggestions(name, 'action', expired, file);
+          if (!this.index.serverActions) result.partial = 'regenerate legacy index';
+        }
+      } else result.notes = this.suggestions(target, kind, expired);
     }
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
     const status = new Map<string, boolean>();
@@ -572,7 +619,7 @@ export class QueryEngine {
         staleCount || snapshotStale ? 'stale index' : omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
-      const scope = {
+      const scope = result.scope ?? {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),
         search: 'indexed name and path matches'

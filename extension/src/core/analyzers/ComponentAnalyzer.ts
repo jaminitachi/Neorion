@@ -1,7 +1,9 @@
-import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
-import { collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf } from './ArchitectureFacts';
+import {
+  collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression
+} from './ArchitectureFacts';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { renderBindings } from './RenderBindings';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -14,11 +16,6 @@ const HOOK = /^use[A-Z0-9]/;
 function rootBinding(node: Node): Node {
   while (Node.isPropertyAccessExpression(node)) node = node.getExpression();
   return node;
-}
-
-function isPackageSpecifier(specifier: string): boolean {
-  return !specifier.startsWith('.') && !specifier.startsWith('@/') && !specifier.startsWith('#') &&
-    !path.isAbsolute(specifier) && !path.win32.isAbsolute(specifier);
 }
 
 function externalAlias(node: Node | undefined, files: Set<SourceFile>): string | undefined {
@@ -87,9 +84,108 @@ function hasRender(body: Node): boolean {
   return found;
 }
 
-function actionBinding(node: NodeWithBody): Node {
-  const parent = node.getParent();
+function actionBinding(node: Node): Node {
+  let expression = node;
+  for (let parent = expression.getParent(); parent && wrappedExpression(parent) === expression; parent = expression.getParent()) {
+    expression = parent;
+  }
+  const parent = expression.getParent();
   return Node.isVariableDeclaration(parent) || Node.isExportAssignment(parent) ? parent : node;
+}
+
+function exportedAction(node: Node, seen = new Set<Node>()): Node | undefined {
+  if (seen.has(node)) return;
+  seen.add(node);
+  if (Node.isFunctionDeclaration(node) && node.getBody()) return node;
+  let expression = Node.isVariableDeclaration(node) ? node.getInitializer() :
+    Node.isExportAssignment(node) ? node.getExpression() : Node.isExpression(node) ? node : undefined;
+  while (expression) {
+    const inner = wrappedExpression(expression);
+    if (!inner) break;
+    expression = inner;
+  }
+  if (Node.isArrowFunction(expression) || Node.isFunctionExpression(expression) || Node.isCallExpression(expression)) return expression;
+  if (Node.isConditionalExpression(expression) &&
+      exportedAction(expression.getWhenTrue(), new Set(seen)) && exportedAction(expression.getWhenFalse(), seen)) return expression;
+  if (Node.isIdentifier(expression) || Node.isPropertyAccessExpression(expression)) {
+    for (const declaration of declarationsOf(expression)) {
+      const action = exportedAction(declaration, seen);
+      if (action) return action;
+    }
+  }
+}
+
+function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, modules: Map<ts.Symbol, Map<string, string>>) {
+  const byDeclaration = new Map([...bindings].map(([node, id]) => [node.compilerNode, id]));
+  const exports = new Map<ts.Symbol, Map<string, ts.Symbol>>();
+  const cached = new Map<ts.Symbol, string | undefined>();
+  const exportedSymbol = (module: ts.Symbol, name: string) => {
+    let entry = exports.get(module);
+    if (!entry) {
+      entry = new Map(checker.getExportsOfModule(module).map(symbol => [symbol.name, symbol]));
+      exports.set(module, entry);
+    }
+    return entry.get(name);
+  };
+  const fromModule = (module: ts.Symbol | undefined, name: string, seen = new Set<ts.Symbol>()): string | undefined => {
+    if (!module || seen.has(module)) return;
+    const id = modules.get(module)?.get(name);
+    if (id) return id;
+    const symbol = exportedSymbol(module, name);
+    if (!symbol) return;
+    // Star exports can skip the intervening module in the checker's alias chain.
+    if (!module.exports?.has(symbol.escapedName)) {
+      seen.add(module);
+      for (const file of module.declarations ?? []) {
+        if (!ts.isSourceFile(file)) continue;
+        for (const statement of file.statements) {
+          if (!ts.isExportDeclaration(statement) || statement.exportClause || statement.isTypeOnly || !statement.moduleSpecifier) continue;
+          const source = checker.getSymbolAtLocation(statement.moduleSpecifier);
+          if (source && exportedSymbol(source, name) === symbol) {
+            const forwarded = fromModule(source, name, seen);
+            if (forwarded) return forwarded;
+          }
+        }
+      }
+    }
+    return fromSymbol(symbol);
+  };
+  const fromSymbol = (symbol: ts.Symbol | undefined): string | undefined => {
+    if (!symbol || cached.has(symbol)) return symbol && cached.get(symbol);
+    cached.set(symbol, undefined);
+    let id: string | undefined;
+    for (const declaration of symbol.declarations ?? []) {
+      id = byDeclaration.get(declaration);
+      if (id) break;
+      if (ts.isImportSpecifier(declaration)) {
+        id = fromModule(checker.getSymbolAtLocation(declaration.parent.parent.parent.moduleSpecifier),
+          (declaration.propertyName ?? declaration.name).text);
+      } else if (ts.isImportClause(declaration) && declaration.name) {
+        id = fromModule(checker.getSymbolAtLocation(declaration.parent.moduleSpecifier), 'default');
+      } else if (ts.isExportSpecifier(declaration) && declaration.parent.parent.moduleSpecifier) {
+        id = fromModule(checker.getSymbolAtLocation(declaration.parent.parent.moduleSpecifier),
+          (declaration.propertyName ?? declaration.name).text);
+      }
+      if (id) break;
+    }
+    if (!id && symbol.flags & ts.SymbolFlags.Alias) id = fromSymbol(checker.getImmediateAliasedSymbol(symbol));
+    cached.set(symbol, id);
+    return id;
+  };
+  return (node: Node): string | undefined => {
+    if (Node.isPropertyAccessExpression(node)) {
+      const namespace = node.getExpression().getSymbol()?.compilerSymbol;
+      const source = namespace && namespace.flags & ts.SymbolFlags.Alias && checker.getAliasedSymbol(namespace);
+      const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.getName()) : undefined;
+      if (id) return id;
+    }
+    if (Node.isIdentifier(node) && node.getParentIfKind(SyntaxKind.PropertyAccessExpression)?.getNameNode() === node) return;
+    if (Node.isShorthandPropertyAssignment(node)) return fromSymbol(node.getValueSymbol()?.compilerSymbol);
+    if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) return fromSymbol(node.getSymbol()?.compilerSymbol);
+    if ((Node.isArrowFunction(node) || Node.isFunctionExpression(node)) && !Node.isVariableDeclaration(actionBinding(node))) {
+      return bindings.get(node);
+    }
+  };
 }
 
 function lexicalName(node: Node): string | undefined {
@@ -112,35 +208,67 @@ export class ComponentAnalyzer {
     const actions = new Set<string>();
     const actionIds = new Map<Node, string>();
     const actionNames = new Set<Node>();
+    const actionModules = new Map<ts.Symbol, Map<string, string>>();
     const relativePath = (file: SourceFile) => path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
     const routesByFile = new Map(routes.map(route => [route.file, route]));
 
     for (const file of files) {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
-      if (route?.type === 'api') continue;
-      const addAction = (name: string, fn: NodeWithBody, declaration: Node) => {
-        const binding = actionBinding(fn);
-        let id = actionIds.get(binding);
-        if (!id) {
-          const base = `action:${relative}#${name}`;
-          id = base;
-          for (let suffix = 2; actions.has(id); suffix++) id = `${base}~${suffix}`;
-          actions.add(id);
-        }
-        for (const target of [fn, binding, declaration]) {
+      const registerAction = (name: string, site: Node) => {
+        const base = `action:${relative}#${name}`;
+        let id = base;
+        for (let suffix = 2; actions.has(id); suffix++) id = `${base}~${suffix}`;
+        actions.add(id);
+        index?.action(id, name, relative, site.getStartLineNumber());
+        return id;
+      };
+      const addAction = (name: string, declaration: Node, action = declaration, site = declaration) => {
+        const binding = actionBinding(action);
+        const id = actionIds.get(binding) ?? registerAction(name, site);
+        for (const target of [declaration, binding, action]) {
           actionIds.set(target, id);
           if (Node.isVariableDeclaration(target) || Node.isFunctionDeclaration(target) || Node.isFunctionExpression(target)) {
             const name = target.getNameNode();
             if (name) actionNames.add(name);
           }
         }
+        return id;
       };
       if (hasDirective(file.getStatements(), 'use server')) {
+        const named = new Map(file.getExportDeclarations().flatMap(statement => statement.getNamedExports()
+          .map(specifier => [(specifier.getAliasNode() ?? specifier.getNameNode()).getText(), specifier] as const)));
+        const stars = file.getExportDeclarations().filter(statement =>
+          !statement.isTypeOnly() && !statement.compilerNode.exportClause && statement.hasModuleSpecifier());
+        const defaultSite = file.getExportAssignments().find(assignment => !assignment.isExportEquals());
+        const module = file.getSymbol()?.compilerSymbol;
+        const exportedActions = new Map<string, string>();
+        if (module) actionModules.set(module, exportedActions);
         for (const [name, declarations] of file.getExportedDeclarations()) {
+          const specifier = named.get(name);
+          if (specifier?.isTypeOnly() || specifier?.getExportDeclaration().isTypeOnly()) continue;
           for (const declaration of declarations) {
-            const fn = callable(declaration);
-            if (fn?.isAsync()) addAction(name, fn, declaration);
+            const action = exportedAction(declaration);
+            if (!action) continue;
+            const local = declaration.getSourceFile() === file;
+            const site = specifier ?? (name === 'default' ? defaultSite : undefined) ?? (local ? declaration :
+              stars.find(star => star.getModuleSpecifierSourceFile()?.getExportedDeclarations().get(name)?.includes(declaration)));
+            if (!site) continue;
+            // Cross-module exports are actions at this boundary. Keep the implementation's
+            // binding available for ordinary imports from its own module.
+            const localAction = local && action.getSourceFile() === file;
+            const location = localAction && specifier && !specifier.getExportDeclaration().hasModuleSpecifier()
+              ? declaration : site;
+            const id = Node.isExportDeclaration(site)
+              ? registerAction(name, site)
+              : addAction(name, site, localAction ? action : site, location);
+            exportedActions.set(name, id);
+            index?.actionAlias(id, name);
+            if (name === 'default' && local && Node.isFunctionDeclaration(declaration) && declaration.isDefaultExport()) {
+              const lexical = declaration.getName();
+              if (lexical) index?.actionAlias(id, lexical);
+            }
+            break;
           }
         }
       }
@@ -153,11 +281,11 @@ export class ComponentAnalyzer {
           const scopes = binding.getAncestors().reverse().filter(ancestor =>
             !Node.isFunctionExpression(ancestor) || actionBinding(ancestor) === ancestor);
           const name = [...scopes.map(lexicalName).filter(Boolean), lexicalName(binding) ?? '(inline)'].join('.');
-          addAction(name, node, binding);
+          addAction(name, binding, node);
         });
       }
 
-      if (isMetadata(route)) continue;
+      if (route?.type === 'api' || isMetadata(route)) continue;
       const defaultDeclarations = new Set(file.getDefaultExportSymbol()?.getDeclarations());
       for (const assignment of file.getExportAssignments().filter(node => !node.isExportEquals())) {
         const expression = unwrapComponent(assignment.getExpression());
@@ -357,20 +485,15 @@ export class ComponentAnalyzer {
       }
     };
     const componentTags = new Set<Node>();
+    const componentOwners = new Map<Node, string>();
     for (const [node, component] of components) {
       const body = bodies.get(node)!;
+      componentOwners.set(body, component.id);
       const file = body.getSourceFile();
       const imports = importsFor(file);
 
       const usedHooks = new Set<string>();
       const inspect = (child: Node) => {
-        if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
-          if (!actionNames.has(child)) {
-            for (const target of declarationsOf(child)) addEdge(component.id, actionIds.get(target), 'uses-action');
-          }
-        } else if (Node.isArrowFunction(child) || Node.isFunctionExpression(child)) {
-          if (!Node.isVariableDeclaration(child.getParent())) addEdge(component.id, actionIds.get(child), 'uses-action');
-        }
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
           componentTags.add(child);
           render(child.getTagNameNode(), component.id, body);
@@ -397,6 +520,7 @@ export class ComponentAnalyzer {
       component.hooks = [...usedHooks];
     }
 
+    const actionReference = actions.size && actionReferences(files[0].getProject().getTypeChecker().compilerObject, actionIds, actionModules);
     const fileHooks = new Map<string, { hooks: string[]; isClient: boolean }>();
     for (const file of files) {
       const relative = relativePath(file);
@@ -405,6 +529,19 @@ export class ComponentAnalyzer {
       const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       file.forEachDescendant(node => {
+        if (actionReference && !actionNames.has(node)) {
+          const id = actionReference(node);
+          if (id) {
+            const ancestors = node.getAncestors();
+            if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
+              Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
+              const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
+              const line = node.getStartLineNumber();
+              addEdge(owner, id, 'uses-action');
+              index?.useAction(id, relative, line);
+            }
+          }
+        }
         if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !componentTags.has(node)) {
           render(node.getTagNameNode(), from);
         }
@@ -412,12 +549,6 @@ export class ComponentAnalyzer {
         const expression = node.getExpression();
         const [argument] = node.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, from);
-        if (actions.size) {
-          for (const declaration of declarationsOf(expression)) {
-            const to = actionIds.get(declaration);
-            addEdge(from, to, 'uses-action');
-          }
-        }
         const name = Node.isPropertyAccessExpression(expression) ? expression.getName() :
           Node.isIdentifier(expression) ? expression.getText() : '';
         if (!HOOK.test(name) && !aliasedHooks.has(name)) return;

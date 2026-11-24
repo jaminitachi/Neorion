@@ -51,6 +51,32 @@ test('CLI graph and query use the workspace cache', t => {
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'tsconfig.json']);
 });
 
+test('wrapper queries include only third-party components on the page chain by default', async t => {
+  const { root, env, run } = fixture(t);
+  fs.cpSync(path.join(__dirname, 'fixtures/external-wrappers'), root, { recursive: true });
+  const query = ['query', 'wrappers', '/'];
+  const standard = run(query);
+  assert.equal(standard.status, 0, standard.stderr);
+  const providers = '# providers (outermost first): SWRConfig (external: swr), SessionProvider (external: next-auth/react), Scope (external: widgets), ContextShell, theme.Provider';
+  assert.match(standard.stdout, /^1 app\/layout\.tsx:8 RootLayout, Grid \(external: widgets\), Tabs \(external: @radix-ui\/react-tabs\), widgets\.Root \(external: widgets\), LocalContext, LocalConfig, theme\.Consumer providers:/m);
+  assert.ok(standard.stdout.split('\n').includes(providers));
+  assert.match(standard.stdout, /^# not wrappers: rendered inside the page$/m);
+  assert.match(standard.stdout, /1 file, 1 page/);
+  assert.doesNotMatch(standard.stdout, /Link|Icon|PageDecoration|motion\.div/);
+  assert.equal(run([...query, '--include-external']).stdout, standard.stdout);
+
+  const hidden = run([...query, '--no-external']);
+  assert.equal(hidden.status, 0, hidden.stderr);
+  assert.match(hidden.stdout, /^1 app\/layout\.tsx:8 RootLayout, LocalContext, LocalConfig, theme\.Consumer providers:/m);
+  assert.ok(hidden.stdout.split('\n').includes(providers));
+  assert.doesNotMatch(hidden.stdout, /\b(?:Grid|Tabs|widgets\.Root)\b/);
+
+  const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  const args = { kind: 'wrappers', target: '/' };
+  assert.equal(await client.text('query', args), standard.stdout.trimEnd());
+  assert.equal(await client.text('query', { ...args, includeExternal: false }), hidden.stdout.trimEnd());
+});
+
 test('CLI MCP builds a missing index and gives the same answer as query', { timeout: 20_000 }, async t => {
   const { root, env, run } = fixture(t);
   const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });

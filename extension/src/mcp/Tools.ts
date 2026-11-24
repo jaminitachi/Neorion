@@ -4,7 +4,7 @@ export const queryName = 'neorion_query';
 
 export const tools = [{
   name: queryName,
-  description: 'Use this tool first, before searching source files, for Next.js and React TypeScript architecture questions. Use who_renders to find which pages render a component, wrappers to find which layouts or providers wrap a route, rename_impact to find references to a symbol, api_consumers to find callers of an API route, and search to find a component, hook, or route by name. The graph builds and refreshes automatically.',
+  description: 'Use this tool first, before searching source files, for Next.js and React TypeScript architecture questions. Use who_renders to find which pages render a component, wrappers to find layouts and providers on a page’s wrapper chain (including external wrappers by default), rename_impact to find references to a symbol, api_consumers to find callers of an API route or a server action (name or path#Name), and search to find a component, hook, or route by name. The graph builds and refreshes automatically.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -12,9 +12,9 @@ export const tools = [{
       target: { type: 'string', description: 'Name, path#Name, route URL/file, or search text' },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
       direct: { type: 'boolean' },
-      includeExternal: { type: 'boolean' },
+      includeExternal: { type: 'boolean', default: true, description: 'For wrappers, include third-party components on the page’s wrapper chain. Set false to hide only third-party non-providers.' },
       includeTests: { type: 'boolean' },
-      callers: { type: 'integer', minimum: 0, maximum: 2 },
+      callers: { type: 'integer', minimum: 0, maximum: 2, description: 'Caller depth for API route targets. Server action targets list direct use sites.' },
       filter: { enum: ['any', 'component', 'hook', 'function', 'constant', 'route', 'api'] }
     },
     required: ['kind', 'target'],

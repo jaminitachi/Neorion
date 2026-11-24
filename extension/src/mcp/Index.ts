@@ -22,6 +22,7 @@ export interface Wrapper {
   conditional: boolean;
   external?: string;
   provider?: boolean;
+  providerTag?: boolean;
   definitionFile?: string;
 }
 
@@ -39,6 +40,14 @@ export interface FetchEntry {
 }
 
 export type Reference = [symbol: number, file: string, line: number, kind: string, detail?: string, caller?: number];
+
+export interface ServerAction {
+  file: string;
+  name: string;
+  aliases?: string[];
+  line: number;
+  callers: [file: string, line: number][];
+}
 
 export interface QueryIndex {
   schema: 1;
@@ -60,5 +69,6 @@ export interface QueryIndex {
   branches?: Record<string, string[]>;
   references: Reference[];
   fetches: FetchEntry[];
+  serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;
 }

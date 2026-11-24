@@ -1,10 +1,10 @@
 # wrappers /structure : 3 files, 1 page (index 2026-11-19T06:00Z, fresh)
 # not wrappers: rendered inside the page
-# providers (outermost first, branch A): Provider, QueryProvider
+# providers (outermost first, branch A): Provider, QueryProvider (external: widgets)
 branch A
 1 src/app/layout.tsx:20 RootLayout
 2 src/app/structure/layout.tsx:2 Layout
-3 fixture/providers.tsx:2 Provider providers: QueryProvider [cond]
+3 fixture/providers.tsx:2 Provider providers: QueryProvider (external: widgets) [cond]
 branch B
 1 src/app/layout.tsx:20 RootLayout
 2 src/app/structure/layout.tsx:2 Layout
