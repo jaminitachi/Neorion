@@ -40,7 +40,7 @@ Call `neorion_query` with `kind` and, for queries that take a target, `target` (
 | `who_renders` | Which pages render a component or reach a tRPC procedure, including via a layout? |
 | `wrappers` | Which layouts and providers wrap a page, in outermost-first order? Third-party wrappers are included by default. Set `includeExternal: false` to hide third-party non-provider wrappers. Providers stay visible. |
 | `rename_impact` | Which files contain checker-resolved references to a declaration? |
-| `api_consumers` | Which files use an API route, server action, or tRPC procedure? Use the procedure’s dotted path, such as `post.create`. Cache operations appear as `cache-only`. |
+| `api_consumers` | Which files use an API route, server action, or tRPC procedure? Use the procedure’s dotted path, such as `post.create`. Cache-only uses follow the callers. |
 | `search` | Which declarations or routes match a name or path fragment? |
 | `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
 | `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
@@ -53,6 +53,9 @@ indexed static matches in the query’s scope. `partial` gives the reason for
 uncertainty or missing results. Run **Generate Architecture Map** to refresh
 the snapshot after source changes. Reconnect a managed bundled registration to
 refresh its launcher and instruction block.
+
+tRPC tracing requires router definitions in the indexed project. Routers defined
+in another workspace package may be unresolved.
 
 ### Markdown architecture map
 
