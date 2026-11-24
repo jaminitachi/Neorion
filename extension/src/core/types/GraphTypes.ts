@@ -63,6 +63,7 @@ export interface CodebaseGraph {
     directories: DirectoryMetadata[];
   };
   routes: RouteNode[];
+  pagesApps?: { file: string; componentId?: string }[];
   index?: QueryIndex;
   sourceFileCount: number;
   facts: DetailFacts;

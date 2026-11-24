@@ -110,14 +110,24 @@ export class GraphVisualizer {
                 ? target : "'" + target.replace(/'/g, "'\\''") + "'";
             return `neorion query ${kind} ${argument}`;
         };
-        const renderSymbols = new Map((graph.index?.symbols ?? []).filter(symbol => symbol.kind === 'component')
-            .map(symbol => [symbol.file + '#' + symbol.name, symbol.id]));
-        const pageIds = new Map(graph.routes.filter(route => route.type === 'page').map(route => [route.file, route.id]));
-        const renderRoots = (graph.index?.routes ?? []).filter(route => route.kind === 'page' && pageIds.has(route.file)).map(route => ({
-            id: pageIds.get(route.file),
-            roots: [route.component, route.fileSymbol, ...(route.layouts ?? [])].filter(id => id !== undefined)
-        }));
         const layouts = graph.routes.filter(route => route.type === 'layout' || route.type === 'template');
+        const wrapperRoots = new Map<string, string[]>();
+        for (const layout of layouts) {
+            for (const page of layout.wraps ?? []) {
+                const roots = wrapperRoots.get(page) ?? [];
+                roots.push(`file:${layout.file}`);
+                if (layout.componentId) roots.push(layout.componentId);
+                wrapperRoots.set(page, roots);
+            }
+        }
+        const pagesApps = new Map(graph.pagesApps?.map(app => [app.file, app]));
+        const renderRoots = graph.routes.filter(route => route.type === 'page').map(route => {
+            const pagesDirectory = /^(?:src\/)?pages\//.exec(route.file)?.[0];
+            const app = pagesDirectory && ['tsx', 'ts', 'jsx', 'js']
+                .map(ext => pagesApps.get(`${pagesDirectory}_app.${ext}`)).find(Boolean);
+            const wraps = app ? [`file:${app.file}`, app.componentId] : wrapperRoots.get(route.id) ?? [];
+            return { id: route.id, roots: [`file:${route.file}`, route.componentId, ...wraps].filter(Boolean) };
+        });
         const layoutDepth = new Map(layouts.map(layout => {
             const directory = path.posix.dirname(layout.file);
             const depth = layouts.filter(outer => directory.startsWith(path.posix.dirname(outer.file) + '/')).length;
@@ -153,7 +163,6 @@ export class GraphVisualizer {
             id: c.id,
             kind: 'component',
             level: componentLevel,
-            renderSymbol: renderSymbols.get(c.path + '#' + c.name),
             query: query('who_renders', c.path + '#' + c.name),
             label: c.name, 
             group: c.domain || 'other', 
@@ -261,7 +270,7 @@ export class GraphVisualizer {
                 edges: codeEdges.length },
             neighbors: Array.from(neighbors, ([id, adjacent]) => [id, [...adjacent]]),
             renderRoots,
-            renderEdges: graph.index?.renderEdges.map(([from, to]) => [from, to]) ?? []
+            renderEdges: graph.edges.filter(edge => edge.type === 'renders').map(({ from, to }) => [from, to])
         };
         const safeGraphData = Buffer.from(JSON.stringify(graphPayload), 'utf8').toString('base64');
         const nonce = randomBytes(16).toString('base64');
@@ -1151,7 +1160,7 @@ export class GraphVisualizer {
                     if (selectedId !== id) hopLimit = undefined;
                     selectedId = id;
                     const wrappers = (layoutsByPage.get(id) ?? []).map(edge => edge.from);
-                    const pages = node.kind === 'component' ? renderedBy(node.renderSymbol) : [];
+                    const pages = node.kind === 'component' ? renderedBy(id) : [];
                     const callers = node.kind === 'action' ? [...connections.get(id).incoming] : [];
                     focusIds = new Set([id, ...wrappers, ...pages, ...callers]);
                     if (node.componentId) focusIds.add(node.componentId);
@@ -1169,7 +1178,7 @@ export class GraphVisualizer {
                     document.getElementById('render-section').hidden = node.kind !== 'component';
                     document.getElementById('callers-section').hidden = node.kind !== 'action';
                     listNodes('details-wrappers', wrappers, 'No layouts');
-                    listNodes('details-pages', pages, 'No indexed pages');
+                    listNodes('details-pages', pages, 'No rendering pages found');
                     listNodes('details-callers', callers, 'No callers');
                     document.getElementById('render-heading').textContent = 'Rendered by ' + pages.length + (pages.length === 1 ? ' page' : ' pages');
                     document.getElementById('callers-heading').textContent = 'Called by ' + callers.length + (callers.length === 1 ? ' node' : ' nodes');

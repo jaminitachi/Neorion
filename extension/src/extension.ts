@@ -121,7 +121,6 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
         try {
             const { graph, outputPath } = generateGraph(projectPath, {
                 markdown: options.markdown,
-                queryIndex: options.visualize,
                 migrateLegacy: true,
                 onProgress: message => progress?.report({ message })
             });
