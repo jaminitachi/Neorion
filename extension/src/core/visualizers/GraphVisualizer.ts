@@ -1342,6 +1342,10 @@ export class GraphVisualizer {
                 let labelOverride;
                 let currentLevel;
                 let hoveredNode;
+                const labelGap = 4;
+                const kindPriority = { route: 1, layout: 2, action: 3, file: 5, component: 6 };
+                const overlaps = (a, b, gap = 0) => a.left < b.right + gap && a.right + gap > b.left &&
+                    a.top < b.bottom + gap && a.bottom + gap > b.top;
                 const rankedRoutes = nodes.filter(node => node.kind === 'route' || node.kind === 'layout')
                     .sort((a, b) => adjacency.get(b.id).length - adjacency.get(a.id).length);
                 const mapRoutes = new Set(rankedRoutes.slice(0, 12).map(node => node.id));
@@ -1395,27 +1399,31 @@ export class GraphVisualizer {
                         const cluster = clustersById.get(id);
                         if (!node && !cluster) continue;
                         const { x, y } = network.canvasToDOM(network.getPosition(id));
+                        const radius = (cluster?.size ?? node.size) * scale + 2;
+                        if (x + radius < 0 || x - radius > width || y + radius < 0 || y - radius > height) continue;
+                        markers.push({ left: x - radius, top: y - radius, right: x + radius, bottom: y + radius });
                         if (x < 0 || x > width || y < 0 || y > height) continue;
                         const domain = node?.group ?? cluster.domain;
-                        const point = { x, y };
-                        const radius = (cluster?.size ?? node.size) * scale + 2;
-                        markers.push({ left: x - radius, top: y - radius, right: x + radius, bottom: y + radius });
                         if (level === 'Map' && !rowNodes.has(id)) {
                             const points = positionsByDomain.get(domain) ?? [];
-                            points.push(point);
+                            points.push({ x, y });
                             positionsByDomain.set(domain, points);
                         }
                         const isRoute = node?.kind === 'route' || node?.kind === 'layout';
                         const isFocused = focused.has(id);
+                        const isHovered = id === hoveredNode;
+                        const degree = adjacency.get(id)?.length ?? 0;
                         const eligible = isFocused || cluster || level === 'Full' ||
                             (level === 'Map' && mapRoutes.has(id)) ||
-                            (level === 'Read' && (isRoute || node.kind !== 'component' || adjacency.get(id).length >= 2));
+                            (level === 'Read' && (isRoute || node.kind !== 'component' || degree >= 2));
                         if (!eligible) continue;
                         labels.push({
-                            ...point, radius, size: cluster || isRoute ? 13 : 11,
+                            x, y, radius, domain, size: cluster || isRoute ? 13 : 11,
                             text: cluster ? domain + ' · ' + cluster.count + (cluster.count === 1 ? ' component' : ' components') : node.shortLabel,
-                            alpha: cluster ? clusterOpacity(cluster) : nodeOpacity(id),
-                            priority: isFocused ? 0 : cluster ? 1 : isRoute ? 2 : 4,
+                            alpha: isHovered ? 1 : cluster ? clusterOpacity(cluster) : nodeOpacity(id),
+                            attention: isHovered ? 0 : id === selectedId ? 1 : isFocused ? 2 : 3,
+                            priority: cluster ? 0 : kindPriority[node.kind],
+                            degree,
                             inRow: rowNodes.has(id)
                         });
                     }
@@ -1423,9 +1431,10 @@ export class GraphVisualizer {
                         if (positions.length < 2 || componentClusters.some(cluster => cluster.domain === domain && isCollapsed(cluster.id))) continue;
                         const center = positions.reduce((sum, p) => ({ x: sum.x + p.x, y: sum.y + p.y }), { x: 0, y: 0 });
                         labels.push({ x: center.x / positions.length, y: center.y / positions.length,
-                            radius: 16, size: 13, text: domain, alpha: focusIds ? 0.15 : 1, priority: 3 });
+                            radius: 16, size: 13, text: domain, alpha: focusIds ? 0.15 : 1,
+                            attention: 3, priority: 4, degree: 0 });
                     }
-                    labels.sort((a, b) => a.priority - b.priority);
+                    labels.sort((a, b) => a.attention - b.attention || a.priority - b.priority || b.degree - a.degree);
 
                     // Work in screen pixels, leaving vis in control of the canvas transform.
                     ctx.save();
@@ -1462,34 +1471,63 @@ export class GraphVisualizer {
                             occupied.push({ left: x - 9, right: x + 9, top: y - 9, bottom: y + 9 });
                         }
                     }
-                    const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+                    const leaders = [];
                     for (const label of labels) {
                         const { x, y, radius, size } = label;
                         ctx.font = size + 'px system-ui';
                         const w = ctx.measureText(label.text).width + 8;
                         const h = size + 5;
-                        const centered = Math.max(3, Math.min(width - w - 3, x - w / 2));
+                        const clampLeft = left => Math.max(3, Math.min(width - w - 3, left));
+                        const centered = clampLeft(x - w / 2);
                         const sides = [[x + radius, y - h / 2], [x - radius - w, y - h / 2]];
                         const vertical = [[centered, y + radius], [centered, y - radius - h]];
                         const candidates = label.inRow ? [...vertical, ...sides] : [...sides, ...vertical];
-                        for (const extra of [h + 3, (h + 3) * 2, (h + 3) * 3]) {
-                            candidates.push([centered, y - radius - h - extra], [centered, y + radius + extra]);
+                        // Try positions toward either end of the text before moving farther from the marker.
+                        const aligned = [clampLeft(x - 8), clampLeft(x - w + 8)];
+                        for (const offset of [0, 8, 16, 24, 32]) {
+                            if (offset) {
+                                for (const shift of [0, -labelGap, labelGap]) {
+                                    const top = y - h / 2 + shift;
+                                    candidates.push([x + radius + offset, top, offset], [x - radius - w - offset, top, offset]);
+                                }
+                            }
+                            const columns = offset === 0 ? aligned : [centered, ...aligned];
+                            for (const left of columns) {
+                                candidates.push([left, y - radius - h - offset, offset], [left, y + radius + offset, offset]);
+                            }
                         }
-                        for (const [left, top] of candidates) {
+                        for (const [left, top, offset] of candidates) {
                             const box = { left, top, right: left + w, bottom: top + h };
                             if (left < 2 || top < 2 || box.right > width - 2 || box.bottom > height - 2) continue;
-                            if (occupied.some(other => intersects(box, other)) || markers.some(other => intersects(box, other))) continue;
-                            occupied.push(box);
-                            ctx.globalAlpha = label.alpha;
-                            const nearestY = Math.max(top, Math.min(y, box.bottom));
-                            if (Math.abs(nearestY - y) > radius + 3) {
-                                ctx.strokeStyle = theme.edge.color;
-                                ctx.lineWidth = 1;
+                            if (occupied.some(other => overlaps(box, other, labelGap)) ||
+                                markers.some(other => overlaps(box, other)) || leaders.some(other => overlaps(box, other))) continue;
+                            if (offset && label.domain) {
+                                // Leave a clear path from the marker to displaced text and keep it clear for later labels.
+                                const endX = Math.max(left, Math.min(x, box.right));
+                                const endY = Math.max(top, Math.min(y, box.bottom));
+                                const dx = Math.sign(endX - x);
+                                const dy = Math.sign(endY - y);
+                                if (dx && dy) continue;
+                                const startX = x + dx * radius;
+                                const startY = y + dy * radius;
+                                const leader = {
+                                    left: Math.min(startX, endX) - Math.abs(dy), right: Math.max(startX, endX) + Math.abs(dy),
+                                    top: Math.min(startY, endY) - Math.abs(dx), bottom: Math.max(startY, endY) + Math.abs(dx)
+                                };
+                                if (markers.some(other => overlaps(leader, other)) ||
+                                    occupied.some(other => overlaps(leader, other, 1)) ||
+                                    leaders.some(other => overlaps(leader, other))) continue;
+                                leaders.push(leader);
+                                ctx.globalAlpha = label.alpha;
+                                ctx.strokeStyle = theme.groups[label.domain].color.background;
+                                ctx.lineWidth = 1.5;
                                 ctx.beginPath();
-                                ctx.moveTo(x, y + Math.sign(nearestY - y) * radius);
-                                ctx.lineTo(Math.max(left, Math.min(x, box.right)), nearestY);
+                                ctx.moveTo(startX - dx * 2, startY - dy * 2);
+                                ctx.lineTo(endX, endY);
                                 ctx.stroke();
                             }
+                            occupied.push(box);
+                            ctx.globalAlpha = label.alpha;
                             ctx.fillStyle = theme.font.background;
                             ctx.beginPath();
                             ctx.roundRect(left, top, w, h, 3);
