@@ -204,11 +204,9 @@ export class GraphVisualizer {
         ];
 
         const groupsConfig = domains.reduce((acc, domain, index) => {
-            const background = DomainExtractor.getColor(domain, index);
-            // This outline has at least 3:1 contrast on both white and #1e1e1e.
-            acc[domain] = { color: { background, border: '#767676' } };
+            acc[domain] = DomainExtractor.getColor(domain, index);
             return acc;
-        }, Object.create(null) as Record<string, { color: { background: string; border: string } }>);
+        }, Object.create(null) as Record<string, string>);
 
         const denseGraph = nodes.length > 100;
         // A dense graph fits at a much smaller scale than a handful of nodes.
@@ -249,7 +247,7 @@ export class GraphVisualizer {
     <title>Neo Architecture Graph</title>
     <script type="text/javascript" src="${scriptUri}"></script>
     <style>
-        :root {
+        body {
             --bg-color: var(--vscode-editor-background, #1e1e1e);
             --fg-color: var(--vscode-editor-foreground, #ccc);
             --border-color: var(--vscode-panel-border, #444);
@@ -288,9 +286,9 @@ export class GraphVisualizer {
         .btn { background: var(--vscode-button-secondaryBackground, var(--bg-color)); color: var(--vscode-button-secondaryForeground, var(--fg-color)); border: 1px solid var(--vscode-button-border, var(--border-color)); padding: 6px 12px; cursor: pointer; border-radius: 4px; font-size: 12px; transition: background 0.2s; }
         .btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--border-color)); }
         
-        #error-overlay { display: none; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 2000; align-items: center; justify-content: center; flex-direction: column; }
-        #error-content { background: #2d2d2d; padding: 20px; border-radius: 8px; max-width: 80%; border: 1px solid #ff4444; color: #ff9999; }
-        #debug-log { position: absolute; bottom: 0; left: 0; width: 100%; max-height: 150px; background: rgba(0,0,0,0.8); color: lime; font-family: monospace; font-size: 10px; overflow-y: auto; display: none; padding: 5px; }
+        #error-overlay { display: none; position: absolute; inset: 0; background: var(--bg-color); z-index: 2000; align-items: center; justify-content: center; flex-direction: column; }
+        #error-content { background: var(--vscode-inputValidation-errorBackground, var(--bg-color)); padding: 20px; border-radius: 8px; max-width: 80%; border: 1px solid currentColor; color: var(--vscode-errorForeground, var(--fg-color)); }
+        #debug-log { position: absolute; bottom: 0; left: 0; width: 100%; max-height: 150px; background: var(--bg-color); color: var(--fg-color); font-family: monospace; font-size: 10px; overflow-y: auto; display: none; padding: 5px; }
     </style>
 </head>
 <body>
@@ -481,6 +479,57 @@ export class GraphVisualizer {
             return { ...item, title: tooltip };
         }
 
+        function readTheme(groupsConfig) {
+            const styles = getComputedStyle(document.body);
+            const { color: foreground, backgroundColor: background } = styles;
+            const swatch = document.createElement('canvas');
+            swatch.width = swatch.height = 1;
+            const colorContext = swatch.getContext('2d', { willReadFrequently: true });
+            const rgb = color => {
+                colorContext.clearRect(0, 0, 1, 1);
+                colorContext.fillStyle = color;
+                colorContext.fillRect(0, 0, 1, 1);
+                return Array.from(colorContext.getImageData(0, 0, 1, 1).data.slice(0, 3));
+            };
+            const hex = channels => '#' + channels.map(value => value.toString(16).padStart(2, '0')).join('');
+            const luminance = channels => channels.reduce((sum, channel, index) => {
+                const value = channel / 255;
+                const linear = value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+                return sum + linear * [0.2126, 0.7152, 0.0722][index];
+            }, 0);
+            const surface = luminance(rgb(background));
+            const contrast = channels => {
+                const fill = luminance(channels);
+                return (Math.max(surface, fill) + 0.05) / (Math.min(surface, fill) + 0.05);
+            };
+            const groups = Object.create(null);
+            const textColor = hex(rgb(foreground));
+            for (const [domain, color] of Object.entries(groupsConfig)) {
+                const original = rgb(color);
+                const target = surface > 0.3 ? 0 : 255;
+                let adjusted = original;
+                for (let mix = 0.05; contrast(adjusted) < 3 && mix <= 1; mix += 0.05) {
+                    adjusted = original.map(value => Math.round(value + (target - value) * mix));
+                }
+                const fill = hex(adjusted);
+                groups[domain] = { color: {
+                    background: fill, border: fill, highlight: { background: fill, border: textColor },
+                    hover: { background: fill, border: textColor }
+                } };
+            }
+            const widgetBorder = styles.getPropertyValue('--vscode-editorWidget-border').trim();
+            const editorForeground = styles.getPropertyValue('--vscode-foreground').trim() || foreground;
+            return {
+                groups,
+                font: { color: textColor, background: hex(rgb(background)), bold: { color: textColor } },
+                edge: {
+                    color: hex(rgb(widgetBorder && contrast(rgb(widgetBorder)) >= 2 ? widgetBorder : editorForeground)),
+                    inherit: false,
+                    opacity: document.body.matches('.vscode-high-contrast, .vscode-high-contrast-light') ? 1 : 0.6
+                }
+            };
+        }
+
         document.getElementById('btn-logs').addEventListener('click', () => {
             document.getElementById('debug-log').style.display = 'block';
         });
@@ -493,6 +542,7 @@ export class GraphVisualizer {
             );
 
             const container = document.getElementById('mynetwork');
+            let theme = readTheme(groupsConfig);
             const options = {
                 layout: {
                     randomSeed: 42,
@@ -500,13 +550,13 @@ export class GraphVisualizer {
                     improvedLayout: false
                 },
                 nodes: {
-                    font: { size: 14, color: '#111111' },
+                    font: { size: 14, ...theme.font },
                     borderWidth: 2,
                     shadow: true
                 },
-                groups: groupsConfig,
+                groups: theme.groups,
                 edges: {
-                    color: { color: '#636e72', opacity: 0.6 },
+                    color: theme.edge,
                     arrows: 'to',
                     width: 1.5,
                     smooth: { type: 'continuous', roundness: 0.5 }
@@ -539,7 +589,25 @@ export class GraphVisualizer {
                     nodes: new vis.DataSet(nodes.map(withTextTooltip)),
                     edges: new vis.DataSet(edges.map(withTextTooltip))
                 }, options);
-                initLegend(domains, groupsConfig);
+                initLegend(domains, theme.groups);
+                const graphColors = node => theme.groups[node.group].color;
+                new MutationObserver(() => {
+                    theme = readTheme(groupsConfig);
+                    network.setOptions({ nodes: { font: theme.font }, groups: theme.groups, edges: { color: theme.edge } });
+                    network.body.data.nodes.update(nodes.filter(node => node.kind).map(node => ({
+                        id: node.id, color: graphColors(node)
+                    })));
+                    for (const cluster of componentClusters) {
+                        if (isCollapsed(cluster.id)) network.updateClusteredNode(cluster.id, { color: graphColors({ group: cluster.domain }) });
+                    }
+                    for (const item of document.querySelectorAll('.legend-item')) {
+                        const color = graphColors({ group: item.dataset.domain });
+                        const dot = item.querySelector('.dot');
+                        dot.style.backgroundColor = color.background;
+                        dot.style.borderColor = color.border;
+                    }
+                    network.redraw();
+                }).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'] });
                 const adjacency = new Map(neighbors);
                 const graphNodes = new Map(nodes.filter(node => node.kind).map(node => [node.id, node]));
                 const connections = new Map(Array.from(graphNodes.keys(), id => [
@@ -721,12 +789,12 @@ export class GraphVisualizer {
                         if (fontSize > 12) {
                             const width = ctx.measureText(node.label).width + 8 / scale;
                             const height = fontSize + 4 / scale;
-                            ctx.fillStyle = groupsConfig[node.group].color.background;
+                            ctx.fillStyle = theme.font.background;
                             ctx.beginPath();
                             ctx.roundRect(x - width / 2, y - height / 2, width, height, 3 / scale);
                             ctx.fill();
                         }
-                        ctx.fillStyle = '#111111';
+                        ctx.fillStyle = theme.font.color;
                         ctx.fillText(node.label, x, y);
                     }
                     ctx.restore();
