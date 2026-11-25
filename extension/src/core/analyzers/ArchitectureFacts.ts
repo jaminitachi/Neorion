@@ -1,3 +1,4 @@
+import type { PropFlow } from './PropFlow';
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import { AI_SDK_TRANSPORT, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
 import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
@@ -1143,10 +1144,13 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
+export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true,
+  substitute?: (node: Node) => UrlText[] | undefined): UrlText[] | undefined {
   if (seen.has(node)) return;
+  const replacement = substitute?.(node);
+  if (replacement) return replacement;
   seen.add(node);
-  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
+  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole, substitute);
   // An unresolved expression gets a slot. An empty set has no viable URL.
   const fallback = (values: UrlText[] | undefined): UrlText[] => values ?? [{ text: slot }];
   try {
@@ -1158,7 +1162,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
     if (node.getKind() === SyntaxKind.NullKeyword) return [];
     if (Node.isConditionalExpression(node)) {
       const branches = [node.getWhenTrue(), node.getWhenFalse()]
-        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl)))
+        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl, substitute)))
         .filter(value => !wholeUrl || value.text !== '');
       if (!branches.length) return [];
       const hasSlash = branches.some(value => value.text.includes('/'));
@@ -1181,7 +1185,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
         const constant = Node.isVariableDeclaration(declaration) &&
           declaration.getVariableStatement()?.getDeclarationKind() === 'const';
         if (initializer) {
-          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl)
+          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl, substitute)
             ?.map(value => value.text === slot ? value : { ...value, partial: value.partial || !constant });
         }
       }
@@ -1430,7 +1434,7 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: routeSegments(route.path)
@@ -1488,6 +1492,14 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     return matches;
   };
   const matchesFor = (url: Node | string) => matchValues(typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []);
+  const embeddedUrlProp = (input: Node) => {
+    let prop: ReturnType<PropFlow['read']>;
+    if (flow) urlTexts(input, undefined, true, true, part => {
+      prop ??= flow.read(part);
+      return prop ? [{ text: spanningSlot }] : undefined;
+    });
+    return prop;
+  };
   type Request = NonNullable<ReturnType<typeof httpRequest>>;
   const summaries = new Map<Node, { request: Request; call: Node; parameter: number }[]>();
   const summarize = (node: Node) => {
@@ -1512,25 +1524,25 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
+  const literals: Node[] = [];
+  const classified = new Set<Node>();
+  const classify = (url: Node) => {
+    classified.add(url);
+    const wrapped = wrappedExpression(url);
+    const plus = addition(url);
+    if (wrapped) classify(wrapped);
+    else if (plus) {
+      classify(plus.getLeft());
+      classify(plus.getRight());
+    } else if (Node.isConditionalExpression(url)) {
+      classify(url.getWhenTrue());
+      classify(url.getWhenFalse());
+    } else if (Node.isTemplateExpression(url)) {
+      for (const span of url.getTemplateSpans()) classify(span.getExpression());
+    }
+  };
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
-    const literals: Node[] = [];
-    const classified = new Set<Node>();
-    const classify = (url: Node) => {
-      classified.add(url);
-      const wrapped = wrappedExpression(url);
-      const plus = addition(url);
-      if (wrapped) classify(wrapped);
-      else if (plus) {
-        classify(plus.getLeft());
-        classify(plus.getRight());
-      } else if (Node.isConditionalExpression(url)) {
-        classify(url.getWhenTrue());
-        classify(url.getWhenFalse());
-      } else if (Node.isTemplateExpression(url)) {
-        for (const span of url.getTemplateSpans()) classify(span.getExpression());
-      }
-    };
+    if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
@@ -1597,26 +1609,60 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       }];
       for (const request of requests) {
         const method = request.unbounded ? undefined : request.method;
-        for (const url of request.urls) {
-          if (url === undefined) continue;
-          const matches = matchesFor(url);
-          if (!matches) continue;
-          if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
-          const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
-          for (const { route, partial, markdown, dynamic } of matches.values()) {
-            const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
-              value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial;
-            if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
-            index?.fetch({
-              file: source, line, node, route: route.id,
-              method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-              partial: partial || request.partial || undefined, dynamic
-            });
-            if (isSwr || !mapFact) continue;
-            const targets = endpointsByCall.get(node) ?? [];
-            targets.push({ route, kind });
-            endpointsByCall.set(node, targets);
+        for (const input of request.urls) {
+          if (input === undefined) continue;
+          const directProp = isFetch && typeof input !== 'string' ? flow?.read(input) : undefined;
+          const embeddedProp = isFetch && !directProp && typeof input !== 'string' ? embeddedUrlProp(input) : undefined;
+          const prop = directProp ?? embeddedProp;
+          // Retain the static route pattern from a template with runtime path segments.
+          const templateMatches = embeddedProp ? matchesFor(input) : undefined;
+          const bindings = prop ? flow!.bindings(prop) : [];
+          const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
+            const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
+            const replace = (values: UrlText[]) => urlTexts(input, undefined, true, true, part => {
+              const read = flow!.read(part);
+              return read?.component === prop.component && read.name === prop.name ? values : undefined;
+            }) ?? [];
+            const unknown = !values || values.some(({ text }) => text === slot || text === spanningSlot) ||
+              'unknown' in binding && !!binding.unknown;
+            const known = values?.filter(({ text }) => text !== slot && text !== spanningSlot);
+            const entry = 'site' in binding && binding.value && known?.length
+              ? [{ values: replace(known), binding: { name: prop.name, site: binding.site, value: binding.value },
+                gates: binding.gates, unknown: !!binding.unknown }] : [];
+            if (!unknown) return entry;
+            const possible = replace([{ text: spanningSlot, dynamic: true, partial: true }]);
+            const bounded = possible.filter(value => apiSegments(value, config));
+            if (possible.some(value => value.text.startsWith(spanningSlot) && !apiSegments(value, config))) {
+              index?.uncertainPropRequest(source, node, method, binding.gates);
+            }
+            if (!bounded.length) return entry;
+            return [...entry, { values: bounded, binding: undefined, gates: binding.gates, unknown: true }];
+          }) : [{ values: typeof input === 'string' ? [{ text: input }] : urlTexts(input) ?? [],
+            binding: undefined, gates: [], unknown: false }];
+          for (const { values, binding, gates, unknown } of candidates) {
+            const matches = matchValues(values);
+            if (!matches) continue;
+            const url = binding?.value ?? input;
+            if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
+            const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
+            for (const { route, partial, markdown, dynamic } of matches.values()) {
+              const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
+                value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
+              if (unknown && !binding && (!route.pages || route.methodBasis === 'enforced') && !matchesMethod) continue;
+              const patternMatched = unknown && !binding ? templateMatches?.get(route.id)?.markdown : markdown && !unknown;
+              const mapFact = patternMatched && matchesMethod && origin?.name !== 'mutate' && !request.partial;
+              if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+              index?.fetch({
+                file: source, line, node, route: route.id,
+                method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+                partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
+                propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates
+              });
+              if (isSwr || !mapFact) continue;
+              const targets = endpointsByCall.get(node) ?? [];
+              targets.push({ route, kind });
+              endpointsByCall.set(node, targets);
+            }
           }
         }
       }
@@ -1631,18 +1677,19 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           Node.isTemplateExpression(node) || addition(node))) literals.push(node);
     });
     for (const constructor of constructors) collectRequest(constructor);
-    for (const node of literals) {
-      if (classified.has(node)) continue;
-      const matches = matchesFor(node);
-      if (!matches) continue;
-      classify(node);
-      const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
-      for (const { route, partial, dynamic } of matches.values()) {
-        index?.fetch({
-          file: source, line: startLine(node), node, route: route.id, method: '?',
-          url: route.path, via, partial: partial || undefined, dynamic
-        });
-      }
+  }
+  for (const node of literals) {
+    const source = relativePath(node.getSourceFile());
+    if (classified.has(node)) continue;
+    const matches = matchesFor(node);
+    if (!matches) continue;
+    classify(node);
+    const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
+    for (const { route, partial, dynamic } of matches.values()) {
+      index?.fetch({
+        file: source, line: startLine(node), node, route: route.id, method: '?',
+        url: route.path, via, partial: partial || undefined, dynamic
+      });
     }
   }
 

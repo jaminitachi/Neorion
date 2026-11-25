@@ -1,34 +1,10 @@
-import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { Node, SourceFile } from 'ts-morph';
 import { declarationsOf } from './ArchitectureFacts';
+import { packageMember, returnedValues } from './CallableFlow';
 
 type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
   import('ts-morph').ArrowFunction;
 type Step = { members: string[]; returns: boolean };
-
-function returnedValues(fn: RenderFunction): Node[] {
-  const body = fn.getBody();
-  if (!body) return [];
-  if (!Node.isBlock(body)) return [body];
-  const values: Node[] = [];
-  body.forEachDescendant((node, traversal) => {
-    if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node)) traversal.skip();
-    if (Node.isReturnStatement(node)) {
-      const expression = node.getExpression();
-      if (expression) values.push(expression);
-    }
-  });
-  return values;
-}
-
-function reactHook(expression: Node): string | undefined {
-  const root = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
-  for (const declaration of root.getSymbol()?.getDeclarations() ?? []) {
-    if (declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue() !== 'react') continue;
-    if (Node.isImportSpecifier(declaration)) return declaration.getName();
-    if (Node.isPropertyAccessExpression(expression) &&
-        (Node.isNamespaceImport(declaration) || Node.isImportClause(declaration))) return expression.getName();
-  }
-}
 
 /** Follow the value behind a JSX binding through local factories and React memoization. */
 export function renderBindings(declarations: Node[], files: Set<SourceFile>): RenderFunction[] {
@@ -78,7 +54,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): Re
     }
     if (Node.isCallExpression(node) && !returns) {
       const expression = node.getExpression();
-      const hook = reactHook(expression);
+      const hook = packageMember(expression, 'react');
       if (hook === 'useCallback' || hook === 'useMemo') {
         return resolve(node.getArguments()[0], members, hook === 'useMemo');
       }
