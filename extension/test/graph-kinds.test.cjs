@@ -991,6 +991,9 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.doesNotMatch(requests, /^page .*\/secondary/m);
   assert.match(query('path', '/secondary', '/api/items/[id]'), /no directed path/);
   assert.match(query('path', '/primary', '/api/items/[id]'), /fetch .*PATCH|fetch .*DELETE/);
+  const unknownUrl = query('path', '/opaque', '/api/items/[id]');
+  assert.match(unknownUrl, /fetch .*\[partial url\]/);
+  assert.match(unknownUrl, /^# partial: prop value untraced at a render site$/m);
 
   const impact = query('impact', 'publishPrimary', '--depth', '6');
   assert.match(impact, /^page \/primary\s/m);

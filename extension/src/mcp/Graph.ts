@@ -1026,6 +1026,7 @@ export class DependencyGraph {
       for (const alternate of step.previous.alternatives) otherSteps.add(alternate);
       const edge = step.edge;
       if (edge.gates?.some(gate => gate.partial)) pathIssue ??= 'prop value untraced at a render site';
+      if (edge.partial) pathIssue ??= 'uncertain URL match';
       if (edge.label === 'use') pathIssue ??= 'symbol use does not trace invocation';
       if (typeof step.previous.id === 'number') pathIssue ??= this.index.flowIssues?.[step.previous.id];
       const file = this.file(step.id);
@@ -1101,6 +1102,7 @@ export class DependencyGraph {
         if (expired()) break;
         const [edge] = sites;
         if (edge.gates?.some(gate => gate.partial)) flowIssue ??= 'prop value untraced at a render site';
+        if (sites.some(site => site.partial)) flowIssue ??= 'uncertain URL match';
         if (edge.label === 'render') renders.add(edge.to);
         else if (edge.label === 'fetch') fetches.add(JSON.stringify([edge.to, edge.method]));
         else if (edge.label === 'call' || edge.label === 'event' || edge.label === 'action' || edge.label === 'trpc') project.add(JSON.stringify([edge.to, edge.detail]));
