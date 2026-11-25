@@ -1613,8 +1613,15 @@ test('failed Codex MCP registration leaves the project hint and skill untouched'
   assert.match(result.stderr, /Cannot load Codex configuration[\s\S]*Check that CODEX_HOME/);
   assert.equal(fs.readFileSync(hint, 'utf8'), '# Project instructions\n');
   assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion')), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents')), false);
   assert.equal(fs.existsSync(mock.config), false);
   assert.ok(mock.calls().some(([, action]) => action === 'add'));
+  fs.mkdirSync(path.join(home, '.agents'));
+  assert.equal(run(['setup', 'codex'], env).status, 1);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.agents')), []);
+  fs.mkdirSync(path.join(home, '.agents/skills/other'), { recursive: true });
+  assert.equal(run(['setup', 'codex'], env).status, 1);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.agents/skills')), ['other']);
 });
 
 test('declared React SDK ranges select the hook endpoint without installed types', t => {
@@ -1672,4 +1679,17 @@ test('an app inherits the workspace SDK declaration and refreshes when it change
   manifest(app, '^2.0.0', { name: 'web' });
   assert.match(query('chat'), consumer);
   assert.doesNotMatch(query('custom'), consumer);
+  manifest(app, 'catalog:', { name: 'web' });
+  const yaml = path.join(workspace, 'pnpm-workspace.yaml');
+  fs.writeFileSync(yaml, "packages:\n  - 'apps/*'\ncatalog:\n  '@ai-sdk/react': '^1.1.0'\n");
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  fs.writeFileSync(yaml, "packages: [apps/*]\ncatalog: { '@ai-sdk/react': '^2.1.0' }\ncatalogs:\n  legacy: { '@ai-sdk/react': '~1.2.0' }\n");
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
+  manifest(app, 'catalog:legacy', { name: 'web' });
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  fs.unlinkSync(yaml);
+  for (const route of ['custom', 'chat']) assert.match(query(route), /useCustomChat POST AI SDK transport \[partial url\]/);
 });

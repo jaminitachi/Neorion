@@ -864,6 +864,53 @@ test('changes traces named and namespace importers of the same removed export', 
   assert.match(dormant, /^# partial: .*no page or API routes traced for removals/m);
 });
 
+test('changes restores direct base importers incrementally and falls back for a namespace', { timeout: 65_000 }, t => {
+  const { env, file, edit, git, changes } = gitFixture(t);
+  const origin = 'lib/history-origin.ts';
+  const api = 'app/api/history';
+  fs.writeFileSync(file(origin), 'export function original() {}\nexport const retained = 1;\n');
+  fs.mkdirSync(file(api), { recursive: true });
+  fs.writeFileSync(file(api + '/route.ts'), 'import { original as work } from "../../../lib/history-origin";\n' +
+    'export function GET() { work(); return Response.json({}); }\n');
+  fs.writeFileSync(file('lib/history-origin.test.ts'), 'import { original } from "./history-origin";\noriginal();\n');
+  fs.mkdirSync(file('app/history'), { recursive: true });
+  fs.writeFileSync(file('app/history/page.tsx'), 'export default function History() { fetch("/api/history"); return <main/>; }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Create a route and test that call the same named export');
+
+  const history = path.join(env.XDG_CACHE_HOME, 'neorion');
+  const onDisk = () => fs.readdirSync(history).flatMap(key => {
+    const directory = path.join(history, key, 'history');
+    return fs.existsSync(directory) ? fs.readdirSync(directory).filter(file => file.endsWith('.json')) : [];
+  });
+  edit(origin, text => text.replace('export function', 'function'));
+  const scoped = changes();
+  assert.match(scoped, /^route api GET \/api\/history .* <- original \[removed\] d1/m);
+  assert.match(scoped, /^route page \/history .* <- original \[removed\].*via fetch/m);
+  assert.match(scoped, /^importer app\/api\/history\/route\.ts:1,2 <- removed original \[base\]$/m);
+  assert.match(scoped, /^importer lib\/history-origin\.test\.ts:1,2 <- removed original \[base\]$/m);
+  assert.match(scoped, /^# complete:/m);
+  assert.deepEqual(onDisk(), []);
+
+  // An ignored compiler input absent from the base invalidates live graph reuse.
+  fs.appendFileSync(file('.git/info/exclude'), '\n/history-local.d.ts\n');
+  fs.writeFileSync(file('history-local.d.ts'), 'export {};\n');
+  assert.equal(stable(changes()), stable(scoped));
+  assert.equal(onDisk().length, 1);
+
+  git('restore', origin);
+  fs.writeFileSync(file(api + '/route.ts'), 'import * as library from "../../../lib/history-origin";\n' +
+    'export function GET(request: Request) { library[request.url](); return Response.json({}); }\n');
+  git('add', api);
+  git('commit', '-qm', 'Use an opaque namespace property in the route');
+  fs.unlinkSync(file('history-local.d.ts'));
+  edit(origin, text => text.replace('export function', 'function'));
+  const unresolved = changes();
+  assert.match(unresolved, /^importer app\/api\/history\/route\.ts:1,2 .* \[uncertain\]$/m);
+  assert.match(unresolved, /^# partial: .*namespace/m);
+  assert.equal(onDisk().length, 2);
+});
+
 test('changes skips a historical graph when the middleware matcher stays the same', { timeout: 65_000 }, t => {
   const { edit, git, run, file } = gitFixture(t);
   edit('middleware.ts', text => text.replace('middleware() {}', 'middleware() {\n  const response = new Response();\n  return response;\n}'));
@@ -1483,6 +1530,10 @@ test('Pages resolves a const alias of the custom App page slot', t => {
 for (const [form, setup, jsx, usesDefault] of [
   ['logical fallback', 'const Layout = Component.Layout || DefaultLayout;', '<Layout><Component {...pageProps}/></Layout>', true],
   ['nullish fallback', 'const Layout = Component.Layout ?? DefaultLayout;', '<Layout><Component {...pageProps}/></Layout>', true],
+  ['destructuring default', 'const { Layout = DefaultLayout } = Component;', '<Layout><Component {...pageProps}/></Layout>', true],
+  ['nested parameter default', '', '<Layout><Component {...pageProps}/></Layout>', true],
+  ['class render', 'const { Component, pageProps } = this.props; const Layout = Component.Layout || DefaultLayout;',
+    '<Layout><Component {...pageProps}/></Layout>', true],
   ['let alias', 'let Layout = Component.Layout;', 'Layout ? <Layout><Component {...pageProps}/></Layout> : <Component {...pageProps}/>', false],
   ['destructured alias', 'const { Layout: Wrapper } = Component;', 'Wrapper ? <Wrapper><Component {...pageProps}/></Wrapper> : <Component {...pageProps}/>', false]
 ]) {
@@ -1490,10 +1541,12 @@ for (const [form, setup, jsx, usesDefault] of [
     const query = pagesReviewFixture(t, {
       'pages/_app.page.tsx': `
         function DefaultLayout({ children }) { return <main>{children}</main>; }
-        export default function App({ Component, pageProps }) {
+        ${form === 'class render' ? "import AppBase from 'next/app'; export default class App extends AppBase { render() {" :
+          form === 'nested parameter default' ? 'export default function App({ Component: { Layout = DefaultLayout }, Component, pageProps }) {' :
+            'export default function App({ Component, pageProps }) {'}
           ${setup}
           return ${jsx};
-        }`,
+        }${form === 'class render' ? '}' : ''}`,
       'lib/page-layouts.tsx': `
         function Shell({ children }) { return <section>{children}</section>; }
         export function AdminLayout({ children }) { return <Shell>{children}</Shell>; }
@@ -1528,6 +1581,77 @@ for (const [form, setup, jsx, usesDefault] of [
     }
   });
 }
+
+test('Pages expands nested children in an inline layout and forwarded children in an inline props layout', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': 'export default function App({ Component }) { return <Component.Layout><Component/></Component.Layout>; }',
+    'pages/index.page.tsx': `
+      function Outer({ children }) { return <main>{children}</main>; }
+      function Inner({ children }) { return <section>{children}</section>; }
+      export default function Page() { return <div/>; }
+      Page.Layout = ({ children }) => <Outer><Inner>{children}</Inner></Outer>;`,
+    'pages/forward.page.tsx': `
+      import { Outer, Inner } from '../lib/layouts';
+      export default function Page() { return <div/>; }
+      Page.Layout = props => <Outer><Inner {...props}/></Outer>;`,
+    'lib/layouts.tsx': 'export function Outer({ children }) { return <main>{children}</main>; }\n' +
+      'export function Inner({ children }) { return <section>{children}</section>; }'
+  });
+  for (const route of ['/', '/forward']) {
+    const output = query('wrappers', route);
+    assert.match(output, /Layout \[Layout assigned at /);
+    assert.match(output, /\bOuter\b/);
+    assert.match(output, /\bInner\b/);
+    assert.match(output, /^# complete:/m);
+  }
+});
+
+test('Pages labels a guarded Layout reassignment and preserves partial for unsupported writes', t => {
+  const source = `
+    function DefaultLayout({ children }) { return <main>{children}</main>; }
+    function OtherLayout({ children }) { return <section>{children}</section>; }
+    export default function App({ Component, pageProps, router }) {
+      let Layout = Component.Layout ?? DefaultLayout;
+      if (router.isPreview) Layout = OtherLayout;
+      return <Layout><Component {...pageProps}/></Layout>;
+    }`;
+  const { root, query, build } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  const app = path.join(root, 'pages/_app.page.tsx');
+  fs.writeFileSync(app, source);
+  fs.writeFileSync(path.join(root, 'pages/inline.page.tsx'), `
+    function InlineChild({ children }) { return <article>{children}</article>; }
+    export default function InlinePage() { return <main/>; }
+    InlinePage.Layout = ({ children }) => <InlineChild>{children}</InlineChild>;
+  `);
+  build();
+  const output = query('wrappers', '/');
+  assert.match(output, /DefaultLayout .*\[cond\]/);
+  assert.match(output, /OtherLayout .*\[cond\]/);
+  assert.match(output, /^# complete:/m);
+  assert.match(query('who_renders', 'OtherLayout'), /^\/ .*\[cond\]/m);
+  const inline = query('who_renders', 'InlineChild');
+  assert.match(inline, /^\/inline .*\[cond\]/m);
+  assert.match(inline, /^# complete:/m);
+  fs.writeFileSync(app, source.replace('if (router.isPreview) Layout = OtherLayout;', 'router.onChange(() => { Layout = OtherLayout; });'));
+  build();
+  assert.match(query('wrappers', '/'), /^# partial:.*unresolved page property Layout/m);
+});
+
+test('a Pages App excluded by tsconfig stays partial for wrapper and reverse render queries', t => {
+  const query = pagesReviewFixture(t, {
+    'tsconfig.json': JSON.stringify({ include: ['**/*.ts', '**/*.tsx'], compilerOptions: { jsx: 'preserve', allowJs: true } }),
+    'next.config.js': 'module.exports = {};',
+    'pages/_app.jsx': "import { EmptyLayout } from '../lib/layout'; export default function App({ Component }) { return <EmptyLayout><Component/></EmptyLayout>; }",
+    'lib/layout.tsx': 'export function EmptyLayout({ children }) { return <main>{children}</main>; }',
+    'pages/excluded.tsx': 'function Visible() { return <main/>; }\nexport default function Page() { return <Visible/>; }'
+  });
+  assert.match(query('wrappers', '/excluded'), /^# partial:.*custom App unresolved/m);
+  assert.match(query('who_renders', 'EmptyLayout'), /^# partial:.*custom App unresolved/m);
+  assert.match(query('path', '/excluded', 'EmptyLayout'), /^# partial:.*custom App unresolved/m);
+  const matched = query('path', '/excluded', 'Visible');
+  assert.match(matched, /1 hop/);
+  assert.match(matched, /^# partial:.*custom App unresolved/m);
+});
 
 test('a destructured App can forward Component directly through a fallback alias', t => {
   const query = pagesReviewFixture(t, {

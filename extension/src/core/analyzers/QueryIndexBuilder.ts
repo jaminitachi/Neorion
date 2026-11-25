@@ -139,6 +139,7 @@ export class QueryIndexBuilder {
   pageRenderCondition(route: string, tag: Node, decision: PageRenderCondition) {
     for (const edge of this.renderSites.get(tag) ?? []) {
       const conditions = this.pageConditions.get(route) ?? new Map();
+      if (decision === 'conditional' && conditions.has(edge)) continue;
       conditions.set(edge, decision);
       this.pageConditions.set(route, conditions);
     }
@@ -266,7 +267,8 @@ export class QueryIndexBuilder {
     for (const [file, body] of this.shells) {
       const parent = body?.getParent();
       if (!parent) continue;
-      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ?? parent;
+      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ??
+        parent.getParentIfKind(SyntaxKind.ClassDeclaration) ?? parent;
       const id = byNode.get(declaration);
       if (id !== undefined) index.routeFiles![file][3] = id;
     }
@@ -636,7 +638,8 @@ export class QueryIndexBuilder {
             const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line)
               .map(other => conditions.get(other));
             if (combined?.includes(undefined)) continue;
-            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' : decision;
+            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' :
+              combined?.includes('conditional') ? 'conditional' : decision;
           }
           index.pagesRenderConditions[id] = entries;
         }
