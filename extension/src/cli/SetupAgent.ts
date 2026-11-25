@@ -55,10 +55,19 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
     : join(homedir(), '.agents', 'skills', 'neorion');
   const skill = join(directory, 'SKILL.md');
   const stateFile = join(directory, '.neorion-setup.json');
-  fs.mkdirSync(directory, { recursive: true });
   const lock = join(directory, '.neorion-setup.lock');
-  try {
+  const acquire = () => {
+    fs.mkdirSync(directory, { recursive: true });
     fs.mkdirSync(lock);
+  };
+  try {
+    try {
+      acquire();
+    } catch (error) {
+      // A concurrent setup can remove the empty directory between these two mkdir calls.
+      if (errorCode(error) !== 'ENOENT') throw error;
+      acquire();
+    }
   } catch (error) {
     if (errorCode(error) !== 'EEXIST') throw error;
     throw new Error(`Neorion setup is locked. If no setup process is running, delete the lock directory and rerun setup: ${lock}`);
@@ -172,7 +181,7 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
     }
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
-    if (remove) {
+    if (remove || agent === 'codex') {
       try {
         fs.rmdirSync(directory);
       } catch (error) {

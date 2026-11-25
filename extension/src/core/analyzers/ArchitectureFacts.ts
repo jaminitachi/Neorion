@@ -1,6 +1,7 @@
+import type { PropFlow } from './PropFlow';
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import { AI_SDK_TRANSPORT, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
-import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { type CallExpression, type JsxOpeningElement, type JsxSelfClosingElement, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { readFileSync } from 'node:fs';
 import { intersects, validRange } from 'semver';
@@ -114,7 +115,7 @@ interface WrapperChain {
   locations: Wrapper[];
   conditional?: boolean;
   contextProvider?: boolean;
-  dispatch?: string;
+  dispatch?: AppSlot;
   possible?: boolean;
   getLayout?: boolean;
 }
@@ -132,8 +133,11 @@ type PagesWrapperScope = {
   parameter?: string;
   forwarded?: Node;
   propertyRead?: (name: string, value: StaticValue) => void;
+  assignmentRead?: (name: string) => void;
   renderCondition?: (tag: Node, decision: PageRenderCondition) => void;
 };
+
+type AppSlot = { name: string; fallback?: Node; usesFalsyFallback?: boolean; uncertain?: boolean };
 
 const unknownValue = Symbol('unknown');
 const truthyValue = Symbol('truthy');
@@ -149,6 +153,19 @@ function staticValue(node: Node | undefined): StaticValue {
   if (Node.isFunctionLikeDeclaration(value) || Node.isClassDeclaration(value) ||
     Node.isArrayLiteralExpression(value) || Node.isObjectLiteralExpression(value)) return truthyValue;
   return unknownValue;
+}
+
+function resolveAppSlot(page: PageProperties, slot: AppSlot, issues?: string[]): { value: Node; site?: Node } | undefined {
+  const { name, fallback, usesFalsyFallback, uncertain } = slot;
+  const value = pagePropertyValue(page, name);
+  if (uncertain || value === unknownValue) {
+    issues?.push(`unresolved page property ${name}`);
+    return;
+  }
+  if (fallback && (usesFalsyFallback ? !value : value == null)) return { value: fallback };
+  const assigned = page.assignments.get(name);
+  if (assigned && value) return assigned;
+  issues?.push(assigned ? `unresolved page property ${name}` : `missing page property ${name} in a reachable App slot`);
 }
 
 const emptyChain: WrapperChain = { path: [], locations: [] };
@@ -195,7 +212,7 @@ const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|Error
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
   bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), scope?: PagesWrapperScope): WrapperChain[] {
   if (seen.has(body) || seen.size >= 12) return [];
-  const { page, parameter: pageParameter, forwarded, issues, renderCondition, propertyRead } = scope ?? {};
+  const { page, parameter: pageParameter, forwarded, issues, renderCondition, propertyRead, assignmentRead } = scope ?? {};
   const pagesScope = !!scope;
   seen = new Set(seen).add(body);
   const chains = new Map<string, WrapperChain>();
@@ -235,22 +252,48 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       node.getSourceFile() === value.getSourceFile() && value.getStart() >= node.getStart()) return false;
     return isSlot(value);
   };
-  const propertySlot = (node: Node | undefined, depth = 0): string | undefined => {
+  const written = new Set<Node>();
+  const checkedWrites = new Set<Node>();
+  const mutable = (name: Node, declaration: Node) => {
+    if (!Node.isIdentifier(name)) return true;
+    if (!checkedWrites.has(declaration)) {
+      checkedWrites.add(declaration);
+      if (name.findReferences().some(symbol => symbol.getReferences().some(ref => ref.isWriteAccess() && !ref.isDefinition()))) {
+        written.add(declaration);
+      }
+    }
+    return written.has(declaration);
+  };
+  const propertySlot = (node: Node | undefined, depth = 0): AppSlot | undefined => {
     if (depth >= 12) return;
     const inner = node && wrappedExpression(node);
     if (inner) return propertySlot(inner, depth + 1);
-    if (Node.isPropertyAccessExpression(node) && isSlot(node.getExpression())) return node.getName();
-    if (Node.isElementAccessExpression(node) && isSlot(node.getExpression())) return textValue(node.getArgumentExpression());
-    const element = Node.isIdentifier(node) ? bindingOf(node) : undefined;
-    if (Node.isVariableDeclaration(element) &&
-      element.getVariableStatement()?.getDeclarationKind() === 'const' && element.getEnd() < node!.getStart()) {
-      return propertySlot(element.getInitializer(), depth + 1);
+    if (Node.isPropertyAccessExpression(node) && isSlot(node.getExpression())) return { name: node.getName() };
+    if (Node.isElementAccessExpression(node) && isSlot(node.getExpression())) {
+      const name = textValue(node.getArgumentExpression());
+      return name === undefined ? { name: 'computed key', uncertain: true } : { name };
     }
-    if (Node.isBindingElement(element) && !element.getInitializer()) {
+    if (Node.isBinaryExpression(node)) {
+      const op = node.getOperatorToken().getKind();
+      const left = propertySlot(node.getLeft(), depth + 1);
+      if (left && (op === SyntaxKind.BarBarToken || op === SyntaxKind.QuestionQuestionToken)) {
+        return { ...left, fallback: node.getRight(), usesFalsyFallback: op === SyntaxKind.BarBarToken,
+          uncertain: left.uncertain || !!left.fallback };
+      }
+    }
+    const element = Node.isIdentifier(node) ? bindingOf(node) : undefined;
+    if (Node.isVariableDeclaration(element) && element.getEnd() < node!.getStart()) {
+      const slot = propertySlot(element.getInitializer(), depth + 1);
+      if (slot) return { ...slot, uncertain: slot.uncertain || element.getVariableStatement()?.getDeclarationKind() !== 'const' &&
+        mutable(element.getNameNode(), element) };
+    }
+    if (Node.isBindingElement(element) && Node.isObjectBindingPattern(element.getParent()) && !element.getDotDotDotToken()) {
       const declaration = element.getParent().getParent();
-      if (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === 'const' &&
-        isSlot(declaration.getInitializer())) {
-        return (element.getPropertyNameNode() ?? element.getNameNode()).getText();
+      if (Node.isVariableDeclaration(declaration) && declaration.getEnd() < node!.getStart() && isSlot(declaration.getInitializer())) {
+        const key = element.getPropertyNameNode() ?? element.getNameNode();
+        const name = Node.isIdentifier(key) ? key.getText() : textValue(key);
+        return { name: name ?? 'computed key', uncertain: !name || !!element.getInitializer() ||
+          declaration.getVariableStatement()?.getDeclarationKind() !== 'const' && mutable(element.getNameNode(), element) };
       }
     }
   };
@@ -261,16 +304,13 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
     const properties = new Set<string>();
     const read = (expression: Node | undefined, depth = 0): StaticValue => {
       if (!expression || depth >= 12) return unknownValue;
-      const key = propertySlot(expression);
-      if (key !== undefined && page) {
-        properties.add(key);
-        const value = pagePropertyValue(page, key);
-        propertyRead?.(key, value);
-        return value;
-      }
-      if (Node.isElementAccessExpression(expression) && page && isSlot(expression.getExpression())) {
-        properties.add(expression.getArgumentExpression()?.getText() ?? 'computed key');
-        return unknownValue;
+      const slot = page && propertySlot(expression);
+      if (slot) {
+        properties.add(slot.name);
+        const value = pagePropertyValue(page, slot.name);
+        propertyRead?.(slot.name, value);
+        if (slot.uncertain || value === unknownValue) return unknownValue;
+        return slot.fallback && (slot.usesFalsyFallback ? !value : value == null) ? read(slot.fallback, depth + 1) : value;
       }
       if (Node.isParenthesizedExpression(expression) || Node.isAsExpression(expression) ||
           Node.isNonNullExpression(expression) || Node.isSatisfiesExpression(expression)) return read(expression.getExpression(), depth + 1);
@@ -356,19 +396,35 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
     const callee = valueNode(node.getExpression()) ?? node.getExpression();
     const property = Node.isBinaryExpression(callee) &&
       [SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken].includes(callee.getOperatorToken().getKind()) ? callee.getLeft() : callee;
-    return propertySlot(property) === 'getLayout';
+    return propertySlot(property)?.name === 'getLayout';
+  };
+  const forwardsPageSlot = (node: JsxOpeningElement | JsxSelfClosingElement) => {
+    // Later JSX attributes and spreads can replace the supplied Component.
+    for (const attribute of node.getAttributes().reverse()) {
+      if (Node.isJsxAttribute(attribute) && attribute.getNameNode().getText() === 'Component') {
+        const initializer = attribute.getInitializer();
+        return Node.isJsxExpression(initializer) && isSlot(initializer.getExpression());
+      }
+      if (Node.isJsxSpreadAttribute(attribute)) {
+        return !!parameterDeclaration && bindingOf(attribute.getExpression()) === parameterDeclaration;
+      }
+    }
+    return false;
   };
   const visit = (node: Node, root = body, outer: Node[] = [], selected = false, possible = false) => {
     const tag = Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node) ? node.getTagNameNode() : undefined;
-    const dispatch = pagesApp ? propertySlot(tag) : undefined;
+    const element = Node.isJsxOpeningElement(node) ? node.getParentIfKind(SyntaxKind.JsxElement) : undefined;
+    const containsChildren = element?.getJsxChildren().some(child => !Node.isJsxText(child) || !!child.getText().trim());
+    const dispatch = pagesApp && !containsChildren ? propertySlot(tag) : undefined;
     const slot = pagesApp ? !!tag && isSlot(tag) : Node.isJsxExpression(node) && isSlot(node.getExpression());
     if (!slot && !dispatch) return;
-    if (dispatch && (!(Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) ||
-      !node.getAttributes().some(attribute => Node.isJsxSpreadAttribute(attribute) &&
-        bindingOf(attribute.getExpression()) === parameterDeclaration))) return;
     const ancestors: Node[] = [];
     const state = pagesScope ? branchState(node, root) : undefined;
     if (state?.dead) return;
+    if (dispatch && (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !forwardsPageSlot(node)) {
+      issues?.push('custom App page slot unresolved');
+      possible = true;
+    }
     let conditional = selected || !!state?.conditional;
     possible ||= !!state?.possible;
     let getLayout = false;
@@ -386,14 +442,30 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
     for (const element of ancestors.filter(Node.isJsxElement)) {
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
-      const name = tag.getText();
-      const member = Node.isPropertyAccessExpression(tag) ? tag.getName() : name;
-      if (!/^[A-Z]/.test(member)) continue;
-      const contextProvider = member === 'Provider' && Node.isPropertyAccessExpression(tag);
-      const declarations = declarationsOf(tag);
-      const definition = declarations.find(declaration => projectFiles.has(declaration.getSourceFile()));
+      const property = pagesApp && page && propertySlot(tag);
+      if (property) assignmentRead?.(property.name);
+      const assignment = property ? resolveAppSlot(page!, property, issues) : undefined;
+      if (property && !assignment) {
+        chain = chain.map(prefix => ({ ...prefix, possible: true }));
+        continue;
+      }
+      const target = assignment?.value ?? tag;
+      const name = property ? property.name : tag.getText();
+      const member = Node.isPropertyAccessExpression(target) ? target.getName() : name;
+      if (!property && !/^[A-Z]/.test(member)) continue;
+      const contextProvider = member === 'Provider' && Node.isPropertyAccessExpression(target);
+      const declarations = declarationsOf(target);
+      const resolved = property ? valueNode(target) : undefined;
+      const definition = declarations.find(declaration => projectFiles.has(declaration.getSourceFile())) ??
+        (property && resolved && projectFiles.has(resolved.getSourceFile()) &&
+          (Node.isFunctionLikeDeclaration(resolved) || Node.isClassDeclaration(resolved)) ? resolved : undefined);
+      if (property && (!definition || !Node.isFunctionLikeDeclaration(resolved) && !Node.isClassDeclaration(resolved))) {
+        issues?.push(`unresolved page property ${property.name}`);
+        chain = chain.map(prefix => ({ ...prefix, possible: true }));
+        continue;
+      }
       const local = definition && bodies.get(definition);
-      let root = tag;
+      let root = target;
       while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
       const binding = root.getSymbol()?.getDeclarations()[0];
       const module = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
@@ -405,17 +477,21 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const nestedScope = scope && { page, issues, renderCondition, propertyRead };
+      const nestedScope = scope && { page, issues, renderCondition, propertyRead, assignmentRead };
       const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope) : [];
       const primitive = names.some(layoutPrimitive);
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
         const provider = !primitive && (namedProvider || !!next.contextProvider);
         // A dedicated component gets its own row. Inline provider tags belong to the file rendering them.
-        const providerTag = provider && (!local || definition.getSourceFile() === tag.getSourceFile());
+        const providerTag = !property && provider && (!local || definition.getSourceFile() === tag.getSourceFile());
         const source = providerTag ? tag : definition ?? tag;
+        const evidenceSite = assignment?.site ?? (property ? tag : undefined);
+        const site = evidenceSite && { file: relativePath(evidenceSite.getSourceFile()), line: startLine(evidenceSite) };
         const location: Wrapper = {
           file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
           line: startLine(source), conditional, provider, providerTag, external,
+          site, evidence: property && site && (assignment?.site ? `${property.name} assigned at ${site.file}:${site.line}` :
+            `${property.name} fallback at ${site.file}:${site.line}`) || undefined,
           definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
             ? relativePath(definition.getSourceFile()) : undefined
         };
@@ -429,7 +505,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         };
       }));
     }
-    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional, !!entry.possible, entry.dispatch, entry.getLayout]), entry);
+    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional, !!entry.possible,
+      entry.dispatch?.name, entry.dispatch?.fallback?.getStart(), entry.dispatch?.uncertain, entry.getLayout]), entry);
   };
   if (pagesScope) {
     if (page && renderCondition) {
@@ -486,7 +563,8 @@ function pagePropertyValue(page: PageProperties, key: string): StaticValue {
 }
 
 function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, files: Set<SourceFile>) {
-  type Cached = { properties: Map<string, StaticValue>; chains: WrapperChain[]; issues: string[];
+  type Cached = { properties: Map<string, StaticValue>; assignments: Map<string, Node | undefined>;
+    chains: WrapperChain[]; issues: string[];
     conditions: [Node, PageRenderCondition][] };
   const cache = new Map<Node, Map<string, Cached[]>>();
   return (body: Node, pagesApp: boolean, scope: PagesWrapperScope) => {
@@ -499,16 +577,22 @@ function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, fi
     modes.set(mode, entries);
     // A branch can only change when one of the property reads that led to
     // it changes. Replay JSX decisions and issues for each affected route.
-    let result = entries.find(entry => [...entry.properties].every(([key, value]) => Object.is(pagePropertyValue(page, key), value)));
+    let result = entries.find(entry => [...entry.properties].every(([key, value]) => Object.is(pagePropertyValue(page, key), value)) &&
+      [...entry.assignments].every(([key, site]) => page.assignments.get(key)?.site === site));
     if (!result) {
       const properties = new Map<string, StaticValue>();
+      const assignments: Cached['assignments'] = new Map();
       const issues: string[] = [];
       const conditions: Cached['conditions'] = [];
       const chains = wrappedChains(body, pagesApp, relativePath, bodies, files, new Set(), {
         ...scope, issues, propertyRead: (key, value) => properties.set(key, value),
+        assignmentRead: key => {
+          properties.set(key, pagePropertyValue(page, key));
+          assignments.set(key, page.assignments.get(key)?.site);
+        },
         renderCondition: (tag, decision) => conditions.push([tag, decision])
       });
-      result = { properties, chains, issues, conditions };
+      result = { properties, assignments, chains, issues, conditions };
       if (entries.length < 16) entries.push(result);
     }
     scope.issues?.push(...result.issues);
@@ -759,27 +843,23 @@ export function collectRenderFacts(
         let branches = [chain];
         const dispatch = chain.dispatch;
         if (dispatch) {
-          const assigned = assignments.get(dispatch);
-          if (!assigned) {
-            issues.push(!page.opaque && !page.unknown.has(dispatch) ?
-              `missing page property ${dispatch} in a reachable App slot` : `unresolved page property ${dispatch}`);
-            return [{ ...chain, possible: true }];
-          }
-          if (page.unknown.has(dispatch)) chain = { ...chain, possible: true };
+          const assigned = resolveAppSlot(page, dispatch, issues);
+          if (!assigned) return [{ ...chain, possible: true }];
           const fn = functionNode(assigned.value);
           const body = fn?.getBody();
           if (!fn || !body || !projectFiles.has(fn.getSourceFile())) {
-            issues.push(`unresolved page property ${dispatch}`);
+            issues.push(`unresolved page property ${dispatch.name}`);
             return [{ ...chain, possible: true }];
           }
           const definition = Node.isArrowFunction(fn) || Node.isFunctionExpression(fn)
             ? fn.getParentIfKind(SyntaxKind.VariableDeclaration) ?? fn : fn;
-          const name = 'getName' in definition && definition.getName() || dispatch;
+          const name = 'getName' in definition && definition.getName() || dispatch.name;
+          const evidenceSite = assigned.site ?? assigned.value;
+          const site = { file: relativePath(evidenceSite.getSourceFile()), line: startLine(evidenceSite) };
           const wrapper: Wrapper = { file: relativePath(fn.getSourceFile()), symbol: name, line: startLine(definition),
-            conditional: false, evidence: `${dispatch} assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`,
-            site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } };
+            conditional: false, evidence: `${dispatch.name} ${assigned.site ? 'assigned' : 'fallback'} at ${site.file}:${site.line}`, site };
           const paths = pageChains(body, true, scope);
-          if (!paths.length) issues.push(`page slot unresolved in ${dispatch}`);
+          if (!paths.length) issues.push(`page slot unresolved in ${dispatch.name}`);
           branches = (paths.length ? paths : [emptyChain]).map(path => ({
             ...andThen(andThen(chain, { path: [wrapper.file + '#' + name], locations: [wrapper] }), path),
             getLayout: path.getLayout
@@ -827,7 +907,7 @@ export function collectRenderFacts(
               { file: route.file, line: 1 });
           index?.render(`file:${route.file}`, id, site.line,
             Number(wrapper.conditional || !!chain.conditional), true, chain.possible ? true : undefined,
-            undefined, site.file === route.file ? undefined : site.file);
+            undefined, undefined, undefined, site.file === route.file ? undefined : site.file);
           layoutSeeds.push(id);
           pageWrapperSeeds.set(id, Math.min(pageWrapperSeeds.get(id) ?? Infinity, position + 1));
         }
@@ -1235,10 +1315,13 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
+export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true,
+  substitute?: (node: Node) => UrlText[] | undefined): UrlText[] | undefined {
   if (seen.has(node)) return;
+  const replacement = substitute?.(node);
+  if (replacement) return replacement;
   seen.add(node);
-  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
+  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole, substitute);
   // An unresolved expression gets a slot. An empty set has no viable URL.
   const fallback = (values: UrlText[] | undefined): UrlText[] => values ?? [{ text: slot }];
   try {
@@ -1250,7 +1333,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
     if (node.getKind() === SyntaxKind.NullKeyword) return [];
     if (Node.isConditionalExpression(node)) {
       const branches = [node.getWhenTrue(), node.getWhenFalse()]
-        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl)))
+        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl, substitute)))
         .filter(value => !wholeUrl || value.text !== '');
       if (!branches.length) return [];
       const hasSlash = branches.some(value => value.text.includes('/'));
@@ -1273,7 +1356,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
         const constant = Node.isVariableDeclaration(declaration) &&
           declaration.getVariableStatement()?.getDeclarationKind() === 'const';
         if (initializer) {
-          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl)
+          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl, substitute)
             ?.map(value => value.text === slot ? value : { ...value, partial: value.partial || !constant });
         }
       }
@@ -1522,7 +1605,7 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(root: string, files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
+  actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: routeSegments(route.path)
@@ -1580,6 +1663,14 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     return matches;
   };
   const matchesFor = (url: Node | string) => matchValues(typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []);
+  const embeddedUrlProp = (input: Node) => {
+    let prop: ReturnType<PropFlow['read']>;
+    if (flow) urlTexts(input, undefined, true, true, part => {
+      prop ??= flow.read(part);
+      return prop ? [{ text: spanningSlot }] : undefined;
+    });
+    return prop;
+  };
   type Request = NonNullable<ReturnType<typeof httpRequest>>;
   const summaries = new Map<Node, { request: Request; call: Node; parameter: number }[]>();
   const summarize = (node: Node) => {
@@ -1605,25 +1696,26 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
   const chatVersions = new Map<string, 'legacy' | 'transport' | undefined>();
+  const manifestBoundary = workspace?.manifestBoundary() ?? path.resolve(root);
+  const literals: Node[] = [];
+  const classified = new Set<Node>();
+  const classify = (url: Node) => {
+    classified.add(url);
+    const wrapped = wrappedExpression(url);
+    const plus = addition(url);
+    if (wrapped) classify(wrapped);
+    else if (plus) {
+      classify(plus.getLeft());
+      classify(plus.getRight());
+    } else if (Node.isConditionalExpression(url)) {
+      classify(url.getWhenTrue());
+      classify(url.getWhenFalse());
+    } else if (Node.isTemplateExpression(url)) {
+      for (const span of url.getTemplateSpans()) classify(span.getExpression());
+    }
+  };
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
-    const literals: Node[] = [];
-    const classified = new Set<Node>();
-    const classify = (url: Node) => {
-      classified.add(url);
-      const wrapped = wrappedExpression(url);
-      const plus = addition(url);
-      if (wrapped) classify(wrapped);
-      else if (plus) {
-        classify(plus.getLeft());
-        classify(plus.getRight());
-      } else if (Node.isConditionalExpression(url)) {
-        classify(url.getWhenTrue());
-        classify(url.getWhenFalse());
-      } else if (Node.isTemplateExpression(url)) {
-        for (const span of url.getTemplateSpans()) classify(span.getExpression());
-      }
-    };
+    if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
@@ -1669,7 +1761,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
-      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions, path.resolve(root)) : undefined;
+      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions, manifestBoundary) : undefined;
       if (sdkRequests?.some(request => request.partial)) {
         index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded),
           sdkRequests.some(request => request.override));
@@ -1694,33 +1786,66 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       for (const request of requests) {
         const method = request.unbounded && request.override ? undefined : request.method;
         const reconnectBase = request.reconnectBase;
-        for (const [url, defaultReconnect] of [
+        for (const [input, defaultReconnect] of [
           ...[...request.urls].map(url => [url, false] as const),
           ...(reconnectBase === undefined ? [] : [[reconnectBase, true] as const])
         ]) {
-          if (url === undefined) continue;
-          const matches = defaultReconnect ?
-            matchValues((typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []).map(value => ({
+          if (input === undefined) continue;
+          const directProp = isFetch && typeof input !== 'string' ? flow?.read(input) : undefined;
+          const embeddedProp = isFetch && !directProp && typeof input !== 'string' ? embeddedUrlProp(input) : undefined;
+          const prop = directProp ?? embeddedProp;
+          // Retain the static route pattern from a template with runtime path segments.
+          const templateMatches = embeddedProp ? matchesFor(input) : undefined;
+          const bindings = prop ? flow!.bindings(prop) : [];
+          const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
+            const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
+            const replace = (values: UrlText[]) => urlTexts(input, undefined, true, true, part => {
+              const read = flow!.read(part);
+              return read?.component === prop.component && read.name === prop.name ? values : undefined;
+            }) ?? [];
+            const unknown = !values || values.some(({ text }) => text === slot || text === spanningSlot) ||
+              'unknown' in binding && !!binding.unknown;
+            const known = values?.filter(({ text }) => text !== slot && text !== spanningSlot);
+            const entry = 'site' in binding && binding.value && known?.length
+              ? [{ values: replace(known), binding: { name: prop.name, site: binding.site, value: binding.value },
+                gates: binding.gates, unknown: !!binding.unknown }] : [];
+            if (!unknown) return entry;
+            const possible = replace([{ text: spanningSlot, dynamic: true, partial: true }]);
+            const bounded = possible.filter(value => apiSegments(value, config));
+            if (possible.some(value => value.text.startsWith(spanningSlot) && !apiSegments(value, config))) {
+              index?.uncertainPropRequest(source, node, method, binding.gates);
+            }
+            if (!bounded.length) return entry;
+            return [...entry, { values: bounded, binding: undefined, gates: binding.gates, unknown: true }];
+          }) : [{ values: typeof input === 'string' ? [{ text: input }] : urlTexts(input) ?? [],
+            binding: undefined, gates: [], unknown: false }];
+          for (const { values, binding, gates, unknown } of candidates) {
+            const matches = matchValues(defaultReconnect ? values.map(value => ({
               ...value, text: value.text + '/' + slot + '/stream', partial: true
-            }))) : matchesFor(url);
-          if (!matches) continue;
-          if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
-          const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
-          for (const { route, partial, markdown, dynamic } of matches.values()) {
-            const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
-              value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !defaultReconnect;
-            if (facts && mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
-            index?.fetch({
-              file: source, line, node, route: route.id,
-              method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-              partial: partial || request.partial || undefined, dynamic,
-              transportOverride: request.override || undefined
-            });
-            if (!facts || isSwr || !mapFact) continue;
-            const targets = endpointsByCall.get(node) ?? [];
-            targets.push({ route, kind });
-            endpointsByCall.set(node, targets);
+            })) : values);
+            if (!matches) continue;
+            const url = binding?.value ?? input;
+            if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
+            const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
+            for (const { route, partial, markdown, dynamic } of matches.values()) {
+              const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
+                value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
+              if (unknown && !binding && (!route.pages || route.methodBasis === 'enforced') && !matchesMethod) continue;
+              const patternMatched = unknown && !binding ? templateMatches?.get(route.id)?.markdown : markdown && !unknown;
+              const mapFact = patternMatched && matchesMethod && origin?.name !== 'mutate' && !request.partial && !defaultReconnect;
+              if (facts && mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+              index?.fetch({
+                file: source, line, node, route: route.id,
+                method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+                partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
+                propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates,
+                transportOverride: request.override || undefined, possibleReconnect: sdkRequests && request.method === 'GET' ? true : undefined
+              });
+              if (!facts || isSwr || !mapFact) continue;
+              const targets = endpointsByCall.get(node) ?? [];
+              targets.push({ route, kind });
+              endpointsByCall.set(node, targets);
+            }
           }
         }
       }
@@ -1735,18 +1860,19 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
           Node.isTemplateExpression(node) || addition(node))) literals.push(node);
     });
     for (const constructor of constructors) collectRequest(constructor);
-    for (const node of literals) {
-      if (classified.has(node)) continue;
-      const matches = matchesFor(node);
-      if (!matches) continue;
-      classify(node);
-      const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
-      for (const { route, partial, dynamic } of matches.values()) {
-        index?.fetch({
-          file: source, line: startLine(node), node, route: route.id, method: '?',
-          url: route.path, via, partial: partial || undefined, dynamic
-        });
-      }
+  }
+  for (const node of literals) {
+    const source = relativePath(node.getSourceFile());
+    if (classified.has(node)) continue;
+    const matches = matchesFor(node);
+    if (!matches) continue;
+    classify(node);
+    const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
+    for (const { route, partial, dynamic } of matches.values()) {
+      index?.fetch({
+        file: source, line: startLine(node), node, route: route.id, method: '?',
+        url: route.path, via, partial: partial || undefined, dynamic
+      });
     }
   }
 

@@ -157,7 +157,7 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.match(typo, /^# did you mean: .*#writeData \(declared at line \d+\)$/m);
   assert.ok(typo.split('\n').length <= 6);
 
-  assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1$/m);
+  assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1 \[prop children via WrapperInside \(rendered at fixture\/providers\.tsx:3\)\]$/m);
   assert.match(await client.text('who_renders', { component: 'Y' }), /^\/structure/m);
   assert.match(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /alias of widgets#Sub/);
   assert.doesNotMatch(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /#Timeout/);
@@ -567,7 +567,7 @@ test('static AI SDK overrides follow property and callback precedence with scope
   const chat = await query('api_consumers', '/api/chat');
   assert.match(chat, /^send .* sameUrl POST AI SDK transport \[partial url\]$/m);
   assert.match(chat, /^send .* literalLast POST AI SDK transport$/m);
-  assert.match(chat, /^send .* literalLast GET AI SDK transport$/m);
+  assert.match(chat, /^send .* literalLast GET AI SDK transport \[possible reconnect\]$/m);
   assert.doesNotMatch(chat, /customChat|spreadChat/);
   const other = await query('api_consumers', '/api/other');
   assert.match(other, /2 sites in 1 file: 2 requests/);
@@ -881,16 +881,23 @@ test('known AI SDK transports can reconnect to the default stream route', async 
       return new DefaultChatTransport({ api: '/api/custom',
         prepareReconnectToStreamRequest: () => ({ headers: {} }) });
     }
+    export function withoutResume() {
+      return new DefaultChatTransport({ api: '/api/custom' });
+    }
   `);
   await generate(root);
   const mcp = await openMcp(t, root);
   const target = '/api/custom/[id]/stream';
   const get = await mcp.text('query', { kind: 'api_consumers', target });
-  assert.match(get, /connect GET AI SDK transport \[partial url\]/);
+  assert.match(get, /connect GET AI SDK transport \[partial url\] \[possible reconnect\]/);
+  assert.match(get, /withoutResume GET AI SDK transport \[partial url\] \[possible reconnect\]/);
   assert.match(get, /^# partial: uncertain AI SDK URL matches$/m);
   const path = await mcp.text('query', { kind: 'path', target: 'connect', to: target });
-  assert.match(path, /1 fetch .* GET .* \[partial url\]/);
+  assert.match(path, /1 fetch .* GET .* \[partial url\] \[possible reconnect\]/);
   assert.match(path, /^# partial: uncertain AI SDK URL matches$/m);
+  const callees = await mcp.text('query', { kind: 'callees', target: 'withoutResume' });
+  assert.match(callees, /GET .* \[possible reconnect\]/);
+  assert.doesNotMatch(callees, /POST .* \[possible reconnect\]/);
   const unrelated = await mcp.text('query', { kind: 'api_consumers', target: '/api/custom/[id]/other' });
   assert.doesNotMatch(unrelated, /AI SDK transport/);
   assert.match(unrelated, /^# complete:/m);

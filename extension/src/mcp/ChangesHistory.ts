@@ -15,10 +15,19 @@ export type ImportEdit = { before: ReadonlyMap<number, string>; after: ReadonlyM
 export type Removal = { file: string; names?: string[]; uncertainNames?: ReadonlySet<string>; currentFile?: string;
   compareExports?: boolean; stagedDrift?: boolean; renamed?: true };
 
-function historicalIndex(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number): QueryIndex {
+// Keep only the latest comparison graph in each query worker. The staged or
+// committed tree signature is rechecked for every request.
+let warmHistory: { root: string; key: string; index: QueryIndex; graph: DependencyGraph } | undefined;
+
+function historicalGraph(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number) {
   const stagedTree = ref ? undefined : git(['ls-files', '--stage', '--full-name', '-z', '--', ':/']);
   const treeId = stagedTree ? createHash('sha256').update(stagedTree).digest('hex') :
     git(['rev-parse', '--verify', ref! + '^{tree}']).toString('utf8').trim();
+  const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
+  if (warmHistory?.root === root && warmHistory.key === key) return warmHistory;
+  const remember = (index: QueryIndex) => warmHistory = {
+    root, key, index, graph: new DependencyGraph(index, new Map(index.symbols.map(symbol => [symbol.id, symbol])))
+  };
   let directory: string | undefined;
   let cached: string | undefined;
   try {
@@ -30,11 +39,10 @@ function historicalIndex(root: string, git: Git, ref: string | undefined, prefix
       if (!lstatSync(path).isDirectory()) throw new Error('Invalid comparison cache directory');
     }
     directory = history;
-    const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
     cached = join(history, key + '.json');
     if (lstatSync(cached).isFile()) {
       const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
-      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return index;
+      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return remember(index);
     }
   } catch {
     // A missing, invalid or unwritable cache is recoverable from Git.
@@ -98,7 +106,7 @@ function historicalIndex(root: string, git: Git, ref: string | undefined, prefix
         // Cache publication is optional. The newly built index is usable.
       }
     }
-    return index;
+    return remember(index);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
   }
@@ -135,8 +143,7 @@ function updatedImport(base: DependencyGraph, current: DependencyGraph, importer
 export function traceHistory(root: string, removals: Removal[], middleware: ReadonlyMap<string, string>,
   current: DependencyGraph, renamed: ReadonlyMap<string, string>, importEdit: (file: string) => ImportEdit | undefined,
   git: Git, ref: string | undefined, prefix: string, depth: number, deadline: number) {
-  const historical = historicalIndex(root, git, ref, prefix, deadline);
-  const base = new DependencyGraph(historical, new Map(historical.symbols.map(symbol => [symbol.id, symbol])));
+  const { index: historical, graph: base } = historicalGraph(root, git, ref, prefix, deadline);
   const origins: ChangeOrigin[] = [];
   const live: ChangeOrigin[] = [];
   const rows: QueryRow[] = [];

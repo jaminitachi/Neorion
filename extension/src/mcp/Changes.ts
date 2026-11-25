@@ -104,8 +104,13 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       const shallowHelp = 'shallow repository history; run git fetch --unshallow or use a reachable ref';
       const commit = known(base);
       if (!commit) {
+        if (shallow()) {
+          const ancestor = /^([^~^]+)(?:[~^]\d*)+$/.exec(base)?.[1];
+          const hint = ancestor && known(ancestor) || /^[a-f0-9]{7,64}$/i.test(base) ? shallowHelp : 'use a reachable ref';
+          return empty(`invalid base ref ${base}; ${hint}`);
+        }
         const count = known('HEAD') ? git(['rev-list', '--max-count=2', 'HEAD', '--']).trim().split('\n').length : 0;
-        const hint = shallow() ? shallowHelp : count === 0 ? 'repository has no commits' :
+        const hint = count === 0 ? 'repository has no commits' :
           count === 1 ? 'only one commit is available; use a reachable ref or fetch more history' : 'use a reachable ref';
         return empty(`invalid base ref ${base}; ${hint}`);
       }

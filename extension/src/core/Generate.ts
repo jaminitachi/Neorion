@@ -41,7 +41,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
                 .some(part => part === 'node_modules' || part === '.next');
     });
     const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const workspace = pagesConfig ? new WorkspaceBindings(projectPath, project) : undefined;
+    const workspace = new WorkspaceBindings(projectPath, project);
     const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));

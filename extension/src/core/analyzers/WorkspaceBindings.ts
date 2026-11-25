@@ -48,6 +48,10 @@ export class WorkspaceBindings {
     return module.split('/').slice(0, module.startsWith('@') ? 2 : 1).join('/');
   }
 
+  manifestBoundary() {
+    return this.workspaceRoot ?? this.root;
+  }
+
   has(module: string) {
     const target = this.packages.get(this.packageName(module));
     return target !== undefined && target !== this.root;

@@ -5,21 +5,25 @@ import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, renderSiteKey, type ExternalCall, type FetchEntry, type GraphReference,
+  isMiddlewareFile, isTestFile, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
-import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
+import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
+import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 
 type RelativePath = (source: SourceFile) => string;
-type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner'> & { route: string; node: Node };
+type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
+  route: string; node: Node; prop?: { site: RenderSite; value: Node; name: string }; propGates?: PropGate[];
+};
 
 const REFERENCE_KINDS = new Set([
   SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
@@ -27,6 +31,7 @@ const REFERENCE_KINDS = new Set([
   SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.ShorthandPropertyAssignment,
   SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier
 ]);
+const FLOW_KINDS = new Set([SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
 const MOCK_KEY_KINDS = new Set([SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.MethodDeclaration]);
 
 function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
@@ -86,10 +91,11 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
-  private edges: [string, string, number, number, true?, true?, string?][] = [];
+  private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
+  private propRequests: { file: string; node: Node; method?: string; gates: PropGate[] }[] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
   private shells = new Map<string, Node | undefined>();
   private wrapperProblems = new Map<string, string[]>();
@@ -112,9 +118,12 @@ export class QueryIndexBuilder {
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, file?: string) {
-    const edge: typeof this.edges[number] = file ? [from, to, line, conditional, layout, possible, file] : possible ? [from, to, line, conditional, layout, possible] :
+  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: RenderSite, file?: string) {
+    const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
       layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
+    if (detail) edge[6] = detail;
+    if (site) edge[7] = site;
+    if (file) edge[8] = file;
     this.edges.push(edge);
     if (tag) {
       const entries = this.renderSites.get(tag) ?? [];
@@ -139,6 +148,10 @@ export class QueryIndexBuilder {
     const conditions = this.pageConditions.get(route);
     const pair = conditions && this.renderPairs.get(from + '\0' + to);
     return !!pair?.length && pair.every(edge => conditions?.get(edge) === 'excluded');
+  }
+
+  uncertainPropRequest(file: string, node: Node, method: string | undefined, gates: PropGate[]) {
+    this.propRequests.push({ file, node, method, gates });
   }
 
   page(route: string, layouts: (string | undefined)[], chains: Wrapper[][]) {
@@ -169,7 +182,7 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config?: NextConfig, workspace?: WorkspaceBindings, historyOnly = false): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false): QueryIndex {
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -293,7 +306,160 @@ export class QueryIndexBuilder {
       else unboundProcedures.add(id);
     }
 
-    const owners = (node: Node): [legacy?: number, graph?: number, possible?: boolean] => {
+    const siteKeys = new WeakMap<RenderSite, string>();
+    const siteKey = (site: RenderSite) => {
+      let key = siteKeys.get(site);
+      if (!key) siteKeys.set(site, key = `${relativePath(site.getSourceFile())}:${site.getStart()}`);
+      return key;
+    };
+    const indexedGates = new WeakMap<PropGate, FlowGate>();
+    const gatesOf = (gates: PropGate[]): FlowGate[] => gates.flatMap(gate => {
+      const previous = indexedGates.get(gate);
+      if (previous) return [previous];
+      const { component, sites, partial, uncertainSites, unscoped } = gate;
+      const scope = byNode.get(component);
+      if (scope === undefined) return [];
+      const entry = { scope, sites: sites.map(siteKey), partial: partial || undefined,
+        uncertainSites: uncertainSites?.map(siteKey), unscoped };
+      indexedGates.set(gate, entry);
+      return [entry];
+    });
+
+    const projectFiles = new Set(files);
+    const declarations = new WeakMap<Node, Node[]>();
+    const flowDeclarations = (node: Node) => {
+      let entries = declarations.get(node);
+      if (!entries) declarations.set(node, entries = declarationsOf(node));
+      return entries;
+    };
+    const callableFlow = new CallableFlow(projectFiles, flowDeclarations);
+    const callableId = (fn: FunctionNode, event?: string) => {
+      let returned: Node = fn;
+      let parent: Node | undefined = fn.getParent();
+      while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned)) {
+        returned = parent;
+        parent = parent.getParent();
+      }
+      const declaration = Node.isVariableDeclaration(parent) || Node.isPropertyAssignment(parent) ? parent : undefined;
+      const returnedCallback = isFunction(returned) && returned !== fn;
+      const binding = returnedCallback ? fn : declaration ?? fn;
+      const known = byNode.get(fn) ?? byNode.get(binding);
+      if (known !== undefined) return known;
+      // Top-level declarations already passed through the ordinary symbol index.
+      // Keep its exclusions when the same value is referenced indirectly.
+      if (!returnedCallback && (Node.isSourceFile(parent) ||
+          Node.isVariableDeclaration(declaration) && Node.isSourceFile(declaration.getVariableStatement()?.getParent()))) return;
+      const factoryName = declaration?.getName();
+      const attribute = Node.isJsxExpression(parent) && parent.getParent();
+      const declaredName = Node.isArrowFunction(fn) ? undefined : fn.getName();
+      const name = declaredName ??
+        (returnedCallback && factoryName ? factoryName + ' (returned callback)' : factoryName) ?? event ??
+        (attribute && Node.isJsxAttribute(attribute) ? attribute.getNameNode().getText() : undefined);
+      if (!name) return;
+      const id = add(binding, name, 'function', null);
+      if (returnedCallback || !factoryName && !declaredName) index.symbols[id - 1].synthetic = true;
+      byNode.set(fn, id);
+      return id;
+    };
+    const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number; detail: string; gates?: PropGate[] }[] = [];
+    const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
+    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[] }[]>();
+    const dynamicCallSites = new Set<Node>();
+    const callableTargets = (expression: Node) => {
+      const prop = flow.read(expression);
+      if (!prop) return callableFlow.resolve(expression).map(target => ({ ...target, gates: undefined, supplied: undefined }));
+      const bindings = flow.bindings(prop);
+      return bindings.flatMap(({ value, gates }) => value ? callableFlow.resolve(value).map(target =>
+        ({ ...target, gates, supplied: value })) : []);
+    };
+    const suppliedCallbacks = new Set<Node>();
+    for (const file of files) {
+      visitKinds(file, FLOW_KINDS, node => {
+        if (Node.isJsxAttribute(node)) {
+          const site = node.getParent()?.getParent();
+          if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return;
+          const name = node.getNameNode().getText();
+          const value = jsxValue(node);
+          if (!value) return;
+          if (name === 'ref') {
+            const direct = Node.isIdentifier(value) && useRefBinding(value);
+            if (direct) {
+              const sites = refWrites.get(direct) ?? [];
+              sites.push({ site, assignment: node, direct: true });
+              refWrites.set(direct, sites);
+            }
+            const functions = isFunction(value) ? [value] : callableFlow.resolve(value).map(target => target.fn);
+            for (const fn of functions) for (const write of callbackRefWrites(fn)) {
+              const sites = refWrites.get(write.binding) ?? [];
+              sites.push({ site, assignment: write.assignment, key: write.key });
+              refWrites.set(write.binding, sites);
+            }
+            return;
+          }
+          if (!/^on[A-Z]/.test(name) || !flow.forwardsEvent(site, name)) return;
+          const targets = callableTargets(value);
+          if (!targets.length) {
+            if (flow.read(value)) dynamicCallSites.add(node);
+            return;
+          }
+          const label = jsxLabel(site);
+          const event = isFunction(value) ? name + ' ' + label : undefined;
+          for (const { fn, via, gates, supplied } of targets) {
+            const target = callableId(fn, event);
+            if (supplied) suppliedCallbacks.add(supplied);
+            if (target !== undefined) eventSites.push({
+              site, attribute: node, target, detail: `${name} <${label}>${via.length ? ' via ' + via.join(' > ') : ''}`, gates
+            });
+          }
+          return;
+        }
+        if (!Node.isCallExpression(node)) return;
+        const expression = node.getExpression();
+        // Existing references cover ordinary declarations. Resolve value flow for
+        // lexical bindings, property reads, and calls whose target is returned.
+        if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression) &&
+            !Node.isElementAccessExpression(expression) && !Node.isCallExpression(expression)) return;
+        let binding: Node = expression;
+        while (Node.isPropertyAccessExpression(binding) || Node.isElementAccessExpression(binding) || Node.isCallExpression(binding)) {
+          binding = binding.getExpression();
+        }
+        if (!Node.isIdentifier(binding)) return;
+        const bindings = flowDeclarations(binding);
+        if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
+            (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
+        if (expression === binding && bindings.some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
+        const targets = callableTargets(expression);
+        if (targets.length && expression !== binding && flowDeclarations(expression)
+          .some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
+        const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
+          if (supplied) suppliedCallbacks.add(supplied);
+          const id = callableId(fn);
+          return id === undefined ? [] : [{ id, via, gates }];
+        });
+        if (resolved.length) indirectCalls.set(node, resolved);
+        else if (flow.read(expression)) dynamicCallSites.add(node);
+      });
+    }
+
+    type Owners = [legacy?: number, graph?: number, possible?: boolean];
+    const graphOwners = new Map([...byNode].filter(([, id]) => index.symbols[id - 1].kind !== 'constant')
+      .map(([node, id]) => [node.compilerNode, id]));
+    const ownerCache = new WeakMap<ts.Node, Owners>();
+    const noOwner: Owners = [];
+    const ownerAt = (node: ts.Node | undefined): Owners => {
+      if (!node) return noOwner;
+      const previous = ownerCache.get(node);
+      if (previous) return previous;
+      const id = graphOwners.get(node);
+      let result: Owners;
+      if (id === undefined) result = ownerAt(node.parent);
+      else if (wrappedOwners.has(id)) result = [ownerAt(node.parent)[0], id];
+      else result = [id, id];
+      ownerCache.set(node, result);
+      return result;
+    };
+    const owners = (node: Node): Owners => {
+      if (!pages) return ownerAt(node.compilerNode.parent);
       let graph: number | undefined;
       for (const parent of [node, ...node.getAncestors()]) {
         const lifecycle = pages?.owners.get(parent);
@@ -307,6 +473,70 @@ export class QueryIndexBuilder {
       }
       return [undefined, graph];
     };
+    const fileIdOf = (node: Node) => byGraphId.get(`file:${relativePath(node.getSourceFile())}`)!;
+    const setFlowIssue = (node: Node, reason: string) => {
+      const id = owners(node)[1] ?? fileIdOf(node);
+      ((index.flowIssues ??= {})[id] ??= []).push({
+        reason: `${reason} (${relativePath(node.getSourceFile())}:${startLine(node)})`, gates: gatesOf(flow.gates(node))
+      });
+    };
+    for (const site of dynamicCallSites) setFlowIssue(site, 'prop callback untraced');
+    const gateKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
+    const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
+      const line = startLine(node);
+      const applicable = gatesOf([...flow.gates(node), ...gates]);
+      (index.flowCalls ??= []).push([from, to, relativePath(node.getSourceFile()), line, detail,
+        applicable.length ? applicable : undefined]);
+    };
+    const eventReferences = suppliedCallbacks;
+    const actionBySymbol = new Map([...actionSymbols].map(([id, symbol]) => [symbol, this.actions.get(id)]));
+    const suppliedActionSites = new Set(this.actionUses.filter(({ node }) => suppliedCallbacks.has(node)).map(({ caller }) => caller));
+    for (const event of eventSites) {
+      const value = Node.isJsxAttribute(event.attribute) && jsxValue(event.attribute);
+      if (value && !isFunction(value)) eventReferences.add(value);
+      addFlowCall(owners(event.site)[1] ?? fileIdOf(event.site), event.target, event.attribute, event.detail, event.gates);
+    }
+    for (const [call, targets] of indirectCalls) {
+      if (!Node.isCallExpression(call)) continue;
+      const from = owners(call)[1] ?? fileIdOf(call);
+      let issue: string | undefined;
+      const refs = call.getArguments().flatMap(argument => {
+        const binding = refBinding(argument);
+        if (!binding) return [];
+        const writes = refWrites.get(binding);
+        if (!writes?.length) {
+          issue ??= `ref source untraced (${relativePath(call.getSourceFile())}:${startLine(call)})`;
+          return [];
+        }
+        return writes.map(({ site, assignment, key, direct }) => {
+          const container = jsxRefContainer(site);
+          return `${argument.getText()} receives <${site.getTagNameNode().getText()}> via ${direct ? 'ref' : 'callback ref'} ${relativePath(site.getSourceFile())}:${startLine(assignment)}` +
+            (key ? ` (key ${key})` : '') + (container ? ' ' + container : '');
+        });
+      });
+      for (const { id, via, gates } of targets) {
+        const detail = [via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
+        addFlowCall(from, id, call, detail, gates);
+        if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
+      }
+    }
+    for (const [from, to, file, line] of index.flowCalls ?? []) {
+      actionBySymbol.get(to)?.callers.push([file, line, from]);
+    }
+    const mapArgument = (expression: Node, remaining = 6): string | undefined => {
+      if (!remaining) return;
+      const wrapped = wrappedExpression(expression);
+      if (wrapped) return mapArgument(wrapped, remaining - 1);
+      if (Node.isIdentifier(expression)) {
+        const value = declarationsOf(expression).map(constValue).find(Boolean);
+        return value && mapArgument(value, remaining - 1);
+      }
+      if (!Node.isCallExpression(expression)) return;
+      const callee = expression.getExpression();
+      if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'get') return;
+      if (declarationsOf(callee.getExpression()).some(Node.isParameterDeclaration)) return expression.getText();
+    };
+
     for (const { caller, node } of this.actionUses) {
       const owner = owners(node)[1];
       if (owner !== undefined) caller[2] = owner;
@@ -315,7 +545,7 @@ export class QueryIndexBuilder {
       const seen = new Set<string>();
       action.callers = action.callers.filter(caller => {
         const key = JSON.stringify(caller);
-        if (seen.has(key)) return false;
+        if (suppliedActionSites.has(caller) || seen.has(key)) return false;
         seen.add(key);
         return true;
       });
@@ -390,7 +620,6 @@ export class QueryIndexBuilder {
         return id === undefined ? [] : [[id, [...reasons]]];
       }));
       index.pagesUrlConfig = config.url;
-      index.pagesWorkspaceInputs = workspace?.snapshot();
       index.pagesIssues = issues(pages.issues);
       index.pagesWrapperIssues = issues(this.wrapperProblems);
       if (this.pageConditions.size) {
@@ -434,19 +663,37 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
-    for (const [from, to, line, conditional, layout, possible, file] of this.edges) {
+    for (const [from, to, line, conditional, layout, possible, detail, site, file] of this.edges) {
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
-      if (source !== undefined && target !== undefined) index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, file] : possible ?
-        [source, target, line, conditional, layout, possible] : layout ?
+      if (source === undefined || target === undefined) continue;
+      index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
+        site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
+        possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
     }
-    for (const { node, route, ...entry } of this.fetches) {
+    for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
       const [owner, graphOwner, possible] = owners(node);
+      const key = prop && siteKey(prop.site);
+      const binding = prop && key ? {
+        file: relativePath(prop.value.getSourceFile()), line: startLine(prop.value), name: prop.name,
+        supplier: owners(prop.site)[1], site: key
+      } : undefined;
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
-        lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null });
+        lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
+        gates: propGates?.length ? gatesOf([...flow.gates(node), ...propGates]) : undefined });
     }
+    const suppliers = new Set(index.fetches.flatMap(fetch => fetch.binding?.supplier ?? []));
+    for (const [, to, , , , , , site] of this.edges) {
+      if (!site || Node.isCallExpression(site) || !suppliers.has(byGraphId.get(to)!)) continue;
+      const label = sectionLabels(site);
+      if (label) (index.renderLabels ??= {})[siteKey(site)] = label;
+    }
+    if (this.propRequests.length) index.uncertainPropRequests = this.propRequests.flatMap(({ file, node, method, gates }) => {
+      if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return [];
+      return [{ file, owner: owners(node)[1] ?? fileIdOf(node), method, gates: gatesOf([...flow.gates(node), ...gates]) }];
+    });
     if (this.uncertainChatTransports.length) {
       index.uncertainChatTransports = this.uncertainChatTransports.map(({ file, node, unbounded, override }) => {
         const [owner, graphOwner] = owners(node);
@@ -584,6 +831,15 @@ export class QueryIndexBuilder {
           const id = byNode.get(declaration);
           if (!id) continue;
           found = true;
+          if (kind === 'call') {
+            const from = graphOwner ?? caller ?? fileId;
+            const gates = gatesOf(flow.gates(node));
+            if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
+            if (Node.isCallExpression(node) && refWrites.size) {
+              const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
+              if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
+            }
+          }
           let referenceKind = kind;
           let referenceCaller = caller;
           let referenceOwner = graphOwner;
@@ -596,10 +852,16 @@ export class QueryIndexBuilder {
               parent.getTagNameNode() === node;
             const signature = Node.isFunctionDeclaration(parent) && parent.getNameNode() === node;
             referenceOwner = jsx ? undefined : owners(node)[1];
+            const executable = eventReferences.has(node) || Node.isPropertyAccessExpression(parent) &&
+              eventReferences.has(parent) || Node.isCallExpression(parent) && parent.getExpression() === node;
+            if (executable) {
+              referenceOwner = undefined;
+              referenceKind = 'binding-use';
+            }
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
             const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
-            if (sameFile && !callbackUse && !jsx && !signature && referenceOwner !== id &&
+            if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
               recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);
             }
@@ -774,6 +1036,7 @@ export class QueryIndexBuilder {
           const id = declarations.map(target => byNode.get(target)).find(value => value !== undefined);
           if (id !== undefined) {
             byNode.set(node, id);
+            if (index.symbols[id - 1].kind !== 'constant') graphOwners.set(node.compilerNode, id);
             localNames.add(node.getName());
             record(node, declarations, 'import', node.getName() === property.getText() ? undefined : `import as ${node.getName()}`);
           }
@@ -805,8 +1068,9 @@ export class QueryIndexBuilder {
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression), 'call', undefined, owner, graphOwner, possible ? true : undefined);
-          if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found);
+          const found = Node.isCallExpression(node) && !!record(node, declarations.get(expression) ?? declarationsOf(expression),
+            'call', undefined, owner, graphOwner, possible ? true : undefined);
+          if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
           const specifier = Node.isStringLiteral(module) ? module :
@@ -894,6 +1158,20 @@ export class QueryIndexBuilder {
     }
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
+    const scopes = new Set([
+      ...Object.values(index.callGates ?? {}).flat(),
+      ...Object.values(index.flowIssues ?? {}).flatMap(issues => issues.flatMap(issue => issue.gates)),
+      ...(index.flowCalls ?? []).flatMap(call => call[5] ?? []),
+      ...index.fetches.flatMap(fetch => fetch.gates ?? []),
+      ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
+    ].map(gate => gate.scope));
+    for (const edge of index.renderEdges) {
+      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) {
+        if (edge[8]) edge[7] = undefined;
+        else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
+      }
+    }
+    index.pagesWorkspaceInputs = workspace?.snapshot();
     return index;
   }
 }

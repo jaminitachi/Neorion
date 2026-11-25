@@ -25,7 +25,7 @@ const help = `Usage:
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
   neorion setup <codex|claude> --remove [--no-hint]
-  neorion --version | --help
+  neorion --version | --help | -h
 
 Query kinds: ${kinds.join(', ')}
 
@@ -75,11 +75,12 @@ function hintCommand(temporary: boolean, onPath: boolean) {
 }
 
 async function main([command, ...args]: string[]) {
-  if ((!command || command === '--help') && !args.length) return console.log(help);
+  const helpFlag = (arg: string | undefined) => arg === '--help' || arg === '-h';
+  if ((!command || helpFlag(command)) && !args.length) return console.log(help);
   if (command === '--version' && !args.length) return console.log(VERSION);
   const separator = args.indexOf('--');
-  if ((command === 'graph' || command === 'query') &&
-      args.slice(0, separator === -1 ? args.length : separator).includes('--help')) return console.log(help);
+  if (command && ['graph', 'query', 'mcp', 'setup'].includes(command) &&
+      args.slice(0, separator === -1 ? args.length : separator).some(helpFlag)) return console.log(help);
   if (command === 'graph') {
     let parsed;
     try {

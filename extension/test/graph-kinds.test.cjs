@@ -189,7 +189,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 8);
+  assert.equal(kindSets.size, 9);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
@@ -275,7 +275,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
   const targetAction = query('impact', 'submitItem');
-  assert.match(targetAction, /depth 4 \(limit 3 \+ renders\)/);
+  assert.match(targetAction, /depth 5 \(limit 3 \+ renders\/events\)/);
   assert.match(targetAction, /# target: server action createItem/);
   assert.match(targetAction, /0 server actions/);
   assert.doesNotMatch(targetAction, /^action createItem/m);
@@ -302,7 +302,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   for (const output of [limited, limitedMcp]) {
     assert.match(output, /^# partial: output truncated; 1 unresolved call on local variables or parameters$/m);
   }
-  assert.match(query('callees', 'CreateItem'), /d1 action .*createItem/);
+  assert.match(query('callees', 'CreateItem', '--depth', '2'), /d2 action .*createItem/);
   assert.match(query('callees', 'useItems'), /fetch .*GET \/api\/items\/\[id\].*\(SWR key\)/);
   assert.doesNotMatch(query('callees', 'useItems'), /\bfetch .*mutate/);
   assert.match(query('callees', 'useItems', '--uses', '--depth', '2'), /d2 call .*parse/);
@@ -320,7 +320,7 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   assert.match(impact, /200 callers in 1 file\b/);
   const actionImpact = query('impact', 'normalize');
   assert.match(actionImpact, /^actions: 7 in 1 file \(top: createItem /m);
-  assert.match(actionImpact, /^page \/items.* via CreateItem > createItem/m);
+  assert.match(actionImpact, /^page \/items.* via CreateItem > onSubmit/m);
   assert.match(actionImpact, /^d1 call .*createItem/m);
   assert.doesNotMatch(actionImpact, /^action /m);
   const timed = run(['query', 'impact', 'cn'], { NEORION_QUERY_DEADLINE_MS: '1', NEORION_AUTOBUILD: '0' });
@@ -341,15 +341,16 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   const { root, env, query, build } = fixture(t);
   build();
   const directly = query('path', '/items', 'createItem');
-  assert.match(directly, /: 2 hops /);
+  assert.match(directly, /: 3 hops /);
   assert.match(directly, /^0 route \/items.* Items$/m);
   assert.match(directly, /^1 render .*CreateItem \[cond\]$/m);
-  assert.match(directly, /^2 action .*createItem -> server\/actions\.ts:6$/m);
+  assert.match(directly, /^2 event .*onSubmit .*onClick <button Create>/m);
+  assert.match(directly, /^3 action .*createItem -> server\/actions\.ts:6$/m);
   const fromFile = query('path', 'app/(main)/items/page.tsx', 'server/actions.ts#submitItem');
   assert.equal(fromFile, directly);
   const layout = query('path', '/other', 'createItem');
   assert.match(layout, /^1 wrap .*layout\.tsx:\d+ MainLayout$/m);
-  assert.match(layout, /^5 action .*sidebar\.tsx:3 createItem/m);
+  assert.match(layout, /^6 action .*sidebar\.tsx:3 createItem/m);
   const noPath = query('path', '/other', '/api/items/1');
   assert.match(noPath, /no directed path/);
   assert.match(noPath, /to is reached from routes: \/b\/\[id\]/);
@@ -975,6 +976,104 @@ test('packing and unpacking the graph preserves default-suite query output', { t
   assert.deepEqual(queries.map(args => query(...args)), expected);
 });
 
+
+test('queries preserve scoped JSX values, callback registrations and store effects', { timeout: 40_000 }, t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const indexFile = build();
+  const { packGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  const unpacked = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  const packed = packGraph(unpacked, 0);
+  assert.ok(packed.references.some(([, file]) => typeof file === 'number'));
+  fs.writeFileSync(indexFile, JSON.stringify(packed));
+
+  const render = query('who_renders', 'Leaf');
+  assert.match(render, /\/primary.*prop body via ForwardPanel > RenderPanel/);
+  assert.doesNotMatch(render, /\/secondary|\/opaque/);
+  assert.match(query('who_renders', 'IconMark'), /\/primary.*prop Badge via RenderPanel/);
+  assert.match(query('who_renders', 'UntracedLeaf'), /# partial: JSX prop render untraced/);
+  assert.match(query('who_renders', 'Busy'), /\/primary.*prop fallback via React Suspense.*\[cond\]/);
+  for (const component of ['TooltipContent', 'DayOverride', 'TriggerButton', 'QuotedContent', 'Panel']) {
+    assert.match(query('who_renders', component), /^\/fallback\s/m);
+  }
+  assert.doesNotMatch(query('who_renders', 'UnusedContent'), /^\/fallback\s/m);
+  assert.match(query('impact', 'runFallback'), /^page \/fallback\s/m);
+
+  const requests = query('api_consumers', '/api/items/[id]');
+  assert.match(requests, /update PATCH fetch via prop endpoint/);
+  assert.match(requests, /remove DELETE fetch via prop endpoint/);
+  assert.match(requests, /onClick <button Update> -> update/);
+  assert.match(requests, /onClick <button Remove> -> remove/);
+  assert.match(requests, /ListRow in Active/);
+  assert.match(requests, /ListRow in Pending/);
+  assert.doesNotMatch(requests, /^page .*\/secondary/m);
+  assert.match(query('path', '/secondary', '/api/items/[id]'), /no directed path/);
+  assert.match(query('path', '/primary', '/api/items/[id]'), /fetch .*PATCH|fetch .*DELETE/);
+  const unknownUrl = query('path', '/opaque', '/api/items/[id]');
+  assert.match(unknownUrl, /fetch .*\[partial url\]/);
+  assert.match(unknownUrl, /^# partial: prop value untraced at a render site$/m);
+  const directBinding = query('path', '/nonjsx', '/api/flags/[id]');
+  assert.match(directBinding, /fetch .*via prop endpoint at app\/nonjsx\/page\.tsx:/);
+  assert.match(directBinding, /^# complete:/m);
+  const opaqueBinding = query('path', '/nonjsx-opaque', '/api/flags/[id]');
+  assert.match(opaqueBinding, /no directed path/);
+  assert.match(opaqueBinding, /^# partial: request URL from JSX prop untraced$/m);
+  assert.match(query('path', '/nonjsx-opaque', '/api/unrelated'), /^# complete:/m);
+  assert.match(query('api_consumers', '/api/family/[id]'), /^# partial: request URL from JSX prop untraced$/m);
+  assert.match(query('impact', 'app/api/family/[id]/route.ts#GET'), /request URL from JSX prop untraced/);
+  const details = path.resolve(path.dirname(indexFile), '../neorion/graph');
+  const markdown = fs.readdirSync(details).map(file => fs.readFileSync(path.join(details, file), 'utf8')).join('\n');
+  assert.match(markdown, /fetch app\/unrelated\/page\.tsx -> app\/api\/family\/\[id\]\/route\.ts \/api\/family\/\[id\]/);
+  for (const args of [
+    ['api_consumers', '/api/unrelated'],
+    ['impact', 'app/api/unrelated/route.ts#GET'],
+    ['api_consumers', 'finishUnrelated'],
+    ['impact', 'unrelatedHelper']
+  ]) assert.match(query(...args), /^# complete:/m);
+  assert.match(query('callees', 'handle'), /^# partial:.*prop callback untraced/m);
+
+  assert.doesNotMatch(query('search', 'onClick'), /#onClick/);
+  assert.match(query('search', 'onClick', '--kind', 'function'), /#onClick button Start \/ Restart/);
+  assert.match(query('impact', 'onClick button Start / Restart'), /^page \/unrelated\s/m);
+
+  const impact = query('impact', 'publishPrimary', '--depth', '6');
+  assert.match(impact, /^page \/primary\s/m);
+  assert.match(impact, /^page \/nonjsx\s/m);
+  assert.match(impact, /^page \/nonjsx-opaque\s/m);
+  assert.doesNotMatch(impact, /^page \/secondary\s/m);
+  assert.match(query('path', '/secondary', 'publishPrimary'), /no directed path/);
+  assert.match(query('path', '/primary', 'persistRecord'), /RequestPanel[\s\S]*onClick <button Publish>[\s\S]*persistRecord/);
+  assert.match(query('path', '/secondary', 'persistRecord'), /no directed path/);
+
+  const git = (...args) => {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  git('init', '--quiet');
+  git('add', '.');
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--quiet', '-m', 'Fixture');
+  const actions = path.join(root, 'lib/actions.ts');
+  fs.writeFileSync(actions, fs.readFileSync(actions, 'utf8')
+    .replace('publishPrimary() {}', 'publishPrimary() { return true; }')
+    .replace('runFallback() {}', 'runFallback() { return true; }'));
+  build();
+  const changes = query('changes', '--unstaged', '--depth', '6');
+  assert.match(changes, /page \/primary\s/);
+  assert.match(changes, /page \/fallback\s/);
+  assert.doesNotMatch(changes, /page \/secondary\s/);
+
+  const capture = query('path', '/jobs', 'captureNode');
+  assert.match(capture, /makeSnapshot \(onClick <button Snapshot>\)/);
+  assert.match(capture, /createCapture .*useJobControls > useJobStore > bindings/);
+  assert.match(capture, /callback ref ui\/jobs\.tsx:\d+ \(key key\)/);
+  assert.match(capture, /argument refs\.get\(key\)/);
+  assert.match(query('path', 'useJobStore', 'captureNode'), /no directed path/);
+
+  const sync = query('api_consumers', 'syncJobs');
+  assert.match(sync, /call .* start\nevent .*Start jobs/);
+  assert.match(sync, /call .* retry\nevent .*Retry job/);
+  assert.match(sync, /page \/jobs\s/);
+});
+
 test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {
   const { build, query, env, root } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
   const index = JSON.parse(fs.readFileSync(build(), 'utf8'));
@@ -1280,6 +1379,35 @@ test('invalid changes base explains shallow and single-commit history', { timeou
   assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; only one commit is available/m);
   fs.writeFileSync(file('.git/shallow'), git('rev-parse', 'HEAD').trim() + '\n');
   assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; shallow repository history; run git fetch --unshallow or use a reachable ref$/m);
+  assert.match(changes('--base', 'nosuchbranch'), /^# partial: invalid base ref nosuchbranch; use a reachable ref$/m);
+  assert.match(changes('--base', 'nosuchbranch~2'), /^# partial: invalid base ref nosuchbranch~2; use a reachable ref$/m);
+});
+
+test('MCP keeps a warm comparison graph and refreshes it when the base tree changes', { timeout: 65_000 }, async t => {
+  const { root, file, edit, git, env, build } = gitFixture(t);
+  edit('lib/normalize.ts', source => source.replace('export function normalize', 'function normalize'));
+  build();
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env
+  });
+  const query = () => mcp.text('query', { kind: 'changes' });
+  const results = await Promise.all([query(), query()]);
+  assert.equal(results[0], results[1]);
+  assert.match(results[0], /^removed lib\/normalize\.ts normalize$/m);
+  const gitDirHash = require('node:crypto').createHash('sha256').update(fs.realpathSync(file('.git'))).digest('hex');
+  const history = path.join(env.XDG_CACHE_HOME, 'neorion', gitDirHash, 'history');
+  const [oldTree] = fs.readdirSync(history);
+  fs.unlinkSync(path.join(history, oldTree));
+  assert.equal(await query(), results[0]);
+  assert.deepEqual(fs.readdirSync(history), []);
+
+  fs.writeFileSync(file('note.md'), 'Change the comparison tree.\n');
+  git('add', 'note.md');
+  git('commit', '-qm', 'Change the comparison tree');
+  assert.match(await query(), /^removed lib\/normalize\.ts normalize$/m);
+  const [newTree] = fs.readdirSync(history);
+  assert.ok(newTree);
+  assert.notEqual(newTree, oldTree);
 });
 
 const wrapperDispatch = `
@@ -1333,6 +1461,121 @@ test('Pages resolves a const alias of the custom App page slot', t => {
   assert.match(wrappers, /LicenseRequired/);
   assert.match(wrappers, /^# complete:/m);
   assert.doesNotMatch(query('impact', 'middleware'), /custom App page slot unresolved/);
+});
+
+for (const [form, setup, jsx, usesDefault] of [
+  ['logical fallback', 'const Layout = Component.Layout || DefaultLayout;', '<Layout><Component {...pageProps}/></Layout>', true],
+  ['nullish fallback', 'const Layout = Component.Layout ?? DefaultLayout;', '<Layout><Component {...pageProps}/></Layout>', true],
+  ['let alias', 'let Layout = Component.Layout;', 'Layout ? <Layout><Component {...pageProps}/></Layout> : <Component {...pageProps}/>', false],
+  ['destructured alias', 'const { Layout: Wrapper } = Component;', 'Wrapper ? <Wrapper><Component {...pageProps}/></Wrapper> : <Component {...pageProps}/>', false]
+]) {
+  test(`Pages resolves the custom App ${form} per page`, t => {
+    const query = pagesReviewFixture(t, {
+      'pages/_app.page.tsx': `
+        function DefaultLayout({ children }) { return <main>{children}</main>; }
+        export default function App({ Component, pageProps }) {
+          ${setup}
+          return ${jsx};
+        }`,
+      'lib/page-layouts.tsx': `
+        function Shell({ children }) { return <section>{children}</section>; }
+        export function AdminLayout({ children }) { return <Shell>{children}</Shell>; }
+        export function OtherLayout({ children }) { return <footer>{children}</footer>; }`,
+      'pages/admin.page.tsx': "import { AdminLayout } from '../lib/page-layouts';\n" +
+        'export default function Admin() { return <main/>; }\nAdmin.Layout = AdminLayout;',
+      'pages/other.page.tsx': "import { OtherLayout } from '../lib/page-layouts';\n" +
+        'export default function Other() { return <main/>; }\nOther.Layout = OtherLayout;',
+      'pages/plain.page.tsx': 'export default function Plain() { return <main/>; }'
+    });
+    const admin = query('wrappers', '/admin');
+    assert.match(admin, /AdminLayout \[Layout assigned at pages\/admin\.page\.tsx:3\]/);
+    assert.match(admin, /Shell/);
+    assert.match(admin, /^# complete:/m);
+    assert.doesNotMatch(admin, /OtherLayout|DefaultLayout/);
+    assert.match(query('wrappers', '/other'), /OtherLayout \[Layout assigned at pages\/other\.page\.tsx:3\]/);
+    const plain = query('wrappers', '/plain');
+    assert.match(plain, /^# complete:/m);
+    if (usesDefault) {
+      assert.match(plain, /DefaultLayout \[Layout fallback at pages\/_app\.page\.tsx/);
+      const fallback = query('who_renders', 'DefaultLayout');
+      assert.match(fallback, /^\/plain .* \[via layout\]/m);
+      assert.doesNotMatch(fallback, /^\/(?:admin|other) /m);
+    } else {
+      assert.doesNotMatch(plain, /DefaultLayout|AdminLayout|OtherLayout/);
+    }
+    for (const component of ['AdminLayout', 'Shell']) {
+      const renders = query('who_renders', component);
+      assert.match(renders, /^\/admin .* \[via layout\]/m);
+      assert.doesNotMatch(renders, /^\/(?:plain|other) /m);
+      assert.match(renders, /^# complete:/m);
+    }
+  });
+}
+
+test('a destructured App can forward Component directly through a fallback alias', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      function DefaultWrapper({ Component, pageProps }) { return <Component {...pageProps}/>; }
+      export default function App({ Component, pageProps }) {
+        const Wrapper = Component.PageWrapper ?? DefaultWrapper;
+        return <Wrapper Component={Component} pageProps={pageProps}/>;
+      }`,
+    'lib/wrapper.tsx': wrapperDispatch,
+    'pages/licensed.page.tsx': `
+      import { PageWrapper } from '../lib/wrapper';
+      export default function Licensed() { return <main/>; }
+      Licensed.PageWrapper = PageWrapper;
+      Licensed.requiresLicense = true;`,
+    'pages/plain.page.tsx': 'export default function Plain() { return <main/>; }'
+  });
+  const licensed = query('wrappers', '/licensed');
+  assert.match(licensed, /PageWrapper assigned at /);
+  assert.match(licensed, /LicenseRequired/);
+  assert.match(licensed, /^# complete:/m);
+  const plain = query('wrappers', '/plain');
+  assert.match(plain, /DefaultWrapper \[PageWrapper fallback at /);
+  assert.match(plain, /^# complete:/m);
+  assert.match(query('who_renders', 'LicenseRequired'), /^\/licensed .* \[via layout\]/m);
+});
+
+test('a reassigned or unresolved App layout alias keeps render and wrapper coverage partial', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      declare const getLayout: () => any;
+      export default function App({ Component, pageProps }) {
+        let Layout = Component.Layout;
+        Layout = getLayout();
+        return <Layout><Component {...pageProps}/></Layout>;
+      }`,
+    'pages/probe.page.tsx': `
+      export function ProbeLayout({ children }) { return <main>{children}</main>; }
+      export default function Probe() { return <main/>; }
+      Probe.Layout = ProbeLayout;`
+  });
+  assert.match(query('wrappers', '/probe'), /^# partial: unresolved page property Layout$/m);
+  assert.match(query('who_renders', 'ProbeLayout'), /^# partial: unresolved page property Layout$/m);
+});
+
+test('an unresolved App alias leaves who_renders partial even when another page has a known assignment', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App({ Component }) {
+        const Layout = Component.Layout;
+        return Layout ? <Layout><Component/></Layout> : <Component/>;
+      }`,
+    'lib/probe-layout.tsx': 'export function ProbeLayout({ children }) { return <main>{children}</main>; }',
+    'pages/probe.page.tsx': `
+      import { ProbeLayout } from '../lib/probe-layout';
+      export default function Probe() { return <main/>; }
+      Probe.Layout = ProbeLayout;`,
+    'pages/uncertain.page.tsx': `
+      import { ProbeLayout } from '../lib/probe-layout';
+      export default function Uncertain() { return <main/>; }
+      if (Date.now()) Uncertain.Layout = ProbeLayout;`
+  });
+  const renders = query('who_renders', 'ProbeLayout');
+  assert.match(renders, /^\/probe .* \[via layout\]/m);
+  assert.match(renders, /^# partial: unresolved page property Layout$/m);
 });
 
 test('an unguarded App slot with a missing page property stays partial', t => {
