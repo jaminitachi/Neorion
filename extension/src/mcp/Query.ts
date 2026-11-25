@@ -1,3 +1,4 @@
+import { matchNextRoutes } from '../core/analyzers/NextRouteMatch';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
@@ -25,7 +26,7 @@ const generatedFile = (file: string) =>
   /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
 const apiEvidence = new Map([
   ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
-  ['fetch', 'request'], ['axios', 'request']
+  ['fetch', 'request'], ['axios', 'request'], ['Playwright request', 'request'], ['tRPC request', 'request']
 ]);
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
@@ -202,38 +203,18 @@ export class QueryEngine {
       .filter(symbol => file === undefined || symbol.file === file).sort(bySymbol);
   }
 
-  private matchRoute(text: string, kind: string) {
-    if (text.startsWith('/')) {
-      if (/^\/\/|^\/(?:[^/]+\/)*\.\.(?:\/|$)|\\/.test(text)) throw new Error('Invalid route URL pattern.');
-      if (/\.[cm]?[jt]sx?$/.test(text) && !this.index.routes.some(route => route.url === text)) {
-        throw new Error('Use an app-relative route file path.');
-      }
-    } else this.checkPath(text);
-    return this.index.routes.filter(route => route.kind === kind &&
-      (route.url === (text.replace(/\/$/, '') || '/') || route.file === path.posix.normalize(text))).sort(byRoute);
-  }
-
-  private matchPathRoute(text: string, kind: 'page' | 'api') {
-    const exact = this.matchRoute(text, kind);
-    if (exact.length || !text.startsWith('/')) return exact;
-    const segments = text.replace(/\/$/, '').split('/').slice(1);
-    let best = '';
-    let matches: Route[] = [];
-    for (const route of this.index.routes) {
-      if (route.kind !== kind) continue;
-      const pattern = route.url.split('/').slice(1);
-      const compatible = pattern.every((part, i) => part.startsWith('[[...') ||
-        (part.startsWith('[') ? !!segments[i] : part === segments[i])) &&
-        (pattern.length === segments.length || pattern.at(-1)?.includes('...'));
-      if (!compatible) continue;
-      const rank = pattern.map(part => part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' :
-        part.startsWith('[') ? '2' : '3').join('');
-      if (rank < best) continue;
-      if (rank > best) matches = [];
-      best = rank;
-      matches.push(route);
+  private matchRoute(text: string, kind?: string, concrete = !!this.index.pagesUrlConfig) {
+    const routes = this.index.routes.filter(route => !kind || route.kind === kind);
+    if (/^route:(?:src\/)?(?:app|pages)\//.test(text)) text = text.slice(6);
+    if (!text.startsWith('/')) {
+      this.checkPath(text);
+      return routes.filter(route => route.file === path.posix.normalize(text)).sort(byRoute);
     }
-    return matches.sort(byRoute);
+    if (/^\/\/|^\/(?:[^/]+\/)*\.\.(?:\/|$)|\\/.test(text)) throw new Error('Invalid route URL pattern.');
+    const exact = routes.filter(route => route.url === (text.replace(/\/$/, '') || '/'));
+    if (exact.length) return exact.sort(byRoute);
+    if (/\.[cm]?[jt]sx?$/.test(text) && !concrete) throw new Error('Use an app-relative route file path.');
+    return concrete ? matchNextRoutes(text, routes, route => route.url, this.index.pagesUrlConfig).sort(byRoute) : [];
   }
 
   private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
@@ -288,11 +269,13 @@ export class QueryEngine {
         pathEnd: label.length
       } });
     }
+    const resolvedRoutes = this.index.pagesUrlConfig && text.startsWith('/') && (kind === 'any' || kind === 'route' || kind === 'api')
+      ? new Set(this.matchRoute(text, kind === 'route' ? 'page' : kind === 'api' ? 'api' : undefined).map(route => route.id)) : undefined;
     for (const route of this.index.routes) {
       if (expired()) break;
       const routeKind = route.kind === 'page' ? 'route' : 'api';
       if (kind !== 'any' && kind !== routeKind) continue;
-      const score = Math.min(match(route.url), match(route.file));
+      const score = resolvedRoutes?.has(route.id) ? 0 : Math.min(match(route.url), match(route.file));
       if (score === 3) continue;
       const label = `${routeKind} ${location(route.file, route.line ?? 1)}`;
       hits.push({ score, references: this.fetches.get(route.id)?.length ?? 0, file: route.file,
@@ -311,7 +294,7 @@ export class QueryEngine {
 
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; depth: number }>();
-    const pending = [{ id: symbol.id, chain: [] as string[], conditional: false, depth: 0 }];
+    const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, depth: 0 }];
     const visited = new Set<number>();
     for (let i = 0; i < pending.length && !expired(); i++) {
       const entry = pending[i];
@@ -320,15 +303,15 @@ export class QueryEngine {
       for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
         if (!entry.depth) continue;
         const previous = reached.get(route.id);
-        if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout });
+        if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
       }
-      for (const [from, , , conditional] of this.incoming.get(entry.id) ?? []) {
+      for (const [from, , , conditional, wrapper] of this.incoming.get(entry.id) ?? []) {
         if (expired()) break;
         if (visited.has(from)) continue;
         const parent = this.symbols.get(from);
         pending.push({
           id: from, chain: parent ? [parent.name, ...entry.chain].slice(-2) : entry.chain,
-          depth: entry.depth + 1, conditional: entry.conditional || !!conditional
+          depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional
         });
       }
     }
@@ -358,7 +341,9 @@ export class QueryEngine {
     }
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
-    return { rows, count: rows.length ? count + directLabel : undefined };
+    return { rows, count: rows.length ? count + directLabel : undefined,
+      partial: [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
+        (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
@@ -370,8 +355,19 @@ export class QueryEngine {
       item.provider ?? item.symbol.endsWith('Provider');
     const rows = chains.flatMap((id, branch) => {
       if (expired()) return [];
-      const items = (this.index.wrapChains[id] ?? []).filter(item => includeExternal || isProvider(item) || !item.external);
-      const groups = group(items, item => item.file);
+      const sites = new Map(this.index.pagesWrapSites?.[route.id]?.[id]);
+      const items = (this.index.wrapChains[id] ?? []).map((item, index) =>
+        sites.has(index) ? { ...item, evidence: sites.get(index) } : item)
+        .filter(item => includeExternal || isProvider(item) || !item.external);
+      const document = items.find(item => item.phase === 'document');
+      const client = items.filter(item => item.phase !== 'document');
+      const groups = new Map<string, typeof items>();
+      for (const item of client) {
+        const previous = [...groups.values()].at(-1);
+        if (previous?.[0].file === item.file || !route.pages && groups.has(item.file)) {
+          (route.pages ? previous : groups.get(item.file))!.push(item);
+        } else groups.set(route.pages ? String(groups.size) : item.file, [item]);
+      }
       const name = (item: typeof items[number]) => item.external ? `${item.symbol} (external: ${item.external})` : item.symbol;
       const providers = items.filter(isProvider);
       const branchLabel = `branch ${String.fromCharCode(65 + branch)}`;
@@ -390,15 +386,23 @@ export class QueryEngine {
       }
       const entries: Row[] = [];
       if (chains.length > 1) entries.push(row(branchLabel));
+      if (document && branch === 0) {
+        const label = `document ${location(document.file, document.line)}`;
+        entries.push({ ...row(`${label} ${document.symbol} [server${document.evidence ? '; ' + document.evidence : ''}]`, document.file), pathEnd: label.length });
+        files.add(document.file);
+      }
       let order = 0;
-      for (const [file, items] of groups) {
+      for (const items of groups.values()) {
+        const file = items[0].file;
         if (expired()) break;
         const components = items.filter(item => !(item.providerTag ?? item.provider));
         const providers = items.filter(item => item.providerTag ?? item.provider);
         const label = `${++order} ${location(file, (components[0] ?? items[0]).line)}`;
         files.add(file);
-        const symbols = [...new Set(components.map(name))];
-        const providerNames = [...new Set(providers.map(name))];
+        const symbols = [...new Set(components.map(item => name(item) +
+          (route.pages && item.evidence ? ` [${item.evidence}]` : '')))];
+        const providerNames = [...new Set(providers.map(item => name(item) +
+          (route.pages && item.evidence ? ` [${item.evidence}]` : '')))];
         entries.push({ ...row(label + (symbols.length ? ` ${symbols.join(', ')}` : '') +
           (providerNames.length ? ` providers: ${providerNames.join(', ')}` : '') +
           (items.some(item => item.conditional) ? ' [cond]' : '') + flagTest(file), file), pathEnd: label.length });
@@ -412,7 +416,7 @@ export class QueryEngine {
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
     return { rows, title: route.url, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}, 1 page`, targets: [route.file],
-      notes };
+      notes, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
   }
 
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
@@ -493,9 +497,10 @@ export class QueryEngine {
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
       const kind = apiEvidence.get(via) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
-      const label = `send   ${location(fetch.file, fetch.line)}`;
+      const verb = route.pages && (kind === 'other mention' || kind === 'fallback key') ? 'mention' : 'send';
+      const label = `${verb === 'send' ? 'send   ' : 'mention '}${location(fetch.file, fetch.line)}`;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${via}` +
-        (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
+        (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '') + (fetch.evidence ? ` (${fetch.evidence})` : '');
       rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
     }
@@ -544,10 +549,15 @@ export class QueryEngine {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
-        fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
-        fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
-        moreCallers ? 'caller depth limit' : undefined,
-      notes: similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : []
+        this.index.pagesApiIssues?.[route.id]?.join('; ') ??
+        (fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
+          fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
+          moreCallers ? 'caller depth limit' : undefined),
+      notes: [
+        ...(route.pages && route.methodBasis === 'enforced' ? [row(`# methods enforced: ${route.methods?.join(', ')}`, route.file)] : []),
+        ...(route.observedMethods?.length ? [row(`# methods observed: ${route.observedMethods.join(', ')} (accepted methods unknown)`, route.file)] : []),
+        ...(similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : [])
+      ]
     };
   }
 
@@ -604,6 +614,19 @@ export class QueryEngine {
     if (tool === 'changes') return {
       result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
     };
+    if (target.startsWith('/') && this.index.pagesUrlConfig) {
+      const routes = this.matchRoute(target);
+      if (routes.length > 1) return { ambiguous: true, result: { rows: routes.map(route =>
+        row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)) } };
+      const [route] = routes;
+      if (route) {
+        const seeds = route.kind === 'api' ? graph.apiTargets(route) : graph.routeStarts(route);
+        const result = tool === 'impact' ? graph.impact(seeds, depth, !!includeTests, limit, expired) :
+          graph.callees(seeds, depth, uses, expired);
+        return { result: { ...result, title: route.url, targets: [route.file] } };
+      }
+      return { result: { rows: [], notes: this.suggestions(target, tool === 'callees' ? 'page' : undefined, expired) } };
+    }
     if (tool === 'impact' && !this.names.has(target) && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
       const file = path.posix.normalize(target);
@@ -622,12 +645,13 @@ export class QueryEngine {
   }
 
   private pathQuery(from: string, to: string, graph: DependencyGraph, expired: () => boolean) {
-    const routeTarget = (text: string) => text.startsWith('/') || (!this.names.has(text) && !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
-    const resolve = (target: string, kind: 'page' | 'api') => {
+    const routeTarget = (text: string) => text.startsWith('/') || text.startsWith('route:') || (!this.names.has(text) && !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text));
+    const resolve = (target: string, kind?: 'page' | 'api') => {
       if (routeTarget(target)) {
-        const routes = this.matchPathRoute(target, kind);
+        const exact = this.matchRoute(target, kind, true);
+        const routes = exact.length || target.startsWith('/') ? exact : [];
         const [route] = routes;
-        return { route, ids: route ? kind === 'page' ? graph.routeStarts(route) : graph.apiTargets(route) : [],
+        return { route, ids: route ? route.kind === 'page' ? graph.routeStarts(route) : graph.apiTargets(route) : [],
           label: route?.url ?? target, file: route?.file,
           candidates: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)),
           notes: () => this.suggestions(target, kind, expired) };
@@ -638,8 +662,8 @@ export class QueryEngine {
         candidates: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)),
         notes: () => this.suggestions(target.split('#').pop()!, undefined, expired) };
     };
-    const source = resolve(from, 'page');
-    const destination = resolve(to, 'api');
+    const source = resolve(from, this.index.pagesUrlConfig ? undefined : 'page');
+    const destination = resolve(to, this.index.pagesUrlConfig ? undefined : 'api');
     const title = `${source.label} -> ${destination.label}`;
     for (const endpoint of [source, destination]) {
       if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
@@ -705,6 +729,8 @@ export class QueryEngine {
           result.notes = this.suggestions(name, 'action', expired, file);
           if (!this.index.serverActions) result.partial = 'regenerate legacy index';
         }
+      } else if (tool === 'wrappers' && this.index.pagesUrlConfig && /(?:^|\/)_((?:app)|(?:document))\.[^/]+$/.test(target)) {
+        result.notes = [row('# custom shell applies to Pages routes; query a page URL or file')];
       } else result.notes = this.suggestions(target, kind, expired);
     }
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
@@ -771,7 +797,7 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
+        staleCount || snapshotStale ? 'stale index' : result.partial ? result.partial :
         omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);

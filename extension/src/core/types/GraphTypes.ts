@@ -11,6 +11,10 @@ export interface RouteNode {
   file: string;
   type: 'page' | 'layout' | 'loading' | 'error' | 'not-found' | 'api' | 'robots' | 'sitemap' | 'opengraph-image' | 'template' | 'default' | 'global-error';
   methods?: string[];
+  methodBasis?: 'enforced' | 'observed';
+  observedMethods?: string[];
+  pages?: boolean;
+  issue?: string;
   scope?: string;
   wraps?: string[];
   componentId?: string;

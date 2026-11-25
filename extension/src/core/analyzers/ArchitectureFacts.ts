@@ -5,6 +5,10 @@ import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
 import { visitKinds } from './CompilerWalk';
+import { bindingOf, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { property, textValue, type NextConfig } from './NextConfig';
+import { matchNextRoutes, normalizeNextUrl, patternRank, routeSegments } from './NextRouteMatch';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { startLine } from './SourceLines';
 
 export function declarationsOf(node: Node): Node[] {
@@ -108,6 +112,9 @@ interface WrapperChain {
   locations: Wrapper[];
   conditional?: boolean;
   contextProvider?: boolean;
+  dispatch?: string;
+  fallbackFor?: string;
+  getLayout?: boolean;
 }
 
 const emptyChain: WrapperChain = { path: [], locations: [] };
@@ -152,8 +159,8 @@ const externalProviderName = (name: string) => /(?:Config|Context)$/.test(name);
 const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|ErrorBoundary)$/.test(name);
 
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
-  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
-  if (seen.has(body)) return [];
+  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), pageParameter?: string, pagesScope = pagesApp, forwarded?: Node): WrapperChain[] {
+  if (seen.has(body) || seen.size >= 12) return [];
   seen = new Set(seen).add(body);
   const chains = new Map<string, WrapperChain>();
   const slots = new Set([pageParameter ?? (pagesApp ? 'Component' : 'children')]);
@@ -167,26 +174,67 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       }
     }
   }
-  const isSlot = (node: Node | undefined) => {
-    if (Node.isPropertyAccessExpression(node)) return slots.has(node.getName());
-    return !!node && slots.has(node.getText());
+  const parameterDeclaration = parameter?.getParameters()[0];
+  const isSlot = (node: Node | undefined): boolean => {
+    if (!node) return false;
+    if (!pagesScope) {
+      if (Node.isPropertyAccessExpression(node)) return slots.has(node.getName());
+      return slots.has(node.getText());
+    }
+    const declaration = bindingOf(node);
+    if (forwarded) return declaration === forwarded;
+    if (pageParameter && declaration === parameterDeclaration) return true;
+    if (Node.isBindingElement(declaration)) {
+      const binding = declaration.getParent().getParent();
+      return (declaration.getPropertyNameNode() ?? declaration.getNameNode()).getText() === (pagesApp ? 'Component' : 'children') &&
+        (binding === parameterDeclaration || Node.isVariableDeclaration(binding) &&
+          bindingOf(binding.getInitializer()) === parameterDeclaration);
+    }
+    if (Node.isPropertyAccessExpression(node)) {
+      return node.getName() === (pagesApp ? 'Component' : 'children') &&
+        bindingOf(node.getExpression()) === parameterDeclaration;
+    }
+    const value = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+    if (!value || value === node || !Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value) ||
+      node.getSourceFile() === value.getSourceFile() && value.getStart() >= node.getStart()) return false;
+    return isSlot(value);
   };
-  const visit = (node: Node) => {
-    const slot = pagesApp
-      ? (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
-        isSlot(node.getTagNameNode())
-      : Node.isJsxExpression(node) && isSlot(node.getExpression());
-    if (!slot) return;
+  const propertySlot = (node: Node | undefined) =>
+    Node.isPropertyAccessExpression(node) && isSlot(node.getExpression()) ? node.getName() : undefined;
+  const layoutCall = (node: Node) => {
+    if (!Node.isCallExpression(node)) return false;
+    const callee = valueNode(node.getExpression()) ?? node.getExpression();
+    const property = Node.isBinaryExpression(callee) &&
+      [SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken].includes(callee.getOperatorToken().getKind()) ? callee.getLeft() : callee;
+    return propertySlot(property) === 'getLayout';
+  };
+  const visit = (node: Node, root = body, outer: Node[] = [], selected = false) => {
+    const tag = Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node) ? node.getTagNameNode() : undefined;
+    const dispatch = pagesApp ? propertySlot(tag) : undefined;
+    const slot = pagesApp ? !!tag && isSlot(tag) : Node.isJsxExpression(node) && isSlot(node.getExpression());
+    if (!slot && !dispatch) return;
+    if (dispatch && (!(Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) ||
+      !node.getAttributes().some(attribute => Node.isJsxSpreadAttribute(attribute) &&
+        bindingOf(attribute.getExpression()) === parameterDeclaration))) return;
     const ancestors: Node[] = [];
-    let conditional = false;
-    for (let child = node; child !== body;) {
+    let conditional = selected;
+    let fallbackFor: string | undefined;
+    let getLayout = false;
+    for (let child = node; child !== root;) {
       const parent = child.getParentOrThrow();
       conditional ||= conditionalChild(child, parent);
+      if (pagesApp && Node.isConditionalExpression(parent) && child === parent.getWhenFalse()) {
+        fallbackFor ??= propertySlot(parent.getCondition());
+      }
+      getLayout ||= pagesApp && layoutCall(parent);
       ancestors.push(parent);
       child = parent;
     }
-    let chain: WrapperChain[] = [{ path: [], locations: [], conditional }];
-    for (const element of ancestors.reverse().filter(Node.isJsxElement)) {
+    ancestors.reverse();
+    ancestors.unshift(...outer);
+    getLayout ||= pagesApp && outer.some(layoutCall);
+    let chain: WrapperChain[] = [{ path: [], locations: [], conditional, dispatch, fallbackFor, getLayout }];
+    for (const element of ancestors.filter(Node.isJsxElement)) {
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
       const name = tag.getText();
@@ -208,7 +256,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen) : [];
+      const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, undefined, pagesScope) : [];
       const primitive = names.some(layoutPrimitive);
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
         const provider = !primitive && (namedProvider || !!next.contextProvider);
@@ -222,6 +270,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
             ? relativePath(definition.getSourceFile()) : undefined
         };
         return {
+          ...prefix,
           path: [...prefix.path, label, ...next.path],
           locations: [...prefix.locations, location, ...next.locations],
           conditional: prefix.conditional || next.conditional,
@@ -229,40 +278,135 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         };
       }));
     }
-    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional]), entry);
+    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional, entry.dispatch, entry.fallbackFor, entry.getLayout]), entry);
   };
-  visit(body);
-  body.forEachDescendant(visit);
+  if (pagesScope) {
+    const scan = (root: Node, outer: Node[], conditional: boolean, visited: Set<Node>) => {
+      if (visited.has(root) || visited.size >= 12) return;
+      visited = new Set(visited).add(root);
+      const follow = (node: Node, walk?: { skip(): void }) => {
+        if (Node.isFunctionLikeDeclaration(node)) { walk?.skip(); return; }
+        visit(node, root, outer, conditional);
+        if (!Node.isIdentifier(node) || !Node.isVariableDeclaration(bindingOf(node))) return;
+        const value = valueNode(node);
+        if (!value || value === node || !body.containsRange(value.getPos(), value.getEnd())) return;
+        if (node !== root && !Node.isJsxExpression(node.getParent()) && !Node.isConditionalExpression(node.getParent()) && !layoutCall(node.getParentOrThrow())) return;
+        const context: Node[] = [];
+        for (let child: Node = node; child !== root;) {
+          child = child.getParentOrThrow();
+          context.unshift(child);
+        }
+        scan(value, [...outer, ...context], conditional || conditionalAt(node, body) === 1, visited);
+      };
+      follow(root);
+      root.forEachDescendant(follow);
+    };
+    for (const expression of returns(body)) scan(expression, [], !!conditionalAt(expression, body), new Set());
+  } else {
+    visit(body);
+    body.forEachDescendant(node => visit(node));
+  }
   return [...chains.values()];
 }
 
-// Pages Router applications can wrap the page before inserting it into _app.
-function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, bodies: Map<Node, Node>,
-  projectFiles: Set<SourceFile>) {
-  if (!source || !source.getFullText().includes('getLayout')) return [];
-  const page = new Set<Node>(source.getExportedDeclarations().get('default') ?? []);
-  const chains: WrapperChain[] = [];
-  for (const statement of source.getStatements()) {
-    if (!Node.isExpressionStatement(statement)) continue;
-    const expression = statement.getExpression();
-    if (!Node.isBinaryExpression(expression) ||
-        expression.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
-    const left = expression.getLeft();
-    const right = expression.getRight();
-    if (!Node.isPropertyAccessExpression(left) || left.getName() !== 'getLayout' ||
-        !declarationsOf(left.getExpression()).some(declaration => page.has(declaration)) ||
-        (!Node.isArrowFunction(right) && !Node.isFunctionExpression(right))) continue;
-    const parameter = right.getParameters()[0]?.getNameNode();
-    if (Node.isIdentifier(parameter)) {
-      chains.push(...wrappedChains(right.getBody(), false, relativePath, bodies, projectFiles, new Set(), parameter.getText()));
+function pageAssignments(source: SourceFile | undefined) {
+  const result = new Map<string, { value: Node; site: Node }>();
+  if (!source) return result;
+  const page = source.getExportedDeclarations().get('default')?.map(node => valueNode(node) ?? node) ?? [];
+  for (const file of new Set([source, ...page.map(node => node.getSourceFile())])) {
+    for (const statement of file.getStatements()) {
+      const expression = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;
+      if (!Node.isBinaryExpression(expression) || expression.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
+      const left = expression.getLeft();
+      if (Node.isPropertyAccessExpression(left) && page.includes(valueNode(left.getExpression())!)) {
+        result.set(left.getName(), { value: expression.getRight(), site: left });
+      }
     }
   }
-  return chains;
+  return result;
+}
+
+function andThen(outer: WrapperChain, inner: WrapperChain): WrapperChain {
+  return { path: [...outer.path, ...inner.path], locations: [...outer.locations, ...inner.locations],
+    conditional: outer.conditional || inner.conditional };
+}
+
+function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies: Map<Node, Node>,
+  files: Set<SourceFile>, workspace?: WorkspaceBindings) {
+  let application = [emptyChain];
+  const issues: string[] = [];
+  const locations = (node: Node, symbol: string, evidence?: string): Wrapper => ({
+    file: relativePath(node.getSourceFile()), symbol, line: startLine(node), conditional: false, phase: 'application', evidence
+  });
+  let value = valueNode(source.getExportedDeclarations().get('default')?.[0]);
+  for (let depth = 0; depth < 8 && Node.isCallExpression(value); depth++) {
+    const callee = value.getExpression();
+    const origin = importBinding(callee);
+    const tRPC = Node.isPropertyAccessExpression(callee) && callee.getName() === 'withTRPC' &&
+      (() => {
+        const receiver = callee.getExpression();
+        const client = valueNode(receiver) ?? valueNode(workspace?.resolve(receiver));
+        const init = Node.isCallExpression(client) ? client : valueNode(workspace?.resolve(receiver));
+        const factory = Node.isCallExpression(init) ? importBinding(init.getExpression()) : undefined;
+        return (factory?.module === '@trpc/next' && factory.name === 'createTRPCNext') ||
+          (Node.isCallExpression(init) && !!workspace?.origin(init.getExpression(), '@trpc/next', 'createTRPCNext'));
+      })();
+    const factory = functionNode(callee);
+    const parameter = factory?.getParameters()[0];
+    const argument = parameter?.getNameNode().getSymbol();
+    const forwarding = argument ? returns(factory?.getBody()).map(functionNode).filter(fn =>
+      !!fn && returns(fn.getBody()).some(expression =>
+        [expression, ...expression.getDescendants()].some(node =>
+          (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
+          node.getTagNameNode().getSymbol() === argument && node.getAttributes().some(attribute =>
+            Node.isJsxSpreadAttribute(attribute) && bindingOf(attribute.getExpression()) === fn.getParameters()[0])))) : [];
+    const localChains = forwarding.flatMap(fn => {
+      const body = fn?.getBody();
+      return body && parameter ? wrappedChains(body, true, relativePath, bodies, files, new Set(), undefined, true, parameter) : [];
+    });
+    const forwards = localChains.length > 0;
+    const known = tRPC || forwards || origin?.module === 'next-i18next' && origin.name === 'appWithTranslation';
+    const hoc = locations(value, callee.getText(), known ? undefined : 'possible wrapper');
+    application = application.flatMap(outer => (localChains.length ? localChains : [emptyChain])
+      .map(inner => andThen(outer, { ...inner, locations: [hoc, ...inner.locations] }))).slice(0, 16);
+    if (!known) issues.push(`opaque App wrapper ${callee.getText()} (${relativePath(value.getSourceFile())}:${startLine(value)})`);
+    value = valueNode(value.getArguments()[0]);
+  }
+  const fn = functionNode(value);
+  if (!fn || !files.has(fn.getSourceFile())) {
+    return { chains: application.map(chain => ({ ...chain, path: [relativePath(source), ...chain.path] })),
+      issues: [...issues, 'custom App body unresolved'], body: undefined };
+  }
+  const name = 'getName' in fn && fn.getName() || fn.getParentIfKind(SyntaxKind.VariableDeclaration)?.getName() || 'default';
+  const app = locations(fn, name);
+  const body = fn.getBody();
+  const paths = body ? wrappedChains(body, true, relativePath, bodies, files) : [];
+  if (!paths.length) issues.push('custom App page slot unresolved');
+  return { body, issues, chains: application.flatMap(outer => (paths.length ? paths : [emptyChain]).map(path => ({
+    ...path,
+    conditional: path.conditional || outer.conditional,
+    path: [relativePath(source), ...outer.path, ...path.path],
+    locations: [...outer.locations, app, ...path.locations]
+  }))) };
+}
+
+function pagesDocument(source: SourceFile, relativePath: RelativePath): Wrapper {
+  const exported = source.getExportedDeclarations().get('default')?.[0];
+  const definition = valueNode(exported) ?? exported ?? source;
+  const name = 'getName' in definition && typeof definition.getName === 'function' ? definition.getName() : undefined;
+  const main = definition.getDescendants().find(node => {
+    if (!Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) return false;
+    const origin = importBinding(node.getTagNameNode());
+    return origin?.module === 'next/document' && origin.name === 'Main';
+  });
+  return { file: relativePath(definition.getSourceFile()), symbol: name || 'default', line: startLine(definition),
+    conditional: false, phase: 'document',
+    evidence: main ? `Main at ${relativePath(main.getSourceFile())}:${startLine(main)}` : 'Main slot unresolved' };
 }
 
 export function collectRenderFacts(
   routes: RouteNode[], components: ComponentNode[], edges: ComponentEdge[],
-  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder
+  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings
 ) {
   const outgoing = new Map<string, string[]>();
   for (const edge of edges) {
@@ -289,18 +433,31 @@ export function collectRenderFacts(
     const id = `cmp:${relativePath(node.getSourceFile())}#${suffix}`;
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
+  const apps = new Map<string, ReturnType<typeof pagesApplication>>();
+  const documents = new Map<string, Wrapper>();
   const wrapperLocations = new Map<string, Wrapper>();
   const wrapperRoots = new Map<string, string>();
   const wrapperChains = new Map<string, WrapperChain[]>();
   const reached = new Map<string, { page: RouteNode; viaLayout: boolean; depth: number }[]>();
   for (const route of routes.filter(route => route.type === 'page')) {
-    const pagesRoot = /^(?:src\/)?pages\//.exec(route.file)?.[0];
+    const pagesRoot = route.pages ? /^(?:src\/)?pages\//.exec(route.file)?.[0] : undefined;
     const layouts = layoutsByPage.get(route.id) ?? [];
-    const app = pagesRoot && ['tsx', 'ts', 'jsx', 'js'].map(ext => pagesRoot + '_app.' + ext)
-      .find(file => filesByPath.has(file));
-    const wrappers = app ? [app] : layouts;
+    const shell = (name: string) => pagesRoot && (config?.extensions ?? ['tsx', 'ts', 'jsx', 'js'])
+      .map(ext => pagesRoot + name + '.' + ext).find(file => filesByPath.has(file));
+    const app = shell('_app');
+    const document = shell('_document');
+    const wrappers = app ? [] : layouts;
+    const issues: string[] = [];
     let chains = [emptyChain];
+    if (document) {
+      if (!documents.has(document)) documents.set(document, pagesDocument(filesByPath.get(document)!, relativePath));
+      const wrapper = documents.get(document)!;
+      if (wrapper.evidence === 'Main slot unresolved') issues.push('custom Document Main slot unresolved');
+      index?.shell(document);
+      chains = [{ path: [], locations: [wrapper] }];
+    }
     const layoutSeeds: (string | undefined)[] = [];
+    const pageWrapperSeeds = new Map<string, number>();
     for (const wrapper of wrappers) {
       if (!wrapperChains.has(wrapper)) {
         const source = filesByPath.get(wrapper);
@@ -310,7 +467,7 @@ export function collectRenderFacts(
         if (component) wrapperRoots.set(wrapper, component);
         const definition = exported[0];
         const symbol = component && componentsById.get(component)?.name || 'default';
-        const paths = body ? wrappedChains(body, !!app, relativePath, bodies, projectFiles) : [];
+        const paths = body ? wrappedChains(body, false, relativePath, bodies, projectFiles) : [];
         wrapperLocations.set(wrapper, {
           file: wrapper, symbol,
           line: definition && definition.getSourceFile() === source ? startLine(definition) : 1, conditional: false,
@@ -327,22 +484,95 @@ export function collectRenderFacts(
         conditional: prefix.conditional || next.conditional
       })));
     }
-    if (app && filesByPath.get(app)?.getFullText().includes('getLayout')) {
-      const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies, projectFiles);
-      if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => ({
-        path: [...prefix.path, ...chain.path],
-        locations: [...prefix.locations, ...chain.locations],
-        conditional: prefix.conditional || chain.conditional
-      })));
+    if (app) {
+      if (!apps.has(app)) apps.set(app, pagesApplication(filesByPath.get(app)!, relativePath, bodies, projectFiles, workspace));
+      const application = apps.get(app)!;
+      const assignments = pageAssignments(filesByPath.get(route.file));
+      index?.shell(app, application.body);
+      layoutSeeds.push(`file:${app}`, application.body && componentByBody.get(application.body));
+      issues.push(...application.issues);
+      const expanded = application.chains.flatMap(chain => {
+        if (chain.fallbackFor && assignments.has(chain.fallbackFor)) return [];
+        let branches = [chain];
+        if (chain.dispatch) {
+          const assigned = assignments.get(chain.dispatch);
+          if (!assigned) return [];
+          const fn = functionNode(assigned.value);
+          const body = fn?.getBody();
+          if (!fn || !body || !projectFiles.has(fn.getSourceFile())) {
+            issues.push(`unresolved page property ${chain.dispatch}`);
+            return branches;
+          }
+          const definition = Node.isArrowFunction(fn) || Node.isFunctionExpression(fn)
+            ? fn.getParentIfKind(SyntaxKind.VariableDeclaration) ?? fn : fn;
+          const name = 'getName' in definition && definition.getName() || chain.dispatch;
+          const wrapper: Wrapper = { file: relativePath(fn.getSourceFile()), symbol: name, line: startLine(definition),
+            conditional: false, evidence: `${chain.dispatch} assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`,
+            site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } };
+          const paths = wrappedChains(body, true, relativePath, bodies, projectFiles);
+          if (!paths.length) issues.push(`page slot unresolved in ${chain.dispatch}`);
+          branches = (paths.length ? paths : [emptyChain]).map(path => ({
+            ...andThen(andThen(chain, { path: [wrapper.file + '#' + name], locations: [wrapper] }), path),
+            getLayout: path.getLayout
+          }));
+        }
+        const assigned = assignments.get('getLayout');
+        return branches.flatMap(branch => {
+          if (!branch.getLayout || !assigned) return [branch];
+          const fn = functionNode(assigned.value);
+          const body = fn?.getBody();
+          const parameter = fn?.getParameters()[0]?.getNameNode();
+          if (!body || !Node.isIdentifier(parameter) || !projectFiles.has(body.getSourceFile())) {
+            issues.push('getLayout binding unresolved');
+            return [branch];
+          }
+          const paths = wrappedChains(body, false, relativePath, bodies, projectFiles, new Set(), parameter.getText(), true);
+          if (!paths.length) {
+            if (!returns(body).every(node => bindingOf(node) === fn?.getParameters()[0])) issues.push('getLayout page slot unresolved');
+            return [branch];
+          }
+          const origin = declarationsOf(assigned.value)[0];
+          if (origin && projectFiles.has(origin.getSourceFile())) {
+            index?.wrapperDependency(route.id, origin, assigned.site, 'getLayout');
+          }
+          const evidence = `getLayout at ${relativePath(fn!.getSourceFile())}:${startLine(fn!)}; assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`;
+          return paths.map(path => andThen(branch, { ...path, locations: path.locations.map((wrapper, i) =>
+            i === 0 ? { ...wrapper, evidence, site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } } : wrapper) }));
+        });
+      });
+      if (expanded.length) chains = chains.flatMap(prefix => expanded.map(chain => andThen(prefix, chain)));
+      else chains = chains.flatMap(prefix => application.chains.map(chain => andThen(prefix, chain)));
+      for (const chain of chains) for (const [position, wrapper] of chain.locations.entries()) {
+        if (wrapper.phase || wrapper.external) continue;
+        const id = `cmp:${wrapper.definitionFile ?? wrapper.file}#${wrapper.symbol}`;
+        if (componentsById.has(id)) {
+          index?.render(`file:${route.file}`, id,
+            wrapper.site?.file === route.file ? wrapper.site.line : route.file === wrapper.file ? wrapper.line :
+              startLine(filesByPath.get(route.file)!.getExportedDeclarations().get('default')?.[0] ?? filesByPath.get(route.file)!),
+            Number(wrapper.conditional || !!chain.conditional), true);
+          layoutSeeds.push(id);
+          pageWrapperSeeds.set(id, Math.min(pageWrapperSeeds.get(id) ?? Infinity, position + 1));
+        }
+      }
     }
-    index?.page(route.id, layoutSeeds, chains.map(chain => chain.locations));
+    if (issues.length) index?.wrapperIssues(route.id, [...new Set(issues)]);
+    if (route.pages) {
+      const unique = new Map<string, WrapperChain>();
+      for (const chain of chains) {
+        const key = JSON.stringify(chain.locations.map(({ conditional, ...item }) => item));
+        const prior = unique.get(key);
+        if (!prior || prior.conditional && !chain.conditional) unique.set(key, chain);
+      }
+      chains = [...unique.values()];
+    }
+    index?.page(route.id, app ? [] : layoutSeeds, chains.map(chain => chain.locations));
     for (const { path, conditional } of chains) {
       if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`, path.length);
     }
     const visited = new Set<string>();
-    const layoutRoots = new Set(layoutSeeds);
+    const layoutRoots = new Set(layoutSeeds.filter(id => id === undefined || !pageWrapperSeeds.has(id)));
     const traverse = (seeds: (string | undefined)[], viaLayout: boolean) => {
-      const queue = seeds.map(id => ({ id, depth: 0 }));
+      const queue = seeds.map(id => ({ id, depth: viaLayout && id ? pageWrapperSeeds.get(id) ?? 0 : 0 }));
       for (let i = 0; i < queue.length; i++) {
         const { id, depth } = queue[i];
         if (!id || visited.has(id)) continue;
@@ -398,7 +628,7 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
+export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
   if (seen.has(node)) return;
   seen.add(node);
   const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
@@ -485,9 +715,10 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, 
   }
 }
 
-function apiSegments(url: UrlText) {
+function apiSegments(url: UrlText, config?: NextConfig) {
   const prefix = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
-  const local = prefix ? url.text.slice(prefix.length) : url.text;
+  const raw = prefix ? url.text.slice(prefix.length) : url.text;
+  const local = config ? (normalizeNextUrl(raw, config.url) ?? raw) + (/[?#].*$/.exec(raw)?.[0] ?? '') : raw;
   if (!localApi.test(local)) return;
   const [pathname] = local.split(/[?#]/, 1);
   const spanning = pathname.includes(spanningSlot);
@@ -578,22 +809,125 @@ function isSwrFallbackKey(node: Node): boolean {
   return origin.module === 'swr' && origin.name === 'SWRConfig';
 }
 
+const requestMethods = ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'];
+
+function axiosInstance(node: Node | undefined) {
+  const init = valueNode(node);
+  if (!Node.isCallExpression(init)) return;
+  const factory = importBinding(init.getExpression());
+  return factory?.module === 'axios' && factory.name === 'create' ? init : undefined;
+}
+
+function playwrightType(node: Node) {
+  const binding = bindingOf(node);
+  const type = Node.isParameterDeclaration(binding) || Node.isVariableDeclaration(binding) ? binding.getTypeNode() : undefined;
+  const origin = type?.getKind() === SyntaxKind.TypeReference ?
+    importBinding(type.asKindOrThrow(SyntaxKind.TypeReference).getTypeName(), true) : undefined;
+  return origin && /^(?:@playwright\/test|playwright)$/.test(origin.module) ? origin.name : undefined;
+}
+
+function playwrightRequest(node: Node) {
+  if (playwrightType(node) === 'APIRequestContext') return true;
+  if (Node.isPropertyAccessExpression(node) && node.getName() === 'request') {
+    const owner = node.getExpression();
+    if (['Page', 'BrowserContext'].includes(playwrightType(owner) ?? '')) return true;
+    if (Node.isCallExpression(owner)) {
+      const method = owner.getExpression();
+      if (Node.isPropertyAccessExpression(method) && method.getName() === 'context' &&
+        playwrightType(method.getExpression()) === 'Page') return true;
+    }
+  }
+  const binding = bindingOf(node);
+  if (!Node.isBindingElement(binding) || (binding.getPropertyNameNode() ?? binding.getNameNode()).getText() !== 'request') return false;
+  const callback = binding.getParent().getParent().getParent();
+  const call = callback.getParentIfKind(SyntaxKind.CallExpression);
+  if (!call || !call.getArguments().some(arg => arg === callback)) return false;
+  const origin = importBinding(call.getExpression());
+  return origin?.module === '@playwright/test' && origin.name === 'test';
+}
+
+function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
+  const expression = call.getExpression();
+  const origin = importBinding(expression);
+  const [url, options] = call.getArguments();
+  if (!url) return;
+  if (/^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+    !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile())) {
+    const methodProperty = property(options, 'method');
+    const method = textValue(methodProperty)?.toUpperCase() ??
+      (options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
+        options.getProperties().some(Node.isSpreadAssignment)) ? '?' : 'GET');
+    return { url, method, via: 'fetch' };
+  }
+  if (!Node.isPropertyAccessExpression(expression) || !requestMethods.includes(expression.getName())) return;
+  const method = expression.getName().toUpperCase();
+  const instance = pages && axiosInstance(expression.getExpression());
+  if (origin?.module === 'axios' && requestMethods.includes(origin.name) || instance) {
+    const options = instance ? instance.getArguments()[0] : undefined;
+    return { url, method, via: 'axios', base: textValue(property(options, 'baseURL')) };
+  }
+  if (pages && playwrightRequest(expression.getExpression())) return { url, method, via: 'Playwright request' };
+}
+
+function trpcRequest(call: import('ts-morph').CallExpression, workspace?: WorkspaceBindings) {
+  let expression = call.getExpression();
+  if (!Node.isPropertyAccessExpression(expression)) return;
+  const operation = expression.getName();
+  const method = ['query', 'useQuery', 'useInfiniteQuery'].includes(operation) ? 'GET' :
+    ['mutate', 'mutateAsync'].includes(operation) ? 'POST' : undefined;
+  if (!method) return;
+  const members: string[] = [];
+  expression = expression.getExpression();
+  const mutation = method === 'POST' && valueNode(expression);
+  if (mutation && Node.isCallExpression(mutation)) {
+    const hook = mutation.getExpression();
+    if (!Node.isPropertyAccessExpression(hook) || hook.getName() !== 'useMutation') return;
+    expression = hook.getExpression();
+  }
+  while (Node.isPropertyAccessExpression(expression)) {
+    members.unshift(expression.getName());
+    expression = expression.getExpression();
+  }
+  if (!members.length) return;
+  const local = valueNode(expression);
+  const init = Node.isCallExpression(local) ? local : valueNode(workspace?.resolve(expression));
+  if (!Node.isCallExpression(init)) return;
+  if (operation.startsWith('use') && property(call.getArguments()[1], 'enabled')?.getKind() === SyntaxKind.FalseKeyword) return;
+  const factory = importBinding(init.getExpression());
+  if (!factory || !['@trpc/client', '@trpc/next', '@trpc/react-query'].includes(factory.module) ||
+      !['createTRPCClient', 'createTRPCProxyClient', 'createTRPCNext', 'createTRPCReact'].includes(factory.name)) return;
+  const links = init.getDescendantsOfKind(SyntaxKind.CallExpression).filter(node => {
+    const origin = importBinding(node.getExpression());
+    return origin?.module === '@trpc/client' && origin.name === 'httpBatchLink';
+  });
+  if (links.length !== 1) return;
+  const url = property(links[0].getArguments()[0], 'url');
+  const prefix = textValue(url);
+  if (!url || !prefix) return;
+  return { url, text: prefix.replace(/\/$/, '') + '/' + members.join('.'), method, via: 'tRPC request',
+    evidence: `httpBatchLink at ${init.getSourceFile().getBaseName()}:${startLine(links[0])}`,
+    partial: !Node.isCallExpression(local) || !!property(call.getArguments()[1], 'enabled') };
+}
+
 const API_REFERENCE_KINDS = new Set([
   SyntaxKind.CallExpression, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
   SyntaxKind.TemplateExpression, SyntaxKind.BinaryExpression
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
-    segments: route.path.slice(1).split('/')
-  })).map(endpoint => ({ ...endpoint, rank: endpoint.segments.map(part =>
-    part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' : part.startsWith('[') ? '2' : '3').join('') }));
+    segments: routeSegments(route.path)
+  })).map(endpoint => ({ ...endpoint, rank: patternRank(endpoint.segments) }));
   if (!endpoints.length) return;
   endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
   const urlMatches = (parsed: NonNullable<ReturnType<typeof apiSegments>>) => {
     const { segments, partial } = parsed;
+    if (config && !segments.some(segment => unknownSlot.test(segment))) {
+      return matchNextRoutes('/' + segments.join('/'), endpoints, endpoint => endpoint.route.path)
+        .map(({ route }) => ({ route, partial, markdown: parsed.markdown, dynamic: undefined }));
+    }
     if (parsed.spanning) {
       return endpoints.filter(({ segments: pattern }) => matchesSpanningPath(pattern, segments))
         .map(({ route }) => ({ route, partial: true, markdown: false, dynamic: true }));
@@ -623,10 +957,10 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     }
     return matches;
   };
-  const matchesFor = (node: Node) => {
+  const matchValues = (values: UrlText[]) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
-    for (const value of urlTexts(node) ?? []) {
-      const parsed = apiSegments(value);
+    for (const value of values) {
+      const parsed = apiSegments(value, config);
       if (!parsed) continue;
       matches ??= new Map();
       for (const match of urlMatches(parsed)) {
@@ -637,6 +971,28 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       }
     }
     return matches;
+  };
+  const matchesFor = (node: Node) => matchValues(urlTexts(node) ?? []);
+  type Request = NonNullable<ReturnType<typeof httpRequest>>;
+  const summaries = new Map<Node, { request: Request; call: Node; parameter: number }[]>();
+  const summarize = (node: Node) => {
+    const fn = functionNode(node);
+    if (!fn || !projectFiles.has(fn.getSourceFile())) return [];
+    if (summaries.has(fn)) return summaries.get(fn)!;
+    const result: { request: Request; call: Node; parameter: number }[] = [];
+    const visit = (node: Node, traversal?: { skip(): void }) => {
+      if (Node.isFunctionLikeDeclaration(node)) { traversal?.skip(); return; }
+      if (!Node.isCallExpression(node) || conditionalAt(node, fn)) return;
+      const request = httpRequest(node, true);
+      if (!request) return;
+      const binding = bindingOf(valueNode(request.url) ?? request.url);
+      const parameter = fn.getParameters().findIndex(parameter => parameter === binding);
+      if (parameter >= 0) result.push({ request, call: node, parameter });
+    };
+    const body = fn.getBody();
+    if (body) { visit(body); body.forEachDescendant(visit); }
+    summaries.set(fn, result);
+    return result;
   };
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
@@ -679,6 +1035,30 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const axiosMethod = origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
+      if (config && !isFetch && !isSwr && !axiosMethod) {
+        const direct = httpRequest(node, true);
+        const trpc = trpcRequest(node, workspace);
+        const requests = direct ? [{ ...direct, evidence: undefined, text: undefined }] : trpc ? [trpc] :
+          summarize(expression).flatMap(summary => {
+            const url = node.getArguments()[summary.parameter];
+            return url ? [{ ...summary.request, url, text: undefined,
+              evidence: `HTTP client at ${relativePath(summary.call.getSourceFile())}:${startLine(summary.call)}` }] : [];
+          });
+        for (const request of requests) {
+          const base = 'base' in request ? request.base : undefined;
+          const values = request.text ? [{ text: request.text, partial: 'partial' in request && request.partial }] : (urlTexts(request.url) ?? []).map(value =>
+            base && !/^https?:/.test(value.text) ? { ...value, text: base.replace(/\/$/, '') + '/' + value.text.replace(/^\//, '') } : value);
+          const matches = matchValues(values);
+          if (!matches?.size) continue;
+          classify(request.url);
+          for (const { route, partial, dynamic, markdown } of matches.values()) {
+            index?.fetch({ file: source, line: startLine(node), node, route: route.id, method: request.method, url: route.path,
+              via: request.via, partial: partial || undefined, dynamic, evidence: request.evidence });
+            if (markdown) addFact(facts, source, `fetch ${source} -> ${route.file} ${route.path} (${request.via})`);
+          }
+        }
+        return;
+      }
       if (!isFetch && !isSwr && !axiosMethod) return;
       const [argument, options] = node.getArguments();
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;

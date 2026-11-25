@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -12,7 +12,7 @@ const { indexFile: indexPath } = require('./workspace-cache.cjs');
 const entry = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
 const source = path.join(__dirname, 'fixtures/impact-graph');
 
-function fixture(t, reverse = false) {
+function fixture(t, reverse = false, fixtureSource = source) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-graph-kinds-'));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const root = path.join(temp, 'project');
@@ -27,7 +27,7 @@ function fixture(t, reverse = false) {
       else fs.copyFileSync(source, destination);
     }
   }
-  copy(source, root);
+  copy(fixtureSource, root);
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache };
   const run = (args, extra = {}) => {
     const result = spawnSync(process.execPath, [entry, ...args], {
@@ -604,4 +604,105 @@ test('changes returns a partial result outside Git and scopes a nested project',
   assert.match(nested, /# outside project: 1 files/);
   assert.match(nested, /changed lib\/normalize\.ts:10 fresh/);
   assert.doesNotMatch(nested, /outside\.ts/);
+});
+
+test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {
+  const { build, query, env, root } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  const index = JSON.parse(fs.readFileSync(build(), 'utf8'));
+  const wrappers = query('wrappers', '/base/ko/posts/article?preview=true');
+  assert.match(wrappers, /document pages\/_document.page.tsx:3 HtmlDocument \[server; Main at pages\/_document.page.tsx:5\]/);
+  assert.match(wrappers, /_app.page.tsx:12 translate, App/);
+  assert.match(wrappers, /providers \(outermost first\): OuterProvider, LayoutProvider/);
+  assert.match(wrappers, /LayoutProvider \[getLayout at lib\/shells.tsx:6; assigned at pages\/posts\/\[slug\].page.tsx:8\]/);
+  assert.doesNotMatch(wrappers, /PageBodyProvider|Never|Maintenance|PropertyWrapper/);
+  assert.match(query('wrappers', '/posts/new'), /PropertyWrapper \[PageWrapper assigned at pages\/posts\/new.page.tsx:5\]/);
+  assert.doesNotMatch(query('wrappers', '/modern'), /Document|OuterProvider/);
+  assert.match(query('wrappers', 'pages/_document.page.tsx'), /custom shell applies to Pages routes/);
+  assert.equal(query('wrappers', '/guide'), query('wrappers', '/guide/one/two'));
+  assert.match(query('who_renders', 'LayoutProvider'), /\/posts\/\[slug\]/);
+  assert.match(query('who_renders', 'PropertyWrapper'), /\/posts\/new/);
+  assert.match(query('path', '/posts/one', 'loadArticle'), /1 data .*getStaticProps · build\/revalidation\)\n2 call .*loadArticle/);
+  assert.match(query('path', '/posts/one', 'findArticles'), /getStaticPaths · build\/enumeration/);
+  assert.match(query('callees', '/posts/new', '--depth', '2'), /getInitialProps · page initial request\/client transition/);
+  assert.match(query('callees', '/posts/new', '--depth', '2'), /getInitialProps · Document server render/);
+  const lifecycle = query('callees', 'pages/posts/new.page.tsx#getServerSideProps');
+  assert.match(lifecycle, /d1 call .*loadUser/);
+  assert.doesNotMatch(lifecycle, /loadUnrelated/);
+  assert.match(query('impact', 'loadArticle'), /page \/posts\/\[slug\]/);
+  assert.match(query('path', '/opaque', 'loadUser'), /# partial:.*callback invocation/);
+  assert.match(query('path', '/posts/new', 'middleware'), /1 middleware middleware.ts:9 middleware/);
+  assert.match(query('path', '/api/auth/signup', 'middleware'), /1 middleware middleware.ts:10 middleware/);
+  assert.match(query('path', '/guide', 'middleware'), /# partial: possible middleware edge/);
+  assert.match(query('path', '/excluded', 'middleware'), /no directed path/);
+  assert.match(query('impact', 'middleware'), /3 exact, 2 possible Pages routes/);
+  assert.match(query('path', '/redirect', '/target'), /1 redirect next.config.js:6 \/target/);
+  assert.match(query('path', '/', '/guide/testing'), /navigate pages\/index.page.tsx:7 .*as \/displayed/);
+  assert.match(query('path', '/', '/target'), /navigate pages\/index.page.tsx:13/);
+  assert.match(query('path', '/', '/excluded'), /# partial: dynamic client navigation destination/);
+  assert.doesNotMatch(query('impact', 'TargetBody'), /page \/  /);
+  assert.doesNotMatch(query('who_renders', 'TargetBody'), /^\/  /m);
+  assert.match(query('search', '/base/ko/posts/article'), /pages\/posts\/\[slug\].page.tsx/);
+
+  const route = file => index.routes.find(route => route.file === file);
+  assert.deepEqual(route('pages/api/auth/signup.page.ts').methods, ['POST']);
+  assert.deepEqual(route('pages/api/table.page.ts').methods, ['POST']);
+  assert.equal(route('pages/api/table.page.ts').methodBasis, 'enforced');
+  assert.ok(!index.routes.some(route => /verification.test|unrelated|ignored/.test(route.file)));
+  assert.match(query('api_consumers', '/api/table'), /POST axios .*HTTP client at lib\/requests.ts:6/);
+  const api = query('api_consumers', '/base/api/auth/token');
+  assert.match(api, /GET Playwright request \[test\]/);
+  assert.match(api, /request.spec.ts:9 csrf GET Playwright request/);
+  assert.match(api, /GET tRPC request/);
+  assert.match(api, /POST tRPC request/);
+  assert.doesNotMatch(api, /POST fetch|POST Playwright request/);
+  assert.match(query('api_consumers', '/api/auth/signup'), /POST fetch/);
+  assert.match(query('api_consumers', '/api/auth/signup'), /POST Playwright request/);
+  assert.doesNotMatch(query('api_consumers', '/api/auth'), /send /);
+  assert.match(query('api_consumers', '/api/auth/shadow'), /mention .*route literal/);
+
+  const mcp = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.equal(await mcp.text('query', { kind: 'wrappers', target: '/base/ko/posts/article?preview=true' }), wrappers);
+
+  const git = (...args) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  git('init', '-q');
+  git('add', '.');
+  git('-c', 'user.email=fixture@example.test', '-c', 'user.name=Fixture', 'commit', '-qm', 'Fixture');
+  const edit = (file, before, after) => {
+    const target = path.join(root, file);
+    fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(before, after));
+  };
+  edit('lib/data.ts', "return 'article'", "return 'changed'");
+  edit('middleware.ts', "'/target'", "'/target?changed=1'");
+  build();
+  const changes = query('changes');
+  assert.match(changes, /route page \/posts\/\[slug\].*loadArticle/);
+  assert.match(changes, /route page \/guide\/\[\[\.\.\.steps\]\].*middleware d1 \[possible\]/);
+  assert.doesNotMatch(changes, /route page \/excluded|route page \/target/);
+});
+
+test('Pages API workspace proof is scoped and invalidates the index after sibling changes', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-pages-workspace-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const workspace = path.join(temporary, 'workspace');
+  fs.cpSync(path.join(__dirname, 'fixtures/pages-router-workspace'), workspace, { recursive: true });
+  const cwd = path.join(workspace, 'web');
+  const cache = path.join(temporary, 'cache');
+  const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, NEORION_AUTOBUILD: '1' };
+  const run = (...args) => {
+    const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const overview = /^Overview: (.+)$/m.exec(run('graph'))[1];
+  const indexFile = path.join(path.dirname(overview), indexPath);
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  assert.deepEqual(index.routes.find(route => route.url === '/api/fixture').methods, ['POST']);
+  assert.deepEqual(index.routes.find(route => route.url === '/api/alias').methods, ['ALL']);
+  assert.ok(index.pagesWorkspaceInputs.files.includes('packages/dispatch/handler.ts'));
+  assert.ok(index.pagesWorkspaceInputs.files.every(file => !file.includes('packages/unused/')));
+  assert.ok(Object.keys(index.files).every(file => !file.startsWith('../')));
+  fs.writeFileSync(path.join(workspace, 'packages/dispatch/handler.ts'), 'export const dispatch = () => () => null;\n');
+  const query = run('query', 'api_consumers', '/api/fixture');
+  assert.match(query, /# partial: API handler factory or re-export unresolved/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(indexFile, 'utf8')).routes.find(route => route.url === '/api/fixture').methods, ['ALL']);
 });

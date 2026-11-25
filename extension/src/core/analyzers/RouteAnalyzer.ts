@@ -1,6 +1,9 @@
 import { CallExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import type { RouteNode } from '../types/GraphTypes';
+import type { NextConfig } from './NextConfig';
+import { functionNode, returns, valueNode } from './StaticBindings';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { DomainExtractor } from '../utils/DomainExtractor';
 
 export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'];
@@ -56,17 +59,68 @@ function forwardedRequest(call: CallExpression) {
   }
 }
 
-function pagesMethods(source?: SourceFile): string[] {
+function methodTable(call: CallExpression, workspace?: WorkspaceBindings) {
+  const callee = call.getExpression();
+  const factory = functionNode(callee) ?? functionNode(workspace?.resolve(callee));
+  const table = valueNode(call.getArguments()[0]);
+  const returned = returns(factory?.getBody());
+  const handler = returned.length === 1 ? functionNode(returned[0]) : undefined;
+  if (!factory || !handler || !Node.isObjectLiteralExpression(table) || table.getProperties().some(Node.isSpreadAssignment)) return;
+  const tableBinding = factory.getParameters()[0]?.getNameNode().getSymbol();
+  const [req, res] = handler.getParameters().map(parameter => parameter.getNameNode().getSymbol());
+  const body = handler.getBody();
+  const lookup = body?.getDescendantsOfKind(SyntaxKind.ElementAccessExpression).find(node => {
+    let key = node.getArgumentExpression();
+    while (Node.isAsExpression(key)) key = key.getExpression();
+    return node.getExpression().getSymbol() === tableBinding && Node.isPropertyAccessExpression(key) &&
+      key.getName() === 'method' && key.getExpression().getSymbol() === req;
+  });
+  const select = lookup?.getFirstAncestorByKind(SyntaxKind.VariableDeclaration)?.getNameNode().getSymbol();
+  if (!select || !res || !body?.getDescendantsOfKind(SyntaxKind.IfStatement).some(branch => {
+    const condition = branch.getExpression();
+    return Node.isPrefixUnaryExpression(condition) && condition.getOperatorToken() === SyntaxKind.ExclamationToken &&
+      condition.getOperand().getSymbol() === select && branch.getThenStatement().getDescendantsOfKind(SyntaxKind.CallExpression)
+        .some(call => {
+          const member = call.getExpression();
+          return Node.isPropertyAccessExpression(member) && member.getName() === 'status' &&
+            member.getExpression().getSymbol() === res && call.getArguments()[0]?.getText() === '405' &&
+            !!call.getFirstAncestorByKind(SyntaxKind.ReturnStatement);
+        });
+  })) return;
+  const names = table.getProperties().flatMap(member => 'getName' in member ? [member.getName()] : []);
+  return HTTP_METHODS.filter(method => names.includes(method));
+}
+
+function pagesMethods(source: SourceFile, workspace?: WorkspaceBindings): Pick<RouteNode, 'methods' | 'methodBasis' | 'observedMethods' | 'issue'> | undefined {
+  const exported = source.getExportedDeclarations().get('default');
+  const assignment = source.getExportAssignments().find(node => !node.isExportEquals());
+  const defaults = exported?.length ? exported : assignment ? [assignment] : [];
+  if (!defaults.length) {
+    const unresolved = source.getExportDeclarations().some(declaration => declaration.hasModuleSpecifier() &&
+      !declaration.isTypeOnly() && declaration.getNamedExports().some(specifier =>
+        !specifier.isTypeOnly() && (specifier.getAliasNode() ?? specifier.getNameNode()).getText() === 'default') &&
+      !declaration.getModuleSpecifierSourceFile());
+    return unresolved ? { methods: ['ALL'], issue: 'API default re-export unresolved' } : undefined;
+  }
+  let possible = false;
+  let runtime = false;
   const methods = new Set<string>();
   let rejectsMethods = false;
-  for (const declaration of source?.getExportedDeclarations().get('default') ?? []) {
-    let handler: Node | undefined = declaration;
-    if (Node.isVariableDeclaration(handler)) handler = handler.getInitializer();
-    if (Node.isExportAssignment(handler)) handler = handler.getExpression();
+  for (const declaration of defaults) {
+    let handler = valueNode(declaration);
+    if (Node.isCallExpression(handler)) {
+      const table = methodTable(handler, workspace);
+      if (table?.length) return { methods: table, methodBasis: 'enforced' };
+    }
     const forwarded = Node.isCallExpression(handler) ? forwardedRequest(handler) : undefined;
     if (forwarded) handler = forwarded.callback;
     if (!Node.isFunctionDeclaration(handler) && !Node.isArrowFunction(handler) &&
-        !Node.isFunctionExpression(handler)) continue;
+        !Node.isFunctionExpression(handler)) {
+      possible ||= Node.isCallExpression(handler) || Node.isIdentifier(handler) &&
+        !handler.getSymbol()?.getDeclarations().some(Node.isVariableDeclaration);
+      continue;
+    }
+    runtime = true;
     const request = forwarded?.request ?? handler.getParameters()[0]?.getNameNode();
     const requestSymbol = Node.isIdentifier(request) ? request.getSymbol() : undefined;
     const methodBinding = Node.isObjectBindingPattern(request) ? request.getElements().find(element =>
@@ -116,16 +170,44 @@ function pagesMethods(source?: SourceFile): string[] {
     if (body) {
       visit(body);
       body.forEachDescendant(visit);
+      // A directly called same-file guard must reject the other methods.
+      const calls = Node.isBlock(body) ? body.getStatements().flatMap(statement =>
+        Node.isTryStatement(statement) ? statement.getTryBlock().getStatements() : [statement]) : [];
+      for (const statement of calls) {
+        const call = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;
+        if (!Node.isCallExpression(call) || !requestSymbol || call.getArguments()[0]?.getSymbol() !== requestSymbol) continue;
+        const guard = functionNode(call.getExpression());
+        const guardBody = guard?.getBody();
+        if (!guard || guard.getSourceFile() !== handler.getSourceFile() || !Node.isBlock(guardBody)) continue;
+        const guardReq = guard.getParameters()[0]?.getNameNode().getSymbol();
+        for (const branch of guardBody.getStatements().filter(Node.isIfStatement)) {
+          const test = branch.getExpression();
+          if (!Node.isBinaryExpression(test) || ![SyntaxKind.ExclamationEqualsEqualsToken, SyntaxKind.ExclamationEqualsToken].includes(test.getOperatorToken().getKind())) continue;
+          const [left, right] = [test.getLeft(), test.getRight()];
+          if (!Node.isPropertyAccessExpression(left) || left.getName() !== 'method' ||
+            left.getExpression().getSymbol() !== guardReq || !Node.isStringLiteral(right)) continue;
+          const rejected = branch.getThenStatement();
+          const throws = Node.isThrowStatement(rejected) ? [rejected] :
+            Node.isBlock(rejected) ? rejected.getStatements().filter(Node.isThrowStatement) : [];
+          if (throws.some(node => node.getDescendantsOfKind(SyntaxKind.NumericLiteral).some(value => value.getLiteralValue() === 405))) {
+            rejectsMethods = true;
+            collect(right);
+          }
+        }
+      }
     }
   }
   const supported = HTTP_METHODS.filter(method => methods.has(method));
   // Preflight and HEAD fast paths can coexist with an unrestricted downstream handler.
-  if (!rejectsMethods && supported.every(method => method === 'OPTIONS' || method === 'HEAD')) return ['ALL'];
-  return supported.length ? supported : ['ALL'];
+  if (!runtime && !possible) return;
+  if (rejectsMethods && supported.length) return { methods: supported, methodBasis: 'enforced' };
+  return { methods: ['ALL'], observedMethods: supported.length ? supported : undefined,
+    issue: possible ? 'API handler factory or re-export unresolved' : undefined };
 }
 
 export class RouteAnalyzer {
-  constructor(private readonly appDir: string, private readonly pagesDir: string, private readonly root: string) {}
+  constructor(private readonly appDir: string, private readonly pagesDir: string, private readonly root: string,
+    private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
   public analyze(files: SourceFile[], staticMetadata: string[]): RouteNode[] {
     const routes = [
@@ -147,13 +229,18 @@ export class RouteAnalyzer {
     if (!path.isAbsolute(pagesRelative) && !pagesRelative.startsWith('..' + path.sep)) {
       const parts = pagesRelative.split(path.sep);
       const filename = parts.pop()!;
-      const match = /^(.*)\.[jt]sx?$/.exec(filename);
-      if (!match || /^_(app|document|error)$/.test(match[1])) return;
+      const extensions = this.config?.extensions ?? ['tsx', 'ts', 'jsx', 'js'];
+      const extension = [...extensions].sort((a, b) => b.length - a.length).find(ext => filename.endsWith('.' + ext));
+      if (!extension) return;
+      const name = filename.slice(0, -extension.length - 1);
+      if (!parts.length && /^_(app|document|error)$/.test(name)) return;
       const type = parts[0] === 'api' ? 'api' : 'page';
-      if (match[1] !== 'index') parts.push(match[1]);
+      const api = type === 'api' && source ? pagesMethods(source, this.workspace) : undefined;
+      if (type === 'api' && !api) return;
+      if (name !== 'index') parts.push(name);
       return {
         id: `route:${file}`, file, type,
-        methods: type === 'api' ? pagesMethods(source) : undefined,
+        pages: true, ...api,
         path: '/' + parts.join('/'), isClient: !!source && isClientFile(source),
         domain: DomainExtractor.extract('/' + file)
       };

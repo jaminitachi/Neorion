@@ -321,6 +321,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const pageFiles = new Set<string>();
   const apiFiles = new Set<string>();
   const otherFiles = new Set<string>();
+  const possibleFiles = new Set<string>();
   for (const { terminal, origins } of trace.routes) {
     const { kind, name, file } = terminal;
     if (kind === 'middleware') {
@@ -330,8 +331,9 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     if (kind === 'api') apiFiles.add(file);
     else if (kind === 'page') pageFiles.add(file);
     else otherFiles.add(file);
-    const labels = origins.slice(0, 3).map(({ origin, depth, fetch }) =>
-      `${origin.name} d${depth}${fetch ? ` via fetch ${fetch}` : ''}`);
+    if (origins.every(origin => origin.possible)) possibleFiles.add(file);
+    const labels = origins.slice(0, 3).map(({ origin, depth, fetch, possible }) =>
+      `${origin.name} d${depth}${fetch ? ` via fetch ${fetch}` : ''}${possible ? ' [possible]' : ''}`);
     const chain = ` <- ${labels.join(', ')}${origins.length > 3 ? ', +' + (origins.length - 3) : ''}`;
     rows.push(graphRow(`route ${kind} ${name}  ${file}${chain}`, file));
   }
@@ -341,7 +343,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   if (outside) notes.push(graphRow(`# outside project: ${outside} files`));
   if (changes.length > 500) limited = true;
   notes.push(graphRow(`# risk: ${changedSymbols.size} changed symbols (${actionCount} actions); ${routes} routes reached (${pageFiles.size} page, ${apiFiles.size} api${otherFiles.size ? `, ${otherFiles.size} special` : ''}); ` +
-    `${wrapperRoutes} routes under touched wrappers; ${configFiles} config files`));
+    `${possibleFiles.size ? `${possibleFiles.size} possible; ` : ''}${wrapperRoutes} routes under touched wrappers; ${configFiles} config files`));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';
   const tracePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : trace.partial;
   const partial = [stagedDrift ? 'worktree differs from staged' : undefined, tracePartial].filter(Boolean).join('; ') || undefined;

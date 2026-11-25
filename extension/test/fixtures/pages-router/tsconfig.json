@@ -1,0 +1,4 @@
+{
+  "compilerOptions": { "jsx": "preserve", "moduleResolution": "node", "allowJs": true },
+  "include": ["**/*.ts", "**/*.tsx", "**/*.js"]
+}

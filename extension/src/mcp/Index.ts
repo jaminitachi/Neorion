@@ -1,6 +1,8 @@
-export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 5;
+import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
+
+export const WRAPPER_INDEX_REVISION = 3;
+export const QUERY_INDEX_REVISION = 3;
+export const GRAPH_INDEX_REVISION = 6;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -31,12 +33,16 @@ export interface Wrapper {
   provider?: boolean;
   providerTag?: boolean;
   definitionFile?: string;
+  site?: { file: string; line: number };
+  phase?: 'document' | 'application';
+  evidence?: string;
 }
 
 export interface FetchEntry {
   file: string;
   line: number;
   fn: string | null;
+  evidence?: string;
   method: string;
   url: string;
   via: string;
@@ -65,6 +71,17 @@ export interface ServerAction {
   callers: [file: string, line: number, owner?: number][];
 }
 
+export interface PagesEdge {
+  from: number;
+  to?: number;
+  route?: number;
+  kind: 'data' | 'wrap' | 'middleware' | 'navigate' | 'redirect' | 'rewrite';
+  file: string;
+  line: number;
+  detail?: string;
+  possible?: boolean;
+}
+
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
@@ -77,9 +94,12 @@ export interface QueryIndex {
   routes: {
     id: number; url: string; file: string; kind: string; line?: number;
     component?: number; fileSymbol?: number; layouts?: number[];
-    methods?: string[]; handlers?: Record<string, number>;
+    pages?: boolean;
+    methods?: string[];
+    methodBasis?: 'enforced' | 'observed';
+    observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
-  renderEdges: [from: number, to: number, line: number, conditional: number][];
+  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true][];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
@@ -105,5 +125,14 @@ export interface QueryIndex {
   trpcUnbound?: number[];
   trpcIssues?: Record<number, [file: number, line: number][]>;
   trpcFiles?: string[];
+  pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
+  pagesUrlConfig?: NextUrlConfig;
+  pagesEdges?: PagesEdge[];
+  pagesIssues?: Record<number, string[]>;
+  pagesWrapSites?: Record<number, Record<string, [position: number, evidence: string][]>>;
+  pagesWrapperIssues?: Record<number, string[]>;
+  pagesApiIssues?: Record<number, string[]>;
+  pagesObservedCalls?: Record<number, [file: string, line: number, expression: string][]>;
+  pagesOwnerIssues?: Record<number, string[]>;
   trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }

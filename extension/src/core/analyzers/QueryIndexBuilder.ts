@@ -10,6 +10,9 @@ import {
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
 import { visitKinds } from './CompilerWalk';
 import { endLine, lineAt, startLine } from './SourceLines';
+import { collectPagesFacts, type PagesDependency } from './PagesFacts';
+import type { NextConfig } from './NextConfig';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 
 type RelativePath = (source: SourceFile) => string;
@@ -75,14 +78,30 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
-  private edges: [string, string, number, number][] = [];
+  private edges: [string, string, number, number, true?][] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
+  private shells = new Map<string, Node | undefined>();
+  private wrapperProblems = new Map<string, string[]>();
+  private wrapperDependencies: PagesDependency[] = [];
+
+  shell(file: string, body?: Node) {
+    this.shells.set(file, body);
+  }
+
+  wrapperIssues(route: string, reasons: string[]) {
+    this.wrapperProblems.set(route, reasons);
+  }
+
+  wrapperDependency(route: string, target: Node, site: Node, detail: string) {
+    this.wrapperDependencies.push({ route, target, site, detail, kind: 'wrap' });
+  }
+
   private fetches: PendingFetch[] = [];
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, line: number, conditional: number) {
-    this.edges.push([from, to, line, conditional]);
+  render(from: string, to: string, line: number, conditional: number, layout?: true) {
+    this.edges.push(layout ? [from, to, line, conditional, layout] : [from, to, line, conditional]);
   }
 
   page(route: string, layouts: (string | undefined)[], chains: Wrapper[][]) {
@@ -109,7 +128,8 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config?: NextConfig, workspace?: WorkspaceBindings): QueryIndex {
+    const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
       wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
@@ -177,13 +197,24 @@ export class QueryIndexBuilder {
         const values = Node.isArrayLiteralExpression(matcher) ? matcher.getElements() : matcher ? [matcher] : [];
         index.routeFiles![relative] = ['middleware', '/', values.length && values.every(Node.isStringLiteral)
           ? values.map(value => value.getText()).join(', ') : undefined];
-      } else if (/^(?:src\/)?pages\/_(?:app|document)\.[jt]sx?$/.test(relative)) {
+      } else if (this.shells.has(relative)) {
         index.routeFiles![relative] = ['app-shell', '/'];
       }
     }
     for (const [node, targets] of aliases) {
       const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
       if (id !== undefined) byNode.set(node, id);
+    }
+    if (pages) for (const [node, name] of pages.lifecycleNames) {
+      const id = byNode.get(node) ?? add(node, name, 'function', null);
+      index.symbols[id - 1].kind = 'function';
+    }
+    for (const [file, body] of this.shells) {
+      const parent = body?.getParent();
+      if (!parent) continue;
+      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ?? parent;
+      const id = byNode.get(declaration);
+      if (id !== undefined) index.routeFiles![file][3] = id;
     }
     const hasValueBinding = (entry: ReturnType<SourceFile['getImportDeclarations']>[number]) => !entry.isTypeOnly() &&
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
@@ -223,7 +254,11 @@ export class QueryIndexBuilder {
 
     const owners = (node: Node): [legacy?: number, graph?: number] => {
       let graph: number | undefined;
-      for (const parent of node.getAncestors()) {
+      for (const parent of [node, ...node.getAncestors()]) {
+        const lifecycle = pages?.owners.get(parent);
+        const entry = lifecycle?.declaration && byNode.get(lifecycle.declaration);
+        if (entry !== undefined && entry !== null) return [entry, entry];
+        if (parent === node) continue;
         const id = byNode.get(parent);
         if (id === undefined || index.symbols[id - 1].kind === 'constant') continue;
         graph ??= id;
@@ -279,22 +314,65 @@ export class QueryIndexBuilder {
         id, url: route.path, file: route.file, kind: route.type, line: symbol && symbol.file === route.file ? symbol.line : site ? startLine(site) : 1,
         component, fileSymbol: byGraphId.get(`file:${route.file}`),
         layouts: page?.layouts.flatMap(layout => byGraphId.get(layout) ?? []), methods: route.methods,
-        handlers: Object.keys(handlers).length ? handlers : undefined
+        handlers: Object.keys(handlers).length ? handlers : undefined,
+        pages: route.pages, methodBasis: route.methodBasis, observedMethods: route.observedMethods
       });
       const chains = [...new Set(page?.chains.map(chain => {
-        const key = createHash('sha1').update(JSON.stringify(chain)).digest('hex').slice(0, 12);
-        index.wrapChains[key] = chain;
+        const annotations: [number, string][] = [];
+        const shared = route.pages ? chain.map((wrapper, position) => {
+          const { site, evidence, ...location } = wrapper;
+          if (!site || !evidence) return wrapper;
+          annotations.push([position, evidence]);
+          return location;
+        }) : chain;
+        const key = createHash('sha1').update(JSON.stringify(shared)).digest('hex').slice(0, 12);
+        index.wrapChains[key] = shared;
+        if (annotations.length) ((index.pagesWrapSites ??= {})[id] ??= {})[key] = annotations;
         return key;
       }))];
       if (chains.length) index.routeWrap[id] = chains[0];
       if (chains.length > 1) index.branches![id] = chains;
     }
-    for (const [from, to, line, conditional] of this.edges) {
+    if (pages && config) {
+      const routeEntries = new Map(index.routes.map(route => [route.id, route]));
+      const routeStart = (id: number | undefined) => id === undefined ? undefined : routeEntries.get(id)?.fileSymbol;
+      const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
+        const id = routeIds.get(route);
+        return id === undefined ? [] : [[id, [...reasons]]];
+      }));
+      index.pagesUrlConfig = config.url;
+      index.pagesWorkspaceInputs = workspace?.snapshot();
+      index.pagesIssues = issues(pages.issues);
+      index.pagesWrapperIssues = issues(this.wrapperProblems);
+      index.pagesApiIssues = issues(pages.apiIssues);
+      index.pagesOwnerIssues = {};
+      for (const [node, reasons] of pages.ownerIssues) {
+        const id = byNode.get(node) ?? owners(node)[1] ?? byGraphId.get(`file:${relativePath(node.getSourceFile())}`);
+        if (id !== undefined) index.pagesOwnerIssues[id] = [...new Set([...index.pagesOwnerIssues[id] ?? [], ...reasons])];
+      }
+      index.pagesEdges = [];
+      const seen = new Set<string>();
+      for (const edge of [...pages.dependencies, ...this.wrapperDependencies]) {
+        const file = relativePath(edge.site.getSourceFile());
+        const route = edge.destination ? routeIds.get(edge.destination) : undefined;
+        const from = edge.route ? routeStart(routeIds.get(edge.route)) : edge.owner ? byNode.get(edge.owner) :
+          owners(edge.site)[1] ?? byGraphId.get(`file:${file}`);
+        const to = edge.target ? byNode.get(edge.target) : undefined;
+        if (from === undefined || to === undefined && route === undefined) continue;
+        const row = { from, to, route, kind: edge.kind, file, line: startLine(edge.site), detail: edge.detail, possible: edge.possible };
+        const key = JSON.stringify(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        index.pagesEdges.push(row);
+      }
+    }
+    for (const [from, to, line, conditional, layout] of this.edges) {
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
-      if (source !== undefined && target !== undefined) index.renderEdges.push([source, target, line, conditional]);
+      if (source !== undefined && target !== undefined) index.renderEdges.push(layout ? [source, target, line, conditional, layout] : [source, target, line, conditional]);
     }
     for (const { node, route, ...entry } of this.fetches) {
+      if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
       const [owner, graphOwner] = owners(node);
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
         fn: owner ? index.symbols[owner - 1].name : null });
@@ -438,6 +516,11 @@ export class QueryIndexBuilder {
         const imported = packageBindings.get(root.getText());
         const declaration = imported || !found ? root.getSymbol()?.getDeclarations()[0] : undefined;
         if (imported && declaration === imported.binding) {
+          if (pages && workspace?.has(imported.module)) {
+            const reasons = (index.pagesOwnerIssues![owner] ??= []);
+            const reason = `workspace import ${imported.module} outside indexed root`;
+            if (!reasons.includes(reason)) reasons.push(reason);
+          }
           const name = [imported.name, ...members].slice(0, 2).join('.');
           const calls = externalCalls.get(owner) ?? new Map();
           const key = imported.module + '\0' + name;
@@ -460,6 +543,12 @@ export class QueryIndexBuilder {
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
+          if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
+            const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
+            sites.push([relative, startLine(node), expression.getText()]);
+            const reasons = (index.pagesOwnerIssues![owner] ??= []);
+            if (!reasons.includes('lifecycle calls on locals/params unresolved')) reasons.push('lifecycle calls on locals/params unresolved');
+          }
         }
       };
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
@@ -535,6 +624,7 @@ export class QueryIndexBuilder {
         } else if (Node.isExportSpecifier(node)) {
           record(node, declarationsOf(node.getAliasNode() ?? node.getNameNode()), 're-export');
         } else if (Node.isCallExpression(node) || Node.isNewExpression(node) || Node.isTaggedTemplateExpression(node)) {
+          if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return;
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
           const [owner, graphOwner] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
