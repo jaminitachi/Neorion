@@ -453,6 +453,7 @@ export class ComponentAnalyzer {
     // Discover component-valued bindings before assigning JSX to its owning body.
     const renderTargets = new Map<Node, ComponentNode[]>();
     const renderChoices = new Map<Node, Map<string, RenderCertainty>>();
+    const unresolvedLookups = new Set<Node>();
     const callbackBodies = new Set<ts.Node>();
     for (const file of files) {
       // Keep RENDER_KINDS in sync with the render sites handled here and in the file scan below.
@@ -477,7 +478,9 @@ export class ComponentAnalyzer {
           if (!previous) resolved.push(component);
           if (!previous || preferRenderBinding(choice, previous)) choices.set(component.id, choice);
         };
-        for (const { target, ...choice } of renderBindings(bindings, projectFiles)) {
+        const traced = renderBindings(bindings, projectFiles);
+        if (traced.unresolvedLookup) unresolvedLookups.add(tag);
+        for (const { target, ...choice } of traced.targets) {
           let binding: Node = target;
           while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
                  Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
@@ -513,6 +516,7 @@ export class ComponentAnalyzer {
       [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath, uncertainLookups);
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
+      if (!suppliedComponent && unresolvedLookups.has(tag)) index?.unresolvedRenderLookup(from, tag);
       if (!targets.length && Node.isPropertyAccessExpression(tag)) {
         targets.push(...declarationsOf(rootBinding(tag)).flatMap(node => resolveComponent(node) ?? []));
       }

@@ -1262,6 +1262,7 @@ test('component choices trace array elements, helper returns and fallback branch
     function LogIcon() { return <span/>; }
   `;
   const navItems = `[{ href: '/dashboard', icon: HomeIcon }, { href: '/workout-log', icon: LogIcon }]`;
+  fs.writeFileSync(path.join(root, 'app/react.d.ts'), 'declare namespace React { type ComponentType = () => any; }');
   const navChoices = [
     ['find-alias', 'const item = NAV.find(n => n.href === k)!; const Icon = item.icon; return <Icon/>;'],
     ['find-optional', 'const Icon = NAV.find(n => n.href === k)?.icon; return Icon ? <Icon/> : null;', true],
@@ -1274,21 +1275,49 @@ test('component choices trace array elements, helper returns and fallback branch
     ['array-at', 'const Icon = NAV.at(0)!.icon; return <Icon/>;'],
     ['slice-chain', 'return <nav>{NAV.slice(0).toSorted().toReversed().sort().reverse().map(({ icon: Icon }) => <Icon/>)}</nav>;'],
     ['flat-map', 'return <nav>{NAV.flatMap(item => item).map(item => <item.icon/>)}</nav>;'],
+    ['grouped-flat-map', 'return <nav>{GROUPS.flatMap(group => group.items).map(item => <item.icon/>)}</nav>;'],
+    ['grouped-flat-find', 'const Icon = GROUPS.flatMap(group => group.items).find(n => n.href === k)?.icon; return Icon ? <Icon/> : null;', true],
+    ['transformed-map', 'return <nav>{NAV.map(item => ({ ...item, active: true })).map(item => <item.icon/>)}</nav>;'],
+    ['named-mapper', 'const select = ({ icon }) => ({ Icon: icon }); return <nav>{NAV.map(select).map(({ Icon }) => <Icon/>)}</nav>;'],
+    ['array-from', 'return <nav>{Array.from(NAV).map(item => <item.icon/>)}</nav>;'],
+    ['reduce-jsx', 'return <nav>{NAV.reduce((acc, item) => [...acc, <item.icon/>], [])}</nav>;'],
+    ['state-destructure', 'const [items] = useNavState(NAV); return <nav>{items.map(item => <item.icon/>)}</nav>;'],
+    ['state-index', 'return <nav>{useNavState(NAV)[0].map(item => <item.icon/>)}</nav>;'],
+    ['typed-find', 'const Icon = NAV.find(n => n.href === k)!.icon; return <Icon/>;'],
+    ['typed-filter', 'return <nav>{NAV.filter(n => n.href === k).map(item => <item.icon/>)}</nav>;'],
     ['concat-map', 'return <nav>{NAV.slice(0, 1).concat({ href: "/more", icon: ExtraIcon }).map(item => <item.icon/>)}</nav>;']
   ];
   for (const [route, render, , tuple] of navChoices) {
     page(route, nav + `
       ${route === 'concat-map' ? 'function ExtraIcon() { return <span/>; }' : ''}
-      const NAV = ${navItems}${tuple ? ' as const' : ''};
+      ${route.startsWith('state-') ? "import { useState as useNavState } from 'react';" : ''}
+      type Item = { href: string; icon: React.ComponentType };
+      const NAV${route.startsWith('typed-') ? ': Item[]' : ''} = ${navItems}${tuple ? ' as const' : ''};
+      ${route.startsWith('grouped-') ? 'const GROUPS = [{ items: [{ href: "/dashboard", icon: HomeIcon }] }, { items: [{ href: "/workout-log", icon: LogIcon }] }];' : ''}
       export default function Page({ k }: { k: string }) { ${render} }
     `);
   }
+  page('typed-map', nav + `
+    type Item = { href: string; icon: React.ComponentType };
+    const NAV: Item[] = ${navItems};
+    export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
+  `);
+  page('typed-index', nav + `
+    interface Item { href: string; icon: React.ComponentType }
+    const NAV: Item[] = ${navItems};
+    export default function Page() { const Icon = NAV[0].icon; return <Icon/>; }
+  `);
+  page('map-override', nav + `
+    const NAV = [{ icon: HomeIcon }];
+    export default function Page() { return <nav>{NAV.map(item => ({ ...item, icon: LogIcon })).map(item => <item.icon/>)}</nav>; }
+  `);
   page('tuple-destructure', nav + `
     const NAV = ${navItems} as const;
     export default function Page() { const [, second] = NAV; return <second.icon/>; }
   `);
   page('property-fallback', nav + `
-    const NAV = ${navItems} as const;
+    function UnusedIcon() { return <span/>; }
+    const NAV = [{ icon: HomeIcon, badge: UnusedIcon }, { icon: LogIcon, badge: UnusedIcon }] as const;
     declare function opaque<T>(value: T): T;
     export default function Page() { const Icon = opaque(NAV)[0].icon; return <Icon/>; }
   `);
@@ -1320,6 +1349,12 @@ test('component choices trace array elements, helper returns and fallback branch
     const index = 1;
     export default function Page() { const Step = STEPS[index]; return <Step/>; }
   `);
+  for (const [route, index] of [['tuple-at-first', '0'], ['tuple-at-last', '-1'], ['tuple-at-outside', '-3']]) {
+    page(route, steps + `
+      const STEPS = [StepA, StepB] as const;
+      export default function Page() { const Step = STEPS.at(${index})!; return <Step/>; }
+    `);
+  }
   const icons = `
     function IconA() { return <span/>; }
     function IconB() { return <span/>; }
@@ -1361,7 +1396,7 @@ test('component choices trace array elements, helper returns and fallback branch
     assert.match(output, new RegExp(`^/${route}\\s.*${condition}\\[possible\\]`, 'm'));
     assert.match(output, /^# partial: component lookup key untraced/m);
   };
-  for (const route of ['nav-member', 'nav-alias', 'nav-destructure']) {
+  for (const route of ['nav-member', 'nav-alias', 'nav-destructure', 'typed-map']) {
     for (const component of ['HomeIcon', 'LogIcon']) await t.test(`${route} certainly renders ${component}`, () => {
       const output = renders(route, component);
       assert.match(output, new RegExp(`^/${route}\\s[^\\n]*depth 1$`, 'm'));
@@ -1375,19 +1410,32 @@ test('component choices trace array elements, helper returns and fallback branch
       }
     });
   }
+  await t.test('fixed typed array indexing traces the selected property through the receiver', () => {
+    assert.doesNotMatch(renders('typed-index', 'LogIcon'), /^\/typed-index\s/m);
+    const output = renders('typed-index', 'HomeIcon');
+    assert.match(output, /^\/typed-index\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('map traces an overwritten property through its callback return', () => {
+    assert.doesNotMatch(renders('map-override', 'HomeIcon'), /^\/map-override\s/m);
+    possible('map-override', 'LogIcon');
+  });
   await t.test('fixed tuple destructuring skips holes and resolves the selected element', () => {
     assert.doesNotMatch(renders('tuple-destructure', 'HomeIcon'), /^\/tuple-destructure\s/m);
     const output = renders('tuple-destructure', 'LogIcon');
     assert.match(output, /^\/tuple-destructure\s[^\n]*depth 1$/m);
     assert.match(output, /^# complete:/m);
   });
-  await t.test('unresolved receiver falls back to the checker property declaration', () => {
-    possible('property-fallback', 'HomeIcon');
-    assert.doesNotMatch(renders('property-fallback', 'LogIcon'), /^\/property-fallback\s/m);
+  await t.test('unresolved receiver falls back to the same property on sibling elements', () => {
+    for (const component of ['HomeIcon', 'LogIcon']) possible('property-fallback', component);
+    assert.doesNotMatch(renders('property-fallback', 'UnusedIcon'), /^\/property-fallback\s/m);
   });
   await t.test('impact picks the unconditional path through a shared component', () => {
     const output = query('impact', 'app/signal.ts#signal');
     assert.match(output, /^page \/certain-impact\s[^\n]*d4 via Shared > Middle$/m);
+    assert.match(output, /^d2 render app\/impact-components\.tsx:\d+ Shared < Leaf \[cond\]$/m);
+    assert.match(output, /^d3 render app\/impact-components\.tsx:\d+ Shared < Middle$/m);
+    assert.match(output, /^d4 render app\/certain-impact\/page\.tsx:\d+ Page < Shared$/m);
     assert.match(output, /^# complete:/m);
   });
   for (const route of ['tuple-step', 'list-step', 'helper-choice', 'object-values', 'object-entries', 'entry-alias']) {
@@ -1406,6 +1454,19 @@ test('component choices trace array elements, helper returns and fallback branch
     assert.match(output, /^\/fixed-step\s[^\n]*depth 1$/m);
     assert.match(output, /^# complete:/m);
   });
+  await t.test('tuple at resolves exact positive and negative positions and omits out-of-range values', () => {
+    for (const [route, selected, other] of [['tuple-at-first', 'StepA', 'StepB'], ['tuple-at-last', 'StepB', 'StepA']]) {
+      const output = renders(route, selected);
+      assert.match(output, new RegExp(`^/${route}\\s[^\\n]*depth 1$`, 'm'));
+      assert.match(output, /^# complete:/m);
+      assert.doesNotMatch(renders(route, other), new RegExp(`^/${route}\\s`, 'm'));
+    }
+    for (const component of ['StepA', 'StepB']) {
+      const output = renders('tuple-at-outside', component);
+      assert.doesNotMatch(output, /^\/tuple-at-outside\s/m);
+      assert.match(output, /^# complete:/m);
+    }
+  });
   for (const component of ['IconA', 'IconB']) await t.test(`the ternary conditionally renders ${component}`, () => {
     const output = renders('ternary-choice', component);
     assert.match(output, /^\/ternary-choice\s.*\[cond\]$/m);
@@ -1420,6 +1481,25 @@ test('component choices trace array elements, helper returns and fallback branch
       assert.match(output, new RegExp(`^/${route}\\s.*\\[cond\\]$`, 'm'));
       assert.match(output, /^# complete:/m);
     });
+  }
+});
+
+test('an unresolved typed render lookup reports partial coverage without inventing a route', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/unused.tsx'), 'export function UnusedIcon() { return <span/>; }');
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    type Item = { icon: () => any };
+    declare function loadNav(): Item[];
+    const NAV = loadNav();
+    export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
+  `);
+  build();
+  for (const [tool, target] of [
+    ['who_renders', 'ui/unused.tsx#UnusedIcon'], ['impact', 'ui/unused.tsx#UnusedIcon'], ['callees', 'app/page.tsx#Page']
+  ]) {
+    const output = query(tool, target);
+    assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
+    assert.doesNotMatch(output, /^(?:page )?\/\s/m);
   }
 });
 

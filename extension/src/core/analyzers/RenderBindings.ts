@@ -1,7 +1,8 @@
-import { Node, SourceFile, SyntaxKind, type ParameterDeclaration } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind, type CallExpression, type ParameterDeclaration, type PropertyAssignment } from 'ts-morph';
 import { conditionalAt, declarationsOf, wrappedExpression } from './ArchitectureFacts';
 import { isFunction, packageMember, returnedValues } from './CallableFlow';
 import { constValue } from './PropFlow';
+import { functionNode, valueNode } from './StaticBindings';
 
 type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
   import('ts-morph').ArrowFunction;
@@ -9,7 +10,8 @@ type Target = RenderFunction | import('ts-morph').ClassDeclaration;
 const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
 export type RenderCertainty = { possible: boolean; conditional: boolean };
-type Step = RenderCertainty & { members: Member[]; returns: boolean };
+type ArrayBinding = { parameter: ParameterDeclaration; receiver: Node; outer?: ArrayBinding };
+type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding };
 
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
   if (candidate.possible !== existing.possible) return !candidate.possible;
@@ -36,14 +38,27 @@ function lookupKey(node: Node | undefined, remaining = 8): string | undefined {
 }
 
 const elementMethods = new Set(['find', 'findLast', 'at']);
-const arrayMethods = new Set(['filter', 'slice', 'toSorted', 'toReversed', 'sort', 'reverse', 'concat', 'flatMap']);
+const arrayMethods = new Set(['filter', 'slice', 'toSorted', 'toReversed', 'sort', 'reverse', 'concat']);
+const transformMethods = new Set(['map', 'flatMap']);
+const isReducer = (method: string) => method === 'reduce' || method === 'reduceRight';
 
-function identityCallback(node: Node | undefined) {
-  while (node && wrappedExpression(node)) node = wrappedExpression(node);
-  if (!Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return false;
-  const [parameter] = node.getParameters();
-  const values = returnedValues(node);
-  return !!parameter && values.length === 1 && Node.isIdentifier(values[0]) && declarationsOf(values[0]).includes(parameter);
+function builtin(node: Node, name: string) {
+  return Node.isIdentifier(node) && node.compilerNode.text === name &&
+    declarationsOf(node).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+}
+
+function stateCall(node: Node | undefined): node is CallExpression {
+  return Node.isCallExpression(node) && packageMember(node.getExpression(), 'react') === 'useState';
+}
+
+function destructuredState(node: Node | undefined) {
+  if (!Node.isBindingElement(node)) return;
+  const pattern = node.getParent();
+  const owner = pattern.getParent();
+  if (!Node.isArrayBindingPattern(pattern) || !Node.isVariableDeclaration(owner) ||
+      pattern.getElements()[0] !== node || node.getDotDotDotToken()) return;
+  const state = valueNode(owner.getInitializer());
+  if (stateCall(state)) return state;
 }
 
 function collectionCall(node: Node, remaining = 12) {
@@ -52,27 +67,44 @@ function collectionCall(node: Node, remaining = 12) {
   if (!Node.isPropertyAccessExpression(callee)) return;
   const method = callee.getName();
   const receiver = callee.getExpression();
-  if ((method === 'values' || method === 'entries') && Node.isIdentifier(receiver) &&
-      receiver.compilerNode.text === 'Object' && declarationsOf(receiver).some(declaration =>
-        declaration.getSourceFile().compilerNode.hasNoDefaultLib)) {
+  if ((method === 'values' || method === 'entries') && builtin(receiver, 'Object')) {
     return { kind: 'object' as const, method, receiver: node.getArguments()[0] };
   }
-  if ((arrayMethods.has(method) || elementMethods.has(method)) && isArrayExpression(receiver, remaining - 1) &&
-      (method !== 'flatMap' || identityCallback(node.getArguments()[0]))) {
+  if (method === 'from' && builtin(receiver, 'Array')) {
+    const [source, callback] = node.getArguments();
+    return callback ? { kind: 'transform' as const, method, receiver: source, callback } :
+      { kind: 'array' as const, method, receiver: source };
+  }
+  if ((arrayMethods.has(method) || elementMethods.has(method)) && isArrayExpression(receiver, remaining - 1)) {
     return { kind: elementMethods.has(method) ? 'element' as const : 'array' as const, method, receiver };
+  }
+  if (transformMethods.has(method) && isArrayExpression(receiver, remaining - 1)) {
+    return { kind: 'transform' as const, method, receiver, callback: node.getArguments()[0] };
   }
 }
 
 function isArrayExpression(node: Node, remaining = 12): boolean {
   const type = node.getType();
   if (type.isArray() || type.isTuple()) return true;
+  if (!remaining) return false;
   const collection = collectionCall(node, remaining);
-  return !!collection && collection.kind !== 'element';
+  if (collection && collection.kind !== 'element') return true;
+  const value = valueNode(node);
+  if (value && value !== node) return isArrayExpression(value, remaining - 1);
+  let state: CallExpression | undefined;
+  if (Node.isIdentifier(value)) {
+    state = declarationsOf(value).map(destructuredState).find(Boolean);
+  } else if (Node.isElementAccessExpression(value) && lookupKey(value.getArgumentExpression()) === '0') {
+    const receiver = valueNode(value.getExpression());
+    if (stateCall(receiver)) state = receiver;
+  }
+  const initial = state?.getArguments()[0];
+  return !!initial && isArrayExpression(initial, remaining - 1);
 }
 
-function mappedArray(parameter: ParameterDeclaration): Node | undefined {
+function callbackArray(parameter: ParameterDeclaration) {
   const fn = parameter.getParent();
-  if ((!Node.isArrowFunction(fn) && !Node.isFunctionExpression(fn)) || fn.getParameters()[0] !== parameter) return;
+  if (!Node.isArrowFunction(fn) && !Node.isFunctionExpression(fn)) return;
   let callback: Node = fn;
   for (let parent = callback.getParent(); parent && wrappedExpression(parent) === callback; parent = callback.getParent()) {
     callback = parent;
@@ -80,20 +112,48 @@ function mappedArray(parameter: ParameterDeclaration): Node | undefined {
   const call = callback.getParent();
   if (!Node.isCallExpression(call) || call.getArguments()[0] !== callback) return;
   const callee = call.getExpression();
-  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'map') return;
+  if (!Node.isPropertyAccessExpression(callee)) return;
+  const method = callee.getName();
+  const reduce = isReducer(method);
+  if ((!transformMethods.has(method) && !reduce) || fn.getParameters()[Number(reduce)] !== parameter) return;
   const receiver = callee.getExpression();
-  if (isArrayExpression(receiver)) return receiver;
+  if (isArrayExpression(receiver)) return { receiver, possible: method !== 'map' };
+}
+
+function tupleAt(receiver: Node, argument: Node | undefined): string | undefined {
+  const type = receiver.getType();
+  const key = lookupKey(argument);
+  if (!type.isTuple() || key === undefined || !/^-?(?:0|[1-9]\d*)$/.test(key)) return;
+  const index = Number(key);
+  if (index >= 0) return key;
+  const length = type.getProperty('length')?.getTypeAtLocation(receiver).getLiteralValue();
+  if (typeof length === 'number') return String(length + index);
+}
+
+function arrayContaining(property: PropertyAssignment) {
+  let object: Node = property.getParent();
+  for (let parent = object.getParent(); parent && wrappedExpression(parent) === object; parent = object.getParent()) {
+    object = parent;
+  }
+  const array = object.getParent();
+  return Node.isArrayLiteralExpression(array) ? { array, object } : undefined;
 }
 
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
-export function renderBindings(declarations: Node[], files: Set<SourceFile>): (RenderCertainty & { target: Target })[] {
+export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
   const seen = new Map<Node, { step: Step; resolved: boolean }[]>();
   const targets = new Map<Target, RenderCertainty>();
+  let unresolvedLookup = false;
   const resolve = (node: Node | undefined, step: Step, remaining: number): boolean => {
-    if (!node || remaining <= 0 || !files.has(node.getSourceFile())) return false;
-    const { members, returns, possible, conditional } = step;
+    if (!node || remaining <= 0) return false;
+    const { members, returns, possible, conditional, binding } = step;
+    if (!files.has(node.getSourceFile())) {
+      return !returns && !members.length && node.getSourceFile().isInNodeModules() &&
+        (Node.isVariableDeclaration(node) || Node.isClassDeclaration(node) || isFunction(node));
+    }
     const steps = seen.get(node) ?? [];
-    const prior = steps.find(({ step: previous }) => previous.returns === returns && previous.possible === possible &&
+    const prior = steps.find(({ step: previous }) => previous.binding === binding &&
+        previous.returns === returns && previous.possible === possible &&
         previous.conditional === conditional && previous.members.length === members.length &&
         previous.members.every((member, i) => member === members[i]));
     if (prior) return prior.resolved;
@@ -108,7 +168,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
     return (current.resolved ||= traced === true);
   };
   const trace = (node: Node, step: Step, next: (value: Node | undefined, change?: Partial<Step>) => boolean): boolean | void => {
-    const { members, returns, possible, conditional } = step;
+    const { members, returns, possible, conditional, binding } = step;
     if (isFunction(node) && returns) {
       const values = returnedValues(node);
       for (const value of values) {
@@ -125,7 +185,13 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
       return next(Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression());
     }
     if (Node.isParameterDeclaration(node)) {
-      return next(mappedArray(node), { members: [allArrayElements, ...members] });
+      for (let current = binding; current; current = current.outer) {
+        if (current.parameter === node) {
+          return next(current.receiver, { members: [allArrayElements, ...members], binding: current.outer });
+        }
+      }
+      const array = callbackArray(node);
+      return next(array?.receiver, { members: [allArrayElements, ...members], possible: possible || !!array?.possible });
     }
     if (Node.isBindingElement(node)) {
       const pattern = node.getParent();
@@ -139,7 +205,8 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
         const index = pattern.getElements().indexOf(node);
         if (node.getDotDotDotToken()) return next(owner, { members: [null, ...members.slice(1)], possible: true });
         // Destructuring an ordinary array can pick up a value from a runtime element.
-        const tuple = !Node.isVariableDeclaration(owner) || owner.getInitializer()?.getType().isTuple();
+        const value = Node.isVariableDeclaration(owner) && owner.getInitializer();
+        const tuple = !value || value.getType().isTuple() || stateCall(valueNode(value));
         return next(owner, { members: [tuple ? String(index) : null, ...members] });
       }
     }
@@ -188,7 +255,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
       }
       return;
     }
-    if (Node.isPropertyAssignment(node)) return next(node.getInitializer());
+    if (Node.isPropertyAssignment(node) || Node.isPropertyDeclaration(node)) return next(node.getInitializer());
     if (Node.isShorthandPropertyAssignment(node)) {
       node.getValueSymbol()?.getDeclarations().forEach(target => next(target));
       return;
@@ -197,7 +264,8 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
       const expression = node.getExpression();
       const collection = collectionCall(node);
       if (collection?.kind === 'element') {
-        return next(collection.receiver, { members: [null, ...members], possible: true });
+        const key = collection.method === 'at' ? tupleAt(collection.receiver, node.getArguments()[0]) : undefined;
+        return next(collection.receiver, { members: [key ?? null, ...members], possible: possible || key === undefined });
       }
       if (collection && members.length) {
         const [, ...rest] = members;
@@ -211,6 +279,25 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
           }
           return;
         }
+        if (collection.kind === 'transform') {
+          const callback = functionNode(collection.callback);
+          if (!callback || !files.has(callback.getSourceFile())) return;
+          const [parameter] = callback.getParameters();
+          const arrayBinding = parameter && collection.receiver ? { parameter, receiver: collection.receiver, outer: binding } : binding;
+          const values = returnedValues(callback);
+          for (const value of values) {
+            const choice = { possible: true, conditional: conditional || values.length > 1 || !!conditionalAt(value, callback),
+              binding: arrayBinding };
+            const type = collection.method === 'flatMap' ? value.getType() : undefined;
+            const array = type && isArrayExpression(value);
+            if (array || type?.isAny() || type?.isUnknown() ||
+                type?.getUnionTypes().some(member => member.isArray() || member.isTuple())) {
+              next(value, { ...choice, members: [allArrayElements, ...rest] });
+            }
+            if (!array) next(value, { ...choice, members: rest });
+          }
+          return;
+        }
         next(collection.receiver, { members: [null, ...rest], possible: true });
         if (collection.method === 'concat') for (const argument of node.getArguments()) {
           const value = Node.isSpreadElement(argument) ? argument.getExpression() : argument;
@@ -220,6 +307,13 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
         return;
       }
       const hook = packageMember(expression, 'react');
+      if (hook === 'useState' && members.length) {
+        const [key, ...rest] = members;
+        if (key !== '0' && key !== null && key !== allArrayElements) return true;
+        const initial = node.getArguments()[0];
+        const initialize = functionNode(initial);
+        return next(initialize ?? initial, { members: rest, possible: true, returns: !!initialize });
+      }
       if (hook === 'useCallback' || hook === 'useMemo') {
         return next(node.getArguments()[0], { returns: hook === 'useMemo' });
       }
@@ -247,13 +341,28 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
       const declarations = declarationsOf(node);
-      if (Node.isPropertyAccessExpression(node) && (!declarations.length ||
+      const typeMember = declarations.some(target => Node.isPropertySignature(target) || Node.isPropertyDeclaration(target));
+      if (Node.isPropertyAccessExpression(node) && (!declarations.length || typeMember ||
           declarations.some(target => Node.isPropertyAssignment(target) || Node.isShorthandPropertyAssignment(target)))) {
         // Resolve literal properties against the object so access through a
         // dynamic outer lookup retains that lookup's uncertainty.
         const guarded = conditional || node.hasQuestionDotToken();
-        if (next(node.getExpression(), { members: [node.getName(), ...members], conditional: guarded })) return;
-        declarations.forEach(target => next(target, { possible: true, conditional: guarded }));
+        const key = node.getName();
+        if (next(node.getExpression(), { members: [key, ...members], conditional: guarded })) return;
+        let resolved = false;
+        for (const target of declarations) {
+          resolved = next(target, { possible: true, conditional: guarded }) || resolved;
+          const siblings = Node.isPropertyAssignment(target) && arrayContaining(target);
+          if (!siblings) continue;
+          for (const element of siblings.array.getElements()) {
+            if (element === siblings.object) continue;
+            const spread = Node.isSpreadElement(element);
+            const lookup: Member[] = spread ? [allArrayElements, key, ...members] : [key, ...members];
+            resolved = next(spread ? element.getExpression() : element,
+              { members: lookup, possible: true, conditional: guarded }) || resolved;
+          }
+        }
+        unresolvedLookup ||= typeMember && !resolved;
         return;
       }
       declarations.forEach(target => next(target));
@@ -263,5 +372,5 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>): (R
   };
   const initial = { members: [], returns: false, possible: false, conditional: false };
   declarations.forEach(node => resolve(node, initial, 40));
-  return [...targets].map(([target, certainty]) => ({ target, ...certainty }));
+  return { targets: [...targets].map(([target, certainty]) => ({ target, ...certainty })), unresolvedLookup };
 }

@@ -94,6 +94,7 @@ export class QueryIndexBuilder {
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
+  private renderLookupIssues = new Map<string, Node>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
   private propRequests: { file: string; node: Node; method?: string; gates: PropGate[] }[] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
@@ -134,6 +135,10 @@ export class QueryIndexBuilder {
       pair.push(edge);
       this.renderPairs.set(key, pair);
     }
+  }
+
+  unresolvedRenderLookup(owner: string, tag: Node) {
+    if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, tag);
   }
 
   pageRenderCondition(route: string, tag: Node, decision: PageRenderCondition) {
@@ -674,6 +679,12 @@ export class QueryIndexBuilder {
         if (seen.has(key)) continue;
         seen.add(key);
         index.pagesEdges.push(row);
+      }
+    }
+    for (const [owner, tag] of this.renderLookupIssues) {
+      const id = byGraphId.get(owner);
+      if (id !== undefined) {
+        (index.renderLookupIssues ??= {})[id] = `${RENDER_LOOKUP_ISSUE} (${relativePath(tag.getSourceFile())}:${startLine(tag)})`;
       }
     }
     for (const [from, to, line, conditional, layout, possible, detail, site, file] of this.edges) {

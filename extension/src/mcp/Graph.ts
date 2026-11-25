@@ -626,7 +626,7 @@ export class DependencyGraph {
   private walkImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, route?: Route, initialGates: FlowGate[] = []) {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const renderSites = new Set<string>();
-    const visited = new Map<NodeId, Visit>();
+    const visited = new Map<NodeId, Visit[]>();
     type State = { id: NodeId; gates: FlowGate[]; visit: Visit };
     const levels: State[][] = [];
     const states = new Map<string, number[]>();
@@ -664,7 +664,10 @@ export class DependencyGraph {
       for (const { id, gates, visit: current } of levels[level]) {
         if (expired()) break;
         if (coversVisit(states.get(stateKey(id, gates)), certaintyFlags(current), level, true)) continue;
-        if (!visited.has(id)) visited.set(id, current);
+        const visits = visited.get(id);
+        if (!visits || terminalCertainty(current) < terminalCertainty(visits[visits.length - 1])) {
+          append(visited, id, current);
+        }
         if (current.edge?.label !== 'middleware') pagesIssue ??= this.coverageIssue(id);
         if (gates.some(gate => gate.partial)) flowIssue ??= propValueIssue;
         const endpoints = this.terminals(id).filter(terminal =>
@@ -864,18 +867,22 @@ export class DependencyGraph {
     const unknownMiddleware = trace.terminals.some(({ terminal }) => terminal.kind === 'middleware' && !terminal.matchedRoutes);
     const groups = new Map<string, { id: NodeId; visit: Visit; edge: Edge }[]>();
     const files = new Set<string>();
-    const localCallers = [...trace.visited.values()].filter(visit => visit.edge?.local && visit.depth <= depth);
+    const localCallers = [...trace.visited.values()].map(([visit]) => visit).filter(visit => visit.edge?.local && visit.depth <= depth);
     const summarizeLocals = trace.visited.size > hubSize && localCallers.length >= 3;
     let symbols = 0;
     let used = trace.terminals.reduce((max, { visit }) => Math.max(max, visit.depth), 0);
-    for (const [id, visit] of trace.visited) {
-      if (!visit.edge) continue;
-      used = Math.max(used, visit.depth);
-      if (visit.depth > depth) continue;
-      if (typeof id === 'number' && this.symbols.has(id)) symbols++;
-      files.add(this.file(id));
-      if (!trace.hidden.has(id) && !(summarizeLocals && visit.edge.local)) {
-        append(groups, JSON.stringify([visit.depth, visit.edge.label, visit.edge.file]), { id, visit, edge: visit.edge });
+    for (const [id, visits] of trace.visited) {
+      const [first] = visits;
+      if (first.edge && first.depth <= depth) {
+        if (typeof id === 'number' && this.symbols.has(id)) symbols++;
+        files.add(this.file(id));
+      }
+      for (const visit of visits) {
+        const edge = visit.edge;
+        if (!edge) continue;
+        used = Math.max(used, visit.depth);
+        if (visit.depth > depth && visits.length === 1 || trace.hidden.has(id) || summarizeLocals && edge.local) continue;
+        append(groups, JSON.stringify([visit.depth, edge.label, edge.file, certaintyFlags(visit)]), { id, visit, edge });
       }
     }
     rows.push(...trace.hubs);
@@ -889,7 +896,7 @@ export class DependencyGraph {
       const label = names.length === 1 && names[0] === 'module' && edge.label !== 'dyn' ? 'module' : edge.label;
       const flags = (items.some(item => item.visit.conditional) ? ' [cond]' : '') +
         (items.some(item => this.action(item.id)) ? ' [action]' : '') +
-        (items.some(item => item.edge.partial) ? edge.label === 'render' ? ' [possible]' : ' [partial url]' : '') +
+        (items.some(item => item.visit.possible) ? ' [possible]' : items.some(item => item.edge.partial) ? ' [partial url]' : '') +
         (isTestFile(edge.file) ? ' [test]' : '');
       const chain = seeds.length === 1 && items.every(item => item.edge.to === seeds[0]) ? '' : ` < ${via.join(', ')}`;
       rows.push(graphRow(`d${visit.depth} ${label} ${edge.file}:${lines.slice(0, 5).join(',')}` +
@@ -941,13 +948,15 @@ export class DependencyGraph {
     notes.push(graphRow(`# risk: ${quantity(routeCount, 'route')} (${quantity(pageIds.size, 'page')}, ${quantity(apiFiles.size, 'API')}` +
       `${other ? `, ${quantity(other, 'meta or special file')}` : ''}), ${quantity(actions.length, 'server action')}, ` +
       `${quantity(layouts, 'layout')}; ${quantity(symbols, 'symbol')} in ${quantity(files.size, 'file')}; max depth ${used}; ${quantity(trace.tests.size, 'test')}`));
+    const unresolvedLookup = !routeCount && seeds.some(id => typeof id === 'number' && this.symbols.get(id)?.kind === 'component') &&
+      Object.entries(this.index.renderLookupIssues ?? {}).find(([id]) => includeTests || !isTestFile(this.file(Number(id))))?.[1];
     return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
       (used > depth ? ` (limit ${depth} + renders/events)` : '') +
       (trace.hubs.length ? ', hub collapsed' : ''),
-      partial: [...middlewareReasons, trace.partial, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
+      partial: [...middlewareReasons, trace.partial ?? unresolvedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
         .filter(Boolean).join('; ') || undefined,
       scope: 'indexed call, event, render, action, use, dyn, fetch edges' +
-        ([...trace.visited.values()].some(visit => visit.edge?.label === 'trpc') ? ', including tRPC' : '') };
+        ([...trace.visited.values()].some(visits => visits.some(visit => visit.edge?.label === 'trpc')) ? ', including tRPC' : '') };
   }
 
   changeRoutes(origins: ChangeOrigin[], maxDepth: number, expired: () => boolean, ignoreTypeStops = false) {
@@ -1116,7 +1125,7 @@ export class DependencyGraph {
 
   private coverageIssue(id: NodeId, includeRoute = false) {
     const route = this.pagesByFileId.get(id);
-    return (typeof id === 'number' ? this.index.pagesOwnerIssues?.[id]?.[0] : undefined) ??
+    return (typeof id === 'number' ? this.index.renderLookupIssues?.[id] ?? this.index.pagesOwnerIssues?.[id]?.[0] : undefined) ??
       (route ? this.index.pagesWrapperIssues?.[route.id]?.[0] ??
         (includeRoute ? this.index.pagesIssues?.[route.id]?.[0] ?? this.index.pagesApiIssues?.[route.id]?.[0] : undefined) : undefined);
   }
