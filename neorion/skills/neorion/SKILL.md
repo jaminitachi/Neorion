@@ -19,3 +19,5 @@ The last line describes the scope of the result.
 - `# partial: <reason>`: the result may miss items. Fix the reason if you can (qualify an ambiguous target, raise `--limit`), then check the source for what the index cannot see, such as dynamic imports or computed URLs.
 
 Without the MCP tool, run the matching CLI query in the shell. Use `neorion query <kind> <target>` for single-target queries, `neorion query path <from> <to>` to trace a path, or `neorion query changes` to inspect the Git diff.
+
+With Claude Code 2.1.295 or later, `neorion setup claude` adds a project Grep and Glob hook that suggests the `neorion_query` MCP tool for likely component, route, or symbol names in indexed Next.js projects. Use `--no-hook` with older versions or to disable the advisory. In Cursor, `neorion setup cursor` adds the project MCP server and installs a project rule if the VS Code extension has not already installed an active Neorion rule. Run the corresponding setup command with `--remove` to undo its changes.

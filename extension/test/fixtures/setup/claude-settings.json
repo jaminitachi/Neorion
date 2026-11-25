@@ -1,0 +1,12 @@
+{
+  "permissions": { "allow": ["Read"] },
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "Grep|Glob", "hooks": [{ "type": "command", "command": "user-search-hook" }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "user-shell-hook" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "Grep", "hooks": [{ "type": "command", "command": "user-post-hook" }] }
+    ]
+  }
+}

@@ -4,9 +4,10 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { parse } = require('jsonc-parser');
 const { openMcp } = require('./mcp-helpers.cjs');
 const { mcpCommand } = require('./mcp-command.cjs');
-const { indexFile } = require('./workspace-cache.cjs');
+const { cachePath, indexFile } = require('./workspace-cache.cjs');
 
 const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
@@ -576,6 +577,336 @@ test('Claude setup registers at user scope once, installs the skill and reverses
   assert.ok(!fs.existsSync(path.dirname(skill)));
 });
 
+const setupFixture = file => path.join(__dirname, 'fixtures/setup', file);
+const neorionHooks = settings => (settings.hooks?.PreToolUse ?? []).flatMap(group => group.hooks)
+  .filter(hook => hook.args?.includes('neorion-query-advisory'));
+
+test('Claude setup merges the advisory and removes only its own hook', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const file = path.join(root, '.claude/settings.json');
+  const source = setupFixture('claude-settings.json');
+  const original = readJson(source);
+  fs.mkdirSync(path.dirname(file));
+  fs.copyFileSync(source, file);
+  const installed = run(['setup', 'claude'], env);
+  assert.equal(installed.status, 0, installed.stderr);
+  const settings = readJson(file);
+  const groups = settings.hooks.PreToolUse;
+  assert.deepEqual(groups.slice(0, -1), original.hooks.PreToolUse);
+  assert.deepEqual(settings.permissions, original.permissions);
+  assert.deepEqual(settings.hooks.PostToolUse, original.hooks.PostToolUse);
+  assert.equal(groups.at(-1).matcher, 'Grep|Glob');
+  assert.equal(neorionHooks(settings).length, 1);
+  const contents = fs.readFileSync(file, 'utf8');
+  const repeated = run(['setup', 'claude'], env);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.equal(fs.readFileSync(file, 'utf8'), contents);
+
+  // Preserve another handler added to the same matcher after setup.
+  const shared = { type: 'command', command: 'another-search-hook' };
+  groups.at(-1).hooks.push(shared);
+  fs.writeFileSync(file, JSON.stringify(settings, null, 2));
+  original.hooks.PreToolUse.push({ matcher: 'Grep|Glob', hooks: [shared] });
+  for (let i = 0; i < 2; i++) {
+    const removed = run(['setup', 'claude', '--remove'], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.deepEqual(readJson(file), original);
+  }
+});
+
+test('Claude --no-hook leaves project settings alone or disables an installed advisory', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const file = path.join(root, '.claude/settings.json');
+  const optOut = () => {
+    const result = run(['setup', 'claude', '--no-hook'], env);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  optOut();
+  assert.ok(!fs.existsSync(file));
+  assertQueryHint(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8'));
+  fs.mkdirSync(path.dirname(file));
+  fs.copyFileSync(setupFixture('claude-settings.json'), file);
+  const original = fs.readFileSync(file, 'utf8');
+  optOut();
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  assert.equal(run(['setup', 'claude', '--no-hint'], env).status, 0);
+  assert.equal(neorionHooks(readJson(file)).length, 1);
+  optOut();
+  assert.deepEqual(readJson(file), JSON.parse(original));
+});
+
+test('Claude setup continues with skill and MCP changes when project settings are unsafe or invalid', async t => {
+  for (const variant of ['settings symlink', 'directory symlink', 'invalid event']) {
+    await t.test(variant, t => {
+      const { home, root, run } = fixture(t);
+      const { config } = fakeAgent(home, 'claude');
+      const env = { PATH: home };
+      const directory = path.join(root, '.claude');
+      const file = path.join(directory, 'settings.json');
+      const skill = path.join(home, '.claude/skills/neorion/SKILL.md');
+      const hint = path.join(root, 'CLAUDE.md');
+      const original = variant === 'invalid event' ? '{"hooks":{"PreToolUse":{}}}' : '{}';
+      let target = file;
+      if (variant === 'directory symlink') {
+        const shared = path.join(home, 'shared');
+        target = path.join(shared, 'settings.json');
+        fs.mkdirSync(shared);
+        fs.symlinkSync(shared, directory, 'junction');
+      } else {
+        fs.mkdirSync(directory);
+        if (variant === 'settings symlink') {
+          target = path.join(home, 'shared-settings.json');
+          try {
+            fs.symlinkSync(target, file, 'file');
+          } catch (error) {
+            if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+            return t.skip('Creating file symlinks requires Windows Developer Mode or administrator access');
+          }
+        }
+      }
+      fs.writeFileSync(target, original);
+
+      const installed = run(['setup', 'claude'], env);
+      assert.equal(installed.status, 0, installed.stderr);
+      assert.match(installed.stderr, /Skipping Neorion Claude hook: (Claude settings path is a symbolic link|Invalid Claude hook configuration)/);
+      assert.ok(fs.existsSync(hint));
+      assert.ok(fs.existsSync(skill));
+      assert.ok(readJson(config).mcpServers.neorion);
+      const removed = run(['setup', 'claude', '--remove'], env);
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.equal(removed.stderr, '');
+      assert.ok(!fs.existsSync(hint));
+      assert.ok(!fs.existsSync(skill));
+      assert.equal(readJson(config).mcpServers.neorion, undefined);
+
+      const optedOut = run(['setup', 'claude', '--no-hook'], env);
+      assert.equal(optedOut.status, 0, optedOut.stderr);
+      assert.equal(optedOut.stderr, '');
+      assert.ok(fs.existsSync(skill));
+      assert.ok(readJson(config).mcpServers.neorion);
+      assert.equal(fs.readFileSync(target, 'utf8'), original);
+      assert.equal(fs.realpathSync(file), fs.realpathSync(target));
+    });
+  }
+});
+
+test('Claude installs the hook only in projects and skips the user settings directory', t => {
+  const { home, root, env, run } = fixture(t);
+  const { config } = fakeAgent(home, 'claude');
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  const result = run(['setup', 'claude'], { PATH: home });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Skipping CLAUDE\.md hint/);
+  assert.ok(!fs.existsSync(path.join(root, '.claude')));
+  assert.ok(readJson(config).mcpServers.neorion);
+  const atHome = () => spawnSync(process.execPath, [entry, 'setup', 'claude', '--no-hint'], {
+    cwd: home, env: { ...env, PATH: home }, encoding: 'utf8'
+  });
+  for (const project of [false, true]) {
+    if (project) fs.writeFileSync(path.join(home, 'package.json'), '{}');
+    const installed = atHome();
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.ok(!fs.existsSync(path.join(home, '.claude/settings.json')));
+  }
+});
+
+test('Claude cleans up created settings and prunes empty containers in legacy settings', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const file = path.join(root, '.claude/settings.json');
+  const setup = (...args) => {
+    const result = run(['setup', 'claude', '--no-hint', ...args], env);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
+  };
+  setup();
+  setup('--remove');
+  assert.ok(!fs.existsSync(file));
+
+  setup();
+  const settings = readJson(file);
+  neorionHooks(settings)[0].args.pop();
+  fs.writeFileSync(file, '\uFEFF{\r\n  // Keep project settings\r\n  "hooks": ' +
+    JSON.stringify(settings.hooks) + ',\r\n  "permissions": {},\r\n}\r\n');
+  setup('--no-hook');
+  const preserved = fs.readFileSync(file, 'utf8');
+  assert.match(preserved, /^\uFEFF/);
+  assert.match(preserved, /\/\/ Keep project settings/);
+  assert.doesNotMatch(preserved.replaceAll('\r\n', ''), /\n/);
+  assert.deepEqual(parse(preserved.slice(1), [], { allowTrailingComma: true }), { permissions: {} });
+
+  fs.writeFileSync(file, '{}\n');
+  setup();
+  setup('--remove');
+  assert.deepEqual(readJson(file), {});
+});
+
+test('Installed Claude hook suggests queries and exits silently when out of scope', t => {
+  const { home, root, env, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const setup = run(['setup', 'claude'], { PATH: home });
+  assert.equal(setup.status, 0, setup.stderr);
+  const [hook] = neorionHooks(readJson(path.join(root, '.claude/settings.json')));
+  assert.equal(hook.command, 'node');
+  assert.equal(hook.onFailure, 'continue');
+  const payload = (tool_name, pattern, searchPath, session = 'fixture-session') => JSON.stringify({
+    session_id: session, cwd: root, hook_event_name: 'PreToolUse',
+    tool_name, tool_input: { pattern, path: searchPath }, tool_use_id: 'fixture-tool'
+  });
+  const invoke = input => {
+    const result = spawnSync(process.execPath, hook.args, { cwd: home, env, input, encoding: 'utf8', timeout: 2000 });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    assert.equal(result.stderr, '');
+    return result.stdout;
+  };
+  const manifest = path.join(root, 'package.json');
+  const component = payload('Grep', '\\bDashboardShell\\b');
+  fs.writeFileSync(manifest, '{"dependencies":{"next":"^15.0.0"}}');
+  assert.equal(invoke(component), '');
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  const componentGlob = '**/*DashboardShell*.{tsx,ts}';
+  for (const [input, kind, target] of [
+    [component, 'who_renders', 'DashboardShell'],
+    [payload('Glob', componentGlob, 'app', '../another/session'), 'who_renders', 'DashboardShell'],
+    [payload('Glob', '**/app/settings/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
+    [payload('Grep', '/api/users'), 'api_consumers', '/api/users'],
+    [payload('Grep', 'signOut'), 'search', 'signOut']
+  ]) {
+    const output = invoke(input);
+    assert.equal(output.trimEnd().split('\n').length, 1);
+    assert.deepEqual(JSON.parse(output), { hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      additionalContext: `Neorion index available. Try the \x60neorion_query\x60 tool (kind \x60${kind}\x60, target \x60${target}\x60).`
+    } });
+  }
+  for (const input of ['{', ' '.repeat(17_000), component, payload('Glob', componentGlob, 'app'),
+    payload('Bash', 'DashboardShell'), payload('Glob', '**/*.{tsx,ts}'),
+    ...['Dashboard.*|Shell', 'Error', 'Promise', 'React', 'Props', '^export', '^import', 'useState', 'useCurrentUser']
+      .map(pattern => payload('Grep', pattern))
+  ]) {
+    assert.equal(invoke(input), '');
+  }
+  fs.writeFileSync(manifest, '{"dependencies":{"react":"^19.0.0"}}');
+  assert.equal(invoke(payload('Grep', 'DashboardShell', undefined, 'non-next-project')), '');
+});
+
+test('Cursor setup merges MCP and shares the Claude hint, with idempotent project removal', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const config = path.join(root, '.cursor/mcp.json');
+  const rule = path.join(root, '.cursor/rules/neorion-query.mdc');
+  const otherRule = path.join(root, '.cursor/rules/other.mdc');
+  fs.mkdirSync(path.dirname(rule), { recursive: true });
+  fs.copyFileSync(setupFixture('cursor-mcp.json'), config);
+  fs.writeFileSync(otherRule, '# Existing rule\n');
+  const original = fs.readFileSync(config, 'utf8');
+  assert.equal(run(['setup', 'claude', '--no-hook'], env).status, 0);
+  const added = run(['setup', 'cursor'], env);
+  assert.equal(added.status, 0, added.stderr);
+  assert.deepEqual(readJson(config), {
+    mcpServers: { ...JSON.parse(original).mcpServers, neorion: {
+      ...mcpCommand({ localEntry: entry, root: '${workspaceFolder}' }), type: 'stdio'
+    } }
+  });
+  const hint = fs.readFileSync(rule, 'utf8');
+  assert.match(hint, /^---\ndescription: .+\nalwaysApply: true\n---\n/);
+  assertQueryHint(hint);
+  const claude = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+  const guidance = text => text.split('<!-- neorion:start -->\n')[1].split('<!-- neorion:state ')[0];
+  assert.equal(guidance(hint), guidance(claude));
+  const merged = fs.readFileSync(config, 'utf8');
+  const repeated = run(['setup', 'cursor'], env);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.equal(repeated.stdout, '');
+  assert.equal(fs.readFileSync(config, 'utf8'), merged);
+  assert.equal(fs.readFileSync(rule, 'utf8'), hint);
+  for (let i = 0; i < 2; i++) {
+    const removed = run(['setup', 'cursor', '--remove'], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    assert.ok(!fs.existsSync(rule));
+    assert.equal(fs.readFileSync(otherRule, 'utf8'), '# Existing rule\n');
+  }
+  assert.ok(!fs.existsSync(path.join(home, '.cursor')));
+  const help = run(['--help']).stdout;
+  assert.match(help, /setup claude .*--no-hook/);
+  assert.match(help, /Claude Code 2\.1\.295\+/);
+  assert.match(help, /setup cursor \[--remove\]/);
+});
+
+test('Cursor preserves compact JSONC and a pre-existing extension rule through setup and removal', t => {
+  const { root, run } = fixture(t);
+  const config = path.join(root, '.cursor/mcp.json');
+  const extensionRule = path.join(root, '.cursor/rules/neorion.mdc');
+  const setupRule = path.join(root, '.cursor/rules/neorion-query.mdc');
+  fs.mkdirSync(path.dirname(extensionRule), { recursive: true });
+  const original = '\uFEFF{\r\n  // Keep this server\r\n  "mcpServers": { "other": {"command":"keep"}, },\r\n}\r\n';
+  fs.writeFileSync(config, original);
+  const setup = (...args) => {
+    const result = run(['setup', 'cursor', ...args]);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const extension = '---\nalwaysApply: true\n---\n<!-- neorion:start -->\nExtension guidance\n<!-- neorion:end -->\n';
+  fs.writeFileSync(extensionRule, extension);
+  setup();
+  assert.ok(!fs.existsSync(setupRule));
+  const merged = fs.readFileSync(config, 'utf8');
+  assert.match(merged, /"mcpServers": \{ "other": \{"command":"keep"\}, "neorion": \{[^\r\n]+\}, \},\r\n/);
+  assert.match(merged, /\/\/ Keep this server/);
+  assert.equal(parse(merged.slice(1), [], { allowTrailingComma: true }).mcpServers.neorion.type, 'stdio');
+  assert.equal(setup(), '');
+  setup('--remove');
+  assert.equal(fs.readFileSync(config, 'utf8'), original);
+  assert.equal(fs.readFileSync(extensionRule, 'utf8'), extension);
+
+  // A project with both older rules loses only the CLI's marked block.
+  fs.unlinkSync(extensionRule);
+  setup();
+  assert.ok(fs.existsSync(setupRule));
+  fs.appendFileSync(setupRule, 'Keep this rule text.\n');
+  fs.writeFileSync(extensionRule, extension);
+  setup();
+  assert.equal(fs.readFileSync(setupRule, 'utf8'), 'Keep this rule text.\n');
+  assert.equal(fs.readFileSync(extensionRule, 'utf8'), extension);
+});
+
+test('Cursor upgrades an owned implicit stdio entry and leaves a matching user entry intact', t => {
+  const { root, cache, run } = fixture(t);
+  const config = path.join(root, '.cursor/mcp.json');
+  const state = path.join(cache, 'neorion', path.basename(cachePath(root)), '.neorion/cursor-setup-state.json');
+  const implicit = mcpCommand({ localEntry: entry, root: '${workspaceFolder}' });
+  const insertion = ', "neorion": ' + JSON.stringify(implicit);
+  const prefix = '{"mcpServers":{"other":{"command":"keep"}';
+  const original = prefix + '}}\n';
+  const withServer = prefix + insertion + '}}\n';
+  fs.mkdirSync(path.dirname(config), { recursive: true });
+  fs.mkdirSync(path.dirname(state), { recursive: true });
+  fs.writeFileSync(config, withServer);
+  fs.writeFileSync(state, JSON.stringify({
+    configs: { Cursor: { createdFile: false, insertion, entry: implicit, hadGroup: true, hadNeorion: false } }
+  }));
+  const setup = (...args) => {
+    const result = run(['setup', 'cursor', ...args]);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  setup();
+  assert.deepEqual(readJson(config).mcpServers.neorion, { ...implicit, type: 'stdio' });
+  setup('--remove');
+  assert.equal(fs.readFileSync(config, 'utf8'), original);
+  fs.writeFileSync(config, withServer);
+  setup();
+  setup('--remove');
+  assert.equal(fs.readFileSync(config, 'utf8'), withServer);
+});
+
 test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked legacy registration', async t => {
   const legacySkill = path.join(__dirname, 'fixtures/neorion-0.5.2-skill.md');
   for (const mode of ['upgrade', 'direct removal', 'preserve customized server']) {
@@ -924,7 +1255,7 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
 
 test('subcommand help succeeds and invalid graph flags include usage', t => {
   const { run } = fixture(t);
-  for (const args of [[], ['graph'], ['query'], ['mcp'], ['setup'], ['setup', 'codex'], ['setup', 'claude']]) {
+  for (const args of [[], ['graph'], ['query'], ['mcp'], ['setup'], ['setup', 'codex'], ['setup', 'claude'], ['setup', 'cursor']]) {
     for (const flag of ['-h', '--help']) {
       const result = run([...args, flag], { PATH: '' });
       assert.equal(result.status, 0, result.stderr);
