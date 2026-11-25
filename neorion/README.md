@@ -73,9 +73,10 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
-`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
-`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+From your project root, run the CLI directly from the clone. A package with `next` in `dependencies`
+or `devDependencies` and an `app`, `pages`, `src/app`, or `src/pages` directory takes priority over
+standalone configs. When a Next.js app is found, Neorion skips project roots inside `cypress`, `e2e`,
+`playwright`, `scripts`, and `tests`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
 `vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 

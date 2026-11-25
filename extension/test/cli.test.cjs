@@ -183,6 +183,41 @@ test('CLI discovers configless Next.js projects and diagnoses missing projects',
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json']);
 });
 
+test('CLI prefers a configless JavaScript Next.js root over a Cypress tsconfig', t => {
+  const { root, run } = fixture(t);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(root, 'app/page.jsx'));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"js-app","dependencies":{"next":"15.0.0"}}');
+  fs.mkdirSync(path.join(root, 'cypress'));
+  fs.writeFileSync(path.join(root, 'cypress/tsconfig.json'), '{"include":["*.ts"]}');
+  fs.writeFileSync(path.join(root, 'cypress/home.cy.ts'), 'export const home = () => cy.visit("/");');
+
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /js-app · app router · 2 source files/);
+  const query = run(['query', 'who_renders', 'DashboardShell']);
+  assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /^\/  app\/page\.jsx:2/m);
+});
+
+test('CLI uses a TypeScript Next.js root with src/app and a nested e2e tsconfig', t => {
+  const { root, run } = fixture(t);
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.renameSync(path.join(root, 'app'), path.join(root, 'src/app'));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"ts-app","dependencies":{"next":"15.0.0"}}');
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+  fs.mkdirSync(path.join(root, 'e2e'));
+  fs.writeFileSync(path.join(root, 'e2e/tsconfig.json'), '{"include":["*.ts"]}');
+  fs.writeFileSync(path.join(root, 'e2e/home.spec.ts'), 'export const home = () => "/";');
+
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /ts-app · app router · 1 source files/);
+  const query = run(['query', 'who_renders', 'DashboardShell']);
+  assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /^\/  src\/app\/page\.tsx:2/m);
+});
+
 test('CLI and MCP prefer a configured Next.js app to a workspace root with hoisted Next.js', async t => {
   const { root, env, run } = fixture(t);
   const web = path.join(root, 'apps/web');
@@ -192,6 +227,9 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   fs.writeFileSync(path.join(root, 'package.json'), '{"devDependencies":{"next":"15.0.0"},"workspaces":["apps/*","packages/*"]}');
   fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
   fs.writeFileSync(path.join(root, 'packages/ui/a.js'), 'export const Shared = 1;');
+  fs.mkdirSync(path.join(root, 'playwright/app'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'playwright/tsconfig.json'), '{}');
+  fs.writeFileSync(path.join(root, 'playwright/app/fixture.ts'), 'export const fixture = true;');
 
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
@@ -201,6 +239,26 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   assert.match(result, /^Project: web$/m);
   assert.match(result, /^\/  app\/page\.tsx:2/m);
   assert.equal(run(['query', 'who_renders', 'DashboardShell']).stdout.trimEnd(), result);
+});
+
+test('CLI finds a Next.js app alongside a standalone config and a Next.js tooling fixture', t => {
+  const { root, run } = fixture(t);
+  const web = path.join(root, 'apps/web');
+  const tooling = path.join(root, 'scripts/fixture');
+  fs.mkdirSync(path.join(web, 'src/pages'), { recursive: true });
+  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(web, 'src/pages/index.jsx'));
+  fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web","dependencies":{"next":"15.0.0"}}');
+  fs.mkdirSync(path.join(tooling, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(tooling, 'app/page.tsx'), 'export default function Page() { return <main />; }');
+  fs.writeFileSync(path.join(tooling, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
+  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(tooling, 'tsconfig.json'));
+  fs.mkdirSync(path.join(root, 'config'));
+  fs.writeFileSync(path.join(root, 'config/tsconfig.json'), '{}');
+  fs.writeFileSync(path.join(root, 'config/build.ts'), 'export const build = true;');
+
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, /web · pages router · 1 source files/);
 });
 
 for (const withConfig of [true, false]) {

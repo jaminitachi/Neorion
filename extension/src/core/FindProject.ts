@@ -4,7 +4,13 @@ import { join, resolve } from 'node:path';
 
 export const ignoredProjectDirectories = ['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage', 'public'] as const;
 const excluded = new Set<string>(ignoredProjectDirectories);
+const toolingDirectories = new Set(['cypress', 'e2e', 'playwright', 'scripts', 'tests']);
 const maxDepth = 4;
+
+interface Candidate {
+  directory: string;
+  inTooling: boolean;
+}
 
 export function projectConfig(directory: string): string | undefined {
   return ['tsconfig.json', 'jsconfig.json'].map(name => join(directory, name))
@@ -23,29 +29,45 @@ function hasNextDependency(directory: string): boolean {
   }
 }
 
+function hasRouterDirectory(directory: string): boolean {
+  return ['app', 'pages', 'src/app', 'src/pages'].some(name =>
+    statSync(join(directory, name), { throwIfNoEntry: false })?.isDirectory());
+}
+
 export function findProject(root: string): string | undefined {
-  const start = resolve(root);
-  let fallback: string | undefined;
-  let level = [start];
+  let firstConfig: Candidate | undefined;
+  let firstNextPackage: string | undefined;
+  let routedConfig: string | undefined;
+  let nextApp: string | undefined;
+  let level: Candidate[] = [{ directory: resolve(root), inTooling: false }];
   for (let depth = 0; level.length && depth <= maxDepth; depth++) {
-    const next: string[] = [];
-    for (const directory of level) {
+    const next: Candidate[] = [];
+    for (const candidate of level) {
+      const { directory, inTooling } = candidate;
       try {
-        if (projectConfig(directory)) return directory;
-        if (!fallback && hasNextDependency(directory)) fallback = directory;
+        const config = projectConfig(directory);
+        if (config) firstConfig ??= candidate;
+        const hasNext = hasNextDependency(directory);
+        if (hasNext) firstNextPackage ??= directory;
+        if (!inTooling && (config || hasNext) && hasRouterDirectory(directory)) {
+          if (config && hasNext) return directory;
+          if (config) routedConfig ??= directory;
+          if (hasNext) nextApp ??= directory;
+        }
         if (depth === maxDepth || directory === homedir()) continue;
         for (const entry of readdirSync(directory, { withFileTypes: true })) {
           if (entry.isDirectory() && !entry.name.startsWith('.') && !excluded.has(entry.name)) {
-            next.push(join(directory, entry.name));
+            next.push({ directory: join(directory, entry.name), inTooling: inTooling || toolingDirectories.has(entry.name) });
           }
         }
       } catch (error) {
         if (!['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
       }
     }
-    level = next.sort((a, b) => a.localeCompare(b));
+    level = next.sort((a, b) => a.directory.localeCompare(b.directory));
   }
-  return fallback;
+  // A configured app can rely on a Next.js dependency hoisted to the workspace.
+  return nextApp ?? (firstConfig?.inTooling ? routedConfig : undefined) ?? firstConfig?.directory ?? firstNextPackage;
 }
 
 export function missingProject(root: string) {
