@@ -23,8 +23,10 @@ neorion query wrappers /
 them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
 in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
-Use `neorion query api_consumers signOut` to find a server action’s caller files
-and lines. Use `path#Name` to qualify an action name shared by multiple files.
+`api_consumers` lists caller files and lines for API routes, server actions, and
+tRPC procedures. Pass a route URL, `signOut`, or a dotted procedure path such as
+`post.create`. Use `path#Name` to disambiguate a name. tRPC routers must be in the
+indexed project. Routers from other workspace packages may be unresolved.
 
 ## Codex
 

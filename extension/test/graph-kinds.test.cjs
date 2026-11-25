@@ -163,6 +163,22 @@ test('graph callbacks give the same results with and without their kind filters'
       return html\`<span>Preview</span>\`;
     }
   `);
+  fs.writeFileSync(path.join(root, 'server/kind-walk-router.ts'), `
+    import { procedure, router } from './trpc';
+
+    function listKindWalkItems() { return []; }
+    export const kindWalkRouter = router({
+      items: router({ list: procedure.query(listKindWalkItems) }),
+    });
+    export type KindWalkRouter = typeof kindWalkRouter;
+  `);
+  fs.writeFileSync(path.join(root, 'hooks/use-kind-walk-items.ts'), `
+    import { createTRPCReact } from '@trpc/react-query';
+    import type { KindWalkRouter } from '../server/kind-walk-router';
+
+    const api = createTRPCReact<KindWalkRouter>();
+    export function useKindWalkItems() { return api.items.list.useQuery(); }
+  `);
   const project = new Project({ tsConfigFilePath: path.join(root, 'tsconfig.json') });
   const files = project.getSourceFiles().filter(file => !file.isDeclarationFile());
   const analyze = (files) => {
@@ -173,11 +189,20 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 7);
+  assert.equal(kindSets.size, 8);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
   assert.ok(filtered.edges.some(edge => edge.type === 'renders'));
+  const { symbols, references, trpcUses } = filtered.index;
+  const procedure = symbols.find(symbol => symbol.name === 'items.list' && symbol.kind === 'procedure');
+  const resolver = symbols.find(symbol => symbol.name === 'listKindWalkItems');
+  const hook = symbols.find(symbol => symbol.name === 'useKindWalkItems');
+  assert.ok(procedure && resolver && hook);
+  assert.ok(Object.values(trpcUses).flat().some(([target, line, operation, owner]) =>
+    target === procedure.id && line === hook.line && operation === 'useQuery' && owner === hook.id));
+  assert.ok(references.some(([target, , , kind, , owner]) =>
+    target === resolver.id && kind === 'call' && owner === procedure.id));
   for (const kinds of kindSets) {
     unfiltered = new Set([kinds]);
     assert.deepEqual(analyze(files), filtered, [...kinds].map(kind => SyntaxKind[kind]).join(', '));
@@ -225,7 +250,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
     /# partial: tRPC client proxy not traced \(server\/router\.ts:4\)/]) assert.match(impact, evidence);
-  assert.match(impact, /d1 module server\/router\.ts:4/);
+  assert.match(impact, /d1 call server\/router\.ts:4 create/);
   assert.doesNotMatch(impact, /api POST/);
   assert.match(query('search', 'prepareMutation'), /# neighbors: .*; tRPC client proxy not traced \(server\/router\.ts:4\)/);
   assert.match(query('impact', 'POST'), /# complete/);
@@ -323,6 +348,107 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   });
   assert.equal(await mcp.text('query', { kind: 'path', target: '/items', to: 'createItem' }), directly);
   assert.equal((await mcp.call('query', { kind: 'path', target: '/items' })).isError, true);
+});
+
+test('tRPC resolves router paths, client aliases and server callers while reporting cache-only sites', { timeout: 40_000 }, async t => {
+  const { root, env, query, build } = fixture(t);
+  build();
+  const target = 'server/trpc-routes.ts#invoices.total';
+  const consumers = query('api_consumers', 'invoices.total');
+  assert.match(consumers, /# ambiguous api_consumers invoices.total/);
+  assert.match(consumers, /server\/trpc-routes.ts:12#invoices.total tRPC procedure/);
+  assert.match(consumers, /server\/trpc-other.ts:6#invoices.total tRPC procedure/);
+  assert.match(query('search', 'invoices.list'), /procedure server\/trpc-routes.ts:14#invoices.list/);
+  assert.match(query('api_consumers', 'invoices.list'), /InvoicePanel \(useInfiniteQuery\)/);
+  assert.match(query('api_consumers', 'invoices.changed'), /InvoicePanel \(useSubscription\)/);
+
+  const create = query('api_consumers', 'invoices.create');
+  assert.match(create, /2 caller sites/);
+  assert.match(create, /InvoicePanel \(useMutation\)/);
+  assert.match(create, /writeThroughFactory \(createCaller\)/);
+  assert.match(create, /# complete: indexed tRPC callers/);
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assert.equal(await mcp.text('query', { kind: 'api_consumers', target: 'invoices.create' }), create);
+  assert.match(query('callees', 'invoices.create'), /d1 call :13  storeInvoice/);
+  assert.match(query('callees', 'history.create'), /d1 call :13  storeInvoice/);
+  assert.match(query('path', '/trpc-check', 'storeInvoice'), /2 trpc .*invoices.create/);
+  assert.match(query('who_renders', 'invoices.create'), /page \/trpc-check/);
+  const upstream = query('impact', 'calculateTotal');
+  assert.match(upstream, /invoices.total/);
+  assert.match(upstream, /page \/trpc-check/);
+  assert.match(upstream, /page \/trpc-cache/);
+  assert.doesNotMatch(upstream, /useDynamic|unrelated/);
+  assert.match(query('callees', 'useDynamic'), /# partial: tRPC procedure target unresolved/);
+  assert.match(query('path', 'useDynamic', 'calculateTotal'), /# partial: tRPC procedure target unresolved/);
+
+  const dynamic = query('api_consumers', 'server/trpc-other.ts#invoices.total');
+  assert.match(dynamic, /0 caller sites/);
+  assert.match(dynamic, /# partial: tRPC procedure target unresolved/);
+  const total = query('api_consumers', target);
+  assert.match(total, /6 caller sites, 2 cache-only/);
+  assert.match(total, /readThroughRouter \(createCaller\)/);
+  assert.match(total, /readThroughTransport \(query\)/);
+  assert.match(total, /InvoicePanel \(useQuery\)/);
+  assert.match(total, /InvoicePanel \(useSuspenseQuery\)/);
+  for (const operation of ['invalidate', 'prefetch']) {
+    assert.ok(total.split('\n').some(line => line.startsWith('cache-only app/trpc-cache/page.tsx:') && line.endsWith(`(${operation})`)));
+  }
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(ensureData\)$/m);
+  assert.match(query('api_consumers', target, '--limit', '1'), /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
+  assert.doesNotMatch(total, /unrelated/);
+  assert.match(query('path', '/trpc-cache', target), /1 trpc .*invoices\.total .*\(fetch\)/);
+  assert.match(query('path', '/trpc-cache', 'history.total'), /no directed path/);
+});
+
+test('tRPC traces batch hooks, TanStack options and hydration through merged and inline routers', { timeout: 40_000 }, t => {
+  const { query, build } = fixture(t);
+  build();
+  const count = query('api_consumers', 'feed.count');
+  assert.match(count, /2 caller sites, 2 cache-only/);
+  assert.match(count, /^call .*useClassicBatch \(useQueries\)$/m);
+  assert.match(count, /^call .*TrpcReviewPage \(count\)$/m);
+  assert.match(count, /^cache-only .*useReactQueryOptions \(queryKey\)$/m);
+  assert.match(count, /^cache-only .*useReactQueryOptions \(pathFilter\)$/m);
+  assert.match(count, /# complete: indexed tRPC callers/);
+  assert.doesNotMatch(count, /unrelatedBatch/);
+
+  const item = query('api_consumers', 'feed.nested.deep.item');
+  assert.match(item, /^call .*useClassicBatch \(useSuspenseQueries\)$/m);
+  assert.match(item, /^cache-only .*TrpcReviewPage \(prefetch\)$/m);
+  assert.match(item, /^cache-only .*useReactQueryOptions \(pathFilter\)$/m);
+  assert.match(query('path', '/trpc-review', 'countFeed'), /1 trpc .*feed\.count[^\n]*\n2 call .*countFeed/);
+
+  const stats = query('api_consumers', 'admin.stats');
+  assert.match(stats, /3 caller sites/);
+  assert.match(stats, /^call .*useClassicBatch \(useQueries\)$/m);
+  assert.match(stats, /^call .*useReactQueryOptions \(queryOptions\)$/m);
+  assert.match(stats, /^call .*useReactQueryOptions \(query\)$/m);
+  assert.match(stats, /# complete: indexed tRPC callers/);
+  assert.doesNotMatch(stats, /unrelatedBatch/);
+  assert.match(query('api_consumers', 'admin.update'), /^call .*useReactQueryOptions \(mutationOptions\)$/m);
+  assert.doesNotMatch(query('search', 'getRemoteCount'), /#getRemoteCount/);
+});
+
+test('tRPC reports skipped client forms and helper-built procedures as partial', { timeout: 40_000 }, t => {
+  const { query, build } = fixture(t);
+  build();
+  const batch = query('api_consumers', 'batch.item');
+  assert.match(batch, /0 caller sites/);
+  assert.match(batch, /# partial: tRPC procedure target unresolved \(components\/trpc\/review-partial\.ts:/);
+  assert.match(query('callees', 'useOpaqueBatch'), /# partial: tRPC procedure target unresolved/);
+
+  const options = query('api_consumers', 'options.item');
+  assert.match(options, /1 caller site/);
+  assert.match(options, /^call .*useMixedOptions \(useQuery\)$/m);
+  assert.match(options, /# partial: tRPC procedure target unresolved \(components\/trpc\/review-partial\.ts:/);
+  assert.match(query('callees', 'useDynamicKey'), /# partial: tRPC procedure target unresolved/);
+
+  assert.match(query('api_consumers', 'helper.direct'), /# partial: tRPC procedure target unresolved \(server\/trpc-review\.ts:/);
+  assert.match(query('callees', 'useHelper'), /# partial: tRPC procedure target unresolved/);
+  assert.doesNotMatch(query('search', 'helper.built'), /#helper\.built/);
 });
 
 function gitFixture(t) {
