@@ -307,15 +307,27 @@ test('project selection follows the precedence rule for all PR #19 review probes
       },
     },
     ...[false, true].map(declared => ({
-      name: declared ? 'declared workspace discovers its app ahead of a base config' : 'workspace-config-with-child-next-and-ui',
+      name: declared ? 'configured workspace keeps its root ahead of a declared app' : 'workspace-config-with-child-next-and-ui',
       build(f) {
         f.pkg('.', 'workspace', declared ? { workspaces: ['apps/*'] } : {});
-        f.library('.', 'bootstrap.ts');
-        f.app('apps/web', 'web');
+        f.library('.', 'bootstrap.ts', 'RootMarker');
+        f.app('apps/web', 'web', { marker: 'WebMarker' });
         f.library('packages/ui');
       },
-      requests: [{ expected: declared ? 'apps/web' : '.' }],
+      requests: [{ expected: '.', query: ['RootMarker', /bootstrap\.ts:1/] },
+        { from: 'apps/web', expected: 'apps/web', query: ['WebMarker', /app\/page\.tsx:1/] }],
     })),
+    {
+      name: 'workspace with a shared base config discovers its declared app',
+      build(f) {
+        f.pkg('.', 'workspace', { workspaces: ['apps/*'] });
+        f.put('.', 'tsconfig.base.json', { compilerOptions: { jsx: 'preserve' } });
+        f.app('apps/web', 'web', { marker: 'WebMarker' });
+        f.put('apps/web', 'tsconfig.json', { extends: '../../tsconfig.base.json', include: ['app/**/*'] });
+        f.library('packages/ui');
+      },
+      requests: [{ expected: 'apps/web', query: ['WebMarker', /app\/page\.tsx:1/] }],
+    },
     {
       name: 'workspace-shared-config-ui-first',
       build(f) {
@@ -425,12 +437,39 @@ test('project selection follows the precedence rule for all PR #19 review probes
       },
       requests: [{ expected: '.', query: ['LibraryMarker', /packages\/core\/src\/index\.[jt]s:1/] }],
     })),
-    {
-      name: 'a configured workspace prefers a routed app to a separately configured example',
+    ...[
+      ['test', ['.', 'test', 'website'], 'app/page'],
+      ['test', ['test', 'website', 'packages/*'], 'pages/index'],
+      ['playground', ['.', 'playground'], 'pages/index'],
+      ['docs', ['docs', 'examples/*', 'packages/*'], 'app/page'],
+    ].map(([directory, patterns, route]) => ({
+      name: `configured library workspace keeps its root ahead of ${directory}/${route}`,
       build(f) {
-        f.pkg('.', 'workspace', { dependencies: f.next, workspaces: ['examples/*', 'apps/*'] });
+        f.pkg('.', 'library', directory === 'docs' ? { workspaces: patterns } : {});
+        if (directory !== 'docs') f.pnpm('.', patterns);
+        f.library('.', 'src/index.ts', 'LibraryMarker');
+        f.app(directory, 'next-fixture', { route, marker: 'FixtureMarker' });
+      },
+      requests: [{ expected: '.', query: ['LibraryMarker', /src\/index\.ts:1/] },
+        { from: directory, expected: directory, query: ['FixtureMarker', /(?:app\/page|pages\/index)\.tsx:1/] }],
+    })),
+    ...['test', 'playground', 'playgrounds'].map(directory => ({
+      name: `configless library workspace prefers the configured library to ${directory}`,
+      build(f) {
+        f.pkg('.', 'workspace', { workspaces: ['packages/*', `${directory}/*`] });
+        f.pkg('packages/react', 'library-react');
+        f.library('packages/react', 'src/index.ts', 'LibraryMarker');
+        f.app(`${directory}/react`, 'next-fixture');
+      },
+      requests: [{ expected: 'packages/react', query: ['LibraryMarker', /src\/index\.ts:1/] }],
+    })),
+    {
+      name: 'a configured workspace that shares Next.js prefers a routed app to tooling',
+      build(f) {
+        const tooling = ['example', 'examples', 'demo', 'demos', 'samples', 'integrations'];
+        f.pkg('.', 'workspace', { dependencies: f.next, workspaces: ['apps/*', ...tooling.map(dir => `${dir}/*`)] });
         f.library('.', 'bootstrap.ts');
-        f.app('examples/next-app', 'next-example');
+        for (const dir of tooling) f.app(`${dir}/next-app`, 'next-fixture');
         f.app('apps/web', 'web', { ownNext: false, marker: 'WebMarker' });
       },
       requests: [{ expected: 'apps/web', query: ['WebMarker', /app\/page\.tsx:1/] }],
@@ -613,7 +652,6 @@ test('project selection follows the precedence rule for all PR #19 review probes
         f.pkg('.', 'checkout', { dependencies: f.next });
         f.pkg('workspace', 'workspace', { workspaces: ['apps/**'] });
         f.pnpm('workspace', patterns);
-        f.library('workspace', 'bootstrap.ts');
         f.app('workspace/apps/web', 'web', { ownNext, route: 'src/app/page', marker: 'WebMarker' });
         markedExample(f, 'workspace/apps/web');
         if (!ownNext) f.app('workspace/apps/ignored', 'ignored');

@@ -167,18 +167,19 @@ npm --prefix extension run build:cli
 From your project root, run the CLI directly from the clone. Neorion keeps the requested directory
 when it has routes and either declares `next` or inherits `next` from an ancestor `package.json` in
 the same Git checkout. Discovery looks for `page`, `layout`, `route`, and supported metadata files
-under `app` or `src/app`, and page or API files under `pages` or `src/pages`. A workspace root
-searches for routed members in the same Git checkout before falling back to its own config or
-`next` dependency. Members need a valid `package.json` and must match the patterns in
+under `app` or `src/app`, and page or API files under `pages` or `src/pages`. A requested directory
+with a `tsconfig.json` or `jsconfig.json` of its own also stays selected when it does not declare
+`next`. Otherwise, a workspace root searches for routed members in the same Git checkout.
+Members need a valid `package.json` and must match the patterns in
 `pnpm-workspace.yaml` or `package.json#workspaces`. Exclusions apply regardless of pattern order.
 Without a workspace declaration, a root that declares `next` searches for routed descendants,
-including apps without a manifest. A standalone root with its own config and no `next` declaration
-stays selected.
+including apps without a manifest. A root that declares `next` stays selected if the search finds
+no routed app.
 
-Discovery treats `cypress`, `e2e`, `integrations`, `playwright`, `scripts`, `tests`, `example`,
-`examples`, `demo`, `demos`, and `samples` as fallback locations among Next.js projects. The generic
-fallback can discover projects in nested Git checkouts. Without Next.js candidates, the first
-config in breadth-first order wins.
+Discovery treats `cypress`, `e2e`, `integrations`, `playwright`, `scripts`, `test`, `tests`,
+`example`, `examples`, `demo`, `demos`, `samples`, `playground`, and `playgrounds` as fallback
+locations among Next.js projects. The generic fallback can discover projects in nested Git
+checkouts. Without Next.js candidates, the first config in breadth-first order wins.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package, Neorion uses
 `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`, `vendor`,
