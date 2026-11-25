@@ -987,6 +987,11 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.match(query('who_renders', 'IconMark'), /\/primary.*prop Badge via RenderPanel/);
   assert.match(query('who_renders', 'UntracedLeaf'), /# partial: JSX prop render untraced/);
   assert.match(query('who_renders', 'Busy'), /\/primary.*prop fallback via React Suspense.*\[cond\]/);
+  for (const component of ['TooltipContent', 'DayOverride', 'TriggerButton', 'QuotedContent', 'Panel']) {
+    assert.match(query('who_renders', component), /^\/fallback\s/m);
+  }
+  assert.doesNotMatch(query('who_renders', 'UnusedContent'), /^\/fallback\s/m);
+  assert.match(query('impact', 'runFallback'), /^page \/fallback\s/m);
 
   const requests = query('api_consumers', '/api/items/[id]');
   assert.match(requests, /update PATCH fetch via prop endpoint/);
@@ -1001,9 +1006,31 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   const unknownUrl = query('path', '/opaque', '/api/items/[id]');
   assert.match(unknownUrl, /fetch .*\[partial url\]/);
   assert.match(unknownUrl, /^# partial: prop value untraced at a render site$/m);
+  const directBinding = query('path', '/nonjsx', '/api/flags/[id]');
+  assert.match(directBinding, /fetch .*via prop endpoint at app\/nonjsx\/page\.tsx:/);
+  assert.match(directBinding, /^# complete:/m);
+  const opaqueBinding = query('path', '/nonjsx-opaque', '/api/flags/[id]');
+  assert.match(opaqueBinding, /no directed path/);
+  assert.match(opaqueBinding, /^# partial: request URL from JSX prop untraced$/m);
+  assert.match(query('path', '/nonjsx-opaque', '/api/unrelated'), /^# complete:/m);
+  assert.match(query('api_consumers', '/api/family/[id]'), /^# partial: request URL from JSX prop untraced$/m);
+  assert.match(query('impact', 'app/api/family/[id]/route.ts#GET'), /request URL from JSX prop untraced/);
+  for (const args of [
+    ['api_consumers', '/api/unrelated'],
+    ['impact', 'app/api/unrelated/route.ts#GET'],
+    ['api_consumers', 'finishUnrelated'],
+    ['impact', 'unrelatedHelper']
+  ]) assert.match(query(...args), /^# complete:/m);
+  assert.match(query('callees', 'handle'), /^# partial:.*prop callback untraced/m);
+
+  assert.doesNotMatch(query('search', 'onClick'), /#onClick/);
+  assert.match(query('search', 'onClick', '--kind', 'function'), /#onClick button Start \/ Restart/);
+  assert.match(query('impact', 'onClick button Start / Restart'), /^page \/unrelated\s/m);
 
   const impact = query('impact', 'publishPrimary', '--depth', '6');
   assert.match(impact, /^page \/primary\s/m);
+  assert.match(impact, /^page \/nonjsx\s/m);
+  assert.match(impact, /^page \/nonjsx-opaque\s/m);
   assert.doesNotMatch(impact, /^page \/secondary\s/m);
   assert.match(query('path', '/secondary', 'publishPrimary'), /no directed path/);
   assert.match(query('path', '/primary', 'persistRecord'), /RequestPanel[\s\S]*onClick <button Publish>[\s\S]*persistRecord/);
@@ -1017,10 +1044,13 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   git('add', '.');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '--quiet', '-m', 'Fixture');
   const actions = path.join(root, 'lib/actions.ts');
-  fs.writeFileSync(actions, fs.readFileSync(actions, 'utf8').replace('publishPrimary() {}', 'publishPrimary() { return true; }'));
+  fs.writeFileSync(actions, fs.readFileSync(actions, 'utf8')
+    .replace('publishPrimary() {}', 'publishPrimary() { return true; }')
+    .replace('runFallback() {}', 'runFallback() { return true; }'));
   build();
   const changes = query('changes', '--unstaged', '--depth', '6');
   assert.match(changes, /page \/primary\s/);
+  assert.match(changes, /page \/fallback\s/);
   assert.doesNotMatch(changes, /page \/secondary\s/);
 
   const capture = query('path', '/jobs', 'captureNode');

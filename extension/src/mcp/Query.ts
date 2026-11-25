@@ -259,7 +259,9 @@ export class QueryEngine {
     const delimiter = text.lastIndexOf('#');
     const file = delimiter < 0 ? undefined : path.posix.normalize(text.slice(0, delimiter));
     if (file !== undefined) this.checkPath(text.slice(0, delimiter));
-    else if (/[\\/]/.test(text)) throw new Error('Use a name or an app-relative path#Name.');
+    else if (/[\\/]/.test(text) && !this.names.get(text)?.some(symbol => symbol.synthetic)) {
+      throw new Error('Use a name or an app-relative path#Name.');
+    }
     return { file, name: text.slice(delimiter + 1) };
   }
 
@@ -283,7 +285,7 @@ export class QueryEngine {
     return concrete ? matchNextRoutes(text, routes, route => route.url, this.index.pagesUrlConfig).sort(byRoute) : [];
   }
 
-  private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
+  private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string, includeSynthetic = true): Row[] {
     const needle = text.toLowerCase().slice(0, 100);
     const candidates: { name: string; label: string; file: string; line?: number; aliases?: string[] }[] = kind === 'page' || kind === 'api'
       ? this.index.routes.filter(route => route.kind === kind).map(route =>
@@ -293,7 +295,7 @@ export class QueryEngine {
           name: action.name, aliases: [...(action.aliases ?? []), actionShortName(action.name)],
           label: `${action.file}#${action.name}`, file: action.file, line: action.line
         }))
-        : this.index.symbols.filter(symbol => (file === undefined || symbol.file === file) &&
+        : this.index.symbols.filter(symbol => (includeSynthetic || !symbol.synthetic) && (file === undefined || symbol.file === file) &&
           (!kind || (kind === 'renderer' ? ['component', 'procedure'].includes(symbol.kind) : symbol.kind === kind))).map(symbol =>
         ({ name: symbol.name, label: `${symbol.file}#${symbol.name}`, file: symbol.file, line: symbol.line }));
     const matches: (typeof candidates[number] & { score: number })[] = [];
@@ -328,6 +330,7 @@ export class QueryEngine {
     };
     for (const symbol of this.index.symbols) {
       if (expired()) break;
+      if (kind === 'any' && symbol.synthetic) continue;
       if (kind !== 'any' && kind !== symbol.kind) continue;
       const score = Math.min(match(symbol.name), match(symbol.file));
       if (score === 3) continue;
@@ -359,22 +362,23 @@ export class QueryEngine {
     return {
       title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row),
       notes: neighbors ? [neighbors] : hits.length || expired() ? [] :
-        this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired)
+        this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired, undefined, kind !== 'any')
     };
   }
 
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
-    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; possible: boolean; depth: number; slots: string[] }>();
-    let partial: string | undefined;
+    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
+      possible: boolean; depth: number; slots: string[]; issue?: string }>();
+    let directIssue: string | undefined;
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
-      const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false, depth: 0, slots: [] as string[] }];
+      const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
+        depth: 0, slots: [] as string[], issue: undefined as string | undefined }];
       const visited = new Set<number>();
       for (let i = 0; i < pending.length && !expired(); i++) {
         const entry = pending[i];
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
-        partial ??= this.index.renderIssues?.[entry.id];
         for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
           if (!entry.depth || only && route !== only) continue;
           const previous = reached.get(route.id);
@@ -390,7 +394,8 @@ export class QueryEngine {
             id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
             possible: entry.possible || !!possible || decision === 'possible',
-            slots: detail ? [detail, ...entry.slots] : entry.slots
+            slots: detail ? [detail, ...entry.slots] : entry.slots,
+            issue: entry.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
           });
         }
       }
@@ -416,9 +421,10 @@ export class QueryEngine {
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
       const parents = new Map<number, { symbol: SymbolEntry; line: number; conditional: number; possible?: true }>();
-      for (const [from, , line, conditional, , possible] of this.incoming.get(symbol.id) ?? []) {
+      for (const [from, , line, conditional, , possible, detail] of this.incoming.get(symbol.id) ?? []) {
         if (expired()) break;
         const parent = this.symbols.get(from);
+        if (possible && detail && parent) directIssue ??= `JSX prop render untraced (${location(parent.file, line)})`;
         const prior = parents.get(from);
         if (parent && (!prior || line < prior.line)) parents.set(from, { symbol: parent, line, conditional, possible });
       }
@@ -430,7 +436,8 @@ export class QueryEngine {
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
     return { rows, count: rows.length ? count + directLabel : undefined,
-      partial: partial ?? [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
+      partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
+        [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
   }
 
@@ -653,7 +660,8 @@ export class QueryEngine {
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
         ([this.index.pagesApiIssues?.[route.id]?.join('; '), transportOverride ? AI_SDK_URL_OVERRIDE : undefined]
           .filter(Boolean).join('; ') || undefined) ??
-        (fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
+        (fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' :
+          fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
           fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
           propIssue ?? (moreCallers ? 'caller depth limit' : undefined)),
       notes: [

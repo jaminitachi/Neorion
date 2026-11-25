@@ -3,12 +3,13 @@ import { conditionalAt, declarationsOf, wrappedExpression } from './Architecture
 import { startLine } from './SourceLines';
 
 export type JsxSite = import('ts-morph').JsxOpeningElement | import('ts-morph').JsxSelfClosingElement;
+export type RenderSite = JsxSite | import('ts-morph').CallExpression;
 type Prop = { component: Node; name: string; fallback?: Node };
-type SiteValue = { site: JsxSite; value?: Node; unknown?: boolean };
+type SiteValue = { site: RenderSite; value?: Node; unknown?: boolean };
 type BoundValue = SiteValue & { gates: PropGate[] };
 type Literal = string | number | boolean | null;
 export type PropConstraint = { prop: Prop; literal: Literal; equal: boolean };
-export type PropGate = { component: Node; sites: JsxSite[]; partial?: boolean };
+export type PropGate = { component: Node; sites: RenderSite[]; partial?: boolean; uncertainSites?: RenderSite[]; unscoped?: true };
 
 export function jsxValue(attribute: import('ts-morph').JsxAttribute) {
   const value = attribute.getInitializer();
@@ -30,8 +31,12 @@ export function constValue(node: Node) {
 }
 
 export class PropFlow {
-  readonly sites = new Map<Node, JsxSite[]>();
+  private sites = new Map<Node, RenderSite[]>();
   private parameters = new Map<Node, Node>();
+  private parameterFiles = new Set<SourceFile>();
+  private props = new WeakMap<Node, Prop | null>();
+  private resolvedBindings = new Map<Node, Map<string, Map<Node | undefined, BoundValue[]>>>();
+  private receiverIdentifiers = new Map<Node, Set<string>>();
   private identifiers = new Map<string, PropGate>();
   private forwardedEvents = new Map<Node, Map<string, boolean>>();
   private slots = new Map<Node, Map<string, { site: Node; via: Node[]; conditional: boolean }[]>>();
@@ -42,12 +47,15 @@ export class PropFlow {
       const fn = body.getParent();
       if (Node.isArrowFunction(fn) || Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn)) {
         const param = fn.getParameters()[0];
-        if (param) this.parameters.set(param, component);
+        if (param) {
+          this.parameters.set(param, component);
+          this.parameterFiles.add(param.getSourceFile());
+        }
       }
     }
     for (const [tag, definitions] of targets) {
       const site = tag.getParent();
-      if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) continue;
+      if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site) && !Node.isCallExpression(site)) continue;
       for (const target of definitions) {
         const entries = this.sites.get(target) ?? [];
         entries.push(site);
@@ -61,6 +69,16 @@ export class PropFlow {
   }
 
   read(node: Node | undefined, member?: string, remaining = 8): Prop | undefined {
+    if (!node || member || remaining !== 8) return this.readProp(node, member, remaining);
+    if (!this.parameterFiles.has(node.getSourceFile())) return;
+    const cached = this.props.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const prop = this.readProp(node, undefined, remaining);
+    this.props.set(node, prop ?? null);
+    return prop;
+  }
+
+  private readProp(node: Node | undefined, member: string | undefined, remaining: number): Prop | undefined {
     if (!node || remaining <= 0) return;
     const wrapped = wrappedExpression(node);
     if (wrapped) return this.read(wrapped, member, remaining - 1);
@@ -142,8 +160,18 @@ export class PropFlow {
     return { unknown: true };
   }
 
-  value(site: JsxSite, prop: Pick<Prop, 'name' | 'fallback'>, remaining = 8, missingUnknown = true): SiteValue {
+  value(site: RenderSite, prop: Pick<Prop, 'name' | 'fallback'>, remaining = 8, missingUnknown = true): SiteValue {
     if (!remaining) return { site, unknown: true };
+    if (Node.isCallExpression(site)) {
+      const [, argument, ...children] = site.getArguments();
+      if (prop.name === 'children' && children.length) {
+        return children.length === 1 ? { site, value: children[0] } : { site, unknown: true };
+      }
+      const binding = argument && argument.getKind() !== SyntaxKind.NullKeyword
+        ? this.spreadValue(argument, prop.name, remaining - 1) : undefined;
+      return { site, value: binding?.value ?? prop.fallback,
+        unknown: binding?.unknown || missingUnknown && !binding?.value && !prop.fallback };
+    }
     let unknown = false;
     for (const attr of [...site.getAttributes()].reverse()) {
       if (Node.isJsxSpreadAttribute(attr)) {
@@ -161,7 +189,20 @@ export class PropFlow {
     return (this.sites.get(prop.component) ?? []).map(site => this.value(site, prop));
   }
 
-  bindings(prop: Prop, pending = new Set<Node>(), budget = { remaining: 256 }): BoundValue[] {
+  bindings(prop: Prop): BoundValue[] {
+    let names = this.resolvedBindings.get(prop.component);
+    if (!names) this.resolvedBindings.set(prop.component, names = new Map());
+    let fallbacks = names.get(prop.name);
+    if (!fallbacks) names.set(prop.name, fallbacks = new Map());
+    let bindings = fallbacks.get(prop.fallback);
+    if (!bindings) {
+      bindings = this.resolveBindings(prop, new Set(), { remaining: 256 });
+      fallbacks.set(prop.fallback, bindings);
+    }
+    return bindings;
+  }
+
+  private resolveBindings(prop: Prop, pending: Set<Node>, budget: { remaining: number }): BoundValue[] {
     if (pending.size >= 6 || pending.has(prop.component)) return [];
     const seen = new Set(pending).add(prop.component);
     return this.values(prop).flatMap<BoundValue>(binding => {
@@ -170,7 +211,7 @@ export class PropFlow {
       if (limited) return [{ ...binding, value: undefined, unknown: true, gates: [gate] }];
       const forwarded = this.read(binding.value);
       if (!forwarded) return [{ ...binding, gates: [gate] }];
-      const sources = this.bindings(forwarded, seen, budget);
+      const sources = this.resolveBindings(forwarded, seen, budget);
       if (!sources.length) return [{ ...binding, value: undefined, unknown: true, gates: [{ ...gate, partial: true }] }];
       return sources.map(source => ({
         ...source, unknown: !!binding.unknown || source.unknown, gates: [gate, ...source.gates]
@@ -180,6 +221,7 @@ export class PropFlow {
 
   constraints(node: Node): PropConstraint[] {
     const result: PropConstraint[] = [];
+    if (!this.parameterFiles.has(node.getSourceFile())) return result;
     for (let child = node, parent = node.getParent(); parent; child = parent, parent = parent.getParent()) {
       let condition: Node | undefined;
       let positive = true;
@@ -216,16 +258,16 @@ export class PropFlow {
       const key = JSON.stringify([prop.component.getSourceFile().getFilePath(), prop.component.getStart(), prop.name, expected, equal]);
       const cached = this.identifiers.get(key);
       if (cached) return cached;
-      let partial = false;
+      const uncertainSites: RenderSite[] = [];
       const sites = this.values(prop).flatMap(({ site, value, unknown }) => {
         const current = Node.isJsxAttribute(value) ? true : literal(value);
         if (unknown || current === undefined) {
-          partial = true;
+          uncertainSites.push(site);
           return [site];
         }
         return (current === expected) === equal ? [site] : [];
       });
-      const gate = { component: prop.component, sites, partial: partial || !this.sites.get(prop.component)?.length };
+      const gate: PropGate = { component: prop.component, sites, uncertainSites: uncertainSites.length ? uncertainSites : undefined, unscoped: true };
       this.identifiers.set(key, gate);
       return gate;
     });
@@ -357,6 +399,40 @@ export class PropFlow {
     const site = attribute.getParent()?.getParent();
     if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return [];
     return this.renderUses(site, attribute.getNameNode().getText(), attribute, asComponent);
+  }
+
+  mayRenderSlot(attribute: import('ts-morph').JsxAttribute): boolean {
+    const site = attribute.getParent()?.getParent();
+    if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return true;
+    const name = attribute.getNameNode().getText();
+    const effective = this.value(site, { name });
+    if (effective.value !== jsxValue(attribute) && !effective.unknown) return false;
+    const targets = this.targetsOf(site);
+    return !targets.length || targets.some(target => {
+      const body = this.bodies.get(target);
+      const fn = body?.getParent();
+      if (!body || !Node.isArrowFunction(fn) && !Node.isFunctionDeclaration(fn) && !Node.isFunctionExpression(fn)) return true;
+      let identifiers = this.receiverIdentifiers.get(target);
+      if (!identifiers) {
+        identifiers = new Set(body.getDescendantsOfKind(SyntaxKind.Identifier).map(node => node.getText()));
+        if (Node.isIdentifier(body)) identifiers.add(body.getText());
+        this.receiverIdentifiers.set(target, identifiers);
+      }
+      if (!Node.isArrowFunction(fn) && identifiers.has('arguments')) return true;
+      const parameter = fn.getParameters()[0]?.getNameNode();
+      if (!parameter) return false;
+      if (Node.isIdentifier(parameter)) return identifiers.has(parameter.getText());
+      if (!Node.isObjectBindingPattern(parameter)) return true;
+      const elements = parameter.getElements();
+      const selected = elements.find(element => {
+        const key = element.getPropertyNameNode() ?? element.getNameNode();
+        return !element.getDotDotDotToken() && (Node.isComputedPropertyName(key) ||
+          (Node.isStringLiteral(key) ? key.getLiteralText() : key.getText()) === name);
+      });
+      if (Node.isComputedPropertyName(selected?.getPropertyNameNode())) return true;
+      const binding = selected?.getNameNode() ?? elements.find(element => element.getDotDotDotToken())?.getNameNode();
+      return !!binding && (!Node.isIdentifier(binding) || identifiers.has(binding.getText()));
+    });
   }
 
   renderChildren(element: import('ts-morph').JsxElement) {

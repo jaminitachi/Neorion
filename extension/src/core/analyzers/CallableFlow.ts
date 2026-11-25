@@ -25,16 +25,21 @@ export function returnedValues(fn: FunctionNode): Node[] {
   return values;
 }
 
-export function packageMember(node: Node, module: string) {
+function packageOrigin(node: Node) {
   const root = Node.isPropertyAccessExpression(node) ? node.getExpression() : node;
   for (const declaration of root.getSymbol()?.getDeclarations() ?? []) {
-    if (declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue() !== module) continue;
-    if (Node.isImportSpecifier(declaration) && root === node) return declaration.getName();
-    if (Node.isPropertyAccessExpression(node) && (Node.isNamespaceImport(declaration) || Node.isImportClause(declaration))) {
-      return node.getName();
-    }
-    if (Node.isImportClause(declaration)) return 'default';
+    if (!Node.isImportSpecifier(declaration) && !Node.isNamespaceImport(declaration) && !Node.isImportClause(declaration)) continue;
+    const module = declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
+    if (!module) continue;
+    if (Node.isImportSpecifier(declaration) && root === node) return { module, name: declaration.getName() };
+    if (Node.isPropertyAccessExpression(node) && !Node.isImportSpecifier(declaration)) return { module, name: node.getName() };
+    if (Node.isImportClause(declaration)) return { module, name: 'default' };
   }
+}
+
+export function packageMember(node: Node, module: string) {
+  const origin = packageOrigin(node);
+  if (origin?.module === module) return origin.name;
 }
 
 function selectedMembers(selector: Node | undefined): string[] | undefined {
@@ -57,7 +62,19 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
 
 type Target = { fn: FunctionNode; via: string[] };
 export class CallableFlow {
-  constructor(private files: Set<SourceFile>) {}
+  private targets = new WeakMap<Node, Target[]>();
+  private returns = new WeakMap<FunctionNode, Node[]>();
+  private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
+
+  constructor(private files: Set<SourceFile>, private declarations = declarationsOf) {}
+
+  private packageOf(node: Node) {
+    const cached = this.packageOrigins.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const origin = packageOrigin(node);
+    this.packageOrigins.set(node, origin ?? null);
+    return origin;
+  }
 
   private storeInitializer(node: Node | undefined, remaining = 8): FunctionNode | undefined {
     if (!node || !remaining) return;
@@ -65,28 +82,36 @@ export class CallableFlow {
     if (wrapped) return this.storeInitializer(wrapped, remaining - 1);
     if (isFunction(node)) return node;
     if (!Node.isCallExpression(node)) return;
-    const callee = node.getExpression();
-    if (['persist', 'devtools', 'subscribeWithSelector', 'combine', 'redux', 'immer'].includes(
-      packageMember(callee, 'zustand/middleware') ?? packageMember(callee, 'zustand/middleware/immer') ?? '')) {
-      if (packageMember(callee, 'zustand/middleware') === 'redux') return;
-      return this.storeInitializer(node.getArguments()[packageMember(callee, 'zustand/middleware') === 'combine' ? 1 : 0], remaining - 1);
+    const origin = this.packageOf(node.getExpression());
+    if (origin && (origin.module === 'zustand/middleware' || origin.module === 'zustand/middleware/immer') &&
+        ['persist', 'devtools', 'subscribeWithSelector', 'combine', 'immer'].includes(origin.name)) {
+      return this.storeInitializer(node.getArguments()[origin.name === 'combine' ? 1 : 0], remaining - 1);
     }
   }
 
   /** Resolve function values through immutable bindings, returned objects and Zustand selectors. */
   resolve(expression: Node): Target[] {
-    const seen = new Set<string>();
+    if (isFunction(expression)) return [{ fn: expression, via: [] }];
+    const cached = this.targets.get(expression);
+    if (cached) return cached;
+    const seen = new Map<Node, Set<string>>();
     let budget = 64;
     const resolve = (node: Node | undefined, members: string[], invoke: number, via: string[]): Target[] => {
       if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return [];
-      const key = JSON.stringify([node.getSourceFile().getFilePath(), node.getStart(), node.getKind(), members, invoke]);
-      if (seen.has(key)) return [];
-      seen.add(key);
+      const key = invoke + ':' + (members.length ? JSON.stringify(members) : '');
+      const states = seen.get(node);
+      if (states?.has(key)) return [];
+      if (states) states.add(key);
+      else seen.set(node, new Set([key]));
       const next = (value: Node | undefined, path = members, calls = invoke, trail = via) => resolve(value, path, calls, trail);
       const wrapped = wrappedExpression(node);
       if (wrapped) return next(wrapped);
-      if (isFunction(node)) return invoke ? returnedValues(node).flatMap(value => next(value, members, invoke - 1)) :
-        members.length ? [] : [{ fn: node, via }];
+      if (isFunction(node)) {
+        if (!invoke) return members.length ? [] : [{ fn: node, via }];
+        let values = this.returns.get(node);
+        if (!values) this.returns.set(node, values = returnedValues(node));
+        return values.flatMap(value => next(value, members, invoke - 1));
+      }
       if (Node.isVariableDeclaration(node)) return next(constValue(node));
       if (Node.isPropertyAssignment(node)) return next(node.getInitializer());
       if (Node.isShorthandPropertyAssignment(node)) {
@@ -113,19 +138,20 @@ export class CallableFlow {
           const selected = next(node.getExpression(), [name, ...members]);
           if (selected.length) return selected;
         }
-        return declarationsOf(node).filter(decl => !Node.isPropertySignature(decl) && !Node.isMethodSignature(decl))
+        return this.declarations(node).filter(decl => !Node.isPropertySignature(decl) && !Node.isMethodSignature(decl))
           .flatMap(decl => next(decl));
       }
       if (!Node.isCallExpression(node)) return [];
       const callee = node.getExpression();
       const args = node.getArguments();
-      const hook = packageMember(callee, 'react');
+      const origin = this.packageOf(callee);
+      const hook = origin?.module === 'react' ? origin.name : undefined;
       if (hook === 'useMemo' || hook === 'useCallback') return next(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0));
 
       const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
-      const creation = packageMember(factory, 'zustand') ?? packageMember(factory, 'zustand/vanilla') ??
-        packageMember(factory, 'zustand/traditional');
-      if (creation && ['create', 'default', 'createStore', 'createWithEqualityFn'].includes(creation) && invoke) {
+      const creation = invoke && (factory === callee ? origin : this.packageOf(factory));
+      if (creation && ['zustand', 'zustand/vanilla', 'zustand/traditional'].includes(creation.module) &&
+          ['create', 'default', 'createStore', 'createWithEqualityFn'].includes(creation.name)) {
         const initializer = this.storeInitializer(args[0]);
         return next(initializer, members, invoke);
       }
@@ -133,21 +159,24 @@ export class CallableFlow {
       // Evaluate the selector against an actual Zustand binding. Local calls may
       // return a nested object or function, but do not supply selector semantics.
       const path = selectedMembers(args[0]);
-      if (path && declarationsOf(callee).some(decl => this.storeFactory(constValue(decl)))) {
+      if (path && this.declarations(callee).some(decl => this.storeFactory(constValue(decl)))) {
         return next(callee, [...path, ...members], invoke + 1, [...via, callee.getText()]);
       }
       if (!members.length && !invoke && !Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return [];
       return next(callee, members, invoke + 1, [...via, callee.getText()]);
     };
-    return resolve(expression, [], 0, []);
+    const result = resolve(expression, [], 0, []);
+    this.targets.set(expression, result);
+    return result;
   }
 
   private storeFactory(node: Node | undefined) {
     if (!Node.isCallExpression(node)) return false;
     const callee = node.getExpression();
     const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
-    const name = packageMember(factory, 'zustand') ?? packageMember(factory, 'zustand/traditional');
-    return name !== undefined && ['create', 'default', 'createWithEqualityFn'].includes(name);
+    const origin = this.packageOf(factory);
+    return !!origin && (origin.module === 'zustand' || origin.module === 'zustand/traditional') &&
+      ['create', 'default', 'createWithEqualityFn'].includes(origin.name);
   }
 }
 

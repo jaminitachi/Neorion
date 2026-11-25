@@ -87,12 +87,13 @@ function append<K, V>(map: Map<K, V[]>, id: K, value: V) {
 }
 
 // A backward trace carries the required supplying render sites until it
-// crosses the JSX edge that entered the receiver.
+// crosses the render edge that entered the receiver.
+const entersReceiver = (edge: Edge) => edge.label === 'render' || edge.label === 'wrap' || edge.label === 'dyn';
 function predecessorGates(edge: Edge, pending: FlowGate[]) {
   const remaining: FlowGate[] = [];
   for (const gate of pending) {
     if (edge.to !== gate.scope) remaining.push(gate);
-    else if (edge.label !== 'render' || !edge.site || !gate.sites.includes(edge.site)) return;
+    else if (!entersReceiver(edge) || (edge.site ? !gate.sites.includes(edge.site) : !gate.unscoped)) return;
   }
   for (const gate of edge.gates ?? []) if (!remaining.includes(gate)) remaining.push(gate);
   return remaining;
@@ -100,6 +101,22 @@ function predecessorGates(edge: Edge, pending: FlowGate[]) {
 
 const isEvent = (detail?: string) => /^on[A-Z]/.test(detail ?? '');
 const stateKey = (id: NodeId, gates: FlowGate[]) => JSON.stringify([id, gates]);
+const propUrlIssue = 'request URL from JSX prop untraced';
+const propValueIssue = 'prop value untraced at a render site';
+const gateIssue = (edge: Edge) => edge.gates?.some(gate => gate.partial) ? propValueIssue : undefined;
+const uncertainEntry = (edge: Edge, gates: FlowGate[]) => entersReceiver(edge) && gates.some(gate =>
+  gate.scope === edge.to && (edge.site ? gate.uncertainSites?.includes(edge.site) : gate.unscoped));
+type RenderContexts = [number, string][];
+const matchesContext = (gate: FlowGate, contexts: RenderContexts) => {
+  const binding = contexts.find(([scope]) => scope === gate.scope);
+  if (!binding) return;
+  if (!binding[1]) return gate.unscoped ? undefined : false;
+  if (!gate.sites.includes(binding[1])) return false;
+  return gate.uncertainSites?.includes(binding[1]) ? undefined : true;
+};
+const permits = (gates: FlowGate[] | undefined, contexts: RenderContexts) =>
+  !gates?.some(gate => matchesContext(gate, contexts) === false);
+const forwardKey = (id: NodeId, contexts: RenderContexts) => contexts.length ? JSON.stringify([id, contexts]) : id;
 
 export function hasGraph(index: QueryIndex) {
   return index.graphRevision === GRAPH_INDEX_REVISION && Array.isArray(index.externalCalls) &&
@@ -136,15 +153,19 @@ export class DependencyGraph {
   private unboundedTransport = false;
   private unboundedProductionTransport = false;
   private gateScopes = new Set<number>();
-  private propRequests: Set<number>;
-  private unboundedPropRequests: [file: string, owner: number][];
+  private propRequests = new Map<number, NonNullable<QueryIndex['uncertainPropRequests']>>();
 
   constructor(private index: QueryIndex, symbols: Map<number, SymbolEntry>) {
     this.symbols = symbols;
     this.trpc = new Set(index.trpcFiles);
     this.unboundProcedures = new Set(index.trpcUnbound);
-    this.unboundedPropRequests = index.uncertainPropRequests ?? [];
-    this.propRequests = new Set(this.unboundedPropRequests.map(([, id]) => id));
+    for (const request of index.uncertainPropRequests ?? []) {
+      append(this.propRequests, request.owner, request);
+      for (const gate of request.gates ?? []) this.gateScopes.add(gate.scope);
+    }
+    for (const issues of Object.values(index.flowIssues ?? {})) for (const issue of issues) {
+      for (const gate of issue.gates) this.gateScopes.add(gate.scope);
+    }
     for (const [file, uses] of Object.entries(index.trpcModuleUses ?? {})) {
       this.trpcModuleUses.set(Number(file), new Set(uses.map(([target, line]) => `${target}:${line}`)));
     }
@@ -222,7 +243,8 @@ export class DependencyGraph {
     const invocation = (from: NodeId, to: number, file: string, line: number, detail?: string, gates?: FlowGate[], possible?: true) => {
       const key = keyOf(from, to, line);
       add({ from, to, label: this.actions.has(to) ? 'action' : isEvent(detail) ? 'event' : 'call', file, line,
-        partial: possible, uncertainty: possible ? this.coverageIssue(from) : undefined,
+        partial: possible || !!index.callIssues?.[key],
+        uncertainty: index.callIssues?.[key] ?? (possible ? this.coverageIssue(from) : undefined),
         detail: detail || index.refEvidence?.[key], gates: gates ?? index.callGates?.[key] });
       calls.add(callSite(to, from, line));
     };
@@ -253,7 +275,8 @@ export class DependencyGraph {
     }
     for (const [from, to, line, conditional, , possible, detail, site] of index.renderEdges) {
       add({ from, to, label: 'render', file: this.file(from), line, conditional: !!conditional, partial: possible || undefined, detail: detail ?? undefined, site: site ?? undefined,
-        uncertainty: possible ? this.coverageIssue(from) : undefined });
+        uncertainty: possible ? detail ? `JSX prop render untraced (${location(this.file(from), line)})` :
+          this.coverageIssue(from) : undefined });
     }
     const routes = new Map(index.routes.map(route => [route.id, route]));
     for (const fact of index.pagesEdges ?? []) {
@@ -279,7 +302,8 @@ export class DependencyGraph {
       const method = route.methods?.includes('ALL') ? 'ALL' : route.methods?.length ? fetch.method === 'HEAD' && !route.methods.includes('HEAD') ? 'GET' : fetch.method : '?';
       const to = this.apiId(route, method);
       const from = fetch.graphOwner ?? fetch.owner ?? this.fileNode(fetch.file);
-      const uncertainty = (fetch.lifecyclePossible ? this.coverageIssue(from) ?? 'possible lifecycle callback' : undefined) ??
+      const uncertainty = (fetch.propUrlUnknown ? propUrlIssue : undefined) ??
+        (fetch.lifecyclePossible ? this.coverageIssue(from) ?? 'possible lifecycle callback' : undefined) ??
         this.index.pagesApiIssues?.[route.id]?.[0];
       add({ from, to, label: 'fetch', file: fetch.file,
         line: fetch.line, detail: fetch.binding ? `${fetch.via} via prop ${fetch.binding.name} at ${location(fetch.binding.file, fetch.binding.line)}` : fetch.via,
@@ -599,11 +623,11 @@ export class DependencyGraph {
       for (const { id, gates, visit: current } of levels[level]) {
         if (expired()) break;
         pagesIssue ??= this.coverageIssue(id);
-        if (typeof id === 'number') flowIssue ??= this.index.renderIssues?.[id] ?? this.index.flowIssues?.[id];
-        if (gates.some(gate => gate.partial)) flowIssue ??= 'prop value untraced at a render site';
+        if (gates.some(gate => gate.partial)) flowIssue ??= propValueIssue;
         const endpoints = this.terminals(id).filter(terminal =>
-          !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.partial));
+          !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.scope === id && gate.unscoped));
         for (const terminal of endpoints) {
+          if (gates.length && terminal.route?.component === id) flowIssue ??= propValueIssue;
           const key = terminalKey(terminal);
           const earlier = terminals.get(key);
           const metadata = terminal.kind === 'page' && this.name(id) === 'generateMetadata';
@@ -611,9 +635,6 @@ export class DependencyGraph {
             terminals.set(key, { terminal, visit: earlier?.visit ?? current, node: earlier?.node ?? id, metadata });
           }
           if (terminal.kind === 'api') {
-            if (this.unboundedPropRequests.some(([file]) => includeTests || !isTestFile(file))) {
-              flowIssue ??= 'request URL from JSX prop untraced';
-            }
             transportOverride ||= this.unboundedProductionTransport || includeTests && this.unboundedTransport;
             for (const fetch of this.fetches.get(terminal.file) ?? []) {
               if (!includeTests && isTestFile(fetch.file)) continue;
@@ -633,7 +654,6 @@ export class DependencyGraph {
           const applicable = this.pageRenderEdge(edge, conditions, route);
           if (!applicable) continue;
           edge = applicable;
-          if (edge.partial && edge.label !== 'fetch') pagesIssue ??= edge.uncertainty ?? 'possible Pages dependency';
           if (!includeTests && isTestFile(edge.file)) {
             if (!visited.has(edge.from)) tests.add(edge.file);
             continue;
@@ -646,6 +666,9 @@ export class DependencyGraph {
             boundary.add(key);
             continue;
           }
+          flowIssue ??= gateIssue(edge) ?? (uncertainEntry(edge, gates) ? propValueIssue : undefined);
+          if (edge.partial && edge.label !== 'fetch') pagesIssue ??= edge.uncertainty ?? 'possible Pages dependency';
+          if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
           if (states.has(key)) continue;
           if (!additions.has(key)) additions.set(key, { edge, gates: awaiting });
@@ -914,15 +937,14 @@ export class DependencyGraph {
       trpc ??= this.coverageIssue(id);
       const source = origins[origin];
       const impact = { origin: source, depth, fetch, possible };
-      if (gates.some(gate => gate.partial)) flowIssue ??= 'prop value untraced at a render site';
-      if (typeof id === 'number') flowIssue ??= this.index.renderIssues?.[id] ?? this.index.flowIssues?.[id];
+      if (gates.some(gate => gate.partial)) flowIssue ??= propValueIssue;
       const terminals = this.terminals(id).filter(terminal =>
-        !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.partial));
+        !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.scope === id && gate.unscoped));
       for (const terminal of depth === 0 && source.externalOnly ? [] : terminals) {
+        if (gates.length && terminal.route?.component === id) flowIssue ??= propValueIssue;
         if (terminal.pages) for (const page of terminal.pages) remember(pageTerminal(page), impact);
         else remember(terminal, impact);
         if (terminal.kind === 'api') {
-          if (this.unboundedPropRequests.some(([file]) => !isTestFile(file))) flowIssue ??= 'request URL from JSX prop untraced';
           const fetches = (this.fetches.get(terminal.file) ?? []).filter(entry => !isTestFile(entry.file));
           uncertain ||= fetches.some(entry => entry.dynamic || entry.partial);
           transportOverride ||= this.unboundedProductionTransport ||
@@ -945,6 +967,8 @@ export class DependencyGraph {
           continue;
         }
         const via = edge.label === 'fetch' ? `${edge.url ?? this.name(id)} (${edge.detail})` : fetch;
+        flowIssue ??= gateIssue(edge) ?? (uncertainEntry(edge, gates) ? propValueIssue : undefined);
+        if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
         if (edge.partial && edge.label !== 'fetch') trpc ??= edge.uncertainty ?? 'possible Pages dependency';
         visit({ id: edge.from, origin, depth: depth + 1, fetch: via, possible: possible || edge.partial, gates: awaiting });
       }
@@ -997,15 +1021,19 @@ export class DependencyGraph {
       uncertainty: route && this.index.pagesWrapperIssues?.[route.id]?.[0] } : edge;
   }
 
+  private enter(edge: Edge, contexts: RenderContexts): RenderContexts {
+    return typeof edge.to === 'number' && this.gateScopes.has(edge.to)
+      ? [...contexts.filter(([scope]) => scope !== edge.to), [edge.to, edge.site ?? '']] : contexts;
+  }
+
   path(starts: NodeId[], goals: NodeId[], expired: () => boolean, route?: Route, pathname?: string): QueryResult {
-    type Step = { id: NodeId; depth: number; weak: number; contexts: [number, string][]; previous?: Step; edge?: PathEdge; alternatives: Set<NodeId> };
+    type Step = { id: NodeId; depth: number; weak: number; contexts: RenderContexts; previous?: Step; edge?: PathEdge; alternatives: Set<NodeId> };
     const depthBudget = 12;
     const targets = new Set(goals);
-    const apiGoal = goals.some(id => typeof id === 'string' && this.api.has(id) || this.handlerRoutes.has(id));
+    const apiGoals = goals.flatMap(id => this.api.get(String(id)) ?? this.handlerRoutes.get(id) ?? []);
     const initial = starts.map(id => ({ id, depth: 0, weak: 0, contexts: [] as Step['contexts'], alternatives: new Set<NodeId>() }));
     let layer: Step[] = initial;
-    const keyOf = (id: NodeId, contexts: Step['contexts']) => JSON.stringify([id, contexts]);
-    const seen = new Set(starts.map(id => keyOf(id, [])));
+    const seen = new Set(starts);
     let flowIssue: string | undefined;
     let goal: Step | undefined;
     let partial: string | undefined;
@@ -1038,10 +1066,16 @@ export class DependencyGraph {
         for (const other of reached.slice(1)) alternatives(goal, other);
         break;
       }
-      const next = new Map<string, Step>();
+      const next = new Map<NodeId, Step>();
       for (const current of layer) {
         if (expired()) break;
         trpc ??= this.coverageIssue(current.id) ?? this.unresolvedTrpc(current.id, false);
+        if (apiGoals.length && typeof current.id === 'number' && this.propRequests.get(current.id)?.some(request =>
+          (!isTestFile(request.file) || isTestFile(this.file(starts[0]))) &&
+          permits(request.gates, current.contexts) &&
+          apiGoals.some(({ route, name }) => !request.method || !route || route.pages && route.methodBasis !== 'enforced' ||
+            name === route.url || name.startsWith(request.method + ' ') || name.startsWith('ALL ') ||
+            request.method === 'HEAD' && name.startsWith('GET ')))) flowIssue ??= propUrlIssue;
         uncertain ||= typeof current.id === 'number' && this.uncertainTransports.has(current.id);
         const outgoing: PathEdge[] = [...this.outgoing.get(current.id) ?? []];
         if (current.depth === 0 && current.id === starts[0]) outgoing.push(...wraps);
@@ -1057,25 +1091,22 @@ export class DependencyGraph {
             edge = { ...edge, partial, conditional: partial };
           }
           if (isTestFile(edge.file) && !isTestFile(this.file(starts[0])) && !isTestFile(this.file(goals[0]))) continue;
-          const matched = edge.gates?.map(gate => {
-            const binding = current.contexts.find(([scope]) => scope === gate.scope);
-            return binding ? gate.sites.includes(binding[1]) : undefined;
-          });
+          const matched = edge.gates?.map(gate => matchesContext(gate, current.contexts));
           if (matched?.includes(false)) continue;
           const traversalEdge = matched && (matched.includes(undefined) || edge.gates?.some(gate => gate.partial))
             ? { ...edge, gates: edge.gates?.map(gate => ({ ...gate, partial: true })) } : edge;
-          const contexts: Step['contexts'] = edge.label === 'render' && edge.site && typeof edge.to === 'number' && this.gateScopes.has(edge.to)
-            ? [...current.contexts.filter(([scope]) => scope !== edge.to), [edge.to, edge.site]] : current.contexts;
+          const contexts = this.enter(edge, current.contexts);
           const handler = edge.label === 'fetch' ? this.api.get(String(edge.to))?.handler : edge.destination?.component;
           for (const id of handler === undefined ? [edge.to] : [edge.to, handler]) {
-            const key = keyOf(id, contexts);
+            const key = forwardKey(id, contexts);
             if (seen.has(key)) continue;
             if (current.depth === depthBudget) {
               partial ??= 'hop budget (12)';
               continue;
             }
             const candidate: Step = {
-              id, depth: current.depth + 1, weak: current.weak + Number(!!edge.partial || edge.label === 'use' || edge.label === 'dyn'),
+              id, depth: current.depth + 1, weak: current.weak + Number(!!edge.partial || !!gateIssue(traversalEdge) ||
+                edge.label === 'use' || edge.label === 'dyn'),
               contexts, previous: current, edge: traversalEdge, alternatives: new Set()
             };
             const earlier = next.get(key);
@@ -1119,8 +1150,8 @@ export class DependencyGraph {
     for (let step = goal; step.edge && step.previous; step = step.previous) {
       for (const alternate of step.previous.alternatives) otherSteps.add(alternate);
       const edge = step.edge;
-      if (edge.gates?.some(gate => gate.partial)) pathIssue ??= 'prop value untraced at a render site';
-      if (edge.partial) pathIssue ??= 'uncertain URL match';
+      pathIssue ??= edge.uncertainty ?? gateIssue(edge);
+      if (edge.partial) pathIssue ??= edge.label === 'fetch' ? 'uncertain URL match' : 'possible dependency';
       if (edge.label === 'use') pathIssue ??= 'symbol use does not trace invocation';
       chosenIssue ??= this.coverageIssue(step.id) ?? (typeof step.previous.id === 'number' ?
         this.index.pagesOwnerIssues?.[step.previous.id]?.[0] : undefined);
@@ -1133,7 +1164,9 @@ export class DependencyGraph {
         this.name(step.id) + (edge.detail?.startsWith('.') ? edge.detail : '');
       rows.unshift(graphRow(`${step.depth} ${edge.label} ${location(edge.file, edge.line)} ${name}` +
         ((step === goal || edge.label === 'trpc') && file !== edge.file ? ' -> ' + location(file, symbol?.line) : '') +
-        (edge.detail && (edge.label === 'event' || edge.label === 'render' || edge.label === 'call' && !edge.detail.startsWith('.') || edge.label === 'trpc' || edge.label === 'data' || edge.label === 'middleware' || isNavigation(edge.label))
+        (edge.detail && (edge.label === 'event' || edge.label === 'render' || edge.label === 'call' && !edge.detail.startsWith('.') ||
+          edge.label === 'fetch' && edge.detail.includes(' via prop ') || edge.label === 'trpc' || edge.label === 'data' ||
+          edge.label === 'middleware' || isNavigation(edge.label))
           ? ` (${edge.detail})` : '') +
         (edge.conditional ? ' [cond]' : '') + (edge.partial ? edge.label === 'fetch' && !edge.uncertainty ? ' [partial url]' : ' [possible]' : ''), edge.file, file));
     }
@@ -1164,7 +1197,7 @@ export class DependencyGraph {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const seeds = Array.isArray(seed) ? seed : [seed];
     const seen = new Set<NodeId>(seeds);
-    const pending = seeds.map(id => ({ id, depth: 0 }));
+    const pending = seeds.map(id => ({ id, depth: 0, contexts: [] as RenderContexts }));
     const rows: QueryRow[] = [];
     const packages = new Set<string>();
     const notes: QueryRow[] = [];
@@ -1180,11 +1213,11 @@ export class DependencyGraph {
     let flowIssue: string | undefined;
     for (let i = 0; i < pending.length && !expired(); i++) {
       const current = pending[i];
-      if (typeof current.id === 'number') {
-        flowIssue ??= this.index.outgoingRenderIssues?.[current.id] ?? this.index.flowIssues?.[current.id];
-        if (this.propRequests.has(current.id)) flowIssue ??= 'request URL from JSX prop untraced';
-      }
       if (current.depth >= depth) break;
+      if (typeof current.id === 'number') {
+        flowIssue ??= this.index.flowIssues?.[current.id]?.find(issue => permits(issue.gates, current.contexts))?.reason;
+        if (this.propRequests.get(current.id)?.some(request => permits(request.gates, current.contexts))) flowIssue ??= propUrlIssue;
+      }
       trpc ??= this.coverageIssue(current.id, true) ?? this.unresolvedTrpc(current.id, true);
       uncertain ||= typeof current.id === 'number' && this.uncertainTransports.has(current.id);
       const d = current.depth + 1;
@@ -1192,6 +1225,7 @@ export class DependencyGraph {
       const parent = d > 1 ? ` < ${this.name(current.id)}` : '';
       const edges = (this.outgoing.get(current.id) ?? []).flatMap(edge => {
         if (!uses && edge.label === 'use') return [];
+        if (!permits(edge.gates, current.contexts)) return [];
         const applicable = this.pageRenderEdge(edge, conditions, route);
         return applicable ? [applicable] : [];
       }).sort((a, b) => outgoingRank[a.label] - outgoingRank[b.label] || a.line - b.line || edgeOrder(a, b));
@@ -1207,8 +1241,9 @@ export class DependencyGraph {
       for (const sites of groups.values()) {
         if (expired()) break;
         const [edge] = sites;
-        if (edge.gates?.some(gate => gate.partial)) flowIssue ??= 'prop value untraced at a render site';
-        if (sites.some(site => site.partial)) flowIssue ??= 'uncertain URL match';
+        flowIssue ??= sites.find(site => site.uncertainty)?.uncertainty ?? gateIssue(edge) ??
+          (sites.some(site => site.gates?.some(gate => matchesContext(gate, current.contexts) === undefined)) ? propValueIssue : undefined);
+        if (sites.some(site => site.partial)) flowIssue ??= edge.label === 'fetch' ? 'uncertain URL match' : 'possible dependency';
         if (edge.label === 'render') renders.add(edge.to);
         else if (edge.label === 'fetch') fetches.add(JSON.stringify([edge.to, edge.method]));
         else if (isNavigation(edge.label)) navigation.add(edge.to);
@@ -1229,13 +1264,18 @@ export class DependencyGraph {
         }
         if (edge.partial && this.index.pagesEdges) trpc ??= edge.uncertainty ??
           (edge.label === 'fetch' ? 'uncertain URL match' : `possible ${edge.label} edge`);
-        if (isNavigation(edge.label) || seen.has(edge.to)) continue;
-        if (seen.size >= nodeBudget) {
-          budget = true;
-          continue;
+        if (isNavigation(edge.label)) continue;
+        for (const site of sites) {
+          const contexts = this.enter(site, current.contexts);
+          const key = forwardKey(site.to, contexts);
+          if (seen.has(key)) continue;
+          if (seen.size >= nodeBudget) {
+            budget = true;
+            break;
+          }
+          seen.add(key);
+          pending.push({ id: site.to, depth: d, contexts });
         }
-        seen.add(edge.to);
-        pending.push({ id: edge.to, depth: d });
       }
       const modules = new Map<string, ExternalCall[]>();
       for (const call of this.external.get(current.id) ?? []) append(modules, this.index.externalModules![call[2]], call);

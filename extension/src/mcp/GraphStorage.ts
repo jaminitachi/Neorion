@@ -4,7 +4,7 @@ import type { IndexedReference, QueryIndex } from './Index';
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
   'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues' |
-  'flowCalls' | 'callGates' | 'flowIssues' | 'refEvidence' | 'renderLabels' | 'outgoingRenderIssues'> & {
+  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -18,12 +18,12 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, refEvidence, renderLabels, outgoingRenderIssues, ...rest } = index;
+    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, refEvidence, renderLabels, outgoingRenderIssues
+    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 

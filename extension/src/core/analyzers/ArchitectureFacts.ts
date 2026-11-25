@@ -1144,10 +1144,13 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
+export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true,
+  substitute?: (node: Node) => UrlText[] | undefined): UrlText[] | undefined {
   if (seen.has(node)) return;
+  const replacement = substitute?.(node);
+  if (replacement) return replacement;
   seen.add(node);
-  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
+  const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole, substitute);
   // An unresolved expression gets a slot. An empty set has no viable URL.
   const fallback = (values: UrlText[] | undefined): UrlText[] => values ?? [{ text: slot }];
   try {
@@ -1159,7 +1162,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
     if (node.getKind() === SyntaxKind.NullKeyword) return [];
     if (Node.isConditionalExpression(node)) {
       const branches = [node.getWhenTrue(), node.getWhenFalse()]
-        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl)))
+        .flatMap(branch => fallback(urlTexts(branch, seen, true, wholeUrl, substitute)))
         .filter(value => !wholeUrl || value.text !== '');
       if (!branches.length) return [];
       const hasSlash = branches.some(value => value.text.includes('/'));
@@ -1182,7 +1185,7 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
         const constant = Node.isVariableDeclaration(declaration) &&
           declaration.getVariableStatement()?.getDeclarationKind() === 'const';
         if (initializer) {
-          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl)
+          return urlTexts(initializer, seen, expandConditional && constant, wholeUrl, substitute)
             ?.map(value => value.text === slot ? value : { ...value, partial: value.partial || !constant });
         }
       }
@@ -1489,6 +1492,14 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     return matches;
   };
   const matchesFor = (url: Node | string) => matchValues(typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []);
+  const urlProp = (input: Node) => {
+    let prop = flow?.read(input);
+    if (!prop && flow) urlTexts(input, undefined, true, true, part => {
+      prop ??= flow.read(part);
+      return prop ? [{ text: spanningSlot }] : undefined;
+    });
+    return prop;
+  };
   type Request = NonNullable<ReturnType<typeof httpRequest>>;
   const summaries = new Map<Node, { request: Request; call: Node; parameter: number }[]>();
   const summarize = (node: Node) => {
@@ -1600,28 +1611,47 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
         const method = request.unbounded ? undefined : request.method;
         for (const input of request.urls) {
           if (input === undefined) continue;
-          const prop = isFetch && typeof input !== 'string' ? flow?.read(input) : undefined;
+          const prop = isFetch && typeof input !== 'string' ? urlProp(input) : undefined;
           const bindings = prop ? flow!.bindings(prop) : [];
-          const unresolved = !!prop && (!bindings.length || bindings.some(binding =>
-            binding.unknown || !binding.value || !urlTexts(binding.value)));
-          if (unresolved) index?.uncertainPropRequest(source, node);
-          const candidates = prop ? bindings.flatMap(({ site, value, gates }) => value
-            ? [{ url: value, binding: { name: prop.name, site, value, gates } }] : []) :
-            [{ url: input, binding: undefined }];
-          for (const { url, binding } of candidates) {
-            const matches = matchesFor(url);
+          const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
+            const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
+            const replace = (values: UrlText[]) => urlTexts(input, undefined, true, true, part => {
+              const read = flow!.read(part);
+              return read?.component === prop.component && read.name === prop.name ? values : undefined;
+            }) ?? [];
+            const unknown = !values || values.some(({ text }) => text === slot || text === spanningSlot) ||
+              'unknown' in binding && !!binding.unknown;
+            const known = values?.filter(({ text }) => text !== slot && text !== spanningSlot);
+            const entry = 'site' in binding && binding.value && known?.length
+              ? [{ values: replace(known), binding: { name: prop.name, site: binding.site, value: binding.value },
+                gates: binding.gates, unknown: !!binding.unknown }] : [];
+            if (!unknown) return entry;
+            const possible = replace([{ text: spanningSlot, dynamic: true, partial: true }]);
+            const bounded = possible.filter(value => apiSegments(value, config));
+            if (possible.some(value => value.text.startsWith(spanningSlot) && !apiSegments(value, config))) {
+              index?.uncertainPropRequest(source, node, method, binding.gates);
+            }
+            if (!bounded.length) return entry;
+            return [...entry, { values: bounded, binding: undefined, gates: binding.gates, unknown: true }];
+          }) : [{ values: typeof input === 'string' ? [{ text: input }] : urlTexts(input) ?? [],
+            binding: undefined, gates: [], unknown: false }];
+          for (const { values, binding, gates, unknown } of candidates) {
+            const matches = matchValues(values);
             if (!matches) continue;
+            const url = binding?.value ?? input;
             if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
             const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
             for (const { route, partial, markdown, dynamic } of matches.values()) {
               const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
                 value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-              const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !unresolved;
+              if (unknown && !binding && (!route.pages || route.methodBasis === 'enforced') && !matchesMethod) continue;
+              const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !unknown;
               if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
               index?.fetch({
                 file: source, line, node, route: route.id,
                 method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-                partial: partial || request.partial || unresolved || undefined, dynamic, prop: binding
+                partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
+                propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates
               });
               if (isSwr || !mapFact) continue;
               const targets = endpointsByCall.get(node) ?? [];

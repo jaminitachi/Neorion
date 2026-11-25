@@ -19,8 +19,8 @@ type NodeWithBody = import('ts-morph').FunctionDeclaration | import('ts-morph').
 
 const HOOK = /^use[A-Z0-9]/;
 const ACTION_DECLARATION_KINDS = new Set([SyntaxKind.FunctionDeclaration, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
-const RENDER_KINDS = new Set([SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.CallExpression]);
-const COMPONENT_BODY_KINDS = new Set([...RENDER_KINDS, SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression, SyntaxKind.JsxAttribute]);
+const RENDER_KINDS = new Set([SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
+const COMPONENT_BODY_KINDS = new Set([...RENDER_KINDS, SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression]);
 const ACTION_SCAN_KINDS = new Set([
   ...COMPONENT_BODY_KINDS, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.ShorthandPropertyAssignment
 ]);
@@ -496,10 +496,9 @@ export class ComponentAnalyzer {
     const flow = new PropFlow(bodies, new Map([...renderTargets].map(([tag, targets]) =>
       [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath);
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
-      const binding = rootBinding(tag);
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
-      if (!targets.length && binding !== tag) {
-        targets.push(...declarationsOf(binding).flatMap(node => resolveComponent(node) ?? []));
+      if (!targets.length && Node.isPropertyAccessExpression(tag)) {
+        targets.push(...declarationsOf(rootBinding(tag)).flatMap(node => resolveComponent(node) ?? []));
       }
       for (const target of new Set(targets)) {
         const site = tag.getParent();
@@ -519,21 +518,47 @@ export class ComponentAnalyzer {
             }
           }
         }
-        if (slot && !slot.length) {
-          index?.unresolvedRender(from, target.id, attribute!);
-          continue;
-        }
+        if (slot && !slot.length && Node.isJsxAttribute(attribute) && !flow.mayRenderSlot(attribute)) continue;
         addEdge(from, target.id, 'renders');
         if (index && from !== target.id) {
-          for (const transfer of slot ?? [{ detail: undefined, conditional: false, partial: false }]) {
-            if (transfer.partial) index.unresolvedRender(from, target.id, attribute ?? tag);
-            index.render(from, target.id, startLine(tag), conditionalAt(tag, body) || Number(transfer.conditional), undefined, undefined, tag, transfer.detail,
-              Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) ? site : undefined);
+          const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
+            ? site : undefined;
+          if (!slot?.length) {
+            index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, undefined, this.config && tag, undefined, renderSite);
+          } else for (const transfer of slot) {
+            index.render(from, target.id, startLine(tag), conditionalAt(tag, body) || Number(transfer.conditional),
+              undefined, transfer.partial ? true : undefined, this.config && tag, transfer.detail, renderSite);
           }
         }
       }
     };
+    const suppliedComponents = (value: Node | undefined, from: string, body?: Node) => {
+      if (!value) return;
+      const wrapped = wrappedExpression(value);
+      if (wrapped) suppliedComponents(wrapped, from, body);
+      else if (Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) render(value, from, body, true);
+      else if (Node.isConditionalExpression(value)) {
+        suppliedComponents(value.getWhenTrue(), from, body);
+        suppliedComponents(value.getWhenFalse(), from, body);
+      } else if (Node.isArrayLiteralExpression(value)) {
+        for (const entry of value.getElements()) suppliedComponents(entry, from, body);
+      } else if (Node.isObjectLiteralExpression(value)) {
+        for (const entry of value.getProperties()) {
+          if (Node.isPropertyAssignment(entry)) suppliedComponents(entry.getInitializer(), from, body);
+          else if (Node.isShorthandPropertyAssignment(entry)) suppliedComponents(entry.getNameNode(), from, body);
+        }
+      }
+    };
+    const inspectAttribute = (attribute: import('ts-morph').JsxAttribute, from: string, body?: Node) => {
+      if (/^on[A-Z]/.test(attribute.getNameNode().getText())) return;
+      const site = attribute.getParent()?.getParent();
+      if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return;
+      const tag = site.getTagNameNode();
+      if (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) return;
+      suppliedComponents(jsxValue(attribute), from, body);
+    };
     const componentTags = new Set<Node>();
+    const componentAttributes = new Set<Node>();
     const componentOwners = new Map<Node, string>();
     for (const [node, component] of components) {
       const body = bodies.get(node)!;
@@ -548,10 +573,8 @@ export class ComponentAnalyzer {
           componentTags.add(child);
           render(child.getTagNameNode(), component.id, body);
         } else if (Node.isJsxAttribute(child)) {
-          const value = jsxValue(child);
-          if ((Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) && flow.renderSlot(child, true).length) {
-            render(value, component.id, body, true);
-          }
+          componentAttributes.add(child);
+          inspectAttribute(child, component.id, body);
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
@@ -598,6 +621,7 @@ export class ComponentAnalyzer {
         if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !componentTags.has(node)) {
           render(node.getTagNameNode(), from);
         }
+        if (Node.isJsxAttribute(node) && !componentAttributes.has(node)) inspectAttribute(node, from);
         if (!Node.isCallExpression(node) || componentCalls.has(node)) return;
         const expression = node.getExpression();
         const [argument] = node.getArguments();
