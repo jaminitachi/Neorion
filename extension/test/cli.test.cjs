@@ -224,6 +224,7 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   fs.mkdirSync(web, { recursive: true });
   fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
   fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
+  fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web"}');
   const manifest = path.join(root, 'package.json');
   const workspaces = ['apps/*'];
   fs.writeFileSync(manifest, JSON.stringify({ workspaces }));
@@ -287,8 +288,9 @@ for (const separateCheckout of [false, true]) {
   });
 }
 
-for (const configured of [true, false]) {
-  test(`CLI keeps an explicit ${configured ? 'configured app with hoisted Next.js' : 'configless Next.js app'} over its nested example`, t => {
+for (const [workspace, configured] of [['npm', true], ['pnpm', true], ['pnpm', false], [undefined, false]]) {
+  const app = workspace ? `${configured ? 'configured' : 'configless'} ${workspace} app with hoisted Next.js` : 'configless Next.js app';
+  test(`CLI keeps an explicit ${app} over its nested example`, t => {
     const { root, run } = fixture(t);
     const web = path.join(root, 'apps/web');
     const example = path.join(web, 'examples/admin');
@@ -296,11 +298,19 @@ for (const configured of [true, false]) {
     const next = { next: '15.0.0' };
     fs.mkdirSync(path.join(web, 'src/app'), { recursive: true });
     fs.renameSync(path.join(root, 'app/page.tsx'), path.join(web, 'src/app', page));
-    if (configured) {
+    if (workspace === 'npm') {
       fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: next, workspaces: ['apps/*'] }));
+    } else if (workspace === 'pnpm') {
+      const manifest = configured ? { dependencies: next } : { dependencies: next, workspaces: ['apps/**'] };
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
+      fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), configured
+        ? "packages:\n  - 'apps/*' # Workspace apps\n"
+        : "packages: ['apps/**', '!apps/web/examples/**']\n");
+    }
+    if (configured) {
       fs.writeFileSync(path.join(web, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
     }
-    fs.writeFileSync(path.join(web, 'package.json'), JSON.stringify({ name: 'web', ...(configured ? {} : { dependencies: next }) }));
+    fs.writeFileSync(path.join(web, 'package.json'), JSON.stringify({ name: 'web', ...(workspace ? {} : { dependencies: next }) }));
     fs.mkdirSync(path.join(example, 'app'), { recursive: true });
     fs.writeFileSync(path.join(example, 'package.json'), JSON.stringify({ name: 'admin', dependencies: next }));
     fs.renameSync(path.join(root, 'tsconfig.json'), path.join(example, 'tsconfig.json'));
@@ -313,6 +323,63 @@ for (const configured of [true, false]) {
     assert.equal(query.status, 0, query.stderr);
     assert.match(query.stdout, /^Project: web$/m);
     assert.ok(query.stdout.includes(`src/app/${page}:2`));
+    if (workspace) {
+      const workspaceGraph = run(['graph', root]);
+      assert.equal(workspaceGraph.status, 0, workspaceGraph.stderr);
+      assert.match(workspaceGraph.stdout, /web · app router/);
+    }
+  });
+}
+
+test('CLI requires a valid package manifest for a workspace member', t => {
+  const { root, run } = fixture(t);
+  const generated = path.join(root, 'apps/generated');
+  fs.mkdirSync(path.join(generated, 'src/app'), { recursive: true });
+  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(generated, 'src/app/page.tsx'));
+  fs.mkdirSync(path.join(root, 'src'));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"workspace","workspaces":["apps/*"],"dependencies":{"next":"15.0.0"}}');
+  fs.writeFileSync(path.join(root, 'src/root.ts'), 'export function RootMarker() { return true; }');
+  for (const directory of [root, generated]) {
+    fs.writeFileSync(path.join(directory, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+  }
+
+  for (const invalidManifest of [undefined, '{', '[]']) {
+    if (invalidManifest) fs.writeFileSync(path.join(generated, 'package.json'), invalidManifest);
+    const graph = run(['graph', root]);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /workspace · none router · 1 source files/);
+    const query = run(['query', 'search', 'RootMarker', '--root', root]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /^Project: workspace$/m);
+    assert.match(query.stdout, /src\/root\.ts:1/);
+  }
+});
+
+for (const sitemap of ['sitemap.ts', 'sitemap.xml']) {
+  test(`CLI keeps an explicit Next.js app with only ${sitemap} over its nested example`, t => {
+    const { root, run } = fixture(t);
+    const example = path.join(root, 'examples/admin');
+    fs.mkdirSync(example, { recursive: true });
+    fs.renameSync(path.join(root, 'app'), path.join(example, 'app'));
+    fs.renameSync(path.join(root, 'tsconfig.json'), path.join(example, 'tsconfig.json'));
+    fs.writeFileSync(path.join(example, 'package.json'), '{"name":"admin","dependencies":{"next":"15.0.0"}}');
+    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"metadata-app","dependencies":{"next":"15.0.0"}}');
+    fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["src/**/*"]}');
+    fs.mkdirSync(path.join(root, 'src/app'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'src/app', sitemap), sitemap === 'sitemap.ts'
+      ? 'export default function SitemapMarker() { return [{ url: "https://example.com" }]; }'
+      : '<urlset></urlset>');
+
+    const graph = run(['graph', root]);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /metadata-app · app router/);
+    assert.ok(fs.readFileSync(/^Overview: (.+)$/m.exec(graph.stdout)[1], 'utf8').includes('/sitemap.xml'));
+    if (sitemap === 'sitemap.ts') {
+      const query = run(['query', 'search', 'SitemapMarker', '--root', root]);
+      assert.equal(query.status, 0, query.stderr);
+      assert.match(query.stdout, /^Project: workspace$/m);
+      assert.match(query.stdout, /src\/app\/sitemap\.ts:1/);
+    }
   });
 }
 

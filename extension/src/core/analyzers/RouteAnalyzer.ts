@@ -1,5 +1,6 @@
 import { CallExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
+import { metadataRouteKind } from '../AppMetadata';
 import type { RouteNode } from '../types/GraphTypes';
 import { DomainExtractor } from '../utils/DomainExtractor';
 
@@ -165,12 +166,10 @@ export class RouteAnalyzer {
         parts[0] === '..' || parts.some(part => part.startsWith('_'))) return;
 
     const filename = parts.pop()!;
-    const match = /^(page|layout|loading|error|not-found|route|robots|sitemap|opengraph-image|template|default|global-error)\.[jt]sx?$/.exec(filename)
-      ?? /^(opengraph-image)\.(?:png|jpg|jpeg|gif)$/.exec(filename)
-      ?? /^(sitemap)\.xml$/.exec(filename)
-      ?? (parts.length === 0 ? /^(robots)\.txt$/.exec(filename) : null);
-    if (!match) return;
-    const type = (match[1] === 'route' ? 'api' : match[1]) as RouteNode['type'];
+    const kind = /^(page|layout|loading|error|not-found|route|template|default|global-error)\.[jt]sx?$/.exec(filename)?.[1]
+      ?? metadataRouteKind(filename, parts.length === 0);
+    if (!kind) return;
+    const type = (kind === 'route' ? 'api' : kind) as RouteNode['type'];
     const exports = type === 'api' && source ? source.getExportSymbols().map(symbol => symbol.getName()) : [];
     const segments: string[] = [];
     for (const part of parts) {
