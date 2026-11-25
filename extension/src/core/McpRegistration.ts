@@ -123,7 +123,6 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
   const workspace = '${workspaceFolder}';
   const matches = (expected: Command) => command === expected.command && JSON.stringify(args) === JSON.stringify(expected.args);
   if (matches(mcpCommand({ root: workspace, localEntry }))) return true;
-  if (args[4] && matches({ command: 'node', args: ['-e', launchBundle, '--', workspace, args[4]] })) return true;
 
   const root = args.at(-1);
   if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
@@ -134,6 +133,17 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
   const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
   return !!version && (matches(mcpCommand({ ...options, platform: 'linux' })) ||
     matches(mcpCommand({ ...options, platform: 'win32' })));
+}
+
+function isExtensionCursorEntry(cache: string, entry: unknown) {
+  try {
+    // The generated bundle launcher can differ across CLI and extension builds.
+    const source = read(checked(cache, STATE));
+    const registered = source && (JSON.parse(source) as State | null)?.configs?.Cursor?.entry;
+    return !!registered && equal(entry, registered);
+  } catch {
+    return false;
+  }
 }
 
 export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', project: string, bundleSource: string) {
@@ -210,8 +220,8 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
-    if (cursorSetup && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
-        isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry)) continue;
+    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
+        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });
     const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
