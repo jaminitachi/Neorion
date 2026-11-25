@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
+import { posix } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { compare, graphRow, moduleStops, quantity, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
 import { routeAsset, sourceFile, traceHistory, type ImportEdit, type Removal } from './ChangesHistory';
@@ -157,20 +158,28 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     return empty(error instanceof Error && error.message.startsWith('Git ') ? error.message : 'git diff failed');
   }
 
+  const repositoryPath = (file: string) => posix.normalize(prefix + file);
+  const workspace = index.workspaceSources;
+  const packagePrefixes = (workspace && /^\.\.(?:\/\.\.){0,7}$/.test(workspace.offset) ? workspace.packages : [])
+    .filter(directory => !/^(?:apps|example-apps)\//.test(directory))
+    .map(directory => repositoryPath(workspace!.offset + '/' + directory + '/'));
+  const appPath = (file: string) => file.startsWith(prefix) ? file.slice(prefix.length) :
+    packagePrefixes.some(directory => file.startsWith(directory)) ? posix.relative(prefix || '.', file) : undefined;
+  const workspaceConfig = (file: string) => file.startsWith('../') ? config.test(posix.basename(file)) : config.test(file);
   const rootPackage = !!prefix && files.some(entry => entry.file === 'package.json' || entry.old === 'package.json');
-  const outside = files.filter(({ file, old }) => !file.startsWith(prefix) && !old?.startsWith(prefix) &&
+  const outside = files.filter(({ file, old }) => appPath(file) === undefined && (!old || appPath(old) === undefined) &&
     file !== 'package.json' && old !== 'package.json').length;
   files = files.flatMap<DiffFile>(entry => {
-    const file = entry.file.startsWith(prefix) ? entry.file.slice(prefix.length) : undefined;
-    const old = entry.old?.startsWith(prefix) ? entry.old.slice(prefix.length) : undefined;
+    const file = appPath(entry.file);
+    const old = entry.old && appPath(entry.old);
     if (!file) return old && entry.status === 'R' ? [{ file: old, status: 'D', hunks: [] }] : [];
     return [{ ...entry, file, old, status: entry.status === 'R' && !old ? 'A' : entry.status }];
   }).sort((a, b) => compare(a.file, b.file));
   const totalFiles = files.length + Number(rootPackage);
-  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => config.test(file) ||
+  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => workspaceConfig(file) ||
     status !== 'M' && [file, old].some(path => path && /^(?:src\/)?(?:app|pages)\//.test(path)));
-  const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(prefix + file) ||
-    (old !== undefined && localChanges.has(prefix + old));
+  const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(repositoryPath(file)) ||
+    (old !== undefined && localChanges.has(repositoryPath(old)));
   const stagedDrift = files.some(worktreeDiffers);
   const byFile = new Map<string, SymbolEntry[]>();
   const relevant = new Set(files.slice(0, maxFiles).map(entry => entry.file));
@@ -236,7 +245,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     const worktree = worktreeDiffers(entry) ? ' [worktree differs]' : '';
     touched.add(file);
     if (status === 'D') {
-      const isConfig = config.test(file);
+      const isConfig = workspaceConfig(file);
       if (isConfig) configFiles++;
       changes.push(graphRow(`deleted ${file}${isConfig ? ' [config: all routes]' : ''}${worktree}`, file));
       if (!isConfig && (sourceFile.test(file) || routeAsset.test(file))) {
@@ -344,7 +353,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       if (existing && isMiddlewareFile(old ?? file) &&
           (matcherChanged || mayChangeRouteFiles || worktree || !graph.middleware(file))) middlewareFiles.set(file, old ?? file);
     }
-    if (config.test(file)) {
+    if (workspaceConfig(file)) {
       configFiles++;
       changes.push(graphRow(`file ${file} [config: all routes]${worktree}`, file));
       continue;
@@ -434,7 +443,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   for (const edit of [...modified.values()].sort((a, b) => compare(a.file, b.file) || a.line - b.line ||
     Number(a.comment) - Number(b.comment))) {
     const { file, symbol, line } = edit;
-    const worktree = localChanges.has(prefix + file) ? ' [worktree differs]' : '';
+    const worktree = localChanges.has(repositoryPath(file)) ? ' [worktree differs]' : '';
     if (edit.comment) {
       changes.push(graphRow(`comment ${file}:${line}${symbol ? ' ' + symbol.name : ''} [comment only]${worktree}`, file));
       continue;

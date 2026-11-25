@@ -57,7 +57,7 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
       const file = record.slice(tab + 1);
       if (file.split('/').some(part => !part || part === '.' || part === '..' || part === '.git') ||
           /[\\:\x00-\x1f\ufffd]/.test(file)) continue;
-      if (!sourceFile.test(file) && !file.endsWith('.json') && !routeAsset.test(file)) continue;
+      if (!sourceFile.test(file) && !file.endsWith('.json') && !file.endsWith('pnpm-workspace.yaml') && !routeAsset.test(file)) continue;
       const blob = /^100(?:644|755) (?:blob )?([a-f0-9]{40,64})(?: 0)?$/.exec(record.slice(0, tab))?.[1];
       if (!blob) continue;
       const aliases = paths.get(blob) ?? [];

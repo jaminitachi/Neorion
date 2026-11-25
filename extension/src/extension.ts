@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { generateGraph } from './core/Generate';
-import { formatProjectCandidates, missingProject, selectProject, type ProjectSelection } from './core/FindProject';
+import { appMode, formatProjectCandidates, missingProject, selectProject, type ProjectSelection } from './core/FindProject';
 import { AGENT_FILES, CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
@@ -51,18 +51,19 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(showGraphDisposable);
 }
 
-function showProjectGuess(root: string, { directory, guessCandidates, searchLimited }: ProjectSelection) {
+function showProjectGuess(root: string, { directory, guessCandidates, searchLimited, developmentPackages }: ProjectSelection) {
     if (!guessCandidates) return;
     const local = (candidate: string) => path.relative(root, candidate) || '.';
-    const candidates = formatProjectCandidates(guessCandidates.map(local));
+    const candidates = guessCandidates.length > 1 ? ` Candidates: ${formatProjectCandidates(guessCandidates.map(local))}.` : '';
+    const development = developmentPackages ? ` Other packages with only a development dependency on Next: ${developmentPackages}.` : '';
     const limitNote = searchLimited ? ' Directory scan limit reached.' : '';
-    vscode.window.setStatusBarMessage(`Neorion guessed ${JSON.stringify(local(directory))}. Candidates: ${candidates}.${limitNote}`, 15_000);
+    vscode.window.setStatusBarMessage(`Neorion guessed ${JSON.stringify(local(directory))}.${candidates}${development}${limitNote}`, 15_000);
 }
 
 async function configureAgents(root: string, selection: ProjectSelection | undefined, connect: boolean, context: vscode.ExtensionContext) {
     try {
         const project = selection?.directory ?? root;
-        const discover = !!selection?.guessCandidates;
+        const discover = !!(selection?.guessCandidates || selection?.apps && selection.apps.length > 1);
         const choices = connect ? await vscode.window.showQuickPick([
             ...AGENT_FILES.map(label => ({ label, picked: fs.existsSync(path.join(root, label)) })),
             { label: REGISTER_MCP, picked: false },
@@ -101,7 +102,7 @@ async function configureAgents(root: string, selection: ProjectSelection | undef
         const selectedPaths = new Set([...instructions, ...configFiles].map(file => path.join(root, file)));
         const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
         if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
-        const mcp = planMcp(root, project, mcpTargets, bundled, bundleSource, connect, { discover });
+        const mcp = planMcp(root, discover ? root : project, mcpTargets, bundled, bundleSource, connect, { discover });
         const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
         mcp.commit();
         const approval = mcpTargets.includes('Claude Code') ?
@@ -131,6 +132,11 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
         if (!silent) vscode.window.showErrorMessage(missingProject(workspaceRoot));
         return;
     }
+    const mode = appMode(selection);
+    if (mode === 'list') {
+        if (!silent) vscode.window.showInformationMessage(`Next.js apps: ${selection.apps!.map(app => app.id).join(', ')}. Open an app folder to generate its map.`);
+        return;
+    }
     const projectPath = selection.directory;
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {
         try {
@@ -139,6 +145,13 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                 migrateLegacy: true,
                 onProgress: message => progress?.report({ message })
             });
+            if (options.markdown && mode === 'all') {
+                for (const app of selection.apps!) {
+                    if (app.directory !== projectPath) generateGraph(app.directory, {
+                        markdown: true, migrateLegacy: true, onProgress: message => progress?.report({ message: `${app.id}: ${message}` })
+                    });
+                }
+            }
             if (outputPath) {
                 const promptKey = 'neo.agentPromptShown:' + projectPath;
                 if (context.workspaceState && !context.workspaceState.get(promptKey)) {

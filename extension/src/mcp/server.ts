@@ -7,8 +7,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { missingProject, selectProject } from '../core/FindProject';
-import { ensureFresh, projectText, waitForBuild } from './Build';
+import { appMode, missingProject, selectedApp, selectProject } from '../core/FindProject';
+import { appList, appQueryText, ensureFresh, projectText, waitForBuild } from './Build';
 import { historyBudgetMs } from './ChangesHistory';
 import { legacyKind, queryName, tools } from './Tools';
 
@@ -120,8 +120,9 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
   const interactive = queryWorker(project, autoBuild, 2000);
   const history = queryWorker(project, autoBuild, historyBudgetMs + 1000);
   let changesQueue = Promise.resolve();
+  let appsQueue = Promise.resolve();
   let closed = false;
-  if (project) {
+  if (project && selection && appMode(selection) === 'single') {
     const initial = interactive.start();
     // Include initial index loading in initialize latency.
     await new Promise<void>((ready, reject) => {
@@ -148,10 +149,52 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
     return response;
   }
 
+  async function queryApp(project: string, name: string, args: Record<string, unknown>) {
+    if (autoBuild) {
+      const build = await waitForBuild(project, ensureFresh(project));
+      if (build.error) return { text: build.error, error: !build.building, building: !!build.building };
+    }
+    if (closed) return { text: '# partial: MCP server closed', error: true, building: false };
+    const changes = name === queryName && args.kind === 'changes';
+    const worker = queryWorker(project, autoBuild, changes ? historyBudgetMs + 1000 : 2000);
+    try {
+      const response = await worker.ask(name, args);
+      return { text: response?.text ?? '# partial: timed out', error: !!response?.isError, building: false };
+    } finally {
+      worker.stop();
+    }
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async request => {
-    const { name, arguments: args = {} } = request.params;
+    const { name, arguments: { app, ...args } = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
     if (!selection) return reply(missingProject(root), true);
+    if (app !== undefined) {
+      if (name !== queryName || typeof app !== 'string' || !app) return reply('Invalid app argument.', true);
+      try {
+        const chosen = selectedApp(selection, app);
+        const result = await queryApp(chosen.directory, name, args);
+        return reply(result.error || result.building ? result.text : projectText(chosen, root, result.text), result.error || undefined);
+      } catch (error) {
+        return reply((error as Error).message, true);
+      }
+    }
+    const mode = appMode(selection);
+    if (mode === 'list') return reply(appList(selection));
+    if (mode === 'all') {
+      const response = appsQueue.then(async () => {
+        const results = [];
+        for (const app of selection.apps!) {
+          const result = await queryApp(app.directory, name, args);
+          results.push({ app: app.id, ...result });
+          // Let the current build finish before starting more apps on the next request.
+          if (result.building) return reply(appQueryText(results) + '\n# partial: remaining apps pending');
+        }
+        return reply(appQueryText(results), results.every(result => result.error) || undefined);
+      });
+      appsQueue = response.then(() => undefined, () => undefined);
+      return response;
+    }
     const project = selection.directory;
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));

@@ -5,8 +5,8 @@ import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } from '../core/AgentInstructions';
-import { missingProject, selectProject } from '../core/FindProject';
-import { ensureFresh, projectText } from '../mcp/Build';
+import { appMode, missingProject, selectedApp, selectProject } from '../core/FindProject';
+import { appList, appQueryText, ensureFresh, projectText } from '../mcp/Build';
 import { isTemporaryCliInstall, mcpCommand, packageSpec, releaseSpec } from '../core/McpCommand';
 import { MCP_TARGETS, planMcp } from '../core/McpRegistration';
 import { VERSION } from '../mcp/Index';
@@ -16,8 +16,8 @@ import { updateClaudeHook } from './ClaudeHook';
 import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
-  neorion graph [dir] [--mcp-config]
-  neorion query <kind> <target> [--limit n] [--root dir]
+  neorion graph [dir] [--app name | --all-apps] [--mcp-config]
+  neorion query <kind> <target> [--limit n] [--root dir] [--app name]
   neorion query search <text> [--kind filter] [--limit n]
   neorion query wrappers <route> [--no-external | --include-external]
   neorion query impact <symbol|file> [--depth n] [--include-tests]
@@ -104,14 +104,15 @@ async function main([command, ...args]: string[]) {
   if (command === 'graph') {
     let parsed;
     try {
-      parsed = parseArgs({ args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true });
+      parsed = parseArgs({ args, options: { 'mcp-config': { type: 'boolean' }, app: { type: 'string' }, 'all-apps': { type: 'boolean' } }, allowPositionals: true });
     } catch (error) {
       throw new Error(`${(error as Error).message}\n\n${help}`);
     }
     const { values, positionals } = parsed;
     if (positionals.length > 1) throw new Error(help);
     const { run } = require('./graph.cjs') as typeof import('./graph');
-    return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
+    if (values.app !== undefined && values['all-apps']) throw new Error('Choose either --app or --all-apps.');
+    return run(resolve(positionals[0] ?? '.'), values['mcp-config'], values.app, values['all-apps']);
   }
   if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude' || args[0] === 'cursor')) {
     const agent = args[0];
@@ -128,7 +129,7 @@ async function main([command, ...args]: string[]) {
     const root = process.cwd();
     const remove = !!values.remove;
     if (agent === 'cursor') {
-      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { cursorSetup: { legacyLocalEntry: __filename } });
+      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { discover: true, cursorSetup: { legacyLocalEntry: __filename } });
       mcp.commit(() => {
         const writeRule = !remove && !hasActiveCursorRule(root, CURSOR_EXTENSION_RULE);
         if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(`npx -y ${releaseSpec()}`))) {
@@ -170,7 +171,7 @@ async function main([command, ...args]: string[]) {
   const { values, positionals } = parseArgs({
     args,
     options: { root: { type: 'string' }, workspace: { type: 'string' }, ...(query ? {
-      limit: { type: 'string' as const },
+      app: { type: 'string' as const }, limit: { type: 'string' as const },
       kind: { type: 'string' as const },
       depth: { type: 'string' as const },
       'include-tests': { type: 'boolean' as const },
@@ -203,13 +204,11 @@ async function main([command, ...args]: string[]) {
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
-  const selection = selectProject(root, confirm);
-  if (!selection) throw new Error(missingProject(root));
-  const project = selection.directory;
-  const build = await ensureFresh(project);
-  if (build.error) throw new Error(build.error);
-  const engine = indexReader(project)();
-  if (!engine) throw new Error(`Neorion index missing. Run graph in ${project} using the same CLI invocation.`);
+  const discovered = selectProject(root, confirm && values.app === undefined);
+  if (!discovered) throw new Error(missingProject(root));
+  const selection = values.app === undefined ? discovered : selectedApp(discovered, String(values.app));
+  const mode = appMode(selection);
+  if (mode === 'list') return console.log(appList(selection));
   const limit = values.limit === undefined ? undefined : Number(values.limit);
   const options = {
     ...(target === undefined ? {} : { target }),
@@ -223,7 +222,27 @@ async function main([command, ...args]: string[]) {
   };
   const installed = basename(process.argv[1]) === 'neorion' && !isTemporaryCliInstall(__filename) && runsCurrentEntry();
   const invocation = installed ? ['neorion'] : [process.execPath, __filename];
-  console.log(projectText(selection, root, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
+  async function queryProject(project: string) {
+    const build = await ensureFresh(project);
+    if (build.error) throw new Error(build.error);
+    const engine = indexReader(project)();
+    if (!engine) throw new Error(`Neorion index missing. Run graph in ${project} using the same CLI invocation.`);
+    return engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project });
+  }
+
+  if (mode === 'all') {
+    const results = [];
+    for (const app of selection.apps!) {
+      try {
+        results.push({ app: app.id, text: await queryProject(app.directory) });
+      } catch (error) {
+        results.push({ app: app.id, text: (error as Error).message, error: true });
+      }
+    }
+    console.log(appQueryText(results));
+    if (results.every(result => result.error)) process.exitCode = 1;
+  } else console.log(projectText(selection, root, await queryProject(selection.directory)));
+
 }
 
 if (isMainThread) {

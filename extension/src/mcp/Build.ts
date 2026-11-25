@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { formatProjectCandidates, type ProjectSelection } from '../core/FindProject';
 import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
-import { projectSnapshot, workspaceInputsHash } from '../core/ProjectSnapshot';
+import { projectSnapshot, workspaceInputsHash, workspaceSourcesHash } from '../core/ProjectSnapshot';
 
 type BuildResult = { error?: string; building?: boolean };
 const builds = new Map<string, Promise<BuildResult>>();
@@ -24,6 +24,7 @@ async function fresh(root: string, indexPath: string) {
   if (index.queryRevision !== QUERY_INDEX_REVISION || index.graphRevision !== GRAPH_INDEX_REVISION) return false;
   const inputs = index.pagesWorkspaceInputs;
   if (inputs && (!inputs.hash || inputs.hash !== workspaceInputsHash(root, inputs.offset, inputs.files))) return false;
+  if (index.workspaceSources && index.workspaceSources.hash !== workspaceSourcesHash(root, index.workspaceSources)) return false;
   return typeof index.projectSnapshot === 'string' && index.projectSnapshot === projectSnapshot(root);
 }
 
@@ -128,18 +129,47 @@ export function projectLabel(root: string) {
   return basename(root).replace(/[\r\n]/g, ' ');
 }
 
-export function projectRootNotice({ directory, guessCandidates, searchLimited }: ProjectSelection, requested: string) {
+export function projectRootNotice({ directory, guessCandidates, searchLimited, developmentPackages, apps }: ProjectSelection, requested: string) {
   if (!guessCandidates) return '';
-  const candidates = formatProjectCandidates(guessCandidates);
+  const candidates = guessCandidates.length > 1 ? ` Candidates: ${formatProjectCandidates(guessCandidates)}.` : '';
+  const development = developmentPackages ? ` Found ${developmentPackages} other package${developmentPackages === 1 ? '' : 's'} with only a development dependency on Next.` : '';
+  const appHint = apps?.some(app => app.directory !== directory)
+    ? ` Next.js apps: ${apps.map(app => JSON.stringify(app.id)).join(', ')}. Use --app <name> to select one.` : '';
   const limitNote = searchLimited ? ' The directory scan reached its limit.' : '';
   const confirmation = directory === requested
     ? 'Use --root . from the selected directory with query or mcp to confirm it.'
     : 'Run from the chosen directory or use --root <dir> with query or mcp.';
-  return `\n# partial: project root guessed\n# hint: Selected ${JSON.stringify(directory)}. Candidates: ${candidates}.${limitNote} ${confirmation}`;
+  return `\n# partial: project root guessed\n# hint: Selected ${JSON.stringify(directory)}.${candidates}${development}${limitNote} ${confirmation}${appHint}`;
 }
 
 export function projectText(selection: ProjectSelection, requested: string, text: string) {
   const notice = projectRootNotice(selection, requested);
   const result = notice ? text.replace(/\n# complete:[^\n]*$/, '') : text;
   return `Project: ${selection.directory.replace(/[\r\n]/g, ' ')}${notice}\n${result}`;
+}
+
+export function appList(selection: ProjectSelection) {
+  const apps = selection.apps!;
+  return ['# Next.js apps', ...apps.map(app => `  ${JSON.stringify(app.id)} (${JSON.stringify(app.name)})`),
+    selection.searchLimited ? '# partial: directory scan limit reached' : '# partial: apps not indexed together',
+    '# hint: Use --app <name> on the CLI or set app in the MCP query.'].join('\n');
+}
+
+export function appQueryText(results: { app: string; text: string; error?: boolean }[]) {
+  let partial = false;
+  const sections = results.map(({ app, text, error }) => {
+    const label = '[' + JSON.stringify(app) + ']';
+    let coverage = false;
+    const lines = text.trimEnd().split('\n').flatMap(line => {
+      if (line.startsWith('# complete:')) {
+        coverage = true;
+        return [];
+      }
+      if (line.startsWith('# partial:')) return ['# partial: ' + label + line.slice('# partial:'.length)];
+      return line ? [label + ' ' + line] : [];
+    });
+    partial ||= !coverage || !!error;
+    return `App: ${JSON.stringify(app)}\n` + lines.join('\n');
+  });
+  return sections.join('\n\n') + (partial ? '\n# partial: see app results' : '\n# complete: all listed apps');
 }

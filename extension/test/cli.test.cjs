@@ -337,6 +337,101 @@ test('A selected workspace root gives a confirmation hint and NEORION_ROOT match
   });
 });
 
+test('monorepo app indexes share workspace source and keep route results app-scoped', async t => {
+  const { root, env, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const cli = (...args) => {
+    const result = run(args);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+
+  const graph = cli('graph');
+  assert.match(graph, /^App: "apps\/admin"$/m);
+  assert.match(graph, /^App: "apps\/web"$/m);
+  const [adminPath, webPath] = [...graph.matchAll(/^Overview: (.+)$/gm)]
+    .map(match => path.join(path.dirname(match[1]), indexFile));
+  assert.notEqual(webPath, adminPath);
+  const search = cli('query', 'search', 'SharedCard');
+  assert.match(search, /^\["apps\/admin"\] component \.\.\/\.\.\/packages\/ui\/src\/card\.tsx:1#SharedCard .*workspace package: @fixture\/ui/m);
+  assert.match(search, /^\["apps\/web"\] component /m);
+  assert.match(search, /# complete: all listed apps/);
+  assert.match(cli('query', 'wrappers', '/', '--app', 'web', '--no-external'), /SharedProvider \(workspace package: @fixture\/ui\)/);
+  assert.match(cli('query', 'who_renders', '../../packages/ui/src/card.tsx#SharedCard', '--app', 'apps/web'), /^\/  app\/page\.tsx:7/m);
+  assert.match(cli('query', 'api_consumers', 'post.all', '--app', '@fixture/web'), /call app\/page\.tsx:8 WebPage \(queryOptions\)/);
+  assert.match(cli('query', 'impact', 'post.all', '--app', 'apps/web'), /trpc app\/page\.tsx:8 WebPage/);
+  const allProcedures = cli('query', 'api_consumers', 'post.all');
+  assert.match(allProcedures, /# partial: \["apps\/admin"\] target unresolved/);
+  assert.doesNotMatch(allProcedures, /^# complete:/m);
+
+  const web = readJson(webPath);
+  const admin = readJson(adminPath);
+  assert.ok(web.files['../../packages/trpc/src/index.ts']);
+  assert.ok(!Object.keys(web.files).some(file => file.includes('/apps/admin/') || file.includes('/unused/')));
+  assert.ok(!Object.keys(admin.files).some(file => file.includes('/apps/web/') || file.includes('/packages/api/')));
+  const missing = run(['query', 'search', 'SharedCard', '--app', 'missing']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Unknown app "missing".*apps\/admin.*apps\/web/);
+
+  await t.test('MCP exposes the same namespaces and app filter', async subtest => {
+    const client = await openMcp(subtest, root, { command: process.execPath, args: [entry, 'mcp', '--workspace', root], cwd: root, env });
+    const result = await client.text('query', { kind: 'search', target: 'SharedCard' });
+    assert.match(result, /^\["apps\/admin"\] component /m);
+    assert.match(result, /^\["apps\/web"\] component /m);
+    const callers = await client.text('query', { kind: 'api_consumers', target: 'post.all', app: 'web' });
+    assert.match(callers, /call app\/page\.tsx:8 WebPage/);
+    assert.match(callers, /^# complete: indexed tRPC callers and cache sites$/m);
+  });
+
+  const git = (...args) => childProcess.execFileSync('git', args, { cwd: root, env, stdio: 'pipe' });
+  git('init', '-q');
+  git('add', '.');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'workspace fixture');
+  const cardFile = path.join(root, 'packages/ui/src/card.tsx');
+  const card = fs.readFileSync(cardFile, 'utf8');
+  fs.writeFileSync(cardFile, card.replace('String(options)', 'JSON.stringify(options)'));
+  const changes = cli('query', 'changes', '--app', 'web');
+  assert.match(changes, /packages\/ui\/src\/card\.tsx/);
+  assert.match(changes, /route page \/ +app\/page\.tsx/);
+
+  fs.writeFileSync(path.join(root, 'packages/ui/src/card.tsx'), 'export const NewCard = () => <article />;\n');
+  assert.match(cli('query', 'search', 'NewCard', '--app', 'web'), /card\.tsx:1#NewCard/);
+
+  fs.mkdirSync(path.join(root, 'app'));
+  fs.writeFileSync(path.join(root, 'next.config.js'), '');
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"compilerOptions":{"jsx":"preserve"}}');
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), 'export default function RootOnly() { return <main />; }');
+  assert.match(cli('query', 'search', 'RootOnly'), /^\["\."\] component app\/page\.tsx:1#RootOnly/m);
+  assert.doesNotMatch(cli('query', 'search', 'AdminPage', '--app', '.'), /#AdminPage/);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'next.config.js'));
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+
+  for (const app of ['events', 'settings']) {
+    const directory = path.join(root, 'apps', app);
+    fs.cpSync(path.join(root, 'apps/admin'), directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name: app, dependencies: nextDep.dependencies }));
+  }
+  const listed = cli('query', 'search', 'SharedCard');
+  assert.match(listed, /^# Next.js apps$/m);
+  assert.match(listed, /Use --app <name>/);
+  assert.doesNotMatch(listed, /^# complete:/m);
+  assert.match(cli('graph'), /--all-apps/);
+});
+
+test('explicit --root rejects directories without a project', t => {
+  const { root, run } = fixture(t);
+  fs.mkdirSync(path.join(root, 'plain/src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'plain/package.json'), '{"name":"plain"}');
+  fs.writeFileSync(path.join(root, 'plain/src/index.ts'), 'export const plain = 1;');
+  const result = run(['query', 'search', 'plain', '--root', 'plain']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Neorion found no tsconfig\.json/);
+  assert.doesNotMatch(result.stdout, /^# complete:/m);
+});
+
 test('CLI Project line shows the full path for an unambiguous nested app', t => {
   const { root, run } = fixture(t);
   const project = moveIntoApp(root, 'apps/web');
@@ -363,7 +458,8 @@ test('CLI ranks dependency-only Next libraries below apps and omits them from th
   assert.equal(query.status, 0, query.stderr);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
   const hint = /^# hint: .*$/m.exec(query.stdout)?.[0];
-  assert.ok(hint?.includes(`Candidates: ${JSON.stringify(app)}.`), query.stdout);
+  assert.ok(hint?.includes(`Selected ${JSON.stringify(app)}. Found 3 other packages with only a development dependency on Next.`), query.stdout);
+  assert.doesNotMatch(hint, /Candidates:/);
   for (const folder of libraries) assert.ok(!hint.includes(JSON.stringify(path.join(root, folder))), hint);
   assert.match(query.stdout, /^# partial: project root guessed$/m);
   assert.doesNotMatch(query.stdout, /^# complete:/m);
@@ -1092,7 +1188,7 @@ test('Cursor setup merges MCP and shares the Claude hint, with idempotent projec
   assert.equal(added.status, 0, added.stderr);
   assert.deepEqual(readJson(config), {
     mcpServers: { ...JSON.parse(original).mcpServers, neorion: {
-      ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio'
+      ...mcpCommand({ root: '${workspaceFolder}', useRelease: true, discover: true }), type: 'stdio'
     } }
   });
   const hint = fs.readFileSync(rule, 'utf8');
@@ -1181,7 +1277,7 @@ test('Cursor migrates an owned local entry to a release archive and leaves a mat
     assert.equal(result.status, 0, result.stderr);
   };
   setup();
-  assert.deepEqual(readJson(config).mcpServers.neorion, { ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio' });
+  assert.deepEqual(readJson(config).mcpServers.neorion, { ...mcpCommand({ root: '${workspaceFolder}', useRelease: true, discover: true }), type: 'stdio' });
   setup('--remove');
   assert.equal(fs.readFileSync(config, 'utf8'), original);
   fs.writeFileSync(config, withServer);

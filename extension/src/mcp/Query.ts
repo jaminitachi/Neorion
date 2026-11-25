@@ -238,13 +238,20 @@ export class QueryEngine {
     }
   }
 
-  private checkPath(file: string) {
-    if (!validRelative(file)) throw new Error('Use an app-relative path within the Neorion root.');
-    const absolute = path.join(this.root, file);
+  private checkPath(file: string, workspaceDiff = false) {
+    const normalized = path.posix.normalize(file);
+    const offset = this.index.workspaceSources?.offset;
+    const workspaceFile = offset && /^\.\.(?:\/\.\.){0,7}$/.test(offset) &&
+      !/[\\:\x00-\x1f]/.test(file) && (Object.prototype.hasOwnProperty.call(this.index.workspacePackages ?? {}, normalized) ||
+        workspaceDiff && this.index.workspaceSources!.packages.some(directory => normalized.startsWith(offset + '/' + directory + '/')));
+    if (!workspaceFile && !validRelative(file)) throw new Error(this.index.workspaceSources ? 'Use an app-relative path or an indexed workspace path.' : 'Use an app-relative path within the Neorion root.');
+    const boundary = workspaceFile ? path.resolve(this.root, offset) : this.root;
+    const absolute = path.resolve(this.root, file);
+    if (!inside(boundary, absolute)) throw new Error('Path is outside the Neorion root.');
     // Also reject links in an existing ancestor when the requested leaf is absent.
-    for (let candidate = absolute; candidate !== this.root; candidate = path.dirname(candidate)) {
+    for (let candidate = absolute; candidate !== boundary; candidate = path.dirname(candidate)) {
       try {
-        if (!inside(this.root, realpathSync(candidate))) throw new Error('Path is outside the Neorion root.');
+        if (!inside(boundary, realpathSync(candidate))) throw new Error('Path is outside the Neorion root.');
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error;
@@ -322,6 +329,11 @@ export class QueryEngine {
       });
   }
 
+  private workspaceLabel(file: string) {
+    const pkg = this.index.workspacePackages?.[file];
+    return typeof pkg === 'string' ? ` (workspace package: ${pkg})` : '';
+  }
+
   private search(text: string, kind: string, expired: () => boolean): Result {
     const needle = text.toLowerCase();
     const hits: { row: Row; score: number; references: number; file: string; kind: string; symbol?: SymbolEntry }[] = [];
@@ -339,7 +351,7 @@ export class QueryEngine {
       const references = this.references.get(symbol.id)?.length ?? 0;
       const label = `${symbol.kind} ${declaration(symbol)}`;
       hits.push({ score, references, file: symbol.file, kind: symbol.kind, symbol, row: {
-        ...row(label + (symbol.aliasOf ? ` alias of ${symbol.aliasOf}` : '') +
+        ...row(label + this.workspaceLabel(symbol.file) + (symbol.aliasOf ? ` alias of ${symbol.aliasOf}` : '') +
           (renders ? `  rendered by ${renders} components` : '') + flagTest(symbol.file), symbol.file),
         pathEnd: label.length
       } });
@@ -473,7 +485,7 @@ export class QueryEngine {
           (route.pages ? previous : groups.get(item.file))!.push(item);
         } else groups.set(route.pages ? String(groups.size) : item.file, [item]);
       }
-      const name = (item: typeof items[number]) => item.external ? `${item.symbol} (external: ${item.external})` : item.symbol;
+      const name = (item: typeof items[number]) => item.external ? `${item.symbol} (external: ${item.external})` : item.workspacePackage ? `${item.symbol} (workspace package: ${item.workspacePackage})` : item.symbol;
       const providers = items.filter(isProvider);
       const branchLabel = `branch ${String.fromCharCode(65 + branch)}`;
       if (providers.length) {
@@ -771,7 +783,7 @@ export class QueryEngine {
     if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
     if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
     if (tool === 'changes') return {
-      result: changes(this.root, this.index, graph, args.scope, args.base, depth, deadline, file => this.checkPath(file))
+      result: changes(this.root, this.index, graph, args.scope, args.base, depth, deadline, file => this.checkPath(file, true))
     };
     if (target.startsWith('/') && this.index.pagesUrlConfig) {
       const routes = this.matchRoute(target);
@@ -983,16 +995,26 @@ export class QueryEngine {
       const freshness = staleCount ? `stale ${staleCount} files; regenerate the index` : 'fresh';
       const omitted = result.rows.length - shown;
       const count = result.count ?? `${result.rows.length} results`;
-      const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${result.title ?? target}` +
+      const title = result.title ?? target;
+      const titleFile = result.targets?.find(file => title.startsWith(file + '#') || title.startsWith(file + ':'));
+      const titlePackage = titleFile ? this.workspaceLabel(titleFile) : '';
+      const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${title}${titlePackage}` +
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
+      const unresolved = this.index.workspaceUnresolved ?? [];
+      const workspaceIssue = [
+        this.index.workspaceDiscoveryLimited ? 'workspace package scan limit reached' : '',
+        unresolved.length ? 'unresolved workspace modules ' + unresolved.slice(0, 3).join(', ') +
+          (unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : '') : ''
+      ].filter(Boolean).join('; ');
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ?
-          ['output truncated', result.partial].filter(Boolean).join('; ') :
-        !this.index.coverage ? 'regenerate legacy index' : result.partial ??
-        (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
+          ['output truncated', result.partial, workspaceIssue].filter(Boolean).join('; ') :
+        !this.index.coverage ? 'regenerate legacy index' : [
+          result.partial ?? (tool !== 'search' && !result.targets ? 'target unresolved' : undefined), workspaceIssue
+        ].filter(Boolean).join('; ') || undefined;
       const scope = result.scope ?? {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.callers ? ' and callers' : ''),

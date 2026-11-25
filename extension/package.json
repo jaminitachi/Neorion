@@ -7,7 +7,7 @@
     "url": "https://github.com/jaminitachi/Neorion"
   },
   "description": "Optimizes codebase context for LLM coding tools by generating an architectural graph.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "engines": {
     "vscode": "^1.80.0"
   },

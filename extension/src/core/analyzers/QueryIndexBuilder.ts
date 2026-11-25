@@ -785,7 +785,7 @@ export class QueryIndexBuilder {
       const packageBindings = new Map<string, { module: string; name: string; binding: Node }>();
       for (const entry of imports) {
         const module = entry.getModuleSpecifierValue();
-        if (!isPackageSpecifier(module) || entry.isTypeOnly() || exports.has(entry.getModuleSpecifierSourceFile()!)) continue;
+        if (!isPackageSpecifier(module) || workspace?.has(module) || entry.isTypeOnly() || exports.has(entry.getModuleSpecifierSourceFile()!)) continue;
         for (const binding of [entry.getDefaultImport(), entry.getNamespaceImport()]) {
           if (!binding) continue;
           const name = binding.getText();
@@ -901,11 +901,6 @@ export class QueryIndexBuilder {
         const imported = packageBindings.get(root.getText());
         const declaration = imported || !found ? root.getSymbol()?.getDeclarations()[0] : undefined;
         if (imported && declaration === imported.binding) {
-          if (pages && workspace?.has(imported.module)) {
-            const reasons = (index.pagesOwnerIssues![owner] ??= []);
-            const reason = `workspace import ${imported.module} outside indexed root`;
-            if (!reasons.includes(reason)) reasons.push(reason);
-          }
           const name = [imported.name, ...members].slice(0, 2).join('.');
           const calls = externalCalls.get(owner) ?? new Map();
           const key = imported.module + '\0' + name;
@@ -1171,7 +1166,16 @@ export class QueryIndexBuilder {
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }
     }
-    index.pagesWorkspaceInputs = workspace?.snapshot();
+    if (workspace) {
+      const packages = files.flatMap(file => {
+        const pkg = workspace.packageFor(file.getFilePath());
+        return pkg ? [[relativePath(file), pkg.name] as const] : [];
+      });
+      if (packages.length) index.workspacePackages = Object.fromEntries(packages);
+      const unresolved = workspace.unresolvedFor(files.map(file => file.getFilePath()));
+      if (unresolved.length) index.workspaceUnresolved = unresolved;
+      if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
+    }
     return index;
   }
 }
