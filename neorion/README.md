@@ -10,7 +10,11 @@ Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs t
 
 ```sh
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.6.0/neorion-0.6.0.tgz
+command -v neorion
 ```
+
+If the command is missing and you use a custom npm prefix, add its bin directory to your PATH. In a Unix shell, run `export PATH="$(npm prefix -g)/bin:$PATH"`.
+When you use the release above, start Claude Code and Codex with `neorion` on PATH.
 
 From your project root, build the graph and ask a question.
 
@@ -19,13 +23,20 @@ neorion graph
 neorion query wrappers /
 ```
 
+If your app has no `/` route, search for part of a route name with a command such as `neorion query search login`.
+In the Pages Router, `wrappers` shows the custom `_app` when present. For dynamic routes, quote
+the indexed pattern, such as `'/blog/[slug]'`. Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap.
+
 `wrappers` includes third-party components on the page’s wrapper chain and labels
 them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
 in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 `api_consumers` lists caller files and lines for API routes, server actions, and
 tRPC procedures. Pass a route URL, `signOut`, or a dotted procedure path such as
-`post.create`. Use `path#Name` to disambiguate a name. tRPC routers must be in the
+`post.create`. Replace examples such as `signOut` with names from your app.
+In source builds, `[mention]` marks a reference such as a route literal and
+`[possible URL override]` marks a transport whose request URL may change at runtime.
+Use `path#Name` to disambiguate a name. tRPC routers must be in the
 indexed project. Routers from other workspace packages may be unresolved.
 
 ## Codex
@@ -39,6 +50,8 @@ neorion setup codex
 The Codex and Claude Code hints and skills cover `impact` for upstream callers and affected routes, `callees` for downstream dependencies, `path` for the shortest directed dependency chain, and `changes` for routes and wrappers affected by a Git diff.
 
 Run `neorion setup codex --remove` from the project to clear its marked block and remove the user-wide skill and MCP registration that setup still owns. Setup recognizes older installations by their released skill and default MCP command. Rerun `--remove` in other projects to clear their blocks, or use `--remove --no-hint` to keep the current project's block.
+
+Codex may leave an empty `config.toml` after removal.
 
 ## Claude Code
 
@@ -60,6 +73,8 @@ claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neo
 ```
 
 Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
+
+Claude Code may leave its settings file and backups after removal.
 
 For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
 
@@ -88,4 +103,15 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
 
-Direct setup from a clone records the clone's path when `neorion` is unavailable on `PATH`. Rerun setup from the new location after moving the clone.
+These source-build commands list indexed pages, narrow a component search, trace downstream calls and query an indexed route pattern. Replace `ChatShell` and `/blog/[slug]` with a symbol and pattern from your project.
+
+```sh
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search / --kind route
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search chat --kind component --limit 50
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query callees ChatShell --depth 2 --limit 84
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers '/blog/[slug]'
+```
+
+Run a query from another directory with `--root /path/to/project`. Query suggestions keep the project and CLI invocation. Symbol suggestions show an accepted `path#Name` target and its declaration line.
+Add `--mcp-config` to `graph` to print an MCP launcher snippet.
+If setup registered absolute paths to Node.js and the CLI, rerun setup when either path changes. This applies to source and packaged builds that use absolute paths.

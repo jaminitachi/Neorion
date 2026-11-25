@@ -121,6 +121,10 @@ export async function waitForBuild(root: string, pending: Promise<BuildResult>):
   }
 }
 
+export function projectLabel(root: string) {
+  return basename(root).replace(/[\r\n]/g, ' ');
+}
+
 export function projectText(root: string, text: string) {
-  return `Project: ${basename(root).replace(/[\r\n]/g, ' ')}\n${text}`;
+  return `Project: ${projectLabel(root)}\n${text}`;
 }

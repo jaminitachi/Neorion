@@ -98,7 +98,12 @@ renders take a separate turn. Ties among fetch facts favor page entry points.
 
 From this directory, run `npm ci` and `npx vsce package`. Run `npm run pack:cli` to build the standalone `neorion` tarball in this directory. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.
 
-Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.txt).
+`package.json` allows the locked esbuild and VSCE signing postinstall scripts.
+Use `npm install-scripts ls` to review scripts after changing dependencies.
+VSCE still brings in a deprecated Secretlint preset. The npm audit finding through
+`ts-morph` requires a `minimatch` release whose declared Node.js support excludes Node.js 18.
+
+Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](https://github.com/jaminitachi/Neorion/blob/HEAD/extension/THIRD_PARTY_NOTICES.txt).
 
 ## Test locally
 

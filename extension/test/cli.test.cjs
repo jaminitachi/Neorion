@@ -95,6 +95,7 @@ function assertQueryHint(hint) {
   }
   assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`\./);
   assert.match(block, /For `path`, pass `target` and `to` in MCP\. For `changes`, omit `target`\./);
+  assert.match(block, /# complete` covers the indexed static matches in the stated scope/);
   assert.match(block, /# partial: <reason>.*verify against the source/);
   assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
   assert.match(block, /`.+ query path <from> <to>`.*`.+ query changes`/);
@@ -119,15 +120,81 @@ test('CLI, extension, plugin and marketplace versions agree', () => {
 
 test('CLI graph and query use the workspace cache', t => {
   const { root, cache, run } = fixture(t);
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"different-package-name"}');
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, / · workspace · app router · /);
+  assert.doesNotMatch(graph.stdout, /^MCP:/m);
+  assert.equal(graph.stderr, '');
+  const config = run(['graph', '--mcp-config']);
+  assert.equal(config.status, 0, config.stderr);
+  assert.deepEqual(JSON.parse(/^MCP:\s+(.+)$/m.exec(config.stdout)[1]), { command: process.execPath, args: [entry, 'mcp'] });
   const overview = /^Overview: (.+)$/m.exec(graph.stdout)[1];
   assert.ok(overview.startsWith(path.join(cache, 'neorion') + path.sep));
   assert.ok(fs.existsSync(overview));
   const query = run(['query', 'who_renders', 'DashboardShell', '--limit', '1']);
   assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /^Project: workspace$/m);
   assert.match(query.stdout, /app\/page\.tsx:2/);
-  assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'tsconfig.json']);
+  const miss = run(['query', 'who_renders', 'Dashboard']);
+  assert.match(miss.stdout, /^# did you mean: app\/page\.tsx#DashboardShell \(declared at line 1\)$/m);
+  assert.match(miss.stdout, /^# try: .+neorion\.cjs'? query search Dashboard --kind component --root .+$/m);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json', 'tsconfig.json']);
+});
+
+test('CLI wrapper misses point to route search and suggest dynamic Pages Router patterns', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["pages/**/*"]}');
+  fs.mkdirSync(path.join(root, 'pages/blog'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'pages/_app.tsx'), 'export default function MyApp({ Component }) { return <Component />; }');
+  for (const page of ['[slug]', 'archive', 'posts/[...parts]']) {
+    const file = path.join(root, 'pages/blog', page + '.tsx');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'export default function BlogPost() { return <main />; }');
+  }
+  const miss = run(['query', 'wrappers', '/']);
+  assert.equal(miss.status, 0, miss.stderr);
+  assert.match(miss.stdout, /^# try: .+neorion\.cjs'? query search \/ --kind route --root .+$/m);
+  assert.match(miss.stdout, /^# partial: target unresolved$/m);
+  const routes = run(['query', 'search', '/', '--kind', 'route', '--limit', '1']);
+  assert.equal(routes.status, 0, routes.stderr);
+  assert.match(routes.stdout, /^route .* \/blog\//m);
+  assert.match(routes.stdout, /# more: 2 \(try .+neorion\.cjs'? query search \/ --kind route --limit 3 --root .+/);
+  assert.doesNotMatch(routes.stdout, /^component /m);
+  for (const [url, pattern] of [
+    ['/blog/example-post', '/blog/[slug]'], ['/blog/archive', '/blog/archive'], ['/blog/posts/a/b', '/blog/posts/[...parts]']
+  ]) {
+    if (url !== pattern) {
+      const concrete = run(['query', 'wrappers', url]);
+      assert.equal(concrete.status, 0, concrete.stderr);
+      assert.ok(concrete.stdout.includes(`# matching pattern: ${pattern} `), concrete.stdout);
+      assert.match(concrete.stdout, /^# partial: target unresolved$/m);
+    }
+    const query = run(['query', 'wrappers', pattern]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.ok(query.stdout.includes(`# wrappers ${pattern} : 1 file, 1 page`), query.stdout);
+    assert.match(query.stdout, /^1 pages\/_app\.tsx:1 MyApp$/m);
+  }
+});
+
+test('CLI hints replay a source query from outside its explicitly selected project', { skip: process.platform === 'win32' }, t => {
+  const { root, home, env } = fixture(t);
+  const direct = copyCli(path.join(home, "checkout's source"));
+  fs.copyFileSync(path.join(path.dirname(entry), 'graph.cjs'), path.join(path.dirname(direct), 'graph.cjs'));
+  const project = path.join(home, 'selected project');
+  fs.renameSync(root, project);
+  env.PATH = home;
+  const first = spawnSync(process.execPath, [direct, 'query', 'search', 'app', '--kind', 'component',
+    '--limit', '1', '--root', project], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(first.status, 0, first.stderr);
+  const command = /^# more: \d+ \(try (.*), or narrow the text\)$/m.exec(first.stdout)?.[1];
+  assert.ok(command?.includes(process.execPath), first.stdout);
+  const second = spawnSync('/bin/sh', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /^Project: selected project$/m);
+  assert.match(second.stdout, /^# search "app" kind=component : 2 results /m);
+  assert.doesNotMatch(second.stdout, /^# more:/m);
 });
 
 test('CLI and MCP index JSX with jsconfig paths, baseUrl, and inherited include', async t => {
@@ -233,7 +300,7 @@ test('wrapper queries include only third-party components on the page chain by d
   const providers = '# providers (outermost first): SWRConfig (external: swr), SessionProvider (external: next-auth/react), Scope (external: widgets), ContextShell, theme.Provider';
   assert.match(standard.stdout, /^1 app\/layout\.tsx:8 RootLayout, Grid \(external: widgets\), Tabs \(external: @radix-ui\/react-tabs\), widgets\.Root \(external: widgets\), LocalContext, LocalConfig, theme\.Consumer providers:/m);
   assert.ok(standard.stdout.split('\n').includes(providers));
-  assert.match(standard.stdout, /^# not wrappers: rendered inside the page$/m);
+  assert.doesNotMatch(standard.stdout, /^# not wrappers:/m);
   assert.match(standard.stdout, /1 file, 1 page/);
   assert.doesNotMatch(standard.stdout, /Link|Icon|PageDecoration|motion\.div/);
   assert.equal(run([...query, '--include-external']).stdout, standard.stdout);
@@ -261,6 +328,77 @@ test('CLI MCP builds a missing index and gives the same answer as query', { time
   assert.match(cold, /app\/page\.tsx:2/);
   assert.equal(await server.text('query', args), cold);
   assert.equal(run(['query', args.kind, args.target]).stdout.trimEnd(), cold);
+});
+
+async function chatTransportQueries(t, source) {
+  const { root, env, run } = fixture(t);
+  for (const route of ['chat', 'other']) {
+    const directory = path.join(root, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() {}\nexport function POST() {}\n');
+  }
+  fs.writeFileSync(path.join(root, 'app/chat.ts'), source);
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  return async (kind, target, to) => {
+    const result = await server.text('query', { kind, target, to });
+    const cli = run(['query', kind, target, ...(to ? [to] : [])]);
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.equal(cli.stdout.trimEnd(), result);
+    return result;
+  };
+}
+
+test('CLI and MCP keep transport receiver mutations out of complete POST paths', async t => {
+  const query = await chatTransportQueries(t, `
+    import { DefaultChatTransport } from 'ai';
+    export function receiverChat() {
+      return new DefaultChatTransport({
+        api: '/api/chat',
+        prepareSendMessagesRequest() {
+          this.api = '/api/other';
+          return { body: {} };
+        },
+      });
+    }
+  `);
+  const partial = /^# partial: possible AI SDK transport URL override$/m;
+  const configured = await query('api_consumers', '/api/chat');
+  assert.match(configured, /^send .* receiverChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(configured, partial);
+  const actual = await query('api_consumers', '/api/other');
+  assert.match(actual, /^send .* receiverChat .* \[mention\]$/m);
+  assert.match(actual, partial);
+  for (const route of ['/api/chat', '/api/other']) {
+    const result = await query('path', 'receiverChat', route);
+    assert.match(result, /no directed path/);
+    assert.match(result, partial);
+  }
+  const callees = await query('callees', 'receiverChat');
+  assert.match(callees, /0 fetches/);
+  assert.match(callees, partial);
+});
+
+test('CLI and MCP index a literal reconnect override as a GET request', async t => {
+  const query = await chatTransportQueries(t, `
+    import { DefaultChatTransport } from 'ai';
+    export function reconnectChat() {
+      return new DefaultChatTransport({
+        api: '/api/chat',
+        prepareReconnectToStreamRequest: () => ({ api: '/api/other' }),
+      });
+    }
+  `);
+  const override = await query('api_consumers', '/api/other');
+  assert.match(override, /1 site in 1 file: 1 request/);
+  assert.match(override, /^send .* reconnectChat GET AI SDK transport$/m);
+  assert.match(override, /^# complete:/m);
+  const configured = await query('api_consumers', '/api/chat');
+  assert.match(configured, /^send .* reconnectChat POST AI SDK transport$/m);
+  assert.match(configured, /^# complete:/m);
+  const result = await query('path', 'reconnectChat', '/api/other');
+  assert.match(result, /1 hop/);
+  assert.match(result, /^1 fetch .* GET \/api\/other \(GET\)/m);
+  assert.match(result, /^# complete:/m);
 });
 
 test('CLI MCP rebuilds an index without the wrapper revision', { timeout: 20_000 }, async t => {
@@ -462,7 +600,7 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
   }
 });
 
-test('Claude repairs a stale owned registration and uses the installed CLI on POSIX', {
+test('Claude repairs a stale owned registration with an absolute launcher on POSIX', {
   skip: process.platform === 'win32'
 }, t => {
   const { home, root, run } = fixture(t);
@@ -478,8 +616,8 @@ test('Claude repairs a stale owned registration and uses the installed CLI on PO
   assert.equal(repaired.status, 0, repaired.stderr);
   const add = ['mcp', 'add', '--scope', 'user', 'neorion', '--'];
   assert.deepEqual(calls(), [[...add, process.execPath, stale, 'mcp'],
-    ['mcp', 'remove', '--scope', 'user', 'neorion'], [...add, 'neorion', 'mcp']]);
-  const registered = { type: 'stdio', command: 'neorion', args: ['mcp'], env: {} };
+    ['mcp', 'remove', '--scope', 'user', 'neorion'], [...add, process.execPath, entry, 'mcp']]);
+  const registered = { type: 'stdio', command: process.execPath, args: [entry, 'mcp'], env: {} };
   assert.deepEqual(readJson(config).mcpServers.neorion, registered);
   assert.deepEqual(readJson(path.join(home, '.claude/skills/neorion/.neorion-setup.json')).mcp.entry, registered);
   assert.match(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8'), /run `neorion query <kind> <target>`/);
