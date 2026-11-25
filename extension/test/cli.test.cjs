@@ -310,7 +310,18 @@ test('project selection follows the precedence rule for all PR #19 review probes
         f.pkg('packages/ui', 'ui');
         f.library('packages/ui', 'src/app/index.ts', 'ready', 'src/**/*');
       },
-      requests: [{ expected: 'packages/ui' }],
+      requests: [{ expected: 'cypress' }],
+    },
+    {
+      name: 'Vite workspace keeps the first Cypress config when no package declares Next.js',
+      build(f) {
+        f.pkg('.', 'vite-workspace', { workspaces: ['packages/*'], devDependencies: { cypress: '15.9.0' } });
+        f.put('.', 'cypress.config.js', "export default { e2e: { supportFile: 'cypress/support/e2e.ts' } };");
+        f.library('cypress', 'support/e2e.ts', 'installAuthCommands', 'support/*.ts');
+        f.pkg('packages/ui', '@vite/ui', { devDependencies: { vite: '7.1.2' } });
+        f.library('packages/ui', 'src/app/index.ts', 'mountUi', 'src/**/*');
+      },
+      requests: [{ expected: 'cypress', query: ['installAuthCommands', /support\/e2e\.ts:1#installAuthCommands/] }],
     },
     {
       name: 'tooling config remains available when it is the only project',
@@ -367,10 +378,22 @@ test('project selection follows the precedence rule for all PR #19 review probes
           f.library(path.join(ws, 'apps/aaa-utils'), 'src/app/index.ts', 'UtilityMarker', 'src/**/*');
         }
       },
-      requests: [ancestor
-        ? { from: 'workspace', expected: 'workspace/apps/web', query: ['WebPage', /src\/app\/page\.tsx:1/], mcp: utility }
-        : { expected: '.', query: ['WebPage', /apps\/web\/src\/app\/page\.tsx:1/] }],
+      requests: [{ from: ancestor ? 'workspace' : '.', expected: ancestor ? 'workspace/apps/web' : 'apps/web',
+        query: ['WebPage', /src\/app\/page\.tsx:1/], mcp: ancestor && utility }],
     }))),
+    {
+      name: 'workspace sharing Next.js selects its routed Pages Router member',
+      build(f) {
+        f.pkg('.', 'shared-next-workspace', { workspaces: ['apps/*'], dependencies: f.next });
+        f.app('apps/web', '@workspace/web', { ownNext: false, route: 'src/pages/index', include: 'src/**/*' });
+        f.put('apps/web', 'src/pages/api/health.ts', 'export default function health(req, res) { res.status(200).json({ ok: true }); }');
+        f.put('apps/web', 'src/lib/health.ts', "export function fetchHealth() { return fetch('/api/health'); }");
+      },
+      requests: ['.', 'apps/web'].map(from => ({
+        from, expected: 'apps/web',
+        query: ['/api/health', /\/api\/health -> src\/pages\/api\/health\.ts:1[^\n]*\nsend +src\/lib\/health\.ts:1 fetchHealth GET fetch/, 'api_consumers'],
+      })),
+    },
     ...['package-json', 'pnpm-yaml', 'undeclared', 'pnpm configless'].map(manager => ({
       name: `hoisted-${manager} explicit with distinct markers`,
       build(f) {
@@ -409,23 +432,24 @@ test('project selection follows the precedence rule for all PR #19 review probes
       requests: [{ from: ancestor ? 'workspace' : '.', expected: ancestor ? 'workspace' : '.', query: ['RootMarker', /src\/root\.ts:1/] }],
     }))),
     ...[
-      ['pnpm-dot-explicit', ['apps/./*', 'apps/*/examples/*'], false],
-      ['pnpm-dot-segment', ['apps/./*', '!apps/web/examples/**', 'examples/*'], true],
-      ['pnpm-exclusion-first', ['!apps/web/examples/**', 'apps/**'], true],
-    ].map(([name, patterns, workspaceProbe]) => ({
+      ['pnpm-dot-explicit', ['apps/./*', 'apps/*/examples/*']],
+      ['pnpm-dot-segment', ['apps/./*', '!apps/web/examples/**', 'examples/*'], 'examples/alternate'],
+      ['pnpm-exclusion-first', ['!apps/web/examples/**', 'apps/**'], 'apps/web'],
+    ].map(([name, patterns, workspaceExpected]) => ({
       name,
       build(f) {
         f.pkg('.', 'workspace', { dependencies: f.next });
         f.pnpm('.', patterns);
         f.app('apps/web', 'web', { route: 'src/app/page', ownNext: false, marker: 'WebMarker' });
         markedExample(f, 'apps/web');
-        if (workspaceProbe) {
+        if (workspaceExpected) {
           f.app('examples/alternate', 'alternate', { route: 'src/app/page', marker: 'AlternateMarker' });
           f.library('.', 'src/root.ts', 'RootMarker', 'src/*.ts');
         }
       },
       requests: [{ from: 'apps/web', expected: 'apps/web', query: ['WebMarker', /src\/app\/page\.tsx:1/] },
-        ...(workspaceProbe ? [{ expected: '.', query: ['WebMarker', /0 results/] }] : [])],
+        ...(workspaceExpected ? [{ expected: workspaceExpected,
+          query: [workspaceExpected === 'apps/web' ? 'WebMarker' : 'AlternateMarker', /src\/app\/page\.tsx:1/] }] : [])],
     })),
     ...[
       ['normalized pnpm include', ['./apps//unused/.././*/', 'apps/*/examples/*'], true],
@@ -501,15 +525,15 @@ test('project selection follows the precedence rule for all PR #19 review probes
         assert.equal(graphFile, path.join(cache, 'neorion', cacheKey, 'codebase_graph.md'), graph.stdout);
         if (overview) assert.ok(fs.readFileSync(graphFile, 'utf8').includes(overview));
         if (query) {
-          const [target, matches] = query;
-          const result = run(['query', 'search', target, '--root', requestedRoot]);
+          const [target, matches, kind = 'search'] = query;
+          const result = run(['query', kind, target, '--root', requestedRoot]);
           assert.equal(result.status, 0, result.stderr);
           assert.match(result.stdout, matches);
           if (mcp) {
             const client = await openMcp(t, requestedRoot, {
               command: process.execPath, args: [entry, 'mcp'], cwd: requestedRoot, env,
             });
-            const reply = await client.text('query', { kind: 'search', target });
+            const reply = await client.text('query', { kind, target });
             assert.equal(reply, result.stdout.trimEnd());
           }
         }

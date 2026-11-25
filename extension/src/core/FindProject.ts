@@ -1,15 +1,16 @@
 // Project selection follows this order.
-// 1. Keep the requested directory if it declares Next.js or has routes and inherits Next.js
-//    from any ancestor in the same Git checkout. Descendants cannot replace it.
+// 1. Keep the requested directory if it has routes and declares Next.js or inherits it
+//    from an ancestor in the same Git checkout. Also keep a standalone root that declares Next.js.
 //    Routes include page, layout, route, and metadata files in app or src/app, and page and
 //    API files in pages or src/pages.
 // 2. At a workspace root, look for routed Next.js apps outside tooling with valid member
 //    manifests. pnpm's glob rules normalize paths and apply exclusions regardless of order.
 //    Prefer configured apps with their own Next.js dependency, then other direct dependencies,
 //    then inherited ones.
-// 3. Keep a standalone root's config. For an unconfigured directory without a workspace,
-//    also discover standalone Next.js descendants. Fall back to non-tooling configs, then
-//    other Next.js packages, then tooling configs.
+// 3. Keep a root that declares Next.js or has its own config if no routed member was found.
+//    For an unconfigured directory without a workspace, also discover standalone Next.js
+//    descendants. With Next.js candidates, prefer non-tooling configs, then Next.js packages,
+//    then tooling configs. Otherwise, use the first config in breadth-first order.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -181,9 +182,11 @@ function* descendants(root: string): Generator<Candidate> {
 export function findProject(root: string): string | undefined {
   const start = resolve(root);
   const manifest = readManifest(start);
-  if (hasNextDependency(manifest) || (hasProjectRoutes(start) && inheritsNext(start))) return start;
+  const hasOwnNext = hasNextDependency(manifest);
+  if (hasProjectRoutes(start) && (hasOwnNext || inheritsNext(start))) return start;
 
   const patterns = workspacePatterns(start, manifest);
+  if (!patterns && hasOwnNext) return start;
   const rootConfig = projectConfig(start);
   if (!patterns && rootConfig) return start;
 
@@ -210,12 +213,13 @@ export function findProject(root: string): string | undefined {
     }
   }
   if (routedWithNext || routedWithInheritedNext) return routedWithNext ?? routedWithInheritedNext;
-  if (rootConfig) return start;
+  if (hasOwnNext || rootConfig) return start;
 
+  const hasNextCandidate = Boolean(nextPackage || toolingNextPackage);
   let toolingConfig: string | undefined;
   for (const { directory, inTooling } of patterns ? descendants(start) : candidates) {
     if (!projectConfig(directory)) continue;
-    if (!inTooling) return directory;
+    if (!hasNextCandidate || !inTooling) return directory;
     toolingConfig ??= directory;
   }
   return nextPackage ?? toolingNextPackage ?? toolingConfig;

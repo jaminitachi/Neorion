@@ -76,14 +76,16 @@ npm --prefix extension run build:cli
 ```
 
 From your project root, run the CLI directly from the clone. Neorion keeps the requested directory
-when it declares `next` or has routes and inherits `next` from an ancestor `package.json` in the
-same Git checkout. Discovery looks for `page`, `layout`, `route`, and supported metadata files
+when it has routes and either declares `next` or inherits `next` from an ancestor `package.json` in
+the same Git checkout. Discovery looks for `page`, `layout`, `route`, and supported metadata files
 under `app` or `src/app`, and page or API files under `pages` or `src/pages`. A workspace root
-without its own Next.js evidence searches its members for a routed app. Members need a valid
-`package.json` and must match the patterns in
-`pnpm-workspace.yaml` or `package.json#workspaces`. Exclusions apply regardless of pattern order.
-A standalone root with a config keeps that config. In discovery, configs under `cypress`, `e2e`,
-`playwright`, `scripts`, and `tests` come after other configs and Next.js packages.
+searches its members for a routed Next.js app before falling back to its own config or `next`
+dependency. Members need a valid `package.json` and must match the patterns in `pnpm-workspace.yaml`
+or `package.json#workspaces`. Exclusions apply regardless of pattern order.
+A standalone root with a config or its own `next` dependency stays selected. When discovery finds
+Next.js candidates, configs under `cypress`, `e2e`, `playwright`, `scripts`, and `tests` come after
+other configs and Next.js packages. Without Next.js candidates, the first config in breadth-first
+order wins.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package, Neorion uses
 `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`, `vendor`,
