@@ -62,7 +62,7 @@ export function returns(body: Node | undefined): Node[] {
 
 // Walk the current invocation. Nested function bodies run only when their
 // callers explicitly follow them.
-export function executionSites(body: Node | undefined) {
+export function executionSites(body: Node | undefined, followGuardedCalls = false) {
   const calls: { node: import('ts-morph').CallExpression; possible: boolean }[] = [];
   const returned: { node: Node; possible: boolean }[] = [];
   const truth = (node: Node) => {
@@ -80,7 +80,7 @@ export function executionSites(body: Node | undefined) {
       let flow = next;
       for (const statement of node.getStatements()) {
         if (!(flow & next)) break;
-        flow = (flow & exit) | visit(statement, possible || !!(flow & exit));
+        flow = (flow & exit) | visit(statement, possible || !followGuardedCalls && !!(flow & exit));
       }
       return flow;
     }
@@ -113,6 +113,16 @@ export function executionSites(body: Node | undefined) {
         if (choice === undefined || choice === (operator !== SyntaxKind.BarBarToken)) visit(right, possible || choice === undefined);
         return next;
       }
+    }
+    if (followGuardedCalls && Node.isTryStatement(node)) {
+      const body = visit(node.getTryBlock(), possible);
+      const handler = node.getCatchClause();
+      const caught = handler ? visit(handler.getBlock(), true) : 0;
+      const last = node.getFinallyBlock();
+      const flow = body | caught;
+      if (!last) return flow;
+      const final = visit(last, possible);
+      return (final & exit) | (final & next ? flow : 0);
     }
     if (Node.isCallExpression(node)) calls.push({ node, possible });
     // Loops, switches and exception handlers require runtime state to resolve.

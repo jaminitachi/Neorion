@@ -40,7 +40,12 @@ export function workspaceInputsHash(root: string, offset: string, files: string[
     if (!file || isAbsolute(file) || /[\\\x00-\x1f]/.test(file) || file.split('/').includes('..')) return;
     const absolute = join(base, file);
     const stat = statSync(absolute, { throwIfNoEntry: false });
-    if (!stat?.isFile() || !realpathSync(absolute).startsWith(base + sep)) return;
+    if (!stat) {
+      // A pnpm workspace can acquire a root package.json after its first build.
+      hash.update(JSON.stringify([file, null]));
+      continue;
+    }
+    if (!stat.isFile() || !realpathSync(absolute).startsWith(base + sep)) return;
     hash.update(JSON.stringify([file, stat.size, stat.mtimeMs, stat.ctimeMs]));
   }
   return hash.digest('hex');

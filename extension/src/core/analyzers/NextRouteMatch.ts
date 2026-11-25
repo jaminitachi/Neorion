@@ -82,24 +82,40 @@ function membership(pattern: MatcherPart[], route: MatcherPart[]) {
   return overlap ? 'yes' : 'no';
 }
 
-export function middlewareMatcher(pattern: string, pathname: string, concrete = false): 'yes' | 'possible' | 'no' | undefined {
+export function compileMiddlewareMatcher(pattern: string) {
   if (!pattern.startsWith('/')) return;
   const parts = routeSegments(pattern.replace(/\/$/, '') || '/');
-  const variants = routeSegments(pathname);
   const negative = /^\/\(\(\?!(.+)\)\.\*\)$/.exec(pattern);
   if (negative && negative[1].split('|').every(part => /^[\w./-]+$/.test(part))) {
     const excluded = negative[1].split('|');
-    const dynamic = concrete ? -1 : variants.findIndex(part => segmentRank(part) !== '3');
-    const prefix = variants.slice(0, dynamic < 0 ? variants.length : dynamic).join('/');
-    if (dynamic < 0) return excluded.some(value => new RegExp('^(?:' + value + ')').test(prefix)) ? 'no' : 'yes';
-    if (excluded.some(value => prefix.startsWith(value) && !value.includes('.'))) return 'no';
-    return excluded.some(value => value.startsWith(prefix ? prefix + '/' : '')) ? 'possible' : 'yes';
+    const prefixes = excluded.map(value => new RegExp('^(?:' + value + ')'));
+    return (pathname: string, concrete = false): 'yes' | 'possible' | 'no' => {
+      const variants = routeSegments(pathname);
+      const dynamic = concrete ? -1 : variants.findIndex(part => segmentRank(part) !== '3');
+      const prefix = variants.slice(0, dynamic < 0 ? variants.length : dynamic).join('/');
+      if (dynamic < 0) return prefixes.some(regex => regex.test(prefix)) ? 'no' : 'yes';
+      if (excluded.some(value => prefix.startsWith(value) && !value.includes('.'))) return 'no';
+      return excluded.some(value => value.startsWith(prefix ? prefix + '/' : '')) ? 'possible' : 'yes';
+    };
   }
   if (parts.some(part => !/^(?:[\w.~-]+|:\w+[?*+]?)$/.test(part))) return;
-  return membership(parts.map(part => part.startsWith(':') ?
-    { optional: /[?*]$/.test(part), repeat: /[+*]$/.test(part) } : { text: part }),
-  variants.map(part => {
-    const rank = concrete ? '3' : segmentRank(part);
-    return rank === '3' ? { text: part } : { optional: rank === '0', repeat: rank !== '2' };
-  }));
+  const patternParts = parts.map(part => part.startsWith(':') ?
+    { optional: /[?*]$/.test(part), repeat: /[+*]$/.test(part) } : { text: part });
+  const fixed = !patternParts.some(part => part.optional || part.repeat);
+  return (pathname: string, concrete = false): 'yes' | 'possible' | 'no' => {
+    const route = routeSegments(pathname).map(part => {
+      const rank = concrete ? '3' : segmentRank(part);
+      return rank === '3' ? { text: part } : { optional: rank === '0', repeat: rank !== '2' };
+    });
+    if (fixed && !route.some(part => part.repeat)) {
+      if (route.length !== patternParts.length || patternParts.some(({ text }, i) =>
+        text !== undefined && route[i].text !== undefined && text !== route[i].text)) return 'no';
+      return patternParts.some(({ text }, i) => text !== undefined && route[i].text === undefined) ? 'possible' : 'yes';
+    }
+    return membership(patternParts, route);
+  };
+}
+
+export function middlewareMatcher(pattern: string, pathname: string, concrete = false) {
+  return compileMiddlewareMatcher(pattern)?.(pathname, concrete);
 }

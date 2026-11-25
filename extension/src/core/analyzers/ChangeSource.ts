@@ -58,8 +58,13 @@ export function inspectChangeSource(file: string, text: string, scanComments: bo
   const names = new Set<string>();
   const aliases = new Set<string>();
   const stars = new Set<string>();
+  const moduleSpecifiers = new Map<number, string>();
   const lineAt = (position: number) => source.getLineAndCharacterOfPosition(position).line + 1;
   const statements = source.statements.map(statement => {
+    if ((ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)) &&
+      statement.moduleSpecifier && ts.isStringLiteral(statement.moduleSpecifier)) {
+      moduleSpecifiers.set(lineAt(statement.getStart(source)), statement.moduleSpecifier.text);
+    }
     const exports = new Set<string>();
     let star: string | undefined;
     if (ts.isExportAssignment(statement)) exports.add('default');
@@ -102,5 +107,5 @@ export function inspectChangeSource(file: string, text: string, scanComments: bo
     };
     visit(source);
   }
-  return { names, aliases, stars, code, statements, matcher: middleware ? middlewareMatcher(source)?.values : undefined };
+  return { names, aliases, stars, code, statements, moduleSpecifiers, matcher: middleware ? middlewareMatcher(source)?.values : undefined };
 }

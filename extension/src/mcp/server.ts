@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { findProject, missingProject } from '../core/FindProject';
+import { missingProject, selectProject } from '../core/FindProject';
 import { ensureFresh, projectText, waitForBuild } from './Build';
 import { historyBudgetMs } from './ChangesHistory';
 import { legacyKind, queryName, tools } from './Tools';
@@ -66,11 +66,15 @@ export function runQueries(root: string) {
   });
 }
 
-export async function serve(root: string, { autoBuild }: { autoBuild: boolean }) {
-  const project = autoBuild ? findProject(root) : root;
+function queryWorker(project: string | undefined, autoBuild: boolean, budget: number) {
   let worker: Worker | undefined;
   let nextId = 0;
   const pending = new Map<number, (response?: Response) => void>();
+  function clear(current: Worker) {
+    if (worker !== current) return;
+    worker = undefined;
+    for (const settle of pending.values()) settle();
+  }
   function start() {
     const current = new Worker(__filename, { workerData: project });
     worker = current;
@@ -78,17 +82,47 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
       if (response !== 'ready' && worker === current) pending.get(response.id)?.(response);
     });
     current.on('error', error => console.error(error));
-    current.on('exit', () => {
-      if (worker !== current) return;
-      worker = undefined;
-      for (const settle of pending.values()) settle();
-    });
+    current.on('exit', () => clear(current));
     if (autoBuild && process.stdin.readableEnded) current.unref();
     return current;
   }
 
+  function stop() {
+    const current = worker;
+    if (!current) return;
+    clear(current);
+    void current.terminate();
+  }
+
+  function ask(name: string, args: unknown) {
+    const id = ++nextId;
+    const current = worker ?? start();
+    return new Promise<Response | undefined>(done => {
+      const timeout = setTimeout(() => {
+        if (worker === current) stop();
+      }, budget);
+      pending.set(id, response => {
+        clearTimeout(timeout);
+        pending.delete(id);
+        done(response);
+      });
+      current.postMessage({ id, name, args } satisfies Call);
+    });
+  }
+
+  return { start, ask, stop, unref: () => worker?.unref() };
+}
+
+export async function serve(root: string, { autoBuild, confirm, discover = autoBuild }:
+  { autoBuild: boolean; confirm?: boolean; discover?: boolean }) {
+  const selection = discover ? selectProject(root, confirm) : { directory: root };
+  const project = selection?.directory;
+  const interactive = queryWorker(project, autoBuild, 2000);
+  const history = queryWorker(project, autoBuild, historyBudgetMs + 1000);
+  let changesQueue = Promise.resolve();
+  let closed = false;
   if (project) {
-    const initial = start();
+    const initial = interactive.start();
     // Include initial index loading in initialize latency.
     await new Promise<void>((ready, reject) => {
       initial.once('message', () => ready());
@@ -97,71 +131,45 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
     });
   }
   const server = new Server({ name: 'neorion-mcp', version: VERSION }, { capabilities: { tools: {} } });
-  server.onclose = () => { void worker?.terminate(); };
+  server.onclose = () => {
+    closed = true;
+    interactive.stop();
+    history.stop();
+  };
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   const reply = (text: string, isError?: boolean) =>
     ({ ...(isError === undefined ? {} : { isError }), content: [{ type: 'text' as const, text }] });
 
-  async function ask(name: string, args: unknown) {
-    const id = ++nextId;
-    const current = worker ?? start();
-    const response = await new Promise<Response | undefined>(done => {
-      const timeout = setTimeout(() => {
-        // The engine tries to return partial results first. This also bounds stalled I/O.
-        if (worker === current) {
-          worker = undefined;
-          for (const settle of pending.values()) settle();
-          void current.terminate();
-        }
-      }, 2000);
-      pending.set(id, response => {
-        clearTimeout(timeout);
-        pending.delete(id);
-        done(response);
-      });
-      current.postMessage({ id, name, args } satisfies Call);
-    });
+  function askChanges(args: unknown) {
+    // Serialize history builds so simultaneous requests can reuse the same
+    // comparison graph and each gets its own budget once it starts.
+    const response = changesQueue.then(() => closed ? undefined : history.ask(queryName, args));
+    changesQueue = response.then(() => undefined, () => undefined);
     return response;
-  }
-
-  async function askChanges(args: unknown) {
-    // An older Git snapshot can take longer to index. Keep it off the
-    // interactive worker used by the other queries.
-    const current = new Worker(__filename, { workerData: project });
-    return new Promise<Response | undefined>(done => {
-      const finish = (response?: Response) => {
-        clearTimeout(timeout);
-        void current.terminate();
-        done(response);
-      };
-      const timeout = setTimeout(finish, historyBudgetMs + 1000);
-      current.on('error', () => finish());
-      current.on('exit', () => finish());
-      current.on('message', (response: Response | 'ready') => {
-        if (response === 'ready') current.postMessage({ id: 0, name: queryName, args } satisfies Call);
-        else finish(response);
-      });
-    });
   }
 
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
-    if (!project) return reply(missingProject(root), true);
+    if (!selection) return reply(missingProject(root), true);
+    const project = selection.directory;
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);
     }
-    const response = await (name === queryName && args.kind === 'changes' ? askChanges(args) : ask(name, args));
+    const response = await (name === queryName && args.kind === 'changes' ? askChanges(args) : interactive.ask(name, args));
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const kind = legacyKind(name) ?? args.kind ?? 'query';
     const text = response?.text ?? `# timeout ${kind}${label ? ' ' + label : ''} : 0 results\n# partial: timed out`;
-    return reply(autoBuild && !response?.isError ? projectText(project, text) : text, response?.isError);
+    return reply(discover && !response?.isError ? projectText(selection, root, text) : text, response?.isError);
   });
   process.stdin.once('end', () => {
     // Let a piped CLI request finish even after its input reaches EOF.
-    if (autoBuild) worker?.unref();
+    if (autoBuild) {
+      interactive.unref();
+      history.unref();
+    }
     else void server.close();
   });
   await server.connect(new StdioServerTransport());

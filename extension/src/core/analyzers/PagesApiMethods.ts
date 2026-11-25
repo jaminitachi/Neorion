@@ -1,8 +1,12 @@
-import { CallExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { RouteNode } from '../types/GraphTypes';
 import { property, textValue } from './NextConfig';
 import { executionSites, functionNode, valueNode } from './StaticBindings';
+import { visitKinds } from './CompilerWalk';
 import type { WorkspaceBindings } from './WorkspaceBindings';
+
+const methodSyntax = new Set([SyntaxKind.SwitchStatement, SyntaxKind.PropertyAccessExpression,
+  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier, SyntaxKind.BinaryExpression, SyntaxKind.CallExpression]);
 
 export const HTTP_METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'];
 
@@ -225,8 +229,16 @@ function requestMethod(request: Node | undefined) {
   const requestSymbol = Node.isIdentifier(request) ? request.getSymbol() : undefined;
   const methodBinding = Node.isObjectBindingPattern(request) ? request.getElements().find(element =>
     (element.getPropertyNameNode() ?? element.getNameNode()).getText() === 'method')?.getNameNode().getSymbol() : undefined;
+  const memo = new Map<Node, boolean>();
   return (input: Node): boolean => {
+    const cached = memo.get(input);
+    if (cached !== undefined) return cached;
     const node = valueNode(input) ?? input;
+    const result = resolve(node);
+    memo.set(input, result);
+    return result;
+  };
+  function resolve(node: Node) {
     if (methodBinding && Node.isIdentifier(node)) return node.getSymbol() === methodBinding;
     if (!requestSymbol || (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node))) return false;
     const key = Node.isPropertyAccessExpression(node) ? node.getName() : textValue(node.getArgumentExpression());
@@ -314,11 +326,8 @@ export function pagesMethods(source: SourceFile, workspace?: WorkspaceBindings):
       const text = textValue(node);
       if (text !== undefined) observed.add(text);
     };
-    const visit = (node: Node, traversal?: { skip(): void }) => {
-      if (Node.isFunctionLikeDeclaration(node)) {
-        traversal?.skip();
-        return;
-      }
+    const visit = (node: Node) => {
+      if (Node.isFunctionLikeDeclaration(node)) return;
       if (Node.isSwitchStatement(node) && isMethod(node.getExpression())) {
         for (const clause of node.getClauses()) if (Node.isCaseClause(clause)) collect(clause.getExpression());
       }
@@ -335,7 +344,7 @@ export function pagesMethods(source: SourceFile, workspace?: WorkspaceBindings):
     const body = handler.getBody();
     if (!body) continue;
     visit(body);
-    body.forEachDescendant(visit);
+    if (!Node.isFunctionLikeDeclaration(body)) visitKinds(body, methodSyntax, visit, { skipNode: ts.isFunctionLike });
     const localGuard = (expression: Node) => {
       const value = valueNode(expression);
       if (!Node.isCallExpression(value) || value.getArguments()[0]?.getSymbol() !== request?.getSymbol() ||
