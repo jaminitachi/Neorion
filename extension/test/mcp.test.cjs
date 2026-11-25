@@ -157,7 +157,7 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.match(typo, /^# did you mean: .*#writeData \(declared at line \d+\)$/m);
   assert.ok(typo.split('\n').length <= 6);
 
-  assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1$/m);
+  assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1 \[prop children via WrapperInside \(rendered at fixture\/providers\.tsx:3\)\]$/m);
   assert.match(await client.text('who_renders', { component: 'Y' }), /^\/structure/m);
   assert.match(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /alias of widgets#Sub/);
   assert.doesNotMatch(await client.text('search', { text: 'fixture/client.tsx', kind: 'component' }), /#Timeout/);

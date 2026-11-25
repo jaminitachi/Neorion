@@ -5,7 +5,9 @@ import {
   collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression
 } from './ArchitectureFacts';
 import { visitKinds } from './CompilerWalk';
+import { packageMember } from './CallableFlow';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
+import { jsxValue, PropFlow } from './PropFlow';
 import { renderBindings } from './RenderBindings';
 import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
@@ -16,7 +18,7 @@ type NodeWithBody = import('ts-morph').FunctionDeclaration | import('ts-morph').
 const HOOK = /^use[A-Z0-9]/;
 const ACTION_DECLARATION_KINDS = new Set([SyntaxKind.FunctionDeclaration, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
 const RENDER_KINDS = new Set([SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.CallExpression]);
-const COMPONENT_BODY_KINDS = new Set([...RENDER_KINDS, SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression]);
+const COMPONENT_BODY_KINDS = new Set([...RENDER_KINDS, SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression, SyntaxKind.JsxAttribute]);
 const ACTION_SCAN_KINDS = new Set([
   ...COMPONENT_BODY_KINDS, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.ShorthandPropertyAssignment
 ]);
@@ -488,15 +490,45 @@ export class ComponentAnalyzer {
         }
       });
     }
-    const render = (tag: Node, from: string, body?: Node) => {
+    const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
+    const flow = new PropFlow(bodies, new Map([...renderTargets].map(([tag, targets]) =>
+      [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath);
+    const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const binding = rootBinding(tag);
-      const targets = renderTargets.get(tag) ?? [];
+      const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
       if (!targets.length && binding !== tag) {
         targets.push(...declarationsOf(binding).flatMap(node => resolveComponent(node) ?? []));
       }
       for (const target of new Set(targets)) {
+        const site = tag.getParent();
+        const attribute = tag.getAncestors().find(parent => parent === body || Node.isJsxAttribute(parent));
+        const element = Node.isJsxOpeningElement(site) ? site.getParent() : site;
+        const parent = element?.getParent();
+        const children = Node.isJsxElement(parent) ? flow.renderChildren(parent) : [];
+        const slot = Node.isJsxAttribute(attribute) ? flow.renderSlot(attribute, suppliedComponent) :
+          children.length ? children : undefined;
+        if (slot && !slot.length && Node.isJsxAttribute(attribute) && attribute.getNameNode().getText() === 'fallback') {
+          const receiver = attribute.getParent()?.getParent();
+          if ((Node.isJsxOpeningElement(receiver) || Node.isJsxSelfClosingElement(receiver)) &&
+              packageMember(receiver.getTagNameNode(), 'react') === 'Suspense') {
+            const binding = flow.value(receiver, { name: 'fallback' });
+            if (binding.value === jsxValue(attribute)) {
+              slot.push({ detail: 'prop fallback via React Suspense', conditional: true, partial: !!binding.unknown });
+            }
+          }
+        }
+        if (slot && !slot.length) {
+          index?.unresolvedRender(from, target.id, attribute!);
+          continue;
+        }
         addEdge(from, target.id, 'renders');
-        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body));
+        if (index && from !== target.id) {
+          for (const transfer of slot ?? [{ detail: undefined, conditional: false, partial: false }]) {
+            if (transfer.partial) index.unresolvedRender(from, target.id, attribute ?? tag);
+            index.render(from, target.id, tag, conditionalAt(tag, body) || Number(transfer.conditional), transfer.detail,
+              Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) ? site : undefined);
+          }
+        }
       }
     };
     const componentTags = new Set<Node>();
@@ -513,6 +545,11 @@ export class ComponentAnalyzer {
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
           componentTags.add(child);
           render(child.getTagNameNode(), component.id, body);
+        } else if (Node.isJsxAttribute(child)) {
+          const value = jsxValue(child);
+          if ((Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) && flow.renderSlot(child, true).length) {
+            render(value, component.id, body, true);
+          }
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
@@ -586,8 +623,8 @@ export class ComponentAnalyzer {
       }
       collectRenameFacts(files, relativePath, symbols, facts);
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, flow);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, flow), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

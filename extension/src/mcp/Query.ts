@@ -212,10 +212,11 @@ export class QueryEngine {
       return compare(left?.file ?? '', right?.file ?? '') || compare(left?.name ?? '', right?.name ?? '') ||
         a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
     });
+    const paths = Object.keys(index.files);
     const references = index.references.map((reference): Reference => {
-      if (reference[1] !== null) return reference;
-      const [id, , ...site] = reference;
-      return [id, this.symbols.get(id)?.file ?? '', ...site];
+      const [id, file, ...site] = reference;
+      if (typeof file === 'string') return reference as Reference;
+      return [id, typeof file === 'number' ? paths[file] : this.symbols.get(id)?.file ?? '', ...site];
     });
     this.references = group(references, reference => reference[0]);
     this.fetches = group(index.fetches, fetch => fetch.route);
@@ -378,37 +379,42 @@ export class QueryEngine {
   }
 
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
-    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; depth: number }>();
-    const pending = [{ id: symbol.id, chain: [] as string[], conditional: false, depth: 0 }];
+    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; depth: number; slots: string[] }>();
+    const pending = [{ id: symbol.id, chain: [] as string[], conditional: false, depth: 0, slots: [] as string[] }];
     const visited = new Set<number>();
+    let partial: string | undefined;
     for (let i = 0; i < pending.length && !expired(); i++) {
       const entry = pending[i];
       if (visited.has(entry.id)) continue;
       visited.add(entry.id);
+      partial ??= this.index.renderIssues?.[entry.id];
       for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
         if (!entry.depth) continue;
         const previous = reached.get(route.id);
         if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout });
       }
-      for (const [from, , , conditional] of this.incoming.get(entry.id) ?? []) {
+      for (const [from, , , conditional, detail] of this.incoming.get(entry.id) ?? []) {
         if (expired()) break;
         if (visited.has(from)) continue;
         const parent = this.symbols.get(from);
         pending.push({
-          id: from, chain: parent ? [parent.name, ...entry.chain].slice(-2) : entry.chain,
-          depth: entry.depth + 1, conditional: entry.conditional || !!conditional
+          id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
+          depth: entry.depth + 1, conditional: entry.conditional || !!conditional,
+          slots: detail ? [detail, ...entry.slots] : entry.slots
         });
       }
     }
     const rows = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
-      const { route, chain, depth, layout, conditional } = entry;
+      const { route, depth, layout, conditional, slots } = entry;
+      const chain = slots.length ? entry.chain : entry.chain.slice(-2);
       const fileLabel = location(route.file, route.line ?? 1);
       const url = shorten(route.url, 0, Math.max(16, 340 - bytes(fileLabel))) ?? '...';
       const label = `${url}  ${fileLabel}`;
-      const via = depth <= 2 && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
+      const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
         chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
       return { ...row(`${label}  depth ${depth}${via.length ? ' via ' + via.join(' > ') : ''}` +
-        (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
+        (slots.length ? ` [${slots.join('; ')}]` : '') + (layout ? ' [via layout]' : '') +
+        (conditional ? ' [cond]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
@@ -426,7 +432,7 @@ export class QueryEngine {
     }
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
-    return { rows, count: rows.length ? count + directLabel : undefined };
+    return { rows, count: rows.length ? count + directLabel : undefined, partial };
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
@@ -547,6 +553,8 @@ export class QueryEngine {
   private consumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
     const rows: Row[] = [];
     const evidence = new Map<string, number>();
+    const propEvidence = new Map<string, Row>();
+    let propIssue: string | undefined;
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
     let owners = new Set<number>();
@@ -565,11 +573,17 @@ export class QueryEngine {
       const kind = (!override ? apiEvidence.get(via) : undefined) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const label = `send   ${location(fetch.file, fetch.line)}`;
+      const binding = fetch.binding;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${override ? '?' : fetch.method} ${via}` +
+        (binding ? ` via prop ${binding.name} at ${location(binding.file, binding.line)}` : '') +
         (override ? ' [possible URL override]' : kind === 'other mention' ? ' [mention]' : '') +
         (fetch.partial || override ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
-      rows.push({ ...row(text, fetch.file), pathEnd: label.length });
-      if (fetch.owner !== undefined) owners.add(fetch.owner);
+      rows.push({ ...row(text, fetch.file, ...binding ? [binding.file] : []), pathEnd: label.length });
+      if (binding && fetch.owner !== undefined) {
+        const result = this.graph()?.consumerEvidence(fetch.graphOwner ?? fetch.owner, includeTests, expired, fetch.gates, binding.supplier);
+        propIssue ??= result?.partial;
+        for (const entry of result?.rows ?? []) propEvidence.set(entry.text, entry);
+      } else if (fetch.owner !== undefined) owners.add(fetch.owner);
     }
     const traversed = new Set<number>();
     const seen = new Set<string>();
@@ -611,6 +625,7 @@ export class QueryEngine {
     const count = `${rows.length} ${rows.length === 1 ? 'site' : 'sites'} in ${files.size} ${files.size === 1 ? 'file' : 'files'}` +
       (breakdown ? `: ${breakdown}` : '') +
       (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
+    rows.push(...propEvidence.values());
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? count : undefined,
@@ -618,7 +633,8 @@ export class QueryEngine {
         transportOverride ? AI_SDK_URL_OVERRIDE :
         fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
         fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
-        moreCallers ? 'caller depth limit' : undefined,
+        this.index.uncertainPropRequests?.some(([file]) => includeTests || !testFile(file)) ? 'request URL from JSX prop untraced' :
+        propIssue ?? (moreCallers ? 'caller depth limit' : undefined),
       notes: similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : []
     };
   }
@@ -626,9 +642,35 @@ export class QueryEngine {
   private actionConsumers(action: ServerAction, includeTests: boolean, expired: () => boolean): Result {
     const callers = group(action.callers.filter(([file]) => includeTests || !testFile(file)), ([file]) => file);
     const rows: Row[] = [];
+    const graph = this.index.flowCalls?.length || this.index.hasFlowCalls ? this.graph() : undefined;
+    let partial: string | undefined;
+    const detailed = new Map<number, ReturnType<DependencyGraph['consumerEvidence']>>();
     for (const [file, uses] of [...callers].sort(([a], [b]) => compare(a, b))) {
       if (expired()) break;
-      const lines = [...new Set(uses.map(([, line]) => line))].sort((a, b) => a - b);
+      const enriched = uses.flatMap(([, line, owner]) => {
+        if (owner === undefined || !graph || testFile(file)) return [];
+        let evidence = detailed.get(owner);
+        if (!evidence) {
+          const gates = action.symbol === undefined ? undefined : this.index.callGates?.[`${owner}:${action.symbol}:${line}`];
+          evidence = graph.consumerEvidence(owner, includeTests, expired, gates);
+          detailed.set(owner, evidence);
+        }
+        if (!evidence.rows.length) return [];
+        partial ??= evidence.partial;
+        return [{ line, owner, evidence }];
+      });
+      if (enriched.length) {
+        const distinct = new Map<string, Row>();
+        for (const { line, owner, evidence } of enriched) {
+          const label = `call   ${location(file, line)}`;
+          distinct.set(label, { ...row(`${label} ${graph!.name(owner)}`, file), pathEnd: label.length });
+          for (const entry of evidence.rows) distinct.set(entry.text, entry);
+        }
+        rows.push(...distinct.values());
+      }
+      const plain = uses.filter(([, line, owner]) => !enriched.some(entry => entry.line === line && entry.owner === owner));
+      if (!plain.length) continue;
+      const lines = [...new Set(plain.map(([, line]) => line))].sort((a, b) => a - b);
       const label = `call   ${location(file, lines[0])}`;
       rows.push({ ...row(label + (lines.length > 1 ? ',' + lines.slice(1, 5).join(',') : '') +
         (lines.length > 5 ? ` +${lines.length - 5}` : '') + flagTest(file), file), pathEnd: label.length });
@@ -636,7 +678,7 @@ export class QueryEngine {
     return {
       title: actionLocation(action),
       rows, targets: [action.file], count: `${callers.size} caller ${callers.size === 1 ? 'file' : 'files'}`,
-      scope: 'indexed server action callers'
+      partial, scope: 'indexed server action callers'
     };
   }
 

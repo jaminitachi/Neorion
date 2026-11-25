@@ -1,3 +1,4 @@
+import type { PropFlow } from './PropFlow';
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import { AI_SDK_TRANSPORT, type Wrapper } from '../../mcp/Index';
 import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
@@ -874,7 +875,7 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, flow?: PropFlow) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: route.path.slice(1).split('/')
@@ -931,25 +932,25 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
+  const literals: Node[] = [];
+  const classified = new Set<Node>();
+  const classify = (url: Node) => {
+    classified.add(url);
+    const wrapped = wrappedExpression(url);
+    const plus = addition(url);
+    if (wrapped) classify(wrapped);
+    else if (plus) {
+      classify(plus.getLeft());
+      classify(plus.getRight());
+    } else if (Node.isConditionalExpression(url)) {
+      classify(url.getWhenTrue());
+      classify(url.getWhenFalse());
+    } else if (Node.isTemplateExpression(url)) {
+      for (const span of url.getTemplateSpans()) classify(span.getExpression());
+    }
+  };
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
-    const literals: Node[] = [];
-    const classified = new Set<Node>();
-    const classify = (url: Node) => {
-      classified.add(url);
-      const wrapped = wrappedExpression(url);
-      const plus = addition(url);
-      if (wrapped) classify(wrapped);
-      else if (plus) {
-        classify(plus.getLeft());
-        classify(plus.getRight());
-      } else if (Node.isConditionalExpression(url)) {
-        classify(url.getWhenTrue());
-        classify(url.getWhenFalse());
-      } else if (Node.isTemplateExpression(url)) {
-        for (const span of url.getTemplateSpans()) classify(span.getExpression());
-      }
-    };
+    if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
       ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
@@ -992,26 +993,36 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       }];
       for (const request of requests) {
         const method = request.unbounded ? undefined : request.method;
-        for (const url of request.urls) {
-          if (url === undefined) continue;
-          const matches = matchesFor(url);
-          if (!matches) continue;
-          if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
-          const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
-          for (const { route, partial, markdown, dynamic } of matches.values()) {
-            const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
-              value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial;
-            if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
-            index?.fetch({
-              file: source, line, node, route: route.id,
-              method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-              partial: partial || request.partial || undefined, dynamic
-            });
-            if (isSwr || !mapFact) continue;
-            const targets = endpointsByCall.get(node) ?? [];
-            targets.push({ route, kind });
-            endpointsByCall.set(node, targets);
+        for (const input of request.urls) {
+          if (input === undefined) continue;
+          const prop = isFetch && typeof input !== 'string' ? flow?.read(input) : undefined;
+          const bindings = prop ? flow!.bindings(prop) : [];
+          const unresolved = !!prop && (!bindings.length || bindings.some(binding =>
+            binding.unknown || !binding.value || !urlTexts(binding.value)));
+          if (unresolved) index?.uncertainPropRequest(source, node);
+          const candidates = prop ? bindings.flatMap(({ site, value, gates }) => value
+            ? [{ url: value, binding: { name: prop.name, site, value, gates } }] : []) :
+            [{ url: input, binding: undefined }];
+          for (const { url, binding } of candidates) {
+            const matches = matchesFor(url);
+            if (!matches) continue;
+            if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
+            const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
+            for (const { route, partial, markdown, dynamic } of matches.values()) {
+              const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
+                value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
+              const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !unresolved;
+              if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+              index?.fetch({
+                file: source, line, node, route: route.id,
+                method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+                partial: partial || request.partial || unresolved || undefined, dynamic, prop: binding
+              });
+              if (isSwr || !mapFact) continue;
+              const targets = endpointsByCall.get(node) ?? [];
+              targets.push({ route, kind });
+              endpointsByCall.set(node, targets);
+            }
           }
         }
       }
@@ -1026,18 +1037,19 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           Node.isTemplateExpression(node) || addition(node))) literals.push(node);
     });
     for (const constructor of constructors) collectRequest(constructor);
-    for (const node of literals) {
-      if (classified.has(node)) continue;
-      const matches = matchesFor(node);
-      if (!matches) continue;
-      classify(node);
-      const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
-      for (const { route, partial, dynamic } of matches.values()) {
-        index?.fetch({
-          file: source, line: startLine(node), node, route: route.id, method: '?',
-          url: route.path, via, partial: partial || undefined, dynamic
-        });
-      }
+  }
+  for (const node of literals) {
+    const source = relativePath(node.getSourceFile());
+    if (classified.has(node)) continue;
+    const matches = matchesFor(node);
+    if (!matches) continue;
+    classify(node);
+    const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
+    for (const { route, partial, dynamic } of matches.values()) {
+      index?.fetch({
+        file: source, line: startLine(node), node, route: route.id, method: '?',
+        url: route.path, via, partial: partial || undefined, dynamic
+      });
     }
   }
 
