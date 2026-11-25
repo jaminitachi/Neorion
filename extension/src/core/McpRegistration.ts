@@ -115,26 +115,41 @@ const launchBundle = (flag: string) => [
   'require(server);'
 ].join('\n');
 
-function isCursorNeorionEntry(value: unknown, localEntry: string) {
-  if (!value || typeof value !== 'object') return false;
+function cursorNeorionEntry(value: unknown, localEntry: string): 'scoped' | 'missing-root' | undefined {
+  if (!value || typeof value !== 'object') return;
   const { type, command, args } = value as Command;
-  if ((type !== undefined && type !== 'stdio') || !Array.isArray(args) ||
-      !args.every(arg => typeof arg === 'string')) return false;
+  if ((type !== undefined && type !== 'stdio') || typeof command !== 'string' || !Array.isArray(args) ||
+      !args.every(arg => typeof arg === 'string')) return;
   const workspace = '${workspaceFolder}';
+  const inWorkspace = (root: string) => {
+    const normalized = process.platform === 'win32' ? root.replace(/\\/g, '/') : root;
+    return (normalized === workspace || normalized.startsWith(workspace + '/')) &&
+      !normalized.split('/').includes('..') && !normalized.includes('\0');
+  };
   const matches = (expected: Command) => command === expected.command && JSON.stringify(args) === JSON.stringify(expected.args);
-  if (matches(mcpCommand({ root: workspace, localEntry }))) return true;
+  if (matches(mcpCommand({ root: workspace, localEntry }))) return 'scoped';
 
+  const executable = path.win32.basename(command);
+  let manual: string[] | undefined;
+  if (/^neorion(?:\.cmd)?$/.test(executable)) manual = args;
+  if (/^npx(?:\.cmd)?$/.test(executable)) {
+    const [spec, ...invocation] = args[0] === '-y' ? args.slice(1) : args;
+    const version = /^neorion@(.+)$/.exec(spec ?? '')?.[1];
+    if (spec === 'neorion' || version === 'latest' || (version && valid(version))) manual = invocation;
+  }
+  if (manual?.[0] === 'mcp') {
+    if (manual.length === 1) return 'missing-root';
+    if (manual.length === 3 && manual[1] === '--root' && inWorkspace(manual[2])) return 'scoped';
+  }
   const root = args.at(-1);
-  if (command === 'neorion' && args[0] === 'mcp' && args.length === 1) return true;
-  if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
-  if (command === 'neorion') return args.length === 3 && args[0] === 'mcp' && args[1] === '--root';
+  if (!root || !inWorkspace(root)) return;
   // Compare the full launch arguments after extracting the installed package's version.
   const spec = (command === 'npx' ? args[1] : /\bnpx -y (\S+) mcp\b/.exec(args[1] ?? '')?.[1]) ?? '';
   const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
   const version = valid(releaseVersion ?? spec.split('@').at(-1) ?? '');
   const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
-  return !!version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
-    matches(mcpCommand({ ...options, discover, platform: 'win32' })));
+  if (version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
+    matches(mcpCommand({ ...options, discover, platform: 'win32' })))) return 'scoped';
 }
 
 function isExtensionCursorEntry(cache: string, entry: unknown) {
@@ -224,10 +239,15 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
-    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
-        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) {
-      reusedCursorEntry = true;
-      continue;
+    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry))) {
+      const existing = cursorNeorionEntry(current, cursorSetup.legacyLocalEntry);
+      if (existing === 'missing-root') {
+        throw new Error(`In ${configFile}, add --root \${workspaceFolder} to the existing Neorion MCP arguments and rerun setup.`);
+      }
+      if (existing === 'scoped' || isExtensionCursorEntry(cache, current)) {
+        reusedCursorEntry = true;
+        continue;
+      }
     }
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });

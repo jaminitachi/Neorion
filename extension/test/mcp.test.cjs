@@ -233,6 +233,54 @@ test('who_renders follows a JSX callback returned by a hook to the page route', 
   assert.doesNotMatch(dialog, /UnusedCallback/);
 });
 
+test('who_renders reports partial coverage for components passed through an opaque registry', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'forms.tsx', [
+    'export function WorkflowFieldError() { return <p />; }',
+    'export function WorkflowEmailActionForm() { return <WorkflowFieldError />; }',
+    'export function RegistryNotice() { return <aside />; }',
+    'export function MixedForm() { return <section />; }',
+    'export function StaticForm() { return <main />; }',
+    'export function UnusedForm() { return <main />; }'
+  ].join('\n'));
+  write(root, 'registry.ts', [
+    "import { WorkflowEmailActionForm as Email, RegistryNotice, MixedForm, StaticForm } from './forms';",
+    'function eraseForm(form: unknown): any { return form; }',
+    'export const registry = { email: { ConfigForm: eraseForm(Email), RegistryNotice } };',
+    'export const options = { Mixed: eraseForm(MixedForm), Static: StaticForm };'
+  ].join('\n'));
+  write(root, 'app/page.tsx', [
+    "import { registry, options } from '../registry';",
+    'function WorkflowNodeConfigPanel({ kind }: { kind: keyof typeof registry }) {',
+    '  const entry = registry[kind];',
+    '  const ConfigForm = entry.ConfigForm;',
+    '  const Notice = entry.RegistryNotice;',
+    '  return <><ConfigForm /><Notice /></>;',
+    '}',
+    'const Mixed = options.Mixed;',
+    'const Static = options.Static;',
+    'export default function Page() { return <><WorkflowNodeConfigPanel kind="email" /><Mixed /><Static /></>; }'
+  ].join('\n'));
+  write(root, 'app/direct/page.tsx', [
+    "import { MixedForm } from '../../forms';",
+    'export default function Direct() { return <MixedForm />; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const component of ['WorkflowEmailActionForm', 'WorkflowFieldError', 'RegistryNotice']) {
+    const result = await client.text('who_renders', { component, direct: true });
+    assert.match(result, /# partial: rendered through a dynamic reference/, result);
+  }
+  const mixed = await client.text('who_renders', { component: 'MixedForm' });
+  assert.match(mixed, /^\/direct  app\/direct\/page\.tsx:/m);
+  assert.match(mixed, /# partial: rendered through a dynamic reference/);
+  for (const component of ['WorkflowNodeConfigPanel', 'StaticForm', 'UnusedForm']) {
+    const result = await client.text('who_renders', { component });
+    assert.match(result, /# complete: indexed JSX paths/, result);
+  }
+});
+
 test('wrappers list rendered providers in chain order for each branch', async t => {
   const root = temporary(t);
   write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');

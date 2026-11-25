@@ -1,7 +1,8 @@
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 6;
-export const QUERY_INDEX_REVISION = 9;
+export const TRANSPORT_QUERY_REVISION = 9;
+export const QUERY_INDEX_REVISION = 10;
 export const GRAPH_INDEX_REVISION = 12;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -129,6 +130,7 @@ export interface QueryIndex {
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
+  dynamicRenderComponents?: number[];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
