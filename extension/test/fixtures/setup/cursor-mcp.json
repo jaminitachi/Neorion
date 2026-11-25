@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "existing-server": { "command": "existing-server", "args": ["--stdio"], "env": { "MODE": "project" } }
+  }
+}
