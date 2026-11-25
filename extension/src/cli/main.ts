@@ -164,7 +164,7 @@ async function main([command, ...args]: string[]) {
     ...(values.uses === undefined ? {} : { uses: values.uses })
   };
   const installed = basename(process.argv[1]) === 'neorion' && !isTemporaryCliInstall(__filename) && runsCurrentEntry();
-  const invocation = installed ? ['neorion'] : ['node', __filename];
+  const invocation = installed ? ['neorion'] : [process.execPath, __filename];
   console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
 }
 

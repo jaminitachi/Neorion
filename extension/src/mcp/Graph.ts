@@ -69,7 +69,8 @@ export class DependencyGraph {
   private trpcModuleUses = new Map<number, Set<string>>();
   private fetches = new Map<string, QueryIndex['fetches']>();
   private uncertainTransports = new Set<number>();
-  private uncertainProductionTransport = false;
+  private unboundedTransport = false;
+  private unboundedProductionTransport = false;
 
   constructor(private index: QueryIndex, symbols: Map<number, SymbolEntry>) {
     this.symbols = symbols;
@@ -84,9 +85,10 @@ export class DependencyGraph {
       this.fileIds.set(file, id);
     });
     for (const symbol of symbols.values()) append(this.symbolsByFile, symbol.file, symbol);
-    for (const [file, owner] of index.uncertainChatTransports ?? []) {
+    for (const [file, owner, unbounded] of index.uncertainChatTransports ?? []) {
       this.uncertainTransports.add(owner);
-      this.uncertainProductionTransport ||= !isTestFile(file);
+      this.unboundedTransport ||= unbounded !== false;
+      this.unboundedProductionTransport ||= unbounded !== false && !isTestFile(file);
       for (const alias of index.trpcAliases?.[owner] ?? []) this.uncertainTransports.add(alias);
     }
 
@@ -373,9 +375,11 @@ export class DependencyGraph {
             terminals.set(key, { terminal, visit: earlier?.visit ?? current, node: earlier?.node ?? id, metadata });
           }
           if (terminal.kind === 'api') {
-            transportOverride ||= this.uncertainProductionTransport || includeTests && this.uncertainTransports.size > 0;
+            transportOverride ||= this.unboundedProductionTransport || includeTests && this.unboundedTransport;
             for (const fetch of this.fetches.get(terminal.file) ?? []) {
+              if (!includeTests && isTestFile(fetch.file)) continue;
               if (fetch.dynamic || fetch.partial) uncertain.add(fetch.file);
+              transportOverride ||= fetch.via === AI_SDK_TRANSPORT && !!fetch.partial;
               if (fetch.via === 'route literal') literals.add(fetch.file);
             }
           }
@@ -606,8 +610,10 @@ export class DependencyGraph {
         if (terminal.pages) for (const page of terminal.pages) remember(pageTerminal(page), impact);
         else remember(terminal, impact);
         if (terminal.kind === 'api') {
-          uncertain ||= (this.fetches.get(terminal.file) ?? []).some(entry => entry.dynamic || entry.partial);
-          transportOverride ||= this.uncertainProductionTransport;
+          const fetches = (this.fetches.get(terminal.file) ?? []).filter(entry => !isTestFile(entry.file));
+          uncertain ||= fetches.some(entry => entry.dynamic || entry.partial);
+          transportOverride ||= this.unboundedProductionTransport ||
+            fetches.some(entry => entry.via === AI_SDK_TRANSPORT && entry.partial);
         }
       }
       let edges = cached.get(id);

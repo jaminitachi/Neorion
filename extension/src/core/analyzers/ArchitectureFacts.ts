@@ -1,6 +1,6 @@
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import { AI_SDK_TRANSPORT, type Wrapper } from '../../mcp/Index';
-import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
@@ -397,66 +397,270 @@ function unwrap(node: Node): Node {
   return inner ? unwrap(inner) : node;
 }
 
-function transportPropertyName(node: Node) {
+function sdkPropertyName(node: Node) {
   if (Node.isComputedPropertyName(node)) node = unwrap(node.getExpression());
-  else if (Node.isIdentifier(node)) return node.getText();
+  else if (Node.isIdentifier(node)) return node.compilerNode.text;
   if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isNumericLiteral(node)) {
     return node.getLiteralText();
   }
 }
 
-function chatTransportUrls(argument: Node | undefined) {
-  const urls = new Set<Node>();
-  let uncertain = false;
+function optionValueDeclarations(node: Node) {
+  const shorthand = node.getParentIfKind(SyntaxKind.ShorthandPropertyAssignment);
+  if (shorthand?.getNameNode() !== node) return declarationsOf(node);
+  const symbol = shorthand.getValueSymbol();
+  return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
+}
+
+function isNullish(node: Node) {
+  return node.getKind() === SyntaxKind.NullKeyword || Node.isVoidExpression(node) ||
+    Node.isIdentifier(node) && node.compilerNode.text === 'undefined' && !optionValueDeclarations(node).length;
+}
+
+function literalUrl(node: Node) {
+  const url = unwrap(node);
+  if (Node.isStringLiteral(url) || Node.isNoSubstitutionTemplateLiteral(url)) return url.getLiteralText();
+}
+
+function isGlobalFetch(expression: Node) {
+  return /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+    !optionValueDeclarations(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
+}
+
+// A single local use lets us read an object without assuming that a const binding makes it immutable.
+function localSdkInitializer(value: Node) {
+  if (!Node.isIdentifier(value)) return;
+  const [declaration] = optionValueDeclarations(value);
+  if (!Node.isVariableDeclaration(declaration) || declaration.getSourceFile() !== value.getSourceFile() ||
+      declaration.isExported() || declaration.getVariableStatement()?.getDeclarationKind() !== 'const') return;
+  const name = declaration.getNameNode();
+  if (!Node.isIdentifier(name)) return;
+  const references = name.findReferencesAsNodes();
+  if (references.length === 1 && references[0] === value) return declaration.getInitializer();
+}
+
+type SdkOption = { value: Node; overwritten?: boolean; indirect?: boolean };
+
+function sdkOptions(argument: Node | undefined, observe: (name: string, value: Node) => void) {
+  const properties = new Map<string, SdkOption>();
+  let opaque = false;
   const seen = new Set<Node>();
-  const inspect = (value: Node, callbackResult = false) => {
-    const config = unwrap(value);
-    if (seen.has(config)) return;
-    seen.add(config);
-    if (!Node.isObjectLiteralExpression(config)) {
-      uncertain = true;
-      return;
-    }
-    for (const property of config.getProperties()) {
+  const unknown = () => {
+    opaque = true;
+    for (const option of properties.values()) option.overwritten = true;
+  };
+  const inspect = (expression: Node, indirect: boolean) => {
+    const value = unwrap(expression);
+    if (seen.has(value)) return unknown();
+    seen.add(value);
+    const initializer = localSdkInitializer(value);
+    if (initializer) return inspect(initializer, true);
+    if (isNullish(value) && indirect) return;
+    if (!Node.isObjectLiteralExpression(value)) return unknown();
+    for (const property of value.getProperties()) {
       if (Node.isSpreadAssignment(property)) {
-        uncertain = true;
-        const expression = unwrap(property.getExpression());
-        const [declaration] = Node.isIdentifier(expression) ? declarationsOf(expression) : [];
-        const initializer = Node.isVariableDeclaration(declaration) && declaration.getSourceFile() === argument?.getSourceFile()
-          ? declaration.getInitializer() : undefined;
-        inspect(initializer ?? expression, callbackResult);
+        const api = properties.get('api');
+        if (api) api.indirect = true;
+        inspect(property.getExpression(), true);
         continue;
       }
-      const name = transportPropertyName(property.getNameNode());
-      const initializer = Node.isPropertyAssignment(property) ? property.getInitializer() :
-        Node.isShorthandPropertyAssignment(property) ? property.getNameNode() : undefined;
-      if (name === undefined || name === '__proto__') uncertain = true;
-      if (name === 'api') {
-        // The SDK prefers the callback's returned api over the constructor option.
-        if (callbackResult || !initializer || urls.size) uncertain = true;
-        if (initializer) urls.add(initializer);
+      const name = sdkPropertyName(property.getNameNode());
+      if (name === undefined || name === '__proto__') {
+        unknown();
+        continue;
       }
-      if (callbackResult || name !== 'prepareSendMessagesRequest') continue;
-      const callback = initializer && unwrap(initializer);
-      const body = Node.isMethodDeclaration(property) ? property.getBody() :
-        Node.isArrowFunction(callback) || Node.isFunctionExpression(callback) ? callback.getBody() : undefined;
-      if (!body) {
-        uncertain = true;
-      } else if (Node.isBlock(body)) {
-        body.forEachDescendant((node, traversal) => {
-          if (Node.isFunctionLikeDeclaration(node)) traversal.skip();
-          else if (Node.isReturnStatement(node)) {
-            const expression = node.getExpression();
-            if (expression) inspect(expression, true);
-          }
-        });
-      } else {
-        inspect(body, true);
-      }
+      const option = Node.isPropertyAssignment(property) ? property.getInitializer() :
+        Node.isShorthandPropertyAssignment(property) ? property.getNameNode() : property;
+      if (!option || !/^(?:api|fetch|then|transport|chat)$|^prepare/.test(name)) continue;
+      observe(name, option);
+      properties.set(name, { value: option, indirect });
     }
   };
-  if (argument) inspect(argument);
-  return { urls, uncertain };
+  if (argument) inspect(argument, false);
+  return { properties, opaque };
+}
+
+function sdkCallback(value: Node, seen = new Set<Node>()) {
+  const expression = unwrap(value);
+  if (Node.isArrowFunction(expression) || Node.isFunctionExpression(expression) || Node.isMethodDeclaration(expression)) {
+    return expression;
+  }
+  if (seen.has(expression) || !Node.isIdentifier(expression)) return;
+  seen.add(expression);
+  const declarations = optionValueDeclarations(expression);
+  if (declarations.length !== 1) return;
+  const [declaration] = declarations;
+  if (Node.isFunctionDeclaration(declaration) && declaration.getBody()) {
+    const name = declaration.getNameNode();
+    const reassigned = name?.findReferences().some(symbol => symbol.getReferences().some(reference =>
+      reference.isWriteAccess() && !reference.isDefinition() &&
+      !reference.getNode().getFirstAncestorByKind(SyntaxKind.ImportDeclaration)));
+    if (!reassigned) return declaration;
+  }
+  if (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === 'const') {
+    const initializer = declaration.getInitializer();
+    if (initializer) return sdkCallback(initializer, seen);
+  }
+}
+
+function forwardsFetch(value: Node) {
+  const expression = unwrap(value);
+  if (isGlobalFetch(expression) || isNullish(expression)) return true;
+  const wrapper = sdkCallback(expression);
+  if (!wrapper) return false;
+  const parameters = wrapper.getParameters();
+  if (parameters.length !== 2 || parameters.some(parameter =>
+    !Node.isIdentifier(parameter.getNameNode()) || parameter.isRestParameter() || parameter.getInitializer())) return false;
+  let request = wrapper.getBody();
+  if (Node.isBlock(request)) {
+    let first = request.getStatements()[0];
+    if (Node.isTryStatement(first)) first = first.getTryBlock().getStatements()[0];
+    if (Node.isReturnStatement(first)) request = first.getExpression();
+    else if (Node.isVariableStatement(first) && first.getDeclarations().length === 1) {
+      request = first.getDeclarations()[0].getInitializer();
+    }
+  }
+  if (request) request = unwrap(request);
+  if (Node.isAwaitExpression(request)) request = unwrap(request.getExpression());
+  if (!Node.isCallExpression(request) || request.hasQuestionDotToken() || !isGlobalFetch(request.getExpression())) return false;
+  const args = request.getArguments();
+  const callee = request.getExpression();
+  return args.length === parameters.length && args.every((arg, i) =>
+    Node.isIdentifier(arg) && declarationsOf(arg)[0] === parameters[i]) &&
+    !wrapper.getDescendants().some(node => node !== callee && node.getParent() !== callee &&
+      (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) && isGlobalFetch(node));
+}
+
+const sdkTransports = new Set(['DefaultChatTransport', 'TextStreamChatTransport']);
+const sdkHooks = new Set(['useChat', 'useCompletion', 'useObject', 'experimental_useObject']);
+const sdkModules = new Set(['ai', '@ai-sdk/react', 'ai/react']);
+
+function aiSdkRequest(
+  node: Node, argument: Node | undefined, name: string, module: string | undefined,
+  classify: (url: Node) => void, handledTransports: Set<Node>
+) {
+  const urls = new Set<Node | string>();
+  const observe = (key: string, value: Node) => {
+    if (key === 'api' && value.getSourceFile() === node.getSourceFile()) classify(value);
+  };
+  const nested = new Map<Node, ReturnType<typeof sdkOptions>>();
+  const transportExpression = (value: Node) => unwrap(localSdkInitializer(unwrap(value)) ?? value);
+  const readTransport = (implementation: Node) => {
+    if (!Node.isNewExpression(implementation)) return;
+    const origin = importOrigin(implementation.getExpression());
+    if (origin.module !== 'ai' || !sdkTransports.has(origin.name)) return;
+    handledTransports.add(implementation);
+    nested.set(implementation, sdkOptions(implementation.getArguments()[0], observe));
+  };
+  let options = sdkOptions(argument, (key, value) => {
+    observe(key, value);
+    if (name !== 'useChat' || key !== 'transport') return;
+    const implementation = transportExpression(value);
+    readTransport(implementation);
+    for (const child of implementation.getDescendantsOfKind(SyntaxKind.NewExpression)) readTransport(child);
+  });
+  const defaultUrl = name === 'useCompletion' ? '/api/completion' :
+    name === 'useChat' || sdkTransports.has(name) ? '/api/chat' : undefined;
+  let unbounded = false;
+  let delegated = false;
+  if (name === 'useChat') {
+    const { properties, opaque } = options;
+    const transport = properties.get('transport');
+    const chat = properties.get('chat');
+    const implementation = transport && transportExpression(transport.value);
+    if (chat) unbounded = true;
+    if (Node.isNewExpression(implementation)) {
+      const origin = importOrigin(implementation.getExpression());
+      const transportOptions = nested.get(implementation);
+      if (transportOptions) {
+        delegated = true;
+        options = transportOptions;
+        unbounded ||= opaque;
+      } else if (origin.module === 'ai' && origin.name === 'DirectChatTransport' && !opaque && !unbounded) {
+        return { urls, partial: false, unbounded: false, linkEndpoint: false };
+      } else unbounded = true;
+    } else if (implementation && !isNullish(implementation)) unbounded = true;
+  }
+  const { properties, opaque } = options;
+  unbounded ||= opaque;
+  const api = properties.get('api');
+  const fetch = properties.get('fetch');
+  unbounded ||= !!fetch && !forwardsFetch(fetch.value);
+  let partial = unbounded || !!api?.indirect;
+  let fallsBack = true;
+  for (const [key, option] of properties) {
+    if (!/^prepare/.test(key) || isNullish(unwrap(option.value))) continue;
+    const callback = sdkCallback(option.value);
+    const body = callback?.getBody();
+    const send = key === 'prepareSendMessagesRequest';
+    let withoutApi = false;
+    const result = (expression?: Node) => {
+      const value = expression && unwrap(expression);
+      if (!value || isNullish(value)) {
+        withoutApi = true;
+        return;
+      }
+      if (Node.isConditionalExpression(value)) {
+        result(value.getWhenTrue());
+        result(value.getWhenFalse());
+        return;
+      }
+      const prepared = sdkOptions(value, observe);
+      const returnedApi = prepared.properties.get('api');
+      // Await adopts a thenable before the SDK reads the prepared object's properties.
+      if (prepared.opaque || prepared.properties.has('then')) {
+        unbounded = true;
+        withoutApi = true;
+      }
+      if (returnedApi && !isNullish(unwrap(returnedApi.value))) {
+        partial = true;
+        if (send) urls.add(returnedApi.value);
+        withoutApi ||= literalUrl(returnedApi.value) === undefined;
+      } else withoutApi = true;
+    };
+    if (!body) {
+      unbounded = true;
+      withoutApi = true;
+    } else if (Node.isBlock(body)) {
+      body.forEachDescendant((child, traversal) => {
+        if (Node.isFunctionLikeDeclaration(child)) traversal.skip();
+        else if (Node.isReturnStatement(child)) result(child.getExpression());
+      });
+      // A branch may fall through without a prepared request.
+      withoutApi ||= !returnsFromBranch(body);
+    } else result(body);
+    if (send && !option.overwritten) fallsBack = withoutApi;
+  }
+  let usesDefault = !api || isNullish(unwrap(api.value)) || !!api.overwritten;
+  if (fallsBack && api && !isNullish(unwrap(api.value))) {
+    urls.add(api.value);
+    // React's transport-based useChat does not use a top-level api from older versions.
+    if (name === 'useChat' && module === '@ai-sdk/react' && !delegated) {
+      const parameters = node.asKindOrThrow(SyntaxKind.CallExpression).getExpression().getType().getCallSignatures()[0]?.getParameters();
+      const type = parameters?.[0]?.getTypeAtLocation(node);
+      const variants = type?.isUnion() ? type.getUnionTypes() : type ? [type] : [];
+      if (variants.some(variant => variant.getProperty('transport'))) {
+        urls.delete(api.value);
+        usesDefault = true;
+      }
+      usesDefault ||= !variants.some(variant => variant.getProperty('api'));
+    }
+  }
+  if (fallsBack && usesDefault) {
+    if (defaultUrl) {
+      if (![...urls].some(url => typeof url !== 'string' && literalUrl(url) === defaultUrl)) urls.add(defaultUrl);
+      partial = true;
+    } else unbounded = true;
+  }
+  for (const url of urls) {
+    if (typeof url === 'string' || literalUrl(url) !== undefined) continue;
+    partial = true;
+    const values = urlTexts(url);
+    const expression = unwrap(url);
+    if (Node.isIdentifier(expression) || Node.isPropertyAccessExpression(expression) ||
+        !values?.length || !values.every(value => apiSegments(value))) unbounded = true;
+  }
+  return { urls, partial: partial || unbounded, unbounded, linkEndpoint: !unbounded };
 }
 
 // Keep unresolved parts distinct from literal URL text and from expressions that can supply slashes.
@@ -497,7 +701,7 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, 
       });
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
-      const [declaration] = declarationsOf(node);
+      const [declaration] = optionValueDeclarations(node);
       if (Node.isVariableDeclaration(declaration) || Node.isPropertyAssignment(declaration)) {
         const initializer = declaration.getInitializer();
         const constant = Node.isVariableDeclaration(declaration) &&
@@ -690,9 +894,9 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     }
     return matches;
   };
-  const matchesFor = (node: Node) => {
+  const matchesFor = (url: Node | string) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
-    for (const value of urlTexts(node) ?? []) {
+    for (const value of typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []) {
       const parsed = apiSegments(value);
       if (!parsed) continue;
       matches ??= new Map();
@@ -729,55 +933,53 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     };
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
-      ['swr', 'swr/immutable', 'axios', 'ai'].includes(declaration.getModuleSpecifierValue()));
-    // Keep API_REFERENCE_KINDS in sync with the branches below.
-    visitKinds(file, API_REFERENCE_KINDS, node => {
-      if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node) || addition(node))) {
-        literals.push(node);
-      }
+      ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
+      sdkModules.has(declaration.getModuleSpecifierValue()));
+    const handledTransports = new Set<Node>();
+    const collectRequest = (node: CallExpression | NewExpression) => {
       const isConstructor = Node.isNewExpression(node);
-      if (!Node.isCallExpression(node) && !isConstructor) return;
       const expression = node.getExpression();
-      const isFetch = !isConstructor && /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
-        !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
+      const isFetch = !isConstructor && isGlobalFetch(expression);
       const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
-      const isChatTransport = isConstructor && origin?.module === 'ai' && origin.name === 'DefaultChatTransport';
+      const isAiSdk = origin && (isConstructor ? origin.module === 'ai' && sdkTransports.has(origin.name) :
+        (origin.module === '@ai-sdk/react' || origin.module === 'ai/react') && sdkHooks.has(origin.name));
       const isSwr = !isConstructor && (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
         ['default', 'useSWR', 'mutate'].includes(origin.name);
       const isSwrMutate = isSwr && origin.name === 'mutate';
       const axiosMethod = !isConstructor && origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
-      if (!isFetch && !isSwr && !axiosMethod && !isChatTransport) return;
+      if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
-      const transport = isChatTransport ? chatTransportUrls(argument) : undefined;
-      if (transport?.uncertain) index?.uncertainChatTransport(source, node);
+      if (handledTransports.has(node)) return;
+      const sdk = isAiSdk ? aiSdkRequest(node, argument, origin.name, origin.module, classify, handledTransports) : undefined;
+      if (sdk?.partial) index?.uncertainChatTransport(source, node, sdk.unbounded);
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
       const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
         options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
           options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
-      const method = isChatTransport ? 'POST' : isFetch ? fetchMethod : axiosMethod;
-      const via = isChatTransport ? AI_SDK_TRANSPORT :
+      const method = sdk ? sdk.linkEndpoint ? 'POST' : undefined : isFetch ? fetchMethod : axiosMethod;
+      const via = sdk ? AI_SDK_TRANSPORT :
         isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
-      for (const url of transport?.urls ?? (isSwr ? swrUrls(argument) : [argument])) {
-        if (!url) continue;
+      for (const url of sdk?.urls ?? (isSwr ? swrUrls(argument) : [argument])) {
+        if (url === undefined) continue;
         const matches = matchesFor(url);
         if (!matches) continue;
-        classify(url);
+        if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
         for (const { route, partial, markdown, dynamic } of matches.values()) {
           const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
             value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
           const subject = action ? action.slice('action:'.length) : source;
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
           const kind = via === 'fetch' ? '' : ` (${via})`;
-          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !transport?.uncertain;
+          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !sdk?.partial;
           if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
-            file: source, line: startLine(isChatTransport ? url : node), node, route: route.id,
-            method: transport?.uncertain ? '?' : method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-            partial: partial || transport?.uncertain || undefined, dynamic
+            file: source, line: startLine(sdk && typeof url !== 'string' && url.getSourceFile() === file ? url : node), node, route: route.id,
+            method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+            partial: partial || sdk?.partial || undefined, dynamic
           });
           if (isSwr || !mapFact) continue;
           const targets = endpointsByCall.get(node) ?? [];
@@ -785,7 +987,17 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           endpointsByCall.set(node, targets);
         }
       }
+    };
+    const constructors: NewExpression[] = [];
+    // Read hooks first so a constructor supplied as a transport is indexed through its hook.
+    visitKinds(file, API_REFERENCE_KINDS, node => {
+      if (Node.isCallExpression(node)) collectRequest(node);
+      else if (Node.isNewExpression(node)) {
+        if (usesHttpLibrary) constructors.push(node);
+      } else if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) ||
+          Node.isTemplateExpression(node) || addition(node))) literals.push(node);
     });
+    for (const constructor of constructors) collectRequest(constructor);
     for (const node of literals) {
       if (classified.has(node)) continue;
       const matches = matchesFor(node);

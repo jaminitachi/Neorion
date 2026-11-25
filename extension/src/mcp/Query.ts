@@ -547,7 +547,7 @@ export class QueryEngine {
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
     let owners = new Set<number>();
-    let transportOverride = this.index.uncertainChatTransports?.some(([file]) => includeTests || !testFile(file)) ?? false;
+    let transportOverride = this.index.uncertainChatTransports?.some(([file, , unbounded]) => unbounded !== false && (includeTests || !testFile(file))) ?? false;
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
       .sort((a, b) => Number(generatedFile(a.file)) - Number(generatedFile(b.file)) ||
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
@@ -558,7 +558,7 @@ export class QueryEngine {
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
       const override = via === AI_SDK_TRANSPORT && (fetch.method === '?' || this.index.queryRevision !== QUERY_INDEX_REVISION);
-      transportOverride ||= override;
+      transportOverride ||= override || via === AI_SDK_TRANSPORT && !!fetch.partial;
       const kind = (!override ? apiEvidence.get(via) : undefined) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const label = `send   ${location(fetch.file, fetch.line)}`;

@@ -287,7 +287,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(callees, /^# partial: 1 unresolved call on local variables or parameters$/m);
   assert.doesNotMatch(callees, /anotherAction/);
   const limited = query('callees', 'createItem', '--limit', '1');
-  assert.match(limited, /^# more: \d+ \(try node .+neorion\.cjs'? query callees createItem --depth 1 --limit \d+ --root .+\)$/m);
+  assert.match(limited, /^# more: \d+ \(try .+neorion\.cjs'? query callees createItem --depth 1 --limit \d+ --root .+\)$/m);
   const limitedMcp = await mcp.text('query', { kind: 'callees', target: 'createItem', limit: 1 });
   assert.match(limitedMcp, /^# more: \d+ \(set limit=\d+ on the same request and keep the other arguments\)$/m);
   for (const output of [limited, limitedMcp]) {
