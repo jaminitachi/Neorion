@@ -51,7 +51,7 @@ Use `neorion query changes --base <ref>` to compare the worktree against the mer
 
 Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap. See the [source-build examples](#build-from-source) for a filtered search and a deeper downstream trace.
 
-In `api_consumers`, `[mention]` marks a reference such as a route literal. `[possible URL override]` marks a transport whose request URL may change at runtime.
+In source builds, `api_consumers` uses `[mention]` to mark a reference such as a route literal. `[possible URL override]` marks a transport whose request URL may change at runtime.
 
 The CLI runs on Node.js 18 or later without native modules or Python. CLI queries refresh the graph when needed.
 

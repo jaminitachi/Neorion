@@ -67,6 +67,10 @@ if (action === 'get') {
     console.log(JSON.stringify(Object.entries(data.mcpServers).map(([name, entry]) => ({ name, ...entry }))));
   }
 } else if (action === 'add') {
+  if (process.env.FAKE_ADD_FAILURE) {
+    console.error('Cannot load Codex configuration');
+    process.exit(1);
+  }
   if (${JSON.stringify(agent)} === 'claude' && data.mcpServers.neorion) {
     console.error('Server already exists');
     process.exit(1);
@@ -483,14 +487,15 @@ test('Codex setup uses bare neorion only when PATH resolves to this entry', { sk
   assert.ok(hint().includes('run `node '));
 });
 
-test('Codex setup writes the hint before failed registration', { skip: process.platform === 'win32' }, t => {
+test('Codex inspection failure leaves the hint and skill absent', { skip: process.platform === 'win32' }, t => {
   const { home, root, run } = fixture(t);
   fs.writeFileSync(path.join(home, 'codex'),
-    '#!/bin/sh\n[ -f AGENTS.md ] || exit 2\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
+    '#!/bin/sh\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
   const setup = run(['setup', 'codex'], { PATH: home });
   assert.equal(setup.status, 1);
-  assert.match(setup.stderr, /registration failed/);
-  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')));
+  assert.match(setup.stderr, /registration failed[\s\S]*CODEX_HOME/);
+  assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion/SKILL.md')), false);
 });
 
 test('Codex setup chooses a temporary npm command or a quoted local entry', t => {
@@ -589,7 +594,7 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
       assert.equal(fs.readFileSync(hintFile, 'utf8'), projectInstructions);
       assert.deepEqual(readJson(config).mcpServers, customized ? { neorion: server } : {});
       assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action),
-        customized ? [] : mode === 'upgrade' ? ['remove', 'add', 'remove'] : ['remove']);
+        customized ? [] : mode === 'upgrade' ? ['add', 'remove'] : ['remove']);
     });
   }
 });
@@ -896,4 +901,36 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
   assert.equal(query.status, 0, query.stderr);
   assert.match(query.stdout, /^Project: workspace\n/);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
+});
+
+test('subcommand help succeeds and invalid graph flags include usage', t => {
+  const { run } = fixture(t);
+  for (const command of ['graph', 'query']) {
+    const result = run([command, '--help']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^Usage:/m);
+  }
+  const invalid = run(['graph', '--unknown']);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Unknown option '--unknown'[\s\S]*Usage:/);
+});
+
+test('root installation README scopes AI SDK evidence labels to source builds', () => {
+  const readme = fs.readFileSync(path.join(packageRoot, '../README.md'), 'utf8');
+  assert.match(readme, /In source builds,[^\n]*`\[mention\]`[^\n]*`\[possible URL override\]`/);
+});
+
+test('failed Codex MCP registration leaves the project hint and skill untouched', t => {
+  const { root, home, run } = fixture(t);
+  const mock = fakeAgent(home, 'codex');
+  const env = { PATH: home + path.delimiter + process.env.PATH, FAKE_ADD_FAILURE: '1' };
+  const hint = path.join(root, 'AGENTS.md');
+  fs.writeFileSync(hint, '# Project instructions\n');
+  const result = run(['setup', 'codex'], env);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cannot load Codex configuration[\s\S]*Check that CODEX_HOME/);
+  assert.equal(fs.readFileSync(hint, 'utf8'), '# Project instructions\n');
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion/SKILL.md')), false);
+  assert.equal(fs.existsSync(mock.config), false);
+  assert.ok(mock.calls().some(([, action]) => action === 'add'));
 });

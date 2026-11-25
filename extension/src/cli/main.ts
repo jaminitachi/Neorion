@@ -77,10 +77,17 @@ function hintCommand(temporary: boolean, onPath: boolean) {
 async function main([command, ...args]: string[]) {
   if ((!command || command === '--help') && !args.length) return console.log(help);
   if (command === '--version' && !args.length) return console.log(VERSION);
+  const separator = args.indexOf('--');
+  if ((command === 'graph' || command === 'query') &&
+      args.slice(0, separator === -1 ? args.length : separator).includes('--help')) return console.log(help);
   if (command === 'graph') {
-    const { values, positionals } = parseArgs({
-      args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true
-    });
+    let parsed;
+    try {
+      parsed = parseArgs({ args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true });
+    } catch (error) {
+      throw new Error(`${(error as Error).message}\n\n${help}`);
+    }
+    const { values, positionals } = parsed;
     if (positionals.length > 1) throw new Error(help);
     const { run } = require('./graph.cjs') as typeof import('./graph');
     return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
