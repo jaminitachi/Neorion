@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { findProject, generateGraph } from './core/Generate';
 import { missingProject } from './core/FindProject';
-import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
+import { AGENT_FILES, CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
 
@@ -81,7 +81,8 @@ async function configureAgents(root: string, project: string, connect: boolean, 
             const format = await vscode.window.showQuickPick([...formats], { placeHolder: 'Choose a global MCP config format' });
             if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project, bundleSource));
         }
-        const instructions = selected.filter(label => AGENT_FILES.includes(label));
+        const instructions = selected.filter(label => AGENT_FILES.includes(label) &&
+            (!connect || label !== CURSOR_EXTENSION_RULE || !hasActiveCursorRule(root, CURSOR_SETUP_RULE)));
         const configFiles = (connect ? mcpTargets : Object.keys(MCP_TARGETS) as McpTarget[])
             .map(target => MCP_TARGETS[target].file);
         const selectedPaths = new Set([...instructions, ...configFiles].map(file => path.join(root, file)));

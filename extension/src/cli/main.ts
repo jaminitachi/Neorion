@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
-import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
+import { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } from '../core/AgentInstructions';
 import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
 import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
+import { MCP_TARGETS, planMcp } from '../core/McpRegistration';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
+import { updateClaudeHook } from './ClaudeHook';
 import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
@@ -23,19 +26,34 @@ const help = `Usage:
   neorion query changes [--base ref | --staged | --unstaged] [--depth n]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
-  neorion setup claude [--no-hint]
+  neorion setup claude [--no-hint] [--no-hook]
   neorion setup <codex|claude> --remove [--no-hint]
+  neorion setup cursor [--remove]
   neorion --version | --help
 
 Query kinds: ${kinds.join(', ')}
 
 Wrapper flags:
   --no-external hides third-party non-provider wrappers. Providers stay visible.
-  --include-external includes third-party wrappers (default).`;
+  --include-external includes third-party wrappers (default).
+
+Setup:
+  claude adds an advisory Grep/Glob hook to project settings (Claude Code 2.1.295+).
+  --no-hook disables the advisory.
+  cursor adds the Neorion MCP server and query rule to the project.`;
+
+function isProjectDirectory(root: string) {
+  return ['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)));
+}
+
+function isHomeDirectory(root: string) {
+  const home = homedir();
+  return root === home || (existsSync(home) && root === realpathSync(home));
+}
 
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();
-  if (!['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)))) {
+  if (!isProjectDirectory(root)) {
     console.log(`Skipping ${file} hint: the current directory has no tsconfig.json, jsconfig.json, or package.json.`);
     return false;
   }
@@ -85,29 +103,50 @@ async function main([command, ...args]: string[]) {
     const { run } = require('./graph.cjs') as typeof import('./graph');
     return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
   }
-  if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude')) {
+  if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude' || args[0] === 'cursor')) {
     const agent = args[0];
     const codex = agent === 'codex';
     const { values } = parseArgs({
       args: args.slice(1),
       options: {
         ...(codex ? { local: { type: 'boolean' as const } } : {}),
-        'no-hint': { type: 'boolean' },
+        ...(agent === 'claude' ? { 'no-hook': { type: 'boolean' as const } } : {}),
+        ...(agent === 'cursor' ? {} : { 'no-hint': { type: 'boolean' as const } }),
         remove: { type: 'boolean' }
       }
     });
-    const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     const temporary = !values.local && isTemporaryCliInstall(__filename);
     const onPath = !values.local && !temporary && runsCurrentEntry();
-    const launch = mcpCommand({ localEntry: temporary ? undefined : __filename });
+    const localEntry = temporary ? undefined : __filename;
+    const root = process.cwd();
+    const remove = !!values.remove;
+    if (agent === 'cursor') {
+      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { localEntry });
+      mcp.commit(() => {
+        const writeRule = !remove && !hasActiveCursorRule(root, CURSOR_EXTENSION_RULE);
+        if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(hintCommand(temporary, onPath)))) {
+          console.log(`${join(root, CURSOR_SETUP_RULE)} (${writeRule ? 'written' : 'Neorion block removed'})`);
+        }
+      });
+      const config = join(root, MCP_TARGETS.Cursor.file);
+      if (mcp.count) console.log(`${config} (Neorion MCP setup ${remove ? 'removed' : 'configured'})`);
+      return;
+    }
+    const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     let skippedHint = false;
-    setupAgent(agent, __filename, launch, !!values.remove, () => {
-      if (values['no-hint']) return;
-      if (values.remove) {
-        const root = process.cwd();
-        if (updateAgentFiles(root, root, [file], false)) console.log(`${join(root, file)} (Neorion block removed)`);
-      } else {
-        skippedHint = !writeHint(file, queryHint(hintCommand(temporary, onPath)));
+    setupAgent(agent, __filename, mcpCommand({ localEntry }), remove, () => {
+      if (!values['no-hint']) {
+        if (remove) {
+          if (updateAgentFiles(root, root, [file], false)) console.log(`${join(root, file)} (Neorion block removed)`);
+        } else {
+          skippedHint = !writeHint(file, queryHint(hintCommand(temporary, onPath)));
+        }
+      }
+      if (agent === 'claude') {
+        if (remove || values['no-hook']) updateClaudeHook(root, false);
+        else if (isProjectDirectory(root) && !isHomeDirectory(root)) {
+          updateClaudeHook(root, true);
+        }
       }
     });
     if (codex && !values.remove) {
