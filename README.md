@@ -45,7 +45,9 @@ Project: taxonomy
 | `path` | What is the shortest directed dependency chain from a page or symbol to a symbol or API route? |
 | `changes` | Which symbols, routes, and wrappers are affected by a Git diff? |
 
-Use `--depth <n>` to set the traversal depth for `impact` or `callees`. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination. For `changes`, use `--staged` or `--unstaged` to narrow the diff, or `--base <ref>` to compare against the merge base of `HEAD` and that ref.
+Use `--depth <n>` with `impact` and `changes` (default 3, maximum 6). Render paths can continue past that limit. For `callees`, the default is 1 and the maximum is 3. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination.
+
+Use `neorion query changes --base <ref>` to compare the worktree against the merge base of `HEAD` and that ref. This includes committed differences and uncommitted edits to tracked files and excludes untracked files. Use `--staged` to compare the index against `HEAD` or `--unstaged` to compare the worktree against the index. The default and `--unstaged` include untracked files and list ignored project-root `.env*` overrides by path as potential configuration changes. Removed files and exports are marked in the result, with importer and route evidence from the comparison side where available.
 
 Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap. See the [source-build examples](#build-from-source) for a filtered search and a deeper downstream trace.
 

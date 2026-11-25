@@ -1,4 +1,4 @@
-export function workspaceCache(root: string): string {
+export function workspaceCache(root: string, identity = root): string {
   // Keep these imports local so the MCP launcher can use this function in Node's inline script.
   const { createHash } = require('node:crypto') as typeof import('node:crypto');
   const { realpathSync } = require('node:fs') as typeof import('node:fs');
@@ -10,7 +10,7 @@ export function workspaceCache(root: string): string {
     process.platform === 'win32' ? join(home, 'AppData', 'Local') : join(home, '.cache');
   const configured = process.platform === 'win32' ? process.env.LOCALAPPDATA : process.env.XDG_CACHE_HOME;
   const base = configured && isAbsolute(configured) ? configured : fallback;
-  const key = createHash('sha256').update(project).digest('hex');
+  const key = createHash('sha256').update(identity === root ? project : realpathSync(identity)).digest('hex');
   const cache = resolve(base, 'neorion', key);
   const within = relative(project, cache);
   // Keep generated output hidden even when the project is the user's home directory.

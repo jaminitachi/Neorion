@@ -49,6 +49,8 @@ neorion setup codex
 
 The Codex and Claude Code hints and skills cover `impact` for upstream callers and affected routes, `callees` for downstream dependencies, `path` for the shortest directed dependency chain, and `changes` for routes and wrappers affected by a Git diff.
 
+`neorion query changes --depth <n>` uses the same depth range as `impact` (default 3, maximum 6). Use `--base <ref>` to compare the worktree to the merge base of `HEAD` and that ref, including uncommitted edits to tracked files and excluding untracked files.
+
 Run `neorion setup codex --remove` from the project to clear its marked block and remove the user-wide skill and MCP registration that setup still owns. Setup recognizes older installations by their released skill and default MCP command. Rerun `--remove` in other projects to clear their blocks, or use `--remove --no-hint` to keep the current project's block.
 
 Codex may leave an empty `config.toml` after removal.

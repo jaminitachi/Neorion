@@ -2,7 +2,8 @@ import { deflateRawSync, inflateRawSync } from 'node:zlib';
 import type { IndexedReference, QueryIndex } from './Index';
 
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
-  'defaultSymbols' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' | 'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues'> & {
+  'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
+  'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -12,15 +13,15 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 
 // Pack graph additions on large projects so existing query kinds can read
 // the base index fields without inflating the graph data.
-export function packGraph(index: QueryIndex): QueryIndex {
-  const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols,
+export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
+  const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
-    graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols,
+    graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues
   };
-  if (JSON.stringify(facts).length < 128 * 1024) return index;
+  if (JSON.stringify(facts).length < minimumBytes) return index;
 
   facts.ends = [];
   facts.types = [];

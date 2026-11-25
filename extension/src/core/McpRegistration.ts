@@ -15,6 +15,7 @@ export const REGISTER_MCP = 'Register Neorion query tools (MCP)';
 export const COPY_MCP = 'Other tools: copy configuration snippet';
 const STATE = '.neorion/connect-state.json';
 const BUNDLE = '.neorion/mcp/server.cjs';
+const GRAPH_BUNDLE = '.neorion/mcp/graph.cjs';
 
 type Command = { command: string; args: string[]; type?: 'stdio' };
 interface ConfigState {
@@ -27,7 +28,7 @@ interface ConfigState {
 }
 interface State {
   configs: Partial<Record<McpTarget, ConfigState>>;
-  bundle?: { hash: string; createdDirectory: boolean };
+  bundle?: { hash?: string; createdDirectory: boolean; graphHash?: string };
   legacyBundle?: State['bundle'];
 }
 type Change = { file: string; content: string | Buffer | null };
@@ -209,17 +210,32 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   }
 
   if (connect && bundled && targets.length) {
-    const content = fs.readFileSync(bundleSource);
-    const previous = exists(bundle) && fs.readFileSync(bundle);
-    if (previous && hash(previous) !== state.bundle?.hash && hash(previous) !== hash(content)) {
-      throw new Error(`Neorion MCP bundle conflicts with an existing file at ${BUNDLE}`);
-    }
-    if (!previous || !previous.equals(content)) {
-      state.bundle = { hash: hash(content), createdDirectory: state.bundle?.createdDirectory ?? !exists(path.dirname(bundle)) };
-      changes.unshift({ file: bundle, content });
+    const graphBundle = checked(cache, GRAPH_BUNDLE);
+    const update = (source: string, file: string, owned: string | undefined) => {
+      const content = fs.readFileSync(source);
+      const next = hash(content);
+      const previous = exists(file) ? hash(fs.readFileSync(file)) : undefined;
+      if (previous && previous !== owned && previous !== next) {
+        throw new Error(`Neorion MCP bundle conflicts with an existing file at ${path.relative(cache, file)}`);
+      }
+      if (previous !== next) changes.unshift({ file, content });
+      return previous === next ? owned : next;
+    };
+    const serverHash = update(bundleSource, bundle, state.bundle?.hash);
+    const graphHash = update(path.join(path.dirname(bundleSource), 'graph.cjs'), graphBundle, state.bundle?.graphHash);
+    if (serverHash || graphHash) {
+      state.bundle = {
+        hash: serverHash, graphHash, createdDirectory: state.bundle?.createdDirectory ?? !exists(path.dirname(bundle))
+      };
     }
   } else if (!connect && state.bundle) {
     if (exists(bundle) && hash(fs.readFileSync(bundle)) === state.bundle.hash) changes.push({ file: bundle, content: null });
+    if (state.bundle.graphHash) {
+      const graphBundle = checked(cache, GRAPH_BUNDLE);
+      if (exists(graphBundle) && hash(fs.readFileSync(graphBundle)) === state.bundle.graphHash) {
+        changes.push({ file: graphBundle, content: null });
+      }
+    }
     if (state.bundle.createdDirectory) directories.add(path.dirname(bundle));
     delete state.bundle;
   }
