@@ -86,5 +86,14 @@
     "typescript": "^5.9.3",
     "yaml": "2.9.1"
   },
+  "overrides": {
+    "@vscode/vsce": {
+      "minimatch": "11.0.9"
+    }
+  },
+  "allowScripts": {
+    "@vscode/vsce-sign@2.1.1": true,
+    "esbuild@0.28.2": true
+  },
   "license": "MIT"
 }

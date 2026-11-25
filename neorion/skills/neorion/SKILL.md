@@ -14,8 +14,8 @@ Call `neorion_query` with `kind` and the arguments for that query.
 - `path` traces the shortest directed chain from a page URL/file or symbol to a symbol or API URL. Pass `target` and `to` in MCP or run `neorion query path <from> <to>`.
 - `changes` maps the Git diff to changed symbols and affected routes and wrappers. The target is omitted. Use MCP `scope` (`staged` or `unstaged`) or `base`, or CLI flags `--staged`, `--unstaged`, or `--base <ref>`.
 
-The last line tells you how far to trust the result.
-- `# complete`: answer from the result. Open a file only to confirm a specific detail.
+The last line describes the scope of the result.
+- `# complete`: the result covers the indexed static matches in the stated scope.
 - `# partial: <reason>`: the result may miss items. Fix the reason if you can (qualify an ambiguous target, raise `--limit`), then check the source for what the index cannot see, such as dynamic imports or computed URLs.
 
 Without the MCP tool, run the matching CLI query in the shell. Use `neorion query <kind> <target>` for single-target queries, `neorion query path <from> <to>` to trace a path, or `neorion query changes` to inspect the Git diff.
