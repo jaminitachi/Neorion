@@ -1,9 +1,9 @@
-import { matchNextRoutes } from '../core/analyzers/NextRouteMatch';
+import { matchNextRoutes, normalizeNextUrl, routeSegments, segmentRank } from '../core/analyzers/NextRouteMatch';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+import { isTestFile as testFile, renderSiteKey, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
@@ -148,7 +148,7 @@ export class QueryEngine {
       const left = this.symbols.get(a[0]);
       const right = this.symbols.get(b[0]);
       return compare(left?.file ?? '', right?.file ?? '') || compare(left?.name ?? '', right?.name ?? '') ||
-        a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
+        Number(!!a[5]) - Number(!!b[5]) || a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
     });
     const references = index.references.map((reference): Reference => {
       if (reference[1] !== null) return reference;
@@ -293,50 +293,62 @@ export class QueryEngine {
   }
 
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
-    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; depth: number }>();
-    const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, depth: 0 }];
-    const visited = new Set<number>();
-    for (let i = 0; i < pending.length && !expired(); i++) {
-      const entry = pending[i];
-      if (visited.has(entry.id)) continue;
-      visited.add(entry.id);
-      for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
-        if (!entry.depth) continue;
-        const previous = reached.get(route.id);
-        if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
+    const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean; possible: boolean; depth: number }>();
+    const trace = (only?: Route) => {
+      const conditions = only && this.index.pagesRenderConditions?.[only.id];
+      const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false, depth: 0 }];
+      const visited = new Set<number>();
+      for (let i = 0; i < pending.length && !expired(); i++) {
+        const entry = pending[i];
+        if (visited.has(entry.id)) continue;
+        visited.add(entry.id);
+        for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
+          if (!entry.depth || only && route !== only) continue;
+          const previous = reached.get(route.id);
+          if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
+        }
+        for (const [from, to, line, conditional, wrapper, possible] of this.incoming.get(entry.id) ?? []) {
+          if (expired()) break;
+          if (visited.has(from)) continue;
+          const decision = conditions?.[renderSiteKey(from, to, line)];
+          if (decision === 'excluded') continue;
+          const parent = this.symbols.get(from);
+          pending.push({
+            id: from, chain: parent ? [parent.name, ...entry.chain].slice(-2) : entry.chain,
+            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
+            possible: entry.possible || !!possible || decision === 'possible'
+          });
+        }
       }
-      for (const [from, , , conditional, wrapper] of this.incoming.get(entry.id) ?? []) {
-        if (expired()) break;
-        if (visited.has(from)) continue;
-        const parent = this.symbols.get(from);
-        pending.push({
-          id: from, chain: parent ? [parent.name, ...entry.chain].slice(-2) : entry.chain,
-          depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional
-        });
-      }
+    };
+    trace();
+    for (const { route } of [...reached.values()]) {
+      if (!this.index.pagesRenderConditions?.[route.id] || expired()) continue;
+      reached.delete(route.id);
+      trace(route);
     }
     const rows = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
-      const { route, chain, depth, layout, conditional } = entry;
+      const { route, chain, depth, layout, conditional, possible } = entry;
       const fileLabel = location(route.file, route.line ?? 1);
       const url = shorten(route.url, 0, Math.max(16, 340 - bytes(fileLabel))) ?? '...';
       const label = `${url}  ${fileLabel}`;
       const via = depth <= 2 && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
         chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
       return { ...row(`${label}  depth ${depth}${via.length ? ' via ' + via.join(' > ') : ''}` +
-        (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
+        (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
-      const parents = new Map<number, { symbol: SymbolEntry; line: number; conditional: number }>();
-      for (const [from, , line, conditional] of this.incoming.get(symbol.id) ?? []) {
+      const parents = new Map<number, { symbol: SymbolEntry; line: number; conditional: number; possible?: true }>();
+      for (const [from, , line, conditional, , possible] of this.incoming.get(symbol.id) ?? []) {
         if (expired()) break;
         const parent = this.symbols.get(from);
         const prior = parents.get(from);
-        if (parent && (!prior || line < prior.line)) parents.set(from, { symbol: parent, line, conditional });
+        if (parent && (!prior || line < prior.line)) parents.set(from, { symbol: parent, line, conditional, possible });
       }
-      for (const { symbol, line, conditional } of [...parents.values()].sort((a, b) => bySymbol(a.symbol, b.symbol))) {
+      for (const { symbol, line, conditional, possible } of [...parents.values()].sort((a, b) => bySymbol(a.symbol, b.symbol))) {
         const label = `direct ${location(symbol.file, line)}#${symbol.name}`;
-        rows.push({ ...row(label + flagTest(symbol.file) + (conditional ? ' [cond]' : ''), symbol.file), pathEnd: label.length });
+        rows.push({ ...row(label + flagTest(symbol.file) + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : ''), symbol.file), pathEnd: label.length });
       }
     }
     const directCount = rows.length - reached.size;
@@ -405,7 +417,8 @@ export class QueryEngine {
           (route.pages && item.evidence ? ` [${item.evidence}]` : '')))];
         entries.push({ ...row(label + (symbols.length ? ` ${symbols.join(', ')}` : '') +
           (providerNames.length ? ` providers: ${providerNames.join(', ')}` : '') +
-          (items.some(item => item.conditional) ? ' [cond]' : '') + flagTest(file), file), pathEnd: label.length });
+          (items.some(item => item.conditional) ? ' [cond]' : '') +
+          (items.some(item => item.possible) ? ' [possible]' : '') + flagTest(file), file), pathEnd: label.length });
       }
       return entries;
     });
@@ -622,7 +635,7 @@ export class QueryEngine {
       if (route) {
         const seeds = route.kind === 'api' ? graph.apiTargets(route) : graph.routeStarts(route);
         const result = tool === 'impact' ? graph.impact(seeds, depth, !!includeTests, limit, expired) :
-          graph.callees(seeds, depth, uses, expired);
+          graph.callees(seeds, depth, uses, expired, route);
         return { result: { ...result, title: route.url, targets: [route.file] } };
       }
       return { result: { rows: [], notes: this.suggestions(target, tool === 'callees' ? 'page' : undefined, expired) } };
@@ -669,7 +682,9 @@ export class QueryEngine {
       if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
       if (!endpoint.file) return { result: { title, rows: [], notes: endpoint.notes() } };
     }
-    const result = graph.path(source.ids, destination.ids, expired, source.route);
+    const pathname = source.route?.pages && normalizeNextUrl(from, this.index.pagesUrlConfig) || undefined;
+    const concrete = pathname && routeSegments(pathname).every(part => segmentRank(part) === '3') ? pathname : undefined;
+    const result = graph.path(source.ids, destination.ids, expired, source.route, concrete);
     return { result: { ...result, title, targets: [source.file!, destination.file!] } };
   }
 

@@ -59,3 +59,71 @@ export function returns(body: Node | undefined): Node[] {
   });
   return result;
 }
+
+// Walk the current invocation. Nested function bodies run only when their
+// callers explicitly follow them.
+export function executionSites(body: Node | undefined) {
+  const calls: { node: import('ts-morph').CallExpression; possible: boolean }[] = [];
+  const returned: { node: Node; possible: boolean }[] = [];
+  const truth = (node: Node) => {
+    const value = valueNode(node);
+    if (Node.isTrueLiteral(value)) return true;
+    if (Node.isFalseLiteral(value) || Node.isNullLiteral(value)) return false;
+    if (Node.isNumericLiteral(value) || Node.isStringLiteral(value)) return Boolean(value.getLiteralValue());
+  };
+  // A path may either continue or leave the current block.
+  const next = 1;
+  const exit = 2;
+  const visit = (node: Node, possible: boolean): number => {
+    if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node) || Node.isClassExpression(node)) return next;
+    if (Node.isBlock(node)) {
+      let flow = next;
+      for (const statement of node.getStatements()) {
+        if (!(flow & next)) break;
+        flow = (flow & exit) | visit(statement, possible || !!(flow & exit));
+      }
+      return flow;
+    }
+    if (Node.isReturnStatement(node) || Node.isThrowStatement(node)) {
+      const expression = node.getExpression();
+      if (expression) visit(expression, possible);
+      if (expression && Node.isReturnStatement(node)) returned.push({ node: expression, possible });
+      return exit;
+    }
+    if (Node.isIfStatement(node) || Node.isConditionalExpression(node)) {
+      const condition = Node.isIfStatement(node) ? node.getExpression() : node.getCondition();
+      const yes = Node.isIfStatement(node) ? node.getThenStatement() : node.getWhenTrue();
+      const no = Node.isIfStatement(node) ? node.getElseStatement() : node.getWhenFalse();
+      visit(condition, possible);
+      const choice = truth(condition);
+      const whenTrue = choice === false ? 0 : visit(yes, possible || choice === undefined);
+      const whenFalse = choice === true ? 0 : no ? visit(no, possible || choice === undefined) : next;
+      return whenTrue | whenFalse;
+    }
+    if (Node.isBinaryExpression(node)) {
+      const left = node.getLeft();
+      const right = node.getRight();
+      const operator = node.getOperatorToken().getKind();
+      if (operator === SyntaxKind.AmpersandAmpersandToken || operator === SyntaxKind.BarBarToken ||
+        operator === SyntaxKind.QuestionQuestionToken) {
+        visit(left, possible);
+        const value = valueNode(left);
+        const choice = operator === SyntaxKind.QuestionQuestionToken ?
+          Node.isNullLiteral(value) ? true : undefined : truth(left);
+        if (choice === undefined || choice === (operator !== SyntaxKind.BarBarToken)) visit(right, possible || choice === undefined);
+        return next;
+      }
+    }
+    if (Node.isCallExpression(node)) calls.push({ node, possible });
+    // Loops, switches and exception handlers require runtime state to resolve.
+    const conditional = Node.isIterationStatement(node) || Node.isCaseClause(node) || Node.isDefaultClause(node) ||
+      Node.isCatchClause(node) || Node.isTryStatement(node);
+    node.forEachChild(child => { visit(child, possible || conditional); });
+    return next;
+  };
+  if (body) {
+    visit(body, false);
+    if (!Node.isBlock(body)) returned.push({ node: body, possible: false });
+  }
+  return { calls, returned };
+}

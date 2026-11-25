@@ -386,9 +386,18 @@ test('detects Pages API equality guards and switches on the exported handler req
     }
   `);
   fs.writeFileSync(path.join(directory, 'wrapped.ts'), `
+    async function authenticate(req) {
+      if (!req.headers.token) return { status: 401 };
+      return { authenticated: true };
+    }
     function wrap(handler) {
       return async (req, res) => {
-        await handler({ ...await authenticate(req), req, res });
+        const auth = await authenticate(req);
+        if ('status' in auth) {
+          res.status(auth.status).json({ error: 'Unauthorized' });
+          return;
+        }
+        await handler({ ...auth, req, res });
       };
     }
     export default wrap(({ req: request, res }) => {
@@ -737,6 +746,8 @@ test('emits transitive render, App and Pages wrapping, rename and API facts with
     import * as components from '@/components';
     export default function Index() { return <components.Middle /> }
     Index.getLayout = page => <PageProvider>{page}</PageProvider>;
+    Index.skip = process.env.SKIP_SHELL === '1';
+    Index.ready = process.env.SHELL_READY === '1';
     function PageProvider({children}) { return <section>{children}</section> }
   `);
   write('src/app/api/report/[id]/route.ts', 'export function GET() {} export function POST() {}');

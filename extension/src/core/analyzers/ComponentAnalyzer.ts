@@ -498,7 +498,7 @@ export class ComponentAnalyzer {
       }
       for (const target of new Set(targets)) {
         addEdge(from, target.id, 'renders');
-        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body));
+        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, undefined, this.config ? tag : undefined);
       }
     };
     const componentTags = new Set<Node>();

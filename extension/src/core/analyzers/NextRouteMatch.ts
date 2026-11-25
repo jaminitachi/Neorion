@@ -43,3 +43,63 @@ export function matchNextRoutes<T>(url: string, routes: T[], pattern: (route: T)
   }
   return matches;
 }
+
+type MatcherPart = { text?: string; optional?: boolean; repeat?: boolean };
+
+function membership(pattern: MatcherPart[], route: MatcherPart[]) {
+  // Literal segments and one other segment partition the input alphabet.
+  const alphabet = [...new Set([...pattern, ...route].flatMap(part => part.text === undefined ? [] : [part.text])), '\0'];
+  const closure = (parts: MatcherPart[], states: number[]) => {
+    const next = new Set(states);
+    for (const index of next) if (parts[index]?.optional) next.add(index + 1);
+    return [...next].sort((a, b) => a - b);
+  };
+  const advance = (parts: MatcherPart[], states: number[], token: string) => closure(parts,
+    states.flatMap(index => {
+      const part = parts[index];
+      return !part || part.text !== undefined && part.text !== token ? [] :
+        part.repeat ? [index, index + 1] : [index + 1];
+    }));
+  const pending = [[closure(pattern, [0]), closure(route, [0])]];
+  const seen = new Set<string>();
+  let overlap = false;
+  let excluded = false;
+  for (let i = 0; i < pending.length; i++) {
+    if (i >= 512 || overlap && excluded) return 'possible';
+    const [left, right] = pending[i];
+    const key = JSON.stringify([left, right]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (right.includes(route.length)) {
+      if (left.includes(pattern.length)) overlap = true;
+      else excluded = true;
+    }
+    for (const token of alphabet) {
+      const variants = advance(route, right, token);
+      if (variants.length) pending.push([advance(pattern, left, token), variants]);
+    }
+  }
+  return overlap ? 'yes' : 'no';
+}
+
+export function middlewareMatcher(pattern: string, pathname: string, concrete = false): 'yes' | 'possible' | 'no' | undefined {
+  if (!pattern.startsWith('/')) return;
+  const parts = routeSegments(pattern.replace(/\/$/, '') || '/');
+  const variants = routeSegments(pathname);
+  const negative = /^\/\(\(\?!(.+)\)\.\*\)$/.exec(pattern);
+  if (negative && negative[1].split('|').every(part => /^[\w./-]+$/.test(part))) {
+    const excluded = negative[1].split('|');
+    const dynamic = concrete ? -1 : variants.findIndex(part => segmentRank(part) !== '3');
+    const prefix = variants.slice(0, dynamic < 0 ? variants.length : dynamic).join('/');
+    if (dynamic < 0) return excluded.some(value => new RegExp('^(?:' + value + ')').test(prefix)) ? 'no' : 'yes';
+    if (excluded.some(value => prefix.startsWith(value) && !value.includes('.'))) return 'no';
+    return excluded.some(value => value.startsWith(prefix ? prefix + '/' : '')) ? 'possible' : 'yes';
+  }
+  if (parts.some(part => !/^(?:[\w.~-]+|:\w+[?*+]?)$/.test(part))) return;
+  return membership(parts.map(part => part.startsWith(':') ?
+    { optional: /[?*]$/.test(part), repeat: /[+*]$/.test(part) } : { text: part }),
+  variants.map(part => {
+    const rank = concrete ? '3' : segmentRank(part);
+    return rank === '3' ? { text: part } : { optional: rank === '0', repeat: rank !== '2' };
+  }));
+}

@@ -706,3 +706,155 @@ test('Pages API workspace proof is scoped and invalidates the index after siblin
   assert.match(query, /# partial: API handler factory or re-export unresolved/);
   assert.deepEqual(JSON.parse(fs.readFileSync(indexFile, 'utf8')).routes.find(route => route.url === '/api/fixture').methods, ['ALL']);
 });
+
+function pagesReviewFixture(t, files) {
+  const { root, build, query } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  for (const [file, content] of Object.entries(files)) {
+    const target = path.join(root, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  }
+  build();
+  return query;
+}
+
+test('Pages wrapper predicates use the effective page properties', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component, pageProps } = props;
+        return Component.PageWrapper ? <Component.PageWrapper {...props} /> : <Component {...pageProps} />;
+      }`,
+    'lib/license.tsx': `
+      export function LicenseRequired({ children }) { return <section>{children}</section>; }
+      export function PageWrapper({ Component: Screen, pageProps }) {
+        const requiresLicense = Screen.requiresLicense;
+        return requiresLicense ? <LicenseRequired><Screen {...pageProps} /></LicenseRequired> : <Screen {...pageProps} />;
+      }`,
+    'pages/index.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function Home() { return <div />; }
+      Home.PageWrapper = PageWrapper;`,
+    'pages/licensed.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function Licensed() { return <div />; }
+      Licensed.PageWrapper = PageWrapper;
+      Licensed.requiresLicense = true;`,
+    'pages/unknown-license.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function UnknownLicense() { return <div />; }
+      UnknownLicense.PageWrapper = PageWrapper;
+      UnknownLicense.requiresLicense = process.env.REQUIRES_LICENSE === '1';`
+  });
+  const home = query('wrappers', '/');
+  assert.match(home, /PageWrapper assigned at/);
+  assert.doesNotMatch(home, /LicenseRequired/);
+  assert.match(home, /# complete:/);
+  const renders = query('who_renders', 'LicenseRequired');
+  assert.doesNotMatch(renders, /^\/  /m);
+  assert.match(renders, /^\/licensed  .*\n/m);
+  assert.match(renders, /^\/unknown-license  .*\[possible\]/m);
+  assert.match(renders, /# partial:.*requiresLicense/);
+  assert.match(query('path', '/', 'lib/license.tsx#LicenseRequired'), /# complete: no directed path/);
+  assert.match(query('path', '/licensed', 'LicenseRequired'), /1 render .*LicenseRequired/);
+  assert.doesNotMatch(query('callees', '/', '--depth', '2'), /LicenseRequired/);
+  const impact = query('impact', 'LicenseRequired');
+  assert.doesNotMatch(impact, /^page \/  /m);
+  assert.match(impact, /^page \/licensed  /m);
+  const unknown = query('path', '/unknown-license', 'LicenseRequired');
+  assert.match(unknown, /1 render .*\[possible\]/);
+  assert.match(unknown, /# partial:.*requiresLicense/);
+  assert.match(query('wrappers', '/unknown-license'), /LicenseRequired.*\[possible\]/);
+});
+
+test('Pages lifecycle callbacks need reachable invocation or forwarding', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/ghost.page.tsx': `
+      export default function Ghost() { return <div />; }
+      function wrap(callback) {
+        return () => {
+          const neverCalled = () => callback();
+          return { props: {} };
+          callback();
+        };
+      }
+      export const getServerSideProps = wrap(() => unreachable());
+      function unreachable() {}`,
+    'pages/forwarded.page.tsx': `
+      export default function Forwarded() { return <div />; }
+      const makeHandler = callback => () => callback();
+      function wrap(callback) {
+        const run = () => callback();
+        return makeHandler(run);
+      }
+      export const getServerSideProps = wrap(() => reachable());
+      function reachable() {}`,
+    'pages/uncertain.page.tsx': `
+      import { run } from 'opaque-runner';
+      export default function Uncertain() { return <div />; }
+      function wrap(callback) {
+        return () => run(callback);
+      }
+      export const getServerSideProps = wrap(() => uncertain());
+      function uncertain() {}`
+  });
+  assert.match(query('path', '/ghost', 'unreachable'), /# complete: no directed path/);
+  assert.doesNotMatch(query('callees', 'pages/ghost.page.tsx#getServerSideProps'), /unreachable/);
+  assert.match(query('path', '/forwarded', 'reachable'), /2 call .*reachable/);
+  const uncertain = query('path', '/uncertain', 'uncertain');
+  assert.match(uncertain, /2 call .*uncertain.*\[possible\]/);
+  assert.match(uncertain, /# partial:.*callback invocation/);
+});
+
+test('Pages API methods follow unconditional rejection and Pages handlers receive HEAD as sent', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/index.page.tsx': `
+      export default function Home() { return <div />; }
+      export function readStatus() { return fetch('/api/status'); }
+      export function sendHead() { return fetch('/api/read-only', { method: 'HEAD' }); }
+      export function appHead() { return fetch('/api/app-read', { method: 'HEAD' }); }
+      export function sendPost() { return fetch('/api/oidc', { method: 'POST' }); }
+      export function readDynamic() { return fetch('/api/runtime-method'); }`,
+    'pages/api/status.page.ts': `
+      export default function handler(req, res) {
+        if (req.method === 'POST' && !req.body) return res.status(405).end();
+        return res.status(200).end();
+      }`,
+    'pages/api/oidc.page.ts': `
+      export default function handler(req, res) {
+        if (req.method !== 'GET') return res.status(400).send('Method not allowed');
+        return res.status(200).end();
+      }`,
+    'pages/api/read-only.page.ts': `
+      export default function handler(req, res) {
+        if (req.method !== 'GET') return res.status(405).end();
+        return res.status(200).end();
+      }`,
+    'pages/api/runtime-method.page.ts': `
+      export default function handler(req, res) {
+        if (isAllowed(req.method)) return res.status(200).end();
+        return res.status(405).end();
+      }`,
+    'app/api/app-read/route.ts': 'export function GET() { return new Response(null); }'
+  });
+  const status = query('api_consumers', '/api/status');
+  assert.match(status, /GET fetch/);
+  assert.doesNotMatch(status, /methods enforced/);
+  assert.match(query('path', 'readStatus', '/api/status'), /1 fetch .*GET \/api\/status/);
+  assert.match(query('api_consumers', '/api/oidc'), /# methods enforced: GET/);
+  assert.match(query('path', 'sendPost', '/api/oidc'), /# complete: no directed path/);
+  assert.match(query('path', 'sendHead', '/api/read-only'), /# complete: no directed path/);
+  const runtimeMethod = query('path', 'readDynamic', '/api/runtime-method');
+  assert.match(runtimeMethod, /1 fetch .*\[possible\]/);
+  assert.match(runtimeMethod, /# partial: Pages API method enforcement unresolved/);
+  assert.match(query('path', 'appHead', '/api/app-read'), /1 fetch .*HEAD \/api\/app-read/);
+});
+
+test('Pages middleware paths check concrete catch-all URLs against the matcher', t => {
+  const { build, query } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  build();
+  assert.match(query('path', '/base/api/auth/csrf?check=1', 'middleware'), /no directed path/);
+  assert.match(query('path', '/api/auth/[...parts]', 'middleware'), /1 middleware .*\[possible\]/);
+  assert.match(query('path', '/base/api/auth/csrf/embed?check=1', 'middleware'), /1 middleware .*\/:path\*\/embed/);
+  assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
+});

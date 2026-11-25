@@ -2,9 +2,9 @@ import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import type { RouteNode } from '../types/GraphTypes';
 import type { PagesEdge } from '../../mcp/Index';
 import { declarationsOf, urlTexts } from './ArchitectureFacts';
-import { matchNextRoutes, normalizeNextUrl, routeSegments, segmentRank } from './NextRouteMatch';
+import { matchNextRoutes, middlewareMatcher, normalizeNextUrl, segmentRank } from './NextRouteMatch';
 import { property, textValue, type NextConfig } from './NextConfig';
-import { bindingOf, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { visitKinds } from './CompilerWalk';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 
@@ -17,6 +17,7 @@ export type PagesDependency = {
   site: Node;
   detail?: string;
   possible?: boolean;
+  matcher?: PagesEdge['matcher'];
 };
 
 const dataPhases = new Map([
@@ -57,116 +58,127 @@ function bodyCalls(node: Node | undefined) {
   return node ? [...(Node.isCallExpression(node) ? [node] : []), ...node.getDescendantsOfKind(SyntaxKind.CallExpression)] : [];
 }
 
-function rootedIn(node: Node | undefined, binding: Node): boolean {
-  if (!node) return false;
-  if (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) return rootedIn(node.getExpression(), binding);
-  return bindingOf(node) === binding;
+type Invocation = 'none' | 'possible' | 'invoked';
+const stronger = (a: Invocation, b: Invocation) =>
+  a === 'invoked' || b === 'invoked' ? 'invoked' : a === 'possible' || b === 'possible' ? 'possible' : 'none';
+
+// Follow executed calls, passing the callback binding through local helpers.
+// Opaque forwarding, conditional composition and runtime member access stay possible.
+function callbackInvocation(factory: NonNullable<ReturnType<typeof functionNode>>, parameter: Node, member?: string): Invocation {
+  const matches = (node: Node | undefined, binding: Node, key?: string, depth = 0): Invocation => {
+    if (!node || depth >= 12) return 'none';
+    if (!key && bindingOf(node) === binding) return 'invoked';
+    if (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
+      const name = Node.isPropertyAccessExpression(node) ? node.getName() : textValue(node.getArgumentExpression());
+      if (key && name && name !== key) return 'none';
+      const receiver = matches(node.getExpression(), binding, undefined, depth + 1);
+      return receiver !== 'none' && (name === undefined || !key) ? 'possible' : receiver;
+    }
+    if (Node.isConditionalExpression(node)) {
+      return [node.getWhenTrue(), node.getWhenFalse()].some(branch =>
+        matches(branch, binding, key, depth + 1) !== 'none') ? 'possible' : 'none';
+    }
+    if (Node.isSpreadElement(node) || Node.isSpreadAssignment(node)) {
+      return matches(node.getExpression(), binding, key, depth + 1) === 'none' ? 'none' : 'possible';
+    }
+    const value = valueNode(node);
+    if (value && value !== node) return matches(value, binding, key, depth + 1);
+    if (Node.isCallExpression(node) && node.getArguments().some(argument =>
+      matches(argument, binding, key, depth + 1) !== 'none')) return 'possible';
+    return 'none';
+  };
+  const knownWrapper = (node: Node) => {
+    const origin = importBinding(node);
+    return origin?.module === 'iron-session/next' && ['withIronSessionApiRoute', 'withIronSessionSsr'].includes(origin.name);
+  };
+  type State = { node: Node; binding: Node; key?: string; returned: boolean };
+  const active: State[] = [];
+  const scan = (node: Node | undefined, binding: Node, key: string | undefined, returned: boolean): Invocation => {
+    if (!node) return 'none';
+    if (active.length >= 12 || active.some(state => state.node === node && state.binding === binding &&
+      state.key === key && state.returned === returned)) return 'possible';
+    active.push({ node, binding, key, returned });
+    let result: Invocation = 'none';
+    const add = (status: Invocation, possible = false) => {
+      if (status !== 'none') result = stronger(result, possible ? 'possible' : status);
+    };
+    const invoke = (site: import('ts-morph').CallExpression, possible: boolean, returnsHandler: boolean) => {
+      const expression = site.getExpression();
+      const local = functionNode(expression);
+      if (!returnsHandler) add(matches(expression, binding, key), possible || site.hasQuestionDotToken());
+      if (local) add(scan(local.getBody(), binding, key, returnsHandler), possible);
+      for (const [i, argument] of site.getArguments().entries()) {
+        const forwarded = matches(argument, binding, key);
+        const receiver = key && matches(argument, binding) === 'invoked';
+        const next = local?.getParameters()[i];
+        if (next && (forwarded !== 'none' || receiver)) {
+          add(scan(local?.getBody(), next, receiver ? key : undefined, returnsHandler), possible || forwarded === 'possible');
+        } else if (!local && (forwarded !== 'none' || receiver)) add('possible');
+        else {
+          const callback = functionNode(argument);
+          if (!callback) continue;
+          const invocation = next ? scan(local?.getBody(), next, undefined, returnsHandler) :
+            knownWrapper(expression) && i === 0 ? 'invoked' : 'possible';
+          if (invocation !== 'none') {
+            add(scan(callback.getBody(), binding, key, false), possible || invocation === 'possible');
+          }
+        }
+      }
+    };
+    const { calls, returned: values } = executionSites(node);
+    if (returned) {
+      const handler = (value: Node | undefined, possible: boolean, depth = 0) => {
+        if (!value || depth >= 12) return;
+        const fn = functionNode(value);
+        const resolved = valueNode(value);
+        if (fn) add(scan(fn.getBody(), binding, key, false), possible);
+        else if (Node.isCallExpression(resolved)) invoke(resolved, possible, true);
+        else if (Node.isConditionalExpression(resolved)) {
+          handler(resolved.getWhenTrue(), true, depth + 1);
+          handler(resolved.getWhenFalse(), true, depth + 1);
+        } else add(matches(value, binding, key), possible);
+      };
+      for (const { node: value, possible } of values) handler(value, possible);
+    } else {
+      for (const { node: site, possible } of calls) invoke(site, possible, false);
+    }
+    active.pop();
+    return result;
+  };
+  return scan(factory.getBody(), parameter, member, true);
 }
 
-// The callback must reach an invocation in a returned handler or a locally
-// identified composition step. An opaque wrapper only supplies possible evidence.
 function callbackArguments(call: import('ts-morph').CallExpression, workspace?: WorkspaceBindings) {
   const expression = call.getExpression();
   const origin = importBinding(expression);
   const factory = functionNode(expression) ?? functionNode(workspace?.resolve(expression));
-  const ironSession = (origin?.module === 'iron-session/next' &&
-    ['withIronSessionApiRoute', 'withIronSessionSsr'].includes(origin.name));
-  const returned = returns(factory?.getBody());
-  const returnedCalls = returned.flatMap(result => {
-    const fn = functionNode(result);
-    return bodyCalls(fn?.getBody() ?? result);
-  });
-  const calls = bodyCalls(factory?.getBody());
+  const ironSession = origin?.module === 'iron-session/next' &&
+    ['withIronSessionApiRoute', 'withIronSessionSsr'].includes(origin.name);
+  const opaque = !factory && !ironSession;
   const callbacks: { value: Node; possible: boolean }[] = [];
-  const add = (value: Node, possible: boolean) => {
-    if (functionNode(value) || Node.isCallExpression(valueNode(value))) callbacks.push({ value, possible });
-  };
+  const candidates: Node[] = [];
   for (const [i, passed] of call.getArguments().entries()) {
     const parameter = factory?.getParameters()[i];
-    const invoked = !!parameter && returnedCalls.some(site => rootedIn(site.getExpression(), parameter));
-    const composed = !!parameter && calls.some(site => site.getArguments().some(argument =>
-      Node.isSpreadElement(argument) && rootedIn(argument.getExpression(), parameter))) &&
-      returnedCalls.some(site => {
-        const callee = valueNode(site.getExpression());
-        return Node.isConditionalExpression(callee) && [callee.getWhenTrue(), callee.getWhenFalse()]
-          .some(branch => rootedIn(branch, parameter));
-      });
     const value = valueNode(passed);
-    const opaque = !factory && !ironSession;
+    const status = (member?: string) => opaque ? 'possible' : ironSession && i === 0 ? 'invoked' :
+      factory && parameter ? callbackInvocation(factory, parameter, member) : 'none';
+    const add = (value: Node, invocation: Invocation) => {
+      if (!functionNode(value) && !Node.isCallExpression(valueNode(value))) return;
+      candidates.push(value);
+      if (invocation !== 'none') callbacks.push({ value, possible: invocation === 'possible' });
+    };
     if (Node.isArrayLiteralExpression(value)) {
-      if (invoked || composed || opaque) for (const element of value.getElements()) add(element, opaque || !invoked);
+      const invocation = status();
+      for (const element of value.getElements()) add(element, invocation);
     } else if (Node.isObjectLiteralExpression(value)) {
       for (const member of value.getProperties()) {
-        if (!Node.isPropertyAssignment(member) && !Node.isMethodDeclaration(member)) continue;
-        const matches = parameter && returnedCalls.some(site => {
-          const access = site.getExpression();
-          return Node.isPropertyAccessExpression(access) && access.getName() === member.getName() && rootedIn(access, parameter);
-        });
-        if (matches || opaque) add(Node.isPropertyAssignment(member) ? member.getInitializerOrThrow() : member, opaque);
+        if (Node.isPropertyAssignment(member) || Node.isMethodDeclaration(member)) {
+          add(Node.isPropertyAssignment(member) ? member.getInitializerOrThrow() : member, status(member.getName()));
+        }
       }
-    } else if (invoked || composed || opaque || ironSession && i === 0) add(passed, opaque);
+    } else add(passed, status());
   }
-  return { callbacks, opaque: !factory && !ironSession, external: origin?.module };
-}
-
-type MatcherPart = { text?: string; optional?: boolean; repeat?: boolean };
-
-function membership(pattern: MatcherPart[], route: MatcherPart[]) {
-  // Literal segments and one other segment partition the input alphabet.
-  const alphabet = [...new Set([...pattern, ...route].flatMap(part => part.text === undefined ? [] : [part.text])), '\0'];
-  const closure = (parts: MatcherPart[], states: number[]) => {
-    const next = new Set(states);
-    for (const index of next) if (parts[index]?.optional) next.add(index + 1);
-    return [...next].sort((a, b) => a - b);
-  };
-  const advance = (parts: MatcherPart[], states: number[], token: string) => closure(parts,
-    states.flatMap(index => {
-      const part = parts[index];
-      return !part || part.text !== undefined && part.text !== token ? [] :
-        part.repeat ? [index, index + 1] : [index + 1];
-    }));
-  const pending = [[closure(pattern, [0]), closure(route, [0])]];
-  const seen = new Set<string>();
-  let overlap = false;
-  let excluded = false;
-  for (let i = 0; i < pending.length; i++) {
-    if (i >= 512 || overlap && excluded) return 'possible';
-    const [left, right] = pending[i];
-    const key = JSON.stringify([left, right]);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    if (right.includes(route.length)) {
-      if (left.includes(pattern.length)) overlap = true;
-      else excluded = true;
-    }
-    for (const token of alphabet) {
-      const variants = advance(route, right, token);
-      if (variants.length) pending.push([advance(pattern, left, token), variants]);
-    }
-  }
-  return overlap ? 'yes' : 'no';
-}
-
-function middlewareMatcher(pattern: string, route: RouteNode): 'yes' | 'possible' | 'no' | undefined {
-  if (!pattern.startsWith('/')) return;
-  const parts = routeSegments(pattern.replace(/\/$/, '') || '/');
-  const variants = routeSegments(route.path);
-  const negative = /^\/\(\(\?!(.+)\)\.\*\)$/.exec(pattern);
-  if (negative && negative[1].split('|').every(part => /^[\w./-]+$/.test(part))) {
-    const excluded = negative[1].split('|');
-    const dynamic = variants.findIndex(part => segmentRank(part) !== '3');
-    const prefix = variants.slice(0, dynamic < 0 ? variants.length : dynamic).join('/');
-    if (dynamic < 0) return excluded.some(value => new RegExp('^(?:' + value + ')').test(prefix)) ? 'no' : 'yes';
-    if (excluded.some(value => prefix.startsWith(value) && !value.includes('.'))) return 'no';
-    return excluded.some(value => value.startsWith(prefix ? prefix + '/' : '')) ? 'possible' : 'yes';
-  }
-  if (parts.some(part => !/^(?:[\w.~-]+|:\w+[?*+]?)$/.test(part))) return;
-  return membership(parts.map(part => part.startsWith(':') ?
-    { optional: /[?*]$/.test(part), repeat: /[+*]$/.test(part) } : { text: part }),
-  variants.map(part => {
-    const rank = segmentRank(part);
-    return rank === '3' ? { text: part } : { optional: rank === '0', repeat: rank !== '2' };
-  }));
+  return { callbacks, candidates, opaque, external: origin?.module };
 }
 
 function destinationNode(node: Node | undefined) {
@@ -195,8 +207,9 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
   const dependencies: PagesDependency[] = [];
   const issues = new Map<string, Set<string>>();
   const ownerIssues = new Map<Node, Set<string>>();
-  const owners = new Map<Node, { declaration?: Node; site: Node; name: string }>();
+  const owners = new Map<Node, { declaration?: Node; site: Node; name: string; possible?: boolean }>();
   const ignored = new Set<Node>();
+  const callbackUses = new Set<Node>();
   const lifecycleNames = new Map<Node, string>();
   const apiIssues = new Map<string, Set<string>>();
   const report = <T>(map: Map<T, Set<string>>, key: T, reason: string) => {
@@ -243,7 +256,7 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
           dependencies.push({ owner, target: binding, kind: 'data', site: node!, possible, detail: 'lifecycle callback' });
           return;
         }
-        owners.set(fn, { declaration: owner, site, name });
+        owners.set(fn, { declaration: owner, site, name, possible });
         for (const result of returns(fn.getBody())) {
           const redirect = property(valueNode(result), 'redirect');
           const destination = property(valueNode(redirect), 'destination');
@@ -252,7 +265,7 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
           }
         }
       } else if (Node.isCallExpression(selected)) {
-        owners.set(selected, { declaration: owner, site, name });
+        owners.set(selected, { declaration: owner, site, name, possible });
         const result = callbackArguments(selected, workspace);
         if (result.opaque || result.callbacks.some(callback => callback.possible) ||
           workspace?.has(result.external ?? '')) {
@@ -261,17 +274,13 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
           report(ownerIssues, owner, reason);
           report(issues, route.id, reason);
         }
-        for (const callback of result.callbacks) trace(callback.value, possible || callback.possible);
-        if (!result.opaque) {
-          for (const argument of selected.getArguments()) {
-            const candidates = Node.isArrayLiteralExpression(argument) ? argument.getElements() :
-              Node.isObjectLiteralExpression(argument) ? argument.getProperties().map(member =>
-                Node.isPropertyAssignment(member) ? member.getInitializer() : member) : [argument];
-            for (const candidate of candidates) {
-              const fn = functionNode(candidate);
-              if (fn && candidate === fn && !owners.has(fn)) ignored.add(fn);
-            }
-          }
+        for (const callback of result.callbacks.sort((a, b) => Number(a.possible) - Number(b.possible))) {
+          trace(callback.value, possible || callback.possible);
+        }
+        for (const candidate of result.candidates) {
+          if (Node.isIdentifier(candidate)) callbackUses.add(candidate);
+          const fn = functionNode(candidate);
+          if (fn && candidate === fn && !owners.has(fn)) ignored.add(fn);
         }
       } else {
         report(ownerIssues, owner, `${name} callable body unresolved`);
@@ -351,25 +360,29 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
         for (const route of pages) report(issues, route.id, 'dynamic middleware config');
       }
       for (const route of pages) {
-        if (!values.length && !match && (!config || Node.isObjectLiteralExpression(object))) {
+        if (!match) {
+          const dynamic = !!config && !Node.isObjectLiteralExpression(object);
           for (const handler of handlers) dependencies.push({ route: route.id, target: handler.target, kind: 'middleware',
-            site: entry, detail: 'default matcher', possible: handler.possible });
+            site: config ?? entry, detail: dynamic ? 'unresolved matcher' : 'default matcher', possible: dynamic || handler.possible });
           continue;
         }
         const matched = values.flatMap(value => {
           const pattern = textValue(value) ?? textValue(property(value, 'source'));
-          const member = pattern && middlewareMatcher(pattern, route);
+          const member = pattern && middlewareMatcher(pattern, route.path);
           if (!member) {
             report(issues, route.id, 'unsupported middleware matcher');
             for (const handler of handlers) report(ownerIssues, handler.target, 'unsupported middleware matcher');
-            return [];
           }
           if (member === 'no') return [];
-          return [{ value, pattern, possible: member === 'possible' || !!(property(value, 'has') || property(value, 'missing')) }];
+          const conditional = !member || !!(property(value, 'has') || property(value, 'missing'));
+          return [{ value, pattern, conditional, possible: member !== 'yes' || conditional }];
         });
         for (const entry of matched) for (const handler of handlers) dependencies.push({
           route: route.id, target: handler.target, kind: 'middleware', site: entry.value,
-          detail: entry.pattern, possible: entry.possible || handler.possible
+          detail: entry.pattern ?? 'unresolved matcher', possible: entry.possible || handler.possible,
+          matcher: entry.pattern === undefined ? undefined : {
+            source: entry.pattern, conditional: (entry.conditional || handler.possible) || undefined
+          }
         });
       }
       for (const handler of handlers) for (const call of bodyCalls(handler.fn?.getBody())) {
@@ -389,7 +402,7 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
     const matched = matchNextRoutes(rule.destination, routes, route => route.path, config.url)?.filter(route => route.pages);
     if (!matched.length) continue;
     for (const route of pages) {
-      const membership = middlewareMatcher(rule.source, route);
+      const membership = middlewareMatcher(rule.source, route.path);
       if (membership !== 'yes' && membership !== 'possible') continue;
       for (const destination of matched) dependencies.push({ route: route.id, destination: destination.id, kind: rule.kind,
         site: rule.site, possible: membership === 'possible' || rule.conditional, detail: rule.source + ' → ' + rule.destination });
@@ -437,5 +450,5 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
     }
   }
 
-  return { dependencies, issues, owners, ownerIssues, lifecycleNames, apiIssues, ignored };
+  return { dependencies, issues, owners, ownerIssues, lifecycleNames, apiIssues, ignored, callbackUses };
 }
