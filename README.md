@@ -47,7 +47,9 @@ Project: taxonomy
 
 Use `--depth <n>` to set the traversal depth for `impact` or `callees`. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination. For `changes`, use `--staged` or `--unstaged` to narrow the diff, or `--base <ref>` to compare against the merge base of `HEAD` and that ref.
 
-Add `--limit <n>` to ask for more rows. Output still has a size cap. In a [source build](#build-from-source), use `query search billing --kind component` to narrow a search.
+Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap. See the [source-build examples](#build-from-source) for a filtered search and a deeper downstream trace.
+
+In `api_consumers`, `[mention]` marks a reference such as a route literal. `[possible URL override]` marks a transport whose request URL may change at runtime.
 
 The CLI runs on Node.js 18 or later without native modules or Python. CLI queries refresh the graph when needed.
 
@@ -173,15 +175,24 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
 
-In a source build, `query search / --kind route` lists indexed pages, and `wrappers` can suggest a pattern for a concrete URL.
+These source-build commands list indexed pages, narrow a component search, trace downstream calls and query an indexed route pattern. Replace `ChatShell` and `/blog/[slug]` with a symbol and pattern from your project.
+
+```sh
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search / --kind route
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search chat --kind component --limit 50
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query callees ChatShell --depth 2 --limit 84
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers '/blog/[slug]'
+```
+
+Run a query from another directory with `--root /path/to/project`. Query suggestions keep the project and CLI invocation. Symbol suggestions show an accepted `path#Name` target and its declaration line.
 Add `--mcp-config` to `graph` to print an MCP launcher snippet.
-Setup from a source build registers absolute paths to Node.js and the CLI. Rerun setup if either moves.
+If setup registered absolute paths to Node.js and the CLI, rerun setup when either path changes. This applies to source and packaged builds that use absolute paths.
 
 ## VS Code extension
 
 ![Taxonomy in Routes view with the layouts that wrap /login highlighted](docs/graph-view/after-taxonomy-routes.png)
 
-Use the clone and `NEORION_DIR` from [Build from source](#build-from-source).
+Build with Node.js 22 or later. Use the clone and `NEORION_DIR` from [Build from source](#build-from-source). The extension's build notes describe the dependency warnings that can appear during `npm ci`. [Dependency notes](extension/README.md#build-and-install-locally)
 
 ```sh
 cd "$NEORION_DIR/extension"

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { accessSync, constants, existsSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, join, resolve } from 'node:path';
+import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
@@ -151,7 +151,7 @@ async function main([command, ...args]: string[]) {
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
-  if (!engine) throw new Error(`Neorion index missing. Run "neorion graph" in ${project}.`);
+  if (!engine) throw new Error(`Neorion index missing. Run graph in ${project} using the same CLI invocation.`);
   const limit = values.limit === undefined ? undefined : Number(values.limit);
   const options = {
     ...(target === undefined ? {} : { target }),
@@ -163,7 +163,9 @@ async function main([command, ...args]: string[]) {
     ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
     ...(values.uses === undefined ? {} : { uses: values.uses })
   };
-  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options })));
+  const installed = basename(process.argv[1]) === 'neorion' && !isTemporaryCliInstall(__filename) && runsCurrentEntry();
+  const invocation = installed ? ['neorion'] : ['node', __filename];
+  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
 }
 
 if (isMainThread) {

@@ -392,6 +392,73 @@ export function wrappedExpression(node: Node) {
   }
 }
 
+function unwrap(node: Node): Node {
+  const inner = wrappedExpression(node);
+  return inner ? unwrap(inner) : node;
+}
+
+function transportPropertyName(node: Node) {
+  if (Node.isComputedPropertyName(node)) node = unwrap(node.getExpression());
+  else if (Node.isIdentifier(node)) return node.getText();
+  if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isNumericLiteral(node)) {
+    return node.getLiteralText();
+  }
+}
+
+function chatTransportUrls(argument: Node | undefined) {
+  const urls = new Set<Node>();
+  let uncertain = false;
+  const seen = new Set<Node>();
+  const inspect = (value: Node, callbackResult = false) => {
+    const config = unwrap(value);
+    if (seen.has(config)) return;
+    seen.add(config);
+    if (!Node.isObjectLiteralExpression(config)) {
+      uncertain = true;
+      return;
+    }
+    for (const property of config.getProperties()) {
+      if (Node.isSpreadAssignment(property)) {
+        uncertain = true;
+        const expression = unwrap(property.getExpression());
+        const [declaration] = Node.isIdentifier(expression) ? declarationsOf(expression) : [];
+        const initializer = Node.isVariableDeclaration(declaration) && declaration.getSourceFile() === argument?.getSourceFile()
+          ? declaration.getInitializer() : undefined;
+        inspect(initializer ?? expression, callbackResult);
+        continue;
+      }
+      const name = transportPropertyName(property.getNameNode());
+      const initializer = Node.isPropertyAssignment(property) ? property.getInitializer() :
+        Node.isShorthandPropertyAssignment(property) ? property.getNameNode() : undefined;
+      if (name === undefined || name === '__proto__') uncertain = true;
+      if (name === 'api') {
+        // The SDK prefers the callback's returned api over the constructor option.
+        if (callbackResult || !initializer || urls.size) uncertain = true;
+        if (initializer) urls.add(initializer);
+      }
+      if (callbackResult || name !== 'prepareSendMessagesRequest') continue;
+      const callback = initializer && unwrap(initializer);
+      const body = Node.isMethodDeclaration(property) ? property.getBody() :
+        Node.isArrowFunction(callback) || Node.isFunctionExpression(callback) ? callback.getBody() : undefined;
+      if (!body) {
+        uncertain = true;
+      } else if (Node.isBlock(body)) {
+        body.forEachDescendant((node, traversal) => {
+          if (Node.isFunctionLikeDeclaration(node)) traversal.skip();
+          else if (Node.isReturnStatement(node)) {
+            const expression = node.getExpression();
+            if (expression) inspect(expression, true);
+          }
+        });
+      } else {
+        inspect(body, true);
+      }
+    }
+  };
+  if (argument) inspect(argument);
+  return { urls, uncertain };
+}
+
 // Keep unresolved parts distinct from literal URL text and from expressions that can supply slashes.
 const slot = '\0';
 const spanningSlot = '\x01';
@@ -683,14 +750,8 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
         ? origin.name.toUpperCase() : undefined;
       if (!isFetch && !isSwr && !axiosMethod && !isChatTransport) return;
       const [argument, options] = node.getArguments();
-      let requestUrl = argument;
-      if (isChatTransport) {
-        const config = argument && (wrappedExpression(argument) ?? argument);
-        const api = Node.isObjectLiteralExpression(config) ? config.getProperty('api') : undefined;
-        const initializer = Node.isPropertyAssignment(api) ? api.getInitializer() : undefined;
-        if (!initializer) return;
-        requestUrl = initializer;
-      }
+      const transport = isChatTransport ? chatTransportUrls(argument) : undefined;
+      if (transport?.uncertain) index?.uncertainChatTransport(source, node);
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
       const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
@@ -700,7 +761,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const via = isChatTransport ? AI_SDK_TRANSPORT :
         isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
-      for (const url of isSwr ? swrUrls(requestUrl) : [requestUrl]) {
+      for (const url of transport?.urls ?? (isSwr ? swrUrls(argument) : [argument])) {
         if (!url) continue;
         const matches = matchesFor(url);
         if (!matches) continue;
@@ -711,12 +772,12 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           const subject = action ? action.slice('action:'.length) : source;
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
           const kind = via === 'fetch' ? '' : ` (${via})`;
-          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate';
+          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !transport?.uncertain;
           if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
             file: source, line: startLine(isChatTransport ? url : node), node, route: route.id,
-            method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-            partial: partial || undefined, dynamic
+            method: transport?.uncertain ? '?' : method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+            partial: partial || transport?.uncertain || undefined, dynamic
           });
           if (isSwr || !mapFact) continue;
           const targets = endpointsByCall.get(node) ?? [];

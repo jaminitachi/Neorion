@@ -1,4 +1,4 @@
-import { AI_SDK_TRANSPORT, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, type ExternalCall, type QueryIndex, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, type ExternalCall, type QueryIndex, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
 type Route = QueryIndex['routes'][number];
 type NodeId = number | string;
@@ -68,6 +68,8 @@ export class DependencyGraph {
   private procedureSites = new Map<number, { file: string; use: TrpcUse }[]>();
   private trpcModuleUses = new Map<number, Set<string>>();
   private fetches = new Map<string, QueryIndex['fetches']>();
+  private uncertainTransports = new Set<number>();
+  private uncertainProductionTransport = false;
 
   constructor(private index: QueryIndex, symbols: Map<number, SymbolEntry>) {
     this.symbols = symbols;
@@ -82,6 +84,11 @@ export class DependencyGraph {
       this.fileIds.set(file, id);
     });
     for (const symbol of symbols.values()) append(this.symbolsByFile, symbol.file, symbol);
+    for (const [file, owner] of index.uncertainChatTransports ?? []) {
+      this.uncertainTransports.add(owner);
+      this.uncertainProductionTransport ||= !isTestFile(file);
+      for (const alias of index.trpcAliases?.[owner] ?? []) this.uncertainTransports.add(alias);
+    }
 
     const pages = index.routes.filter(route => route.kind === 'page');
     for (const route of index.routes) {
@@ -339,6 +346,7 @@ export class DependencyGraph {
     const terminals = new Map<string, Reached>();
     let nodeLimited = false;
     let trpc: string | undefined;
+    let transportOverride = false;
     const uncertain = new Set<string>();
     const literals = new Set<string>();
     const visit = (id: NodeId, value: Visit) => {
@@ -364,9 +372,12 @@ export class DependencyGraph {
           if (!earlier || metadata && earlier.visit.depth === level) {
             terminals.set(key, { terminal, visit: earlier?.visit ?? current, node: earlier?.node ?? id, metadata });
           }
-          if (terminal.kind === 'api') for (const fetch of this.fetches.get(terminal.file) ?? []) {
-            if (fetch.dynamic || fetch.partial) uncertain.add(fetch.file);
-            if (fetch.via === 'route literal') literals.add(fetch.file);
+          if (terminal.kind === 'api') {
+            transportOverride ||= this.uncertainProductionTransport || includeTests && this.uncertainTransports.size > 0;
+            for (const fetch of this.fetches.get(terminal.file) ?? []) {
+              if (fetch.dynamic || fetch.partial) uncertain.add(fetch.file);
+              if (fetch.via === 'route literal') literals.add(fetch.file);
+            }
           }
         }
         const edges = this.predecessors(id);
@@ -406,7 +417,8 @@ export class DependencyGraph {
     const limit = nodeLimited ? 'node budget' :
       unexplored ? `depth limit (${unexplored} unexplored callers at d=${depth}${depth < 6 ? `; rerun --depth ${Math.min(6, depth + 2)}` : ''})` :
       undefined;
-    const partial = [limit, trpc].filter(Boolean).join('; ') || (uncertain.size ? 'dynamic URL fetch' : undefined);
+    const partial = [limit, trpc, transportOverride ? AI_SDK_URL_OVERRIDE : undefined].filter(Boolean).join('; ') ||
+      (uncertain.size ? 'dynamic URL fetch' : undefined);
     return { visited, terminals: [...terminals.values()].sort(terminalOrder), tests, hidden, hubs, partial, trpc, literals };
   }
 
@@ -526,6 +538,7 @@ export class DependencyGraph {
     const cached = new Map<NodeId, Edge[]>();
     let nodeLimited = false;
     let uncertain = false;
+    let transportOverride = false;
     let trpc: string | undefined;
     const visit = (state: State) => {
       const seen = reached.get(state.id);
@@ -592,7 +605,10 @@ export class DependencyGraph {
       for (const terminal of terminals) {
         if (terminal.pages) for (const page of terminal.pages) remember(pageTerminal(page), impact);
         else remember(terminal, impact);
-        if (terminal.kind === 'api') uncertain ||= (this.fetches.get(terminal.file) ?? []).some(entry => entry.dynamic || entry.partial);
+        if (terminal.kind === 'api') {
+          uncertain ||= (this.fetches.get(terminal.file) ?? []).some(entry => entry.dynamic || entry.partial);
+          transportOverride ||= this.uncertainProductionTransport;
+        }
       }
       let edges = cached.get(id);
       if (!edges) {
@@ -621,7 +637,8 @@ export class DependencyGraph {
     ordered.sort((a, b) => a.origins[0].depth - b.origins[0].depth ||
       compare(a.terminal.file, b.terminal.file) || compare(a.terminal.name, b.terminal.name));
     const limit = nodeLimited ? 'node budget' : unexplored.size ? `depth limit (${unexplored.size} unexplored callers at d=3)` : undefined;
-    const partial = [limit, trpc].filter(Boolean).join('; ') || (uncertain ? 'dynamic URL fetch' : undefined);
+    const partial = [limit, trpc, transportOverride ? AI_SDK_URL_OVERRIDE : undefined].filter(Boolean).join('; ') ||
+      (uncertain ? 'dynamic URL fetch' : undefined);
     return { routes: ordered, wrappers: [...wrappers.values()].sort((a, b) => compare(a.name, b.name)), partial };
   }
 
@@ -647,13 +664,16 @@ export class DependencyGraph {
     let goal: Step | undefined;
     let partial: string | undefined;
     let trpc: string | undefined;
+    let uncertain = false;
     const wraps: PathEdge[] = [];
     if (route) for (const [file, terminals] of this.routesByFile) {
       if (!terminals.some(terminal => terminal.pages?.includes(route))) continue;
       const fileId = this.fileNode(file);
       const component = this.index.routeFiles![file]?.[3] ?? this.defaultSymbol(file)?.id;
       if (component !== undefined) wraps.push({ from: starts[0], to: component, label: 'wrap', file, line: this.symbols.get(component)?.line ?? 1 });
-      if (this.outgoing.has(fileId)) wraps.push({ from: starts[0], to: fileId, label: 'wrap', file, line: 1 });
+      if (this.outgoing.has(fileId) || typeof fileId === 'number' && this.uncertainTransports.has(fileId)) {
+        wraps.push({ from: starts[0], to: fileId, label: 'wrap', file, line: 1 });
+      }
     }
     const stepOrder = (a: Step, b: Step) => a.weak - b.weak ||
       (a.edge && b.edge ? pathEdgeOrder(a.edge, b.edge) : 0) || compare(this.file(a.id), this.file(b.id)) ||
@@ -677,6 +697,7 @@ export class DependencyGraph {
       for (const current of layer) {
         if (expired()) break;
         trpc ??= this.unresolvedTrpc(current.id, false);
+        uncertain ||= typeof current.id === 'number' && this.uncertainTransports.has(current.id);
         const outgoing: PathEdge[] = [...this.outgoing.get(current.id) ?? []];
         if (current.depth === 0 && current.id === starts[0]) outgoing.push(...wraps);
         for (const edge of outgoing) {
@@ -712,6 +733,7 @@ export class DependencyGraph {
       for (const step of layer) seen.add(step.id);
     }
 
+    const coverage = [partial ?? trpc, uncertain ? AI_SDK_URL_OVERRIDE : undefined].filter(Boolean).join('; ') || undefined;
     const scope = 'over indexed render, call, action, fetch, dyn, use and wrap edges';
     if (!goal) {
       const trace = this.traceImpact(goals, 6, false, expired);
@@ -719,7 +741,7 @@ export class DependencyGraph {
         terminal.pages?.map(page => page.url) ?? []));
       const notes = [graphRow(`# from reaches ${seen.size} nodes` +
         (pages.size ? `; to is reached from routes: ${[...pages].slice(0, 5).join(', ')}${pages.size > 5 ? ', +' + (pages.size - 5) : ''}` : ''))];
-      return { rows: [], notes, count: 'no directed path', partial: partial ?? trpc ?? trace.trpc,
+      return { rows: [], notes, count: 'no directed path', partial: coverage ?? trace.trpc,
         scope: 'no directed path ' + scope };
     }
 
@@ -742,7 +764,7 @@ export class DependencyGraph {
     else rows.unshift(graphRow(`0 ${symbol?.kind ?? 'module'} ${location(this.file(origin.id), symbol?.line)} ${this.name(origin.id)}`, this.file(origin.id)));
     const notes = goal.alternatives && goal.alternate ? [graphRow(`# alternatives: ${goal.alternatives} other shortest ` +
       `predecessor${goal.alternatives === 1 ? '' : 's'} (via ${this.name(goal.alternate.id)})`)] : [];
-    return { rows, notes, count: `${goal.depth} ${goal.depth === 1 ? 'hop' : 'hops'}`, partial: partial ?? trpc,
+    return { rows, notes, count: `${goal.depth} ${goal.depth === 1 ? 'hop' : 'hops'}`, partial: coverage,
       scope: 'shortest directed path ' + scope + (rows.some(row => /^\d+ trpc /.test(row.text)) ? ', including tRPC' : '') };
   }
 
@@ -766,6 +788,7 @@ export class DependencyGraph {
     const renders = new Set<NodeId>();
     const fetches = new Set<string>();
     let unresolved = 0;
+    let uncertain = false;
     let collapsed = false;
     let budget = false;
     let trpc: string | undefined;
@@ -773,6 +796,7 @@ export class DependencyGraph {
       const current = pending[i];
       if (current.depth >= depth) break;
       trpc ??= this.unresolvedTrpc(current.id, true);
+      uncertain ||= typeof current.id === 'number' && this.uncertainTransports.has(current.id);
       const d = current.depth + 1;
       const file = this.file(current.id);
       const parent = d > 1 ? ` < ${this.name(current.id)}` : '';
@@ -798,7 +822,7 @@ export class DependencyGraph {
         const label = edge.label === 'fetch' ? `${edge.method} ${edge.url}` : edge.detail?.startsWith('.') ? name + edge.detail : name;
         if (!hub) {
           const lines = [...new Set(sites.map(site => site.line))];
-          const site = edge.file + ':' + lines.slice(0, 3).join(',') +
+          const site = (d === 1 && edge.file === file ? '' : edge.file) + ':' + lines.slice(0, 3).join(',') +
             (lines.length > 3 ? ` +${lines.length - 3}` : '');
           const flags = (edge.label === 'action' ? ' [action]' : '') + (sites.some(site => site.conditional) ? ' [cond]' : '') +
             (sites.some(site => site.partial) ? ' [partial url]' : '') + (edge.from === edge.to ? ' [self]' : '') +
@@ -821,15 +845,17 @@ export class DependencyGraph {
         packages.add(module);
         const names = this.index.graphNames!;
         const sites = calls.sort((a, b) => a[1] - b[1] || compare(names[a[3]], names[b[3]])).slice(0, 3)
-          .map(([, line, , name, count]) => `${names[name]} ${location(file, line)}${count ? ` ×${count}` : ''}`);
+          .map(([, line, , name, count]) => `${names[name]}:${line}${count ? ` ×${count}` : ''}`);
         rows.push(graphRow(`d${d} ext ${module}  ${sites.join(', ')}${calls.length > 3 ? ` +${calls.length - 3}` : ''}${parent}`, file));
       }
       if (typeof current.id === 'number') unresolved += this.index.unresolvedCalls![current.id] ?? 0;
     }
     const callers = new Set(this.predecessors(seed).filter(edge => edge.from !== seed && !isTestFile(edge.file)).map(edge => edge.file));
+    if (rows.length) notes.push(graphRow(`# source: ${this.file(seed)} (unqualified first-hop sites)`, this.file(seed)));
     notes.push(graphRow(`# callers: ${callers.size} (impact for routes)`));
     const partial = [budget ? 'node budget' : trpc,
-      unresolved ? `${quantity(unresolved, 'unresolved call')} on locals/params` : undefined].filter(Boolean).join('; ');
+      unresolved ? `${quantity(unresolved, 'unresolved call')} on local variables or parameters` : undefined,
+      uncertain ? AI_SDK_URL_OVERRIDE : undefined].filter(Boolean).join('; ');
     return { rows, notes, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
       (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };

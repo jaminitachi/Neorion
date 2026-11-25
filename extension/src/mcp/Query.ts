@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, QUERY_INDEX_REVISION, isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
@@ -27,11 +27,34 @@ const apiEvidence = new Map([
   ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
   ['fetch', 'request'], ['axios', 'request'], [AI_SDK_TRANSPORT, 'request']
 ]);
-const shellArg = (value: string) => /^[\w./:-]+$/.test(value) && !value.startsWith('-') ? value : process.platform === 'win32'
+const shellArg = (value: string) => /^[\w./:-]+$/.test(value) ? value : process.platform === 'win32'
   ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'";
-const searchHint = (text: string, filter?: string) =>
-  `# try: neorion query search ${text.startsWith('-') ? `${filter ? `--kind ${filter} ` : ''}-- ${shellArg(text)}` :
-    `${shellArg(text)}${filter ? ` --kind ${filter}` : ''}`}`;
+type CliReplay = { invocation: string[]; root: string };
+
+function queryCommand(cli: CliReplay, kind: QueryKind, targets: string[], options: string[]) {
+  const flags = [...options, '--root', cli.root].map(shellArg);
+  const positionals = targets.map(shellArg);
+  return [...cli.invocation.map(shellArg), 'query', ...(targets.some(target => target.startsWith('-'))
+    ? [...flags, '--', kind, ...positionals] : [kind, ...positionals, ...flags])].join(' ');
+}
+
+function retryHint(cli: CliReplay | undefined, kind: 'search' | 'wrappers', target: string, options: {
+  filter?: string; includeExternal?: boolean; limit?: number; targetKey?: string;
+} = {}) {
+  const { filter, includeExternal, limit, targetKey = 'target' } = options;
+  if (!cli) {
+    const params = { kind, target, ...(filter ? { filter } : {}) };
+    return kind === 'search' ? `# try: call ${queryName} with ${JSON.stringify(params)}` :
+      `# try: set ${targetKey}=${JSON.stringify(target)} on the same request and keep the other arguments`;
+  }
+  const flags = [...(filter ? ['--kind', filter] : []), ...(includeExternal === false ? ['--no-external'] : []),
+    ...(limit !== undefined && limit !== 40 ? ['--limit', String(limit)] : [])];
+  const command = queryCommand(cli, kind, [target], flags);
+  if (bytes(command) <= 370 && oneLine(command) === command) return `# try: ${command}`;
+  return kind === 'search' ? `# try: use the same CLI invocation and project root to search for ${shellArg(target)}` +
+    (filter ? ` with --kind ${filter}` : '') : `# try: replace the target in the original command with ${shellArg(target)}`;
+}
+
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
   return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
@@ -100,28 +123,34 @@ function validate(name: string, value: unknown) {
     uses: !!uses, scope: scope as ChangeScope, base };
 }
 
-function limitHint(args: ReturnType<typeof validate>, count: number) {
+function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter') {
   const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
   const limit = Math.min(count, tool === 'search' ? 50 : 100);
+  let narrow = '';
+  if (tool === 'search') {
+    narrow = 'narrow the text';
+    if (filter === 'any') narrow += cli ? ' or use --kind component' : ` or set ${mcpFilterKey}="component"`;
+  } else if (tool === 'callees' && depth > 1) {
+    narrow = cli ? 'use --depth 1 to narrow' : 'set depth=1 to narrow';
+  }
+  if (!cli) {
+    return args.limit < limit ? `set limit=${limit} on the same request and keep the other arguments${narrow ? `, or ${narrow}` : ''}` :
+      narrow || 'only the rows within the output cap can be shown';
+  }
+  if (args.limit >= limit) return narrow || 'only the rows within the output cap can be shown';
   const options = [
     ...(tool === 'search' && filter !== 'any' ? ['--kind', filter] : []),
     ...(tool === 'impact' || tool === 'callees' ? ['--depth', String(depth)] : []),
-    ...(tool === 'impact' && includeTests ? ['--include-tests'] : []),
+    ...((tool === 'impact' || tool === 'api_consumers' || tool === 'rename_impact') && includeTests ? ['--include-tests'] : []),
     ...(tool === 'callees' && uses ? ['--uses'] : []),
     ...(tool === 'wrappers' && !includeExternal ? ['--no-external'] : []),
     ...(tool === 'changes' && scope !== 'all' ? [`--${scope}`] : []),
-    ...(base === undefined ? [] : ['--base', shellArg(String(base))]),
+    ...(base === undefined ? [] : ['--base', String(base)]),
     '--limit', String(limit)
   ];
-  const targets = [target, to].filter(Boolean);
-  const endOfOptions = targets.some(value => value.startsWith('-'));
-  const command = ['neorion', 'query', ...(endOfOptions ? [...options, '--'] : []), tool, ...targets.map(shellArg),
-    ...(endOfOptions ? [] : options)].join(' ');
-  const narrow = tool === 'search' ? 'narrow the text' + (filter === 'any' ? ' or use --kind component' : '') :
-    tool === 'callees' && depth > 1 ? 'use --depth 1 to narrow' : '';
-  const hint = limit > args.limit ? `try ${command}${narrow ? `, or ${narrow}` : ''}` :
-    narrow || `--limit ${limit}, subject to the output cap`;
-  return bytes(hint) <= 380 && oneLine(hint) === hint ? hint : `use --limit ${limit}`;
+  const command = queryCommand(cli, tool, [target, to].filter(Boolean), options);
+  const hint = `try ${command}${narrow ? `, or ${narrow}` : ''}`;
+  return bytes(hint) <= 380 && oneLine(hint) === hint ? hint : `set --limit ${limit} in the original command`;
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -269,17 +298,17 @@ export class QueryEngine {
 
   private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string): Row[] {
     const needle = text.toLowerCase().slice(0, 100);
-    const candidates: { name: string; label: string; file: string; aliases?: string[] }[] = kind === 'page' || kind === 'api'
+    const candidates: { name: string; label: string; file: string; line?: number; aliases?: string[] }[] = kind === 'page' || kind === 'api'
       ? this.index.routes.filter(route => route.kind === kind).map(route =>
         ({ name: route.url, label: `${route.url} ${location(route.file, route.line ?? 1)}`, file: route.file }))
       : kind === 'action'
         ? (this.index.serverActions ?? []).filter(action => file === undefined || file === action.file).map(action => ({
           name: action.name, aliases: [...(action.aliases ?? []), actionShortName(action.name)],
-          label: actionLocation(action), file: action.file
+          label: `${action.file}#${action.name}`, file: action.file, line: action.line
         }))
         : this.index.symbols.filter(symbol => (file === undefined || symbol.file === file) &&
           (!kind || (kind === 'renderer' ? ['component', 'procedure'].includes(symbol.kind) : symbol.kind === kind))).map(symbol =>
-        ({ name: symbol.name, label: declaration(symbol), file: symbol.file }));
+        ({ name: symbol.name, label: `${symbol.file}#${symbol.name}`, file: symbol.file, line: symbol.line }));
     const matches: (typeof candidates[number] & { score: number })[] = [];
     const threshold = Math.max(2, Math.floor(needle.length / 3));
     for (const candidate of candidates) {
@@ -299,7 +328,7 @@ export class QueryEngine {
     return matches.sort((a, b) => a.score - b.score || compare(a.label, b.label)).slice(0, 5)
       .map(candidate => {
         const text = `# did you mean: ${candidate.label}`;
-        return { ...row(text, candidate.file), pathEnd: text.length };
+        return { ...row(text + (candidate.line === undefined ? '' : ` (declared at line ${candidate.line})`), candidate.file), pathEnd: text.length };
       });
   }
 
@@ -518,6 +547,7 @@ export class QueryEngine {
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
     let owners = new Set<number>();
+    let transportOverride = this.index.uncertainChatTransports?.some(([file]) => includeTests || !testFile(file)) ?? false;
     const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
       .sort((a, b) => Number(generatedFile(a.file)) - Number(generatedFile(b.file)) ||
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
@@ -527,12 +557,14 @@ export class QueryEngine {
       const generated = generatedFile(fetch.file);
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
-      const kind = apiEvidence.get(via) ?? 'other mention';
+      const override = via === AI_SDK_TRANSPORT && (fetch.method === '?' || this.index.queryRevision !== QUERY_INDEX_REVISION);
+      transportOverride ||= override;
+      const kind = (!override ? apiEvidence.get(via) : undefined) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
-      const mention = kind === 'other mention';
-      const label = `${mention ? 'mention' : 'send  '} ${location(fetch.file, fetch.line)}`;
-      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${mention ? '' : fetch.method + ' '}${via}` +
-        (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
+      const label = `send   ${location(fetch.file, fetch.line)}`;
+      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${override ? '?' : fetch.method} ${via}` +
+        (override ? ' [possible URL override]' : kind === 'other mention' ? ' [mention]' : '') +
+        (fetch.partial || override ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
       rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
     }
@@ -580,6 +612,7 @@ export class QueryEngine {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
+        transportOverride ? AI_SDK_URL_OVERRIDE :
         fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
         fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
         moreCallers ? 'caller depth limit' : undefined,
@@ -685,7 +718,7 @@ export class QueryEngine {
     return { result: { ...result, title, targets: [source.file!, destination.file!] } };
   }
 
-  query(name: string, value: unknown) {
+  query(name: string, value: unknown, cli?: CliReplay) {
     const args = validate(name, value);
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
@@ -716,7 +749,7 @@ export class QueryEngine {
         const { file, name } = this.symbolTarget(target);
         result.notes = this.suggestions(name, tool === 'who_renders' ? 'renderer' : undefined, expired, file);
         if (tool === 'who_renders' && [...name].length >= 2 && [...name].length <= 200 && oneLine(name) === name) {
-          result.notes.push(row(searchHint(name, name.includes('.') ? 'procedure' : 'component')));
+          result.notes.push(row(retryHint(cli, 'search', name, { filter: name.includes('.') ? 'procedure' : 'component' })));
         }
       }
     } else {
@@ -746,7 +779,7 @@ export class QueryEngine {
         else {
           result.notes = this.suggestions(name, 'action', expired, file);
           if ([...name].length >= 2 && [...name].length <= 200 && oneLine(name) === name) {
-            result.notes.push(row(searchHint(name)));
+            result.notes.push(row(retryHint(cli, 'search', name)));
           }
           if (!this.index.serverActions) result.partial = 'regenerate legacy index';
         }
@@ -754,13 +787,21 @@ export class QueryEngine {
         result.notes = this.suggestions(target, kind, expired);
         if (tool === 'wrappers' && this.index.routes.some(route => route.kind === 'page')) {
           const suggestedFiles = new Set(result.notes.flatMap(note => note.files));
-          const patterns = target.startsWith('/') ? this.matchPathRoute(target, 'page') : [];
+          const suffixRoute = this.index.routes.find(route => suggestedFiles.has(route.file) && route.url.endsWith(target));
+          const patterns = target.startsWith('/') && !suffixRoute ? this.matchPathRoute(target, 'page') : [];
           for (const route of patterns.slice(0, 5)) {
             if (!suggestedFiles.has(route.file)) {
               result.notes.push(row(`# matching pattern: ${route.url} ${location(route.file, route.line ?? 1)}`, route.file));
             }
           }
-          result.notes.push(row('# try: neorion query search / --kind route'));
+          const retry = suffixRoute ?? patterns[0];
+          if (retry) {
+            const retryTarget = this.matchRoute(retry.url, 'page').length > 1 ? retry.file : retry.url;
+            result.notes.push(row(retryHint(cli, 'wrappers', retryTarget, {
+              includeExternal: !!args.includeExternal, limit: args.limit, targetKey: legacyKind(name) ? legacyTargets.wrappers : 'target'
+            })));
+          }
+          result.notes.push(row(retryHint(cli, 'search', '/', { filter: 'route' })));
         }
       }
     }
@@ -826,10 +867,11 @@ export class QueryEngine {
       const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${result.title ?? target}` +
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
-        limitHint(args, result.rows.length)})` : '';
+        limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter')})` : '';
+      const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
-        omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :
+        staleCount || snapshotStale ? 'stale index' : truncated ?
+          ['output truncated', result.partial].filter(Boolean).join('; ') :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {

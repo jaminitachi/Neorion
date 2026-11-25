@@ -25,7 +25,7 @@ neorion query wrappers /
 
 If your app has no `/` route, search for part of a route name with a command such as `neorion query search login`.
 In the Pages Router, `wrappers` shows the custom `_app` when present. For dynamic routes, quote
-the indexed pattern, such as `'/blog/[slug]'`. Add `--limit <n>` to ask for more rows.
+the indexed pattern, such as `'/blog/[slug]'`. Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap.
 
 `wrappers` includes third-party components on the page’s wrapper chain and labels
 them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
@@ -34,6 +34,8 @@ in MCP to hide third-party non-provider wrappers. Providers stay visible.
 `api_consumers` lists caller files and lines for API routes, server actions, and
 tRPC procedures. Pass a route URL, `signOut`, or a dotted procedure path such as
 `post.create`. Replace examples such as `signOut` with names from your app.
+In source builds, `[mention]` marks a reference such as a route literal and
+`[possible URL override]` marks a transport whose request URL may change at runtime.
 Use `path#Name` to disambiguate a name. tRPC routers must be in the
 indexed project. Routers from other workspace packages may be unresolved.
 
@@ -101,6 +103,15 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
 
-In a source build, `query search / --kind route` lists indexed pages, and `wrappers` can suggest a pattern for a concrete URL.
-Use `--kind component` to narrow a search. Add `--mcp-config` to `graph` to print an MCP launcher snippet.
-Setup from a source build registers absolute paths to Node.js and the CLI. Rerun setup if either moves.
+These source-build commands list indexed pages, narrow a component search, trace downstream calls and query an indexed route pattern. Replace `ChatShell` and `/blog/[slug]` with a symbol and pattern from your project.
+
+```sh
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search / --kind route
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query search chat --kind component --limit 50
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query callees ChatShell --depth 2 --limit 84
+node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers '/blog/[slug]'
+```
+
+Run a query from another directory with `--root /path/to/project`. Query suggestions keep the project and CLI invocation. Symbol suggestions show an accepted `path#Name` target and its declaration line.
+Add `--mcp-config` to `graph` to print an MCP launcher snippet.
+If setup registered absolute paths to Node.js and the CLI, rerun setup when either path changes. This applies to source and packaged builds that use absolute paths.

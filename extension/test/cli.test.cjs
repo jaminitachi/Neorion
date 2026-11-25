@@ -137,8 +137,8 @@ test('CLI graph and query use the workspace cache', t => {
   assert.match(query.stdout, /^Project: workspace$/m);
   assert.match(query.stdout, /app\/page\.tsx:2/);
   const miss = run(['query', 'who_renders', 'Dashboard']);
-  assert.match(miss.stdout, /^# did you mean: app\/page\.tsx:1#DashboardShell$/m);
-  assert.match(miss.stdout, /^# try: neorion query search Dashboard --kind component$/m);
+  assert.match(miss.stdout, /^# did you mean: app\/page\.tsx#DashboardShell \(declared at line 1\)$/m);
+  assert.match(miss.stdout, /^# try: node .+neorion\.cjs'? query search Dashboard --kind component --root .+$/m);
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json', 'tsconfig.json']);
 });
 
@@ -155,12 +155,12 @@ test('CLI wrapper misses point to route search and suggest dynamic Pages Router 
   }
   const miss = run(['query', 'wrappers', '/']);
   assert.equal(miss.status, 0, miss.stderr);
-  assert.match(miss.stdout, /^# try: neorion query search \/ --kind route$/m);
+  assert.match(miss.stdout, /^# try: node .+neorion\.cjs'? query search \/ --kind route --root .+$/m);
   assert.match(miss.stdout, /^# partial: target unresolved$/m);
   const routes = run(['query', 'search', '/', '--kind', 'route', '--limit', '1']);
   assert.equal(routes.status, 0, routes.stderr);
   assert.match(routes.stdout, /^route .* \/blog\//m);
-  assert.match(routes.stdout, /# more: 2 \(try neorion query search \/ --kind route --limit 3/);
+  assert.match(routes.stdout, /# more: 2 \(try node .+neorion\.cjs'? query search \/ --kind route --limit 3 --root .+/);
   assert.doesNotMatch(routes.stdout, /^component /m);
   for (const [url, pattern] of [
     ['/blog/example-post', '/blog/[slug]'], ['/blog/archive', '/blog/archive'], ['/blog/posts/a/b', '/blog/posts/[...parts]']
@@ -176,6 +176,24 @@ test('CLI wrapper misses point to route search and suggest dynamic Pages Router 
     assert.ok(query.stdout.includes(`# wrappers ${pattern} : 1 file, 1 page`), query.stdout);
     assert.match(query.stdout, /^1 pages\/_app\.tsx:1 MyApp$/m);
   }
+});
+
+test('CLI hints replay a source query from outside its explicitly selected project', { skip: process.platform === 'win32' }, t => {
+  const { root, home, env } = fixture(t);
+  const direct = copyCli(path.join(home, "checkout's source"));
+  fs.copyFileSync(path.join(path.dirname(entry), 'graph.cjs'), path.join(path.dirname(direct), 'graph.cjs'));
+  const project = path.join(home, 'selected project');
+  fs.renameSync(root, project);
+  const first = spawnSync(process.execPath, [direct, 'query', 'search', 'app', '--kind', 'component',
+    '--limit', '1', '--root', project], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(first.status, 0, first.stderr);
+  const command = /^# more: \d+ \(try (.*), or narrow the text\)$/m.exec(first.stdout)?.[1];
+  assert.ok(command?.startsWith('node '), first.stdout);
+  const second = spawnSync('sh', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+  assert.equal(second.status, 0, second.stderr);
+  assert.match(second.stdout, /^Project: selected project$/m);
+  assert.match(second.stdout, /^# search "app" kind=component : 2 results /m);
+  assert.doesNotMatch(second.stdout, /^# more:/m);
 });
 
 test('CLI and MCP index JSX with jsconfig paths, baseUrl, and inherited include', async t => {
