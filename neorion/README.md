@@ -4,6 +4,8 @@
 
 Neorion maps Next.js projects written in TypeScript or JavaScript and answers architecture questions through a CLI or the `neorion_query` MCP tool. The CLI and MCP server store the graph in the local workspace cache. A query builds or refreshes the graph when needed.
 
+[Measured comparisons](https://github.com/jaminitachi/Neorion#how-it-compares) cover direct CLI queries, agent answers, and index build time and memory. They include source builds made after the release below.
+
 ## Install
 
 Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
