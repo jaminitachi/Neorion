@@ -1492,9 +1492,9 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     return matches;
   };
   const matchesFor = (url: Node | string) => matchValues(typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []);
-  const urlProp = (input: Node) => {
-    let prop = flow?.read(input);
-    if (!prop && flow) urlTexts(input, undefined, true, true, part => {
+  const embeddedUrlProp = (input: Node) => {
+    let prop: ReturnType<PropFlow['read']>;
+    if (flow) urlTexts(input, undefined, true, true, part => {
       prop ??= flow.read(part);
       return prop ? [{ text: spanningSlot }] : undefined;
     });
@@ -1611,7 +1611,11 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
         const method = request.unbounded ? undefined : request.method;
         for (const input of request.urls) {
           if (input === undefined) continue;
-          const prop = isFetch && typeof input !== 'string' ? urlProp(input) : undefined;
+          const directProp = isFetch && typeof input !== 'string' ? flow?.read(input) : undefined;
+          const embeddedProp = isFetch && !directProp && typeof input !== 'string' ? embeddedUrlProp(input) : undefined;
+          const prop = directProp ?? embeddedProp;
+          // Retain the static route pattern from a template with runtime path segments.
+          const templateMatches = embeddedProp ? matchesFor(input) : undefined;
           const bindings = prop ? flow!.bindings(prop) : [];
           const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
             const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
@@ -1645,7 +1649,8 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
               const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
                 value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
               if (unknown && !binding && (!route.pages || route.methodBasis === 'enforced') && !matchesMethod) continue;
-              const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !unknown;
+              const patternMatched = unknown && !binding ? templateMatches?.get(route.id)?.markdown : markdown && !unknown;
+              const mapFact = patternMatched && matchesMethod && origin?.name !== 'mutate' && !request.partial;
               if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
               index?.fetch({
                 file: source, line, node, route: route.id,

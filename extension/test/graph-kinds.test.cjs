@@ -1015,6 +1015,9 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.match(query('path', '/nonjsx-opaque', '/api/unrelated'), /^# complete:/m);
   assert.match(query('api_consumers', '/api/family/[id]'), /^# partial: request URL from JSX prop untraced$/m);
   assert.match(query('impact', 'app/api/family/[id]/route.ts#GET'), /request URL from JSX prop untraced/);
+  const details = path.resolve(path.dirname(indexFile), '../neorion/graph');
+  const markdown = fs.readdirSync(details).map(file => fs.readFileSync(path.join(details, file), 'utf8')).join('\n');
+  assert.match(markdown, /fetch app\/unrelated\/page\.tsx -> app\/api\/family\/\[id\]\/route\.ts \/api\/family\/\[id\]/);
   for (const args of [
     ['api_consumers', '/api/unrelated'],
     ['impact', 'app/api/unrelated/route.ts#GET'],
