@@ -528,6 +528,7 @@ test('static AI SDK overrides follow property and callback precedence with scope
   for (const name of ['chat', 'other', 'health']) {
     write(root, `app/api/${name}/route.ts`, 'export function POST() {}');
   }
+  write(root, 'pages/api/shared.ts', 'export default function handler() {}');
   write(root, 'chat.ts', String.raw`
     import { DefaultChatTransport, TextStreamChatTransport } from 'ai';
     import { useChat } from '@ai-sdk/react';
@@ -547,8 +548,14 @@ test('static AI SDK overrides follow property and callback precedence with scope
     export function literalLast() {
       return useChat({
         ...{ transport: new DefaultChatTransport({ api: '/api/other' }) },
-        transport: new TextStreamChatTransport({ ...{ api: '/api/other' }, api: '/api/chat' }),
+        transport: new TextStreamChatTransport({
+          ...{ api: '/api/other' }, api: '/api/chat',
+          prepareReconnectToStreamRequest: () => ({ api: '/api/chat' }),
+        }),
       });
+    }
+    export function sharedRoute() {
+      return new DefaultChatTransport({ api: '/api/shared', prepareReconnectToStreamRequest: () => ({ api: '/api/shared' }) });
     }
   `);
   await generate(root);
@@ -558,6 +565,7 @@ test('static AI SDK overrides follow property and callback precedence with scope
   const chat = await query('api_consumers', '/api/chat');
   assert.match(chat, /^send .* sameUrl POST AI SDK transport \[partial url\]$/m);
   assert.match(chat, /^send .* literalLast POST AI SDK transport$/m);
+  assert.match(chat, /^send .* literalLast GET AI SDK transport$/m);
   assert.doesNotMatch(chat, /customChat|spreadChat/);
   const other = await query('api_consumers', '/api/other');
   assert.match(other, /2 sites in 1 file: 2 requests/);
@@ -574,6 +582,10 @@ test('static AI SDK overrides follow property and callback precedence with scope
     assert.match(miss, partial);
   }
   assert.match(await query('path', 'literalLast', { to: '/api/chat' }), /^# complete:/m);
+  const shared = await query('callees', 'sharedRoute');
+  assert.match(shared, /2 fetches/);
+  assert.match(shared, /^d1 fetch :\d+  GET \/api\/shared /m);
+  assert.match(shared, /^d1 fetch :\d+  POST \/api\/shared /m);
 });
 
 test('opaque AI SDK API, fetch and prepare options cannot create a complete path', async t => {

@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 5;
-export const GRAPH_INDEX_REVISION = 7;
+export const QUERY_INDEX_REVISION = 6;
+export const GRAPH_INDEX_REVISION = 8;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';

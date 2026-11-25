@@ -535,11 +535,12 @@ const sdkTransports = new Set(['DefaultChatTransport', 'TextStreamChatTransport'
 const sdkHooks = new Set(['useChat', 'useCompletion', 'useObject', 'experimental_useObject']);
 const sdkModules = new Set(['ai', '@ai-sdk/react', 'ai/react']);
 
-function aiSdkRequest(
+type SdkRequest = { method: 'POST' | 'GET'; urls: Set<Node | string>; partial: boolean; unbounded: boolean };
+
+function aiSdkRequests(
   node: Node, argument: Node | undefined, name: string, module: string | undefined,
   classify: (url: Node) => void, handledTransports: Set<Node>
-) {
-  const urls = new Set<Node | string>();
+): SdkRequest[] {
   const observe = (key: string, value: Node) => {
     if (key === 'api' && value.getSourceFile() === node.getSourceFile()) classify(value);
   };
@@ -577,7 +578,7 @@ function aiSdkRequest(
         options = transportOptions;
         unbounded ||= opaque;
       } else if (origin.module === 'ai' && origin.name === 'DirectChatTransport' && !opaque && !unbounded) {
-        return { urls, partial: false, unbounded: false, linkEndpoint: false };
+        return [];
       } else unbounded = true;
     } else if (implementation && !isNullish(implementation)) unbounded = true;
   }
@@ -586,13 +587,21 @@ function aiSdkRequest(
   const api = properties.get('api');
   const fetch = properties.get('fetch');
   unbounded ||= !!fetch && !forwardsFetch(fetch.value);
-  let partial = unbounded || !!api?.indirect;
+  const send: SdkRequest = { method: 'POST', urls: new Set(), partial: !!api?.indirect, unbounded: false };
+  const reconnect: SdkRequest = { method: 'GET', urls: new Set(), partial: false, unbounded: false };
   let fallsBack = true;
-  for (const [key, option] of properties) {
-    if (!/^prepare/.test(key) || isNullish(unwrap(option.value))) continue;
+  for (const [key, request] of [
+    ['prepareSendMessagesRequest', send], ['prepareReconnectToStreamRequest', reconnect]
+  ] as const) {
+    if (request === reconnect && !delegated && !sdkTransports.has(name)) continue;
+    const option = properties.get(key);
+    if (!option || isNullish(unwrap(option.value))) continue;
     const callback = sdkCallback(option.value);
     const body = callback?.getBody();
-    const send = key === 'prepareSendMessagesRequest';
+    // The SDK binds regular callbacks to the transport. Receiver access can change or
+    // expose its shared API and fetch state before either request uses it.
+    unbounded ||= !callback || !Node.isArrowFunction(callback) &&
+      !!callback.getFirstDescendantByKind(SyntaxKind.ThisKeyword);
     let withoutApi = false;
     const result = (expression?: Node) => {
       const value = expression && unwrap(expression);
@@ -609,18 +618,17 @@ function aiSdkRequest(
       const returnedApi = prepared.properties.get('api');
       // Await adopts a thenable before the SDK reads the prepared object's properties.
       if (prepared.opaque || prepared.properties.has('then')) {
-        unbounded = true;
+        request.unbounded = true;
         withoutApi = true;
       }
       if (returnedApi && !isNullish(unwrap(returnedApi.value))) {
-        partial = true;
-        if (send) urls.add(returnedApi.value);
+        request.urls.add(returnedApi.value);
+        request.partial ||= !!returnedApi.indirect;
         withoutApi ||= literalUrl(returnedApi.value) === undefined;
       } else withoutApi = true;
     };
     if (!body) {
-      unbounded = true;
-      withoutApi = true;
+      request.unbounded = true;
     } else if (Node.isBlock(body)) {
       body.forEachDescendant((child, traversal) => {
         if (Node.isFunctionLikeDeclaration(child)) traversal.skip();
@@ -629,18 +637,23 @@ function aiSdkRequest(
       // A branch may fall through without a prepared request.
       withoutApi ||= !returnsFromBranch(body);
     } else result(body);
-    if (send && !option.overwritten) fallsBack = withoutApi;
+    if (request === send) {
+      send.partial ||= send.urls.size > 0;
+      if (body && !option.overwritten) fallsBack = withoutApi;
+    } else {
+      reconnect.partial ||= reconnect.urls.size > 0 && (withoutApi || reconnect.urls.size > 1);
+    }
   }
   let usesDefault = !api || isNullish(unwrap(api.value)) || !!api.overwritten;
   if (fallsBack && api && !isNullish(unwrap(api.value))) {
-    urls.add(api.value);
+    send.urls.add(api.value);
     // React's transport-based useChat does not use a top-level api from older versions.
     if (name === 'useChat' && module === '@ai-sdk/react' && !delegated) {
       const parameters = node.asKindOrThrow(SyntaxKind.CallExpression).getExpression().getType().getCallSignatures()[0]?.getParameters();
       const type = parameters?.[0]?.getTypeAtLocation(node);
       const variants = type?.isUnion() ? type.getUnionTypes() : type ? [type] : [];
       if (variants.some(variant => variant.getProperty('transport'))) {
-        urls.delete(api.value);
+        send.urls.delete(api.value);
         usesDefault = true;
       }
       usesDefault ||= !variants.some(variant => variant.getProperty('api'));
@@ -648,19 +661,25 @@ function aiSdkRequest(
   }
   if (fallsBack && usesDefault) {
     if (defaultUrl) {
-      if (![...urls].some(url => typeof url !== 'string' && literalUrl(url) === defaultUrl)) urls.add(defaultUrl);
-      partial = true;
-    } else unbounded = true;
+      if (![...send.urls].some(url => typeof url !== 'string' && literalUrl(url) === defaultUrl)) send.urls.add(defaultUrl);
+      send.partial = true;
+    } else send.unbounded = true;
   }
-  for (const url of urls) {
-    if (typeof url === 'string' || literalUrl(url) !== undefined) continue;
-    partial = true;
-    const values = urlTexts(url);
-    const expression = unwrap(url);
-    if (Node.isIdentifier(expression) || Node.isPropertyAccessExpression(expression) ||
-        !values?.length || !values.every(value => apiSegments(value))) unbounded = true;
+  // The default reconnect URL includes the chat ID. Only explicit reconnect overrides are indexed here.
+  const requests = reconnect.urls.size || reconnect.unbounded ? [send, reconnect] : [send];
+  for (const request of requests) {
+    request.unbounded ||= unbounded;
+    for (const url of request.urls) {
+      if (typeof url === 'string' || literalUrl(url) !== undefined) continue;
+      request.partial = true;
+      const values = urlTexts(url);
+      const expression = unwrap(url);
+      if (Node.isIdentifier(expression) || Node.isPropertyAccessExpression(expression) ||
+          !values?.length || !values.every(value => apiSegments(value))) request.unbounded = true;
+    }
+    request.partial ||= request.unbounded;
   }
-  return { urls, partial: partial || unbounded, unbounded, linkEndpoint: !unbounded };
+  return requests;
 }
 
 // Keep unresolved parts distinct from literal URL text and from expressions that can supply slashes.
@@ -952,39 +971,48 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
-      const sdk = isAiSdk ? aiSdkRequest(node, argument, origin.name, origin.module, classify, handledTransports) : undefined;
-      if (sdk?.partial) index?.uncertainChatTransport(source, node, sdk.unbounded);
+      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports) : undefined;
+      if (sdkRequests?.some(request => request.partial)) {
+        index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded));
+      }
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
       const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
         options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
           options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
-      const method = sdk ? sdk.linkEndpoint ? 'POST' : undefined : isFetch ? fetchMethod : axiosMethod;
-      const via = sdk ? AI_SDK_TRANSPORT :
+      const via = sdkRequests ? AI_SDK_TRANSPORT :
         isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
-      for (const url of sdk?.urls ?? (isSwr ? swrUrls(argument) : [argument])) {
-        if (url === undefined) continue;
-        const matches = matchesFor(url);
-        if (!matches) continue;
-        if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
-        for (const { route, partial, markdown, dynamic } of matches.values()) {
-          const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
-            value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-          const subject = action ? action.slice('action:'.length) : source;
-          const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
-          const kind = via === 'fetch' ? '' : ` (${via})`;
-          const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !sdk?.partial;
-          if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
-          index?.fetch({
-            file: source, line: startLine(sdk && typeof url !== 'string' && url.getSourceFile() === file ? url : node), node, route: route.id,
-            method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-            partial: partial || sdk?.partial || undefined, dynamic
-          });
-          if (isSwr || !mapFact) continue;
-          const targets = endpointsByCall.get(node) ?? [];
-          targets.push({ route, kind });
-          endpointsByCall.set(node, targets);
+      const subject = action ? action.slice('action:'.length) : source;
+      const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
+      const kind = via === 'fetch' ? '' : ` (${via})`;
+      const requests = sdkRequests ?? [{
+        urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : axiosMethod,
+        partial: false, unbounded: false
+      }];
+      for (const request of requests) {
+        const method = request.unbounded ? undefined : request.method;
+        for (const url of request.urls) {
+          if (url === undefined) continue;
+          const matches = matchesFor(url);
+          if (!matches) continue;
+          if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
+          const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
+          for (const { route, partial, markdown, dynamic } of matches.values()) {
+            const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
+              value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
+            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial;
+            if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+            index?.fetch({
+              file: source, line, node, route: route.id,
+              method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
+              partial: partial || request.partial || undefined, dynamic
+            });
+            if (isSwr || !mapFact) continue;
+            const targets = endpointsByCall.get(node) ?? [];
+            targets.push({ route, kind });
+            endpointsByCall.set(node, targets);
+          }
         }
       }
     };

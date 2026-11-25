@@ -330,6 +330,77 @@ test('CLI MCP builds a missing index and gives the same answer as query', { time
   assert.equal(run(['query', args.kind, args.target]).stdout.trimEnd(), cold);
 });
 
+async function chatTransportQueries(t, source) {
+  const { root, env, run } = fixture(t);
+  for (const route of ['chat', 'other']) {
+    const directory = path.join(root, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() {}\nexport function POST() {}\n');
+  }
+  fs.writeFileSync(path.join(root, 'app/chat.ts'), source);
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  return async (kind, target, to) => {
+    const result = await server.text('query', { kind, target, to });
+    const cli = run(['query', kind, target, ...(to ? [to] : [])]);
+    assert.equal(cli.status, 0, cli.stderr);
+    assert.equal(cli.stdout.trimEnd(), result);
+    return result;
+  };
+}
+
+test('CLI and MCP keep transport receiver mutations out of complete POST paths', async t => {
+  const query = await chatTransportQueries(t, `
+    import { DefaultChatTransport } from 'ai';
+    export function receiverChat() {
+      return new DefaultChatTransport({
+        api: '/api/chat',
+        prepareSendMessagesRequest() {
+          this.api = '/api/other';
+          return { body: {} };
+        },
+      });
+    }
+  `);
+  const partial = /^# partial: possible AI SDK transport URL override$/m;
+  const configured = await query('api_consumers', '/api/chat');
+  assert.match(configured, /^send .* receiverChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(configured, partial);
+  const actual = await query('api_consumers', '/api/other');
+  assert.match(actual, /^send .* receiverChat .* \[mention\]$/m);
+  assert.match(actual, partial);
+  for (const route of ['/api/chat', '/api/other']) {
+    const result = await query('path', 'receiverChat', route);
+    assert.match(result, /no directed path/);
+    assert.match(result, partial);
+  }
+  const callees = await query('callees', 'receiverChat');
+  assert.match(callees, /0 fetches/);
+  assert.match(callees, partial);
+});
+
+test('CLI and MCP index a literal reconnect override as a GET request', async t => {
+  const query = await chatTransportQueries(t, `
+    import { DefaultChatTransport } from 'ai';
+    export function reconnectChat() {
+      return new DefaultChatTransport({
+        api: '/api/chat',
+        prepareReconnectToStreamRequest: () => ({ api: '/api/other' }),
+      });
+    }
+  `);
+  const override = await query('api_consumers', '/api/other');
+  assert.match(override, /1 site in 1 file: 1 request/);
+  assert.match(override, /^send .* reconnectChat GET AI SDK transport$/m);
+  assert.match(override, /^# complete:/m);
+  const configured = await query('api_consumers', '/api/chat');
+  assert.match(configured, /^send .* reconnectChat POST AI SDK transport$/m);
+  assert.match(configured, /^# complete:/m);
+  const result = await query('path', 'reconnectChat', '/api/other');
+  assert.match(result, /1 hop/);
+  assert.match(result, /^1 fetch .* GET \/api\/other \(GET\)/m);
+  assert.match(result, /^# complete:/m);
+});
+
 test('CLI MCP rebuilds an index without the wrapper revision', { timeout: 20_000 }, async t => {
   const { root, env, run } = fixture(t);
   fs.writeFileSync(path.join(root, 'app/layout.tsx'),
