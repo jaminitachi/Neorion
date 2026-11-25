@@ -22,7 +22,7 @@ export function queryHint(cli?: string) {
     `Query kinds are ${kinds.map(kind => `\`${kind}${queryArguments[kind]}\``).join(', ')}.`,
     'For `path`, pass `target` and `to` in MCP. For `changes`, omit `target`.',
     'Include this rule in prompts you give subagents.',
-    '`# complete` means trust the result. For `# partial: <reason>`, read the reason and verify against the source.',
+    '`# complete` covers the indexed static matches in the stated scope. For `# partial: <reason>`, read the reason and verify against the source.',
     ...(cli ? [`If MCP is unavailable, run \`${cli} query <kind> <target>\` for single-target queries. Use \`${cli} query path <from> <to>\` to trace a path and \`${cli} query changes\` to inspect a Git diff.`] : [])
   ].join('\n');
 }

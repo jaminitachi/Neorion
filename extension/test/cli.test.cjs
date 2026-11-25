@@ -95,6 +95,7 @@ function assertQueryHint(hint) {
   }
   assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`\./);
   assert.match(block, /For `path`, pass `target` and `to` in MCP\. For `changes`, omit `target`\./);
+  assert.match(block, /# complete` covers the indexed static matches in the stated scope/);
   assert.match(block, /# partial: <reason>.*verify against the source/);
   assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
   assert.match(block, /`.+ query path <from> <to>`.*`.+ query changes`/);
@@ -119,15 +120,62 @@ test('CLI, extension, plugin and marketplace versions agree', () => {
 
 test('CLI graph and query use the workspace cache', t => {
   const { root, cache, run } = fixture(t);
+  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"different-package-name"}');
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
+  assert.match(graph.stdout, / · workspace · app router · /);
+  assert.doesNotMatch(graph.stdout, /^MCP:/m);
+  assert.equal(graph.stderr, '');
+  const config = run(['graph', '--mcp-config']);
+  assert.equal(config.status, 0, config.stderr);
+  assert.deepEqual(JSON.parse(/^MCP:\s+(.+)$/m.exec(config.stdout)[1]), { command: process.execPath, args: [entry, 'mcp'] });
   const overview = /^Overview: (.+)$/m.exec(graph.stdout)[1];
   assert.ok(overview.startsWith(path.join(cache, 'neorion') + path.sep));
   assert.ok(fs.existsSync(overview));
   const query = run(['query', 'who_renders', 'DashboardShell', '--limit', '1']);
   assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /^Project: workspace$/m);
   assert.match(query.stdout, /app\/page\.tsx:2/);
-  assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'tsconfig.json']);
+  const miss = run(['query', 'who_renders', 'Dashboard']);
+  assert.match(miss.stdout, /^# did you mean: app\/page\.tsx:1#DashboardShell$/m);
+  assert.match(miss.stdout, /^# try: neorion query search Dashboard --kind component$/m);
+  assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json', 'tsconfig.json']);
+});
+
+test('CLI wrapper misses point to route search and suggest dynamic Pages Router patterns', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["pages/**/*"]}');
+  fs.mkdirSync(path.join(root, 'pages/blog'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'pages/_app.tsx'), 'export default function MyApp({ Component }) { return <Component />; }');
+  for (const page of ['[slug]', 'archive', 'posts/[...parts]']) {
+    const file = path.join(root, 'pages/blog', page + '.tsx');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, 'export default function BlogPost() { return <main />; }');
+  }
+  const miss = run(['query', 'wrappers', '/']);
+  assert.equal(miss.status, 0, miss.stderr);
+  assert.match(miss.stdout, /^# try: neorion query search \/ --kind route$/m);
+  assert.match(miss.stdout, /^# partial: target unresolved$/m);
+  const routes = run(['query', 'search', '/', '--kind', 'route', '--limit', '1']);
+  assert.equal(routes.status, 0, routes.stderr);
+  assert.match(routes.stdout, /^route .* \/blog\//m);
+  assert.match(routes.stdout, /# more: 2 \(try neorion query search \/ --kind route --limit 3/);
+  assert.doesNotMatch(routes.stdout, /^component /m);
+  for (const [url, pattern] of [
+    ['/blog/example-post', '/blog/[slug]'], ['/blog/archive', '/blog/archive'], ['/blog/posts/a/b', '/blog/posts/[...parts]']
+  ]) {
+    if (url !== pattern) {
+      const concrete = run(['query', 'wrappers', url]);
+      assert.equal(concrete.status, 0, concrete.stderr);
+      assert.ok(concrete.stdout.includes(`# matching pattern: ${pattern} `), concrete.stdout);
+      assert.match(concrete.stdout, /^# partial: target unresolved$/m);
+    }
+    const query = run(['query', 'wrappers', pattern]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.ok(query.stdout.includes(`# wrappers ${pattern} : 1 file, 1 page`), query.stdout);
+    assert.match(query.stdout, /^1 pages\/_app\.tsx:1 MyApp$/m);
+  }
 });
 
 test('CLI and MCP index JSX with jsconfig paths, baseUrl, and inherited include', async t => {
@@ -233,7 +281,7 @@ test('wrapper queries include only third-party components on the page chain by d
   const providers = '# providers (outermost first): SWRConfig (external: swr), SessionProvider (external: next-auth/react), Scope (external: widgets), ContextShell, theme.Provider';
   assert.match(standard.stdout, /^1 app\/layout\.tsx:8 RootLayout, Grid \(external: widgets\), Tabs \(external: @radix-ui\/react-tabs\), widgets\.Root \(external: widgets\), LocalContext, LocalConfig, theme\.Consumer providers:/m);
   assert.ok(standard.stdout.split('\n').includes(providers));
-  assert.match(standard.stdout, /^# not wrappers: rendered inside the page$/m);
+  assert.doesNotMatch(standard.stdout, /^# not wrappers:/m);
   assert.match(standard.stdout, /1 file, 1 page/);
   assert.doesNotMatch(standard.stdout, /Link|Icon|PageDecoration|motion\.div/);
   assert.equal(run([...query, '--include-external']).stdout, standard.stdout);
@@ -462,7 +510,7 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
   }
 });
 
-test('Claude repairs a stale owned registration and uses the installed CLI on POSIX', {
+test('Claude repairs a stale owned registration with an absolute launcher on POSIX', {
   skip: process.platform === 'win32'
 }, t => {
   const { home, root, run } = fixture(t);
@@ -478,8 +526,8 @@ test('Claude repairs a stale owned registration and uses the installed CLI on PO
   assert.equal(repaired.status, 0, repaired.stderr);
   const add = ['mcp', 'add', '--scope', 'user', 'neorion', '--'];
   assert.deepEqual(calls(), [[...add, process.execPath, stale, 'mcp'],
-    ['mcp', 'remove', '--scope', 'user', 'neorion'], [...add, 'neorion', 'mcp']]);
-  const registered = { type: 'stdio', command: 'neorion', args: ['mcp'], env: {} };
+    ['mcp', 'remove', '--scope', 'user', 'neorion'], [...add, process.execPath, entry, 'mcp']]);
+  const registered = { type: 'stdio', command: process.execPath, args: [entry, 'mcp'], env: {} };
   assert.deepEqual(readJson(config).mcpServers.neorion, registered);
   assert.deepEqual(readJson(path.join(home, '.claude/skills/neorion/.neorion-setup.json')).mcp.entry, registered);
   assert.match(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8'), /run `neorion query <kind> <target>`/);

@@ -1,9 +1,10 @@
 export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 2;
+export const QUERY_INDEX_REVISION = 3;
 export const GRAPH_INDEX_REVISION = 5;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
+export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>

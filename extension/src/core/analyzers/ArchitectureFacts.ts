@@ -1,5 +1,5 @@
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
-import type { Wrapper } from '../../mcp/Index';
+import { AI_SDK_TRANSPORT, type Wrapper } from '../../mcp/Index';
 import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
@@ -579,7 +579,7 @@ function isSwrFallbackKey(node: Node): boolean {
 }
 
 const API_REFERENCE_KINDS = new Set([
-  SyntaxKind.CallExpression, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
+  SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
   SyntaxKind.TemplateExpression, SyntaxKind.BinaryExpression
 ]);
 
@@ -662,33 +662,45 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     };
     const source = relativePath(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
-      ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()));
-    // Keep API_REFERENCE_KINDS in sync with the literal, addition, and call branches below.
+      ['swr', 'swr/immutable', 'axios', 'ai'].includes(declaration.getModuleSpecifierValue()));
+    // Keep API_REFERENCE_KINDS in sync with the branches below.
     visitKinds(file, API_REFERENCE_KINDS, node => {
       if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) || Node.isTemplateExpression(node) || addition(node))) {
         literals.push(node);
       }
-      if (!Node.isCallExpression(node)) return;
+      const isConstructor = Node.isNewExpression(node);
+      if (!Node.isCallExpression(node) && !isConstructor) return;
       const expression = node.getExpression();
-      const isFetch = /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+      const isFetch = !isConstructor && /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
         !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
       const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
-      const isSwr = (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
+      const isChatTransport = isConstructor && origin?.module === 'ai' && origin.name === 'DefaultChatTransport';
+      const isSwr = !isConstructor && (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
         ['default', 'useSWR', 'mutate'].includes(origin.name);
       const isSwrMutate = isSwr && origin.name === 'mutate';
-      const axiosMethod = origin?.module === 'axios' &&
+      const axiosMethod = !isConstructor && origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
-      if (!isFetch && !isSwr && !axiosMethod) return;
+      if (!isFetch && !isSwr && !axiosMethod && !isChatTransport) return;
       const [argument, options] = node.getArguments();
+      let requestUrl = argument;
+      if (isChatTransport) {
+        const config = argument && (wrappedExpression(argument) ?? argument);
+        const api = Node.isObjectLiteralExpression(config) ? config.getProperty('api') : undefined;
+        const initializer = Node.isPropertyAssignment(api) ? api.getInitializer() : undefined;
+        if (!initializer) return;
+        requestUrl = initializer;
+      }
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
       const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
         options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
           options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
-      const method = isFetch ? fetchMethod : axiosMethod;
+      const method = isChatTransport ? 'POST' : isFetch ? fetchMethod : axiosMethod;
+      const via = isChatTransport ? AI_SDK_TRANSPORT :
+        isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
-      for (const url of isSwr ? swrUrls(argument) : [argument]) {
+      for (const url of isSwr ? swrUrls(requestUrl) : [requestUrl]) {
         if (!url) continue;
         const matches = matchesFor(url);
         if (!matches) continue;
@@ -698,12 +710,12 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
             value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
           const subject = action ? action.slice('action:'.length) : source;
           const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
-          const kind = isSwr ? ' (SWR key)' : axiosMethod ? ' (axios)' : '';
+          const kind = via === 'fetch' ? '' : ` (${via})`;
           const mapFact = markdown && matchesMethod && origin?.name !== 'mutate';
           if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
           index?.fetch({
-            file: source, line: startLine(node), node, route: route.id, method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'),
-            url: route.path, via: isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch',
+            file: source, line: startLine(isChatTransport ? url : node), node, route: route.id,
+            method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
             partial: partial || undefined, dynamic
           });
           if (isSwr || !mapFact) continue;
@@ -736,8 +748,8 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     const direct = new Set<Endpoint>();
     const callees = new Set<Node>();
     const visit = (node: Node) => {
-      if (!Node.isCallExpression(node)) return;
       for (const endpoint of endpointsByCall.get(node) ?? []) direct.add(endpoint);
+      if (!Node.isCallExpression(node)) return;
       for (const declaration of declarationsOf(node.getExpression())) {
         if (!projectFiles.has(declaration.getSourceFile())) continue;
         const fn = callable(declaration);

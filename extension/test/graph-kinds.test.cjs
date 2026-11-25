@@ -246,6 +246,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     return output;
   }
   const impact = await check('impact', 'normalize');
+  assert.match(impact, /# risk: .*3 pages, 1 API.*1 layout; .*1 test$/m);
   for (const evidence of [/api GET \/api\/items\/\[id\]/, /page \/b\/\[id\].*generateMetadata/,
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
@@ -280,10 +281,12 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(callees, /db\.\$transaction  server\/db\.ts#db/);
   assert.match(callees, /ext next\/cache  revalidatePath/);
   assert.match(callees, /: 2 project calls/);
-  assert.match(callees, /^d1 call :7,10,11 \+1  normalize/m);
+  assert.match(callees, /^d1 call server\/actions\.ts:7,10,11 \+1  normalize/m);
   assert.equal(callees.split('\n').filter(line => line.includes('  normalize  ')).length, 1);
-  assert.match(callees, /# unresolved: 1 calls/);
+  assert.match(callees, /^# partial: 1 unresolved call on locals\/params$/m);
   assert.doesNotMatch(callees, /anotherAction/);
+  const limited = query('callees', 'createItem', '--limit', '1');
+  assert.match(limited, /^# more: \d+ \(try neorion query callees createItem --depth 1 --limit \d+\)$/m);
   assert.match(query('callees', 'CreateItem'), /d1 action .*createItem/);
   assert.match(query('callees', 'useItems'), /fetch .*GET \/api\/items\/\[id\].*\(SWR key\)/);
   assert.doesNotMatch(query('callees', 'useItems'), /\bfetch .*mutate/);
@@ -371,8 +374,8 @@ test('tRPC resolves router paths, client aliases and server callers while report
     command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
   });
   assert.equal(await mcp.text('query', { kind: 'api_consumers', target: 'invoices.create' }), create);
-  assert.match(query('callees', 'invoices.create'), /d1 call :13  storeInvoice/);
-  assert.match(query('callees', 'history.create'), /d1 call :13  storeInvoice/);
+  assert.match(query('callees', 'invoices.create'), /d1 call server\/trpc-routes\.ts:13  storeInvoice/);
+  assert.match(query('callees', 'history.create'), /d1 call server\/trpc-routes\.ts:13  storeInvoice/);
   assert.match(query('path', '/trpc-check', 'storeInvoice'), /2 trpc .*invoices.create/);
   assert.match(query('who_renders', 'invoices.create'), /page \/trpc-check/);
   const upstream = query('impact', 'calculateTotal');

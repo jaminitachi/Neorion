@@ -1,4 +1,4 @@
-import { GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, type ExternalCall, type QueryIndex, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
+import { AI_SDK_TRANSPORT, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, type ExternalCall, type QueryIndex, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
 type Route = QueryIndex['routes'][number];
 type NodeId = number | string;
@@ -21,10 +21,11 @@ const rank: Record<Label, number> = { call: 0, action: 1, render: 2, fetch: 3, d
 const outgoingRank: Record<Label, number> = { render: 0, call: 1, action: 1, fetch: 2, dyn: 3, use: 4, trpc: 1 };
 const nodeBudget = 5000;
 const hubSize = 30;
-const fetchTypes = new Set(['fetch', 'SWR key', 'axios']);
+const fetchTypes = new Set(['fetch', 'SWR key', 'axios', AI_SDK_TRANSPORT]);
 export const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 export const graphRow = (text: string, ...files: string[]): QueryRow => ({ text, files });
 const location = (file: string, line?: number) => file + (line === undefined ? '' : ':' + line);
+const quantity = (count: number, singular: string) => `${count} ${singular}${count === 1 ? '' : 's'}`;
 const edgeOrder = (a: Edge, b: Edge) => rank[a.label] - rank[b.label] || compare(a.file, b.file) ||
   a.line - b.line || compare(String(a.from), String(b.from)) || compare(String(a.to), String(b.to));
 const pathEdgeOrder = (a: PathEdge, b: PathEdge) =>
@@ -507,9 +508,9 @@ export class DependencyGraph {
     }
     if (trace.tests.size) notes.push(graphRow(`# tests: ${trace.tests.size} ${trace.tests.size === 1 ? 'file reaches' : 'files reach'} target (includeTests to list)`));
     if (trace.literals.size) notes.push(graphRow(`# also referenced as literal: ${trace.literals.size} files`));
-    notes.push(graphRow(`# risk: ${routeCount} routes (${pageIds.size} page, ${apiFiles.size} api${other ? `, ${other} meta or special` : ''}), ` +
-      `${actions.length} server action${actions.length === 1 ? '' : 's'}, ${layouts} layouts; ${symbols} symbols in ${files.size} files; max depth ${used}; ${trace.tests.size} tests`));
-    return { rows, notes, count: `${routeCount} routes, ${actions.length} ${actions.length === 1 ? 'action' : 'actions'}, ${symbols} symbols, depth ${used}` +
+    notes.push(graphRow(`# risk: ${quantity(routeCount, 'route')} (${quantity(pageIds.size, 'page')}, ${quantity(apiFiles.size, 'API')}${other ? `, ${other} meta or special` : ''}), ` +
+      `${quantity(actions.length, 'server action')}, ${quantity(layouts, 'layout')}; ${quantity(symbols, 'symbol')} in ${quantity(files.size, 'file')}; max depth ${used}; ${quantity(trace.tests.size, 'test')}`));
+    return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
       (trace.hubs.length ? ', hub collapsed' : ''), partial: trace.partial, scope: 'indexed call, render, action, use, dyn, fetch edges' +
         ([...trace.visited.values()].some(visit => visit.edge?.label === 'trpc') ? ', including tRPC' : '') };
   }
@@ -797,7 +798,7 @@ export class DependencyGraph {
         const label = edge.label === 'fetch' ? `${edge.method} ${edge.url}` : edge.detail?.startsWith('.') ? name + edge.detail : name;
         if (!hub) {
           const lines = [...new Set(sites.map(site => site.line))];
-          const site = (d === 1 && edge.file === file ? '' : edge.file) + ':' + lines.slice(0, 3).join(',') +
+          const site = edge.file + ':' + lines.slice(0, 3).join(',') +
             (lines.length > 3 ? ` +${lines.length - 3}` : '');
           const flags = (edge.label === 'action' ? ' [action]' : '') + (sites.some(site => site.conditional) ? ' [cond]' : '') +
             (sites.some(site => site.partial) ? ' [partial url]' : '') + (edge.from === edge.to ? ' [self]' : '') +
@@ -820,16 +821,17 @@ export class DependencyGraph {
         packages.add(module);
         const names = this.index.graphNames!;
         const sites = calls.sort((a, b) => a[1] - b[1] || compare(names[a[3]], names[b[3]])).slice(0, 3)
-          .map(([, line, , name, count]) => `${names[name]}:${line}${count ? ` ×${count}` : ''}`);
+          .map(([, line, , name, count]) => `${names[name]} ${location(file, line)}${count ? ` ×${count}` : ''}`);
         rows.push(graphRow(`d${d} ext ${module}  ${sites.join(', ')}${calls.length > 3 ? ` +${calls.length - 3}` : ''}${parent}`, file));
       }
       if (typeof current.id === 'number') unresolved += this.index.unresolvedCalls![current.id] ?? 0;
     }
-    if (unresolved) notes.push(graphRow(`# unresolved: ${unresolved} calls on locals/params`));
     const callers = new Set(this.predecessors(seed).filter(edge => edge.from !== seed && !isTestFile(edge.file)).map(edge => edge.file));
     notes.push(graphRow(`# callers: ${callers.size} (impact for routes)`));
+    const partial = [budget ? 'node budget' : trpc,
+      unresolved ? `${quantity(unresolved, 'unresolved call')} on locals/params` : undefined].filter(Boolean).join('; ');
     return { rows, notes, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
-      (collapsed ? ', hub collapsed' : ''), partial: budget ? 'node budget' : trpc,
+      (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };
   }
 }

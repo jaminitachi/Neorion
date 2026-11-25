@@ -13,8 +13,9 @@ import { kinds, queryName } from '../mcp/Tools';
 import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
-  neorion graph [dir]
+  neorion graph [dir] [--mcp-config]
   neorion query <kind> <target> [--limit n] [--root dir]
+  neorion query search <text> [--kind filter] [--limit n]
   neorion query wrappers <route> [--no-external | --include-external]
   neorion query impact <symbol|file> [--depth n] [--include-tests]
   neorion query callees <symbol> [--depth n] [--uses]
@@ -76,10 +77,13 @@ function hintCommand(temporary: boolean, onPath: boolean) {
 async function main([command, ...args]: string[]) {
   if ((!command || command === '--help') && !args.length) return console.log(help);
   if (command === '--version' && !args.length) return console.log(VERSION);
-  if (command === 'graph' && args.length <= 1) {
-    if (args[0]?.startsWith('--')) throw new Error(help);
+  if (command === 'graph') {
+    const { values, positionals } = parseArgs({
+      args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true
+    });
+    if (positionals.length > 1) throw new Error(help);
     const { run } = require('./graph.cjs') as typeof import('./graph');
-    return run(resolve(args[0] ?? '.'));
+    return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
   }
   if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude')) {
     const agent = args[0];
@@ -95,8 +99,7 @@ async function main([command, ...args]: string[]) {
     const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     const temporary = !values.local && isTemporaryCliInstall(__filename);
     const onPath = !values.local && !temporary && runsCurrentEntry();
-    const launch = onPath && process.platform !== 'win32' ? { command: 'neorion', args: ['mcp'] }
-      : mcpCommand({ localEntry: temporary ? undefined : __filename });
+    const launch = mcpCommand({ localEntry: temporary ? undefined : __filename });
     let skippedHint = false;
     setupAgent(agent, __filename, launch, !!values.remove, () => {
       if (values['no-hint']) return;
@@ -119,6 +122,7 @@ async function main([command, ...args]: string[]) {
     args,
     options: { root: { type: 'string' }, ...(query ? {
       limit: { type: 'string' as const },
+      kind: { type: 'string' as const },
       depth: { type: 'string' as const },
       'include-tests': { type: 'boolean' as const },
       uses: { type: 'boolean' as const },
@@ -134,6 +138,7 @@ async function main([command, ...args]: string[]) {
   if (!query) return serve(root, { autoBuild: true });
   const [kind, target, to] = positionals;
   if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
+  if (values.kind !== undefined && kind !== 'search') throw new Error('--kind requires the search query.');
   if (Number(!!values.staged) + Number(!!values.unstaged) + Number(values.base !== undefined) > 1) {
     throw new Error('Choose only one of --base, --staged, or --unstaged.');
   }
@@ -151,6 +156,7 @@ async function main([command, ...args]: string[]) {
   const options = {
     ...(target === undefined ? {} : { target }),
     ...(to === undefined ? {} : { to }),
+    ...(values.kind === undefined ? {} : { filter: values.kind }),
     ...(values.base === undefined ? {} : { base: values.base }),
     ...(values.staged || values.unstaged ? { scope: values.staged ? 'staged' : 'unstaged' } : {}),
     ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),

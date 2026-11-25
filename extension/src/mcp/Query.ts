@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+import { AI_SDK_TRANSPORT, isTestFile as testFile, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
@@ -25,8 +25,13 @@ const generatedFile = (file: string) =>
   /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
 const apiEvidence = new Map([
   ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
-  ['fetch', 'request'], ['axios', 'request']
+  ['fetch', 'request'], ['axios', 'request'], [AI_SDK_TRANSPORT, 'request']
 ]);
+const shellArg = (value: string) => /^[\w./:-]+$/.test(value) && !value.startsWith('-') ? value : process.platform === 'win32'
+  ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'";
+const searchHint = (text: string, filter?: string) =>
+  `# try: neorion query search ${text.startsWith('-') ? `${filter ? `--kind ${filter} ` : ''}-- ${shellArg(text)}` :
+    `${shellArg(text)}${filter ? ` --kind ${filter}` : ''}`}`;
 const inside = (root: string, file: string) => {
   const relative = path.relative(root, file);
   return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
@@ -67,7 +72,9 @@ function validate(name: string, value: unknown) {
     }
   }
   const target = typeof input[targetKey] === 'string' ? (input[targetKey] as string).trim() : '';
-  if (tool !== 'changes' && ([...target].length < (tool === 'search' ? 2 : 1) || [...target].length > (tool === 'search' ? 200 : 300))) {
+  const routeList = tool === 'search' && target === '/' && ['route', 'api'].some(filter => filter === input[filterKey]);
+  if (tool !== 'changes' && ([...target].length < (tool === 'search' && !routeList ? 2 : 1) ||
+      [...target].length > (tool === 'search' ? 200 : 300))) {
     throw new Error('Invalid query target.');
   }
   const to = typeof input.to === 'string' ? input.to.trim() : '';
@@ -91,6 +98,30 @@ function validate(name: string, value: unknown) {
   }
   return { tool, target, to, limit, callers, direct, includeExternal, includeTests, filter: String(filter), depth,
     uses: !!uses, scope: scope as ChangeScope, base };
+}
+
+function limitHint(args: ReturnType<typeof validate>, count: number) {
+  const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
+  const limit = Math.min(count, tool === 'search' ? 50 : 100);
+  const options = [
+    ...(tool === 'search' && filter !== 'any' ? ['--kind', filter] : []),
+    ...(tool === 'impact' || tool === 'callees' ? ['--depth', String(depth)] : []),
+    ...(tool === 'impact' && includeTests ? ['--include-tests'] : []),
+    ...(tool === 'callees' && uses ? ['--uses'] : []),
+    ...(tool === 'wrappers' && !includeExternal ? ['--no-external'] : []),
+    ...(tool === 'changes' && scope !== 'all' ? [`--${scope}`] : []),
+    ...(base === undefined ? [] : ['--base', shellArg(String(base))]),
+    '--limit', String(limit)
+  ];
+  const targets = [target, to].filter(Boolean);
+  const endOfOptions = targets.some(value => value.startsWith('-'));
+  const command = ['neorion', 'query', ...(endOfOptions ? [...options, '--'] : []), tool, ...targets.map(shellArg),
+    ...(endOfOptions ? [] : options)].join(' ');
+  const narrow = tool === 'search' ? 'narrow the text' + (filter === 'any' ? ' or use --kind component' : '') :
+    tool === 'callees' && depth > 1 ? 'use --depth 1 to narrow' : '';
+  const hint = limit > args.limit ? `try ${command}${narrow ? `, or ${narrow}` : ''}` :
+    narrow || `--limit ${limit}, subject to the output cap`;
+  return bytes(hint) <= 380 && oneLine(hint) === hint ? hint : `use --limit ${limit}`;
 }
 
 function takeBytes(text: string, cap: number, tail = false) {
@@ -246,7 +277,8 @@ export class QueryEngine {
           name: action.name, aliases: [...(action.aliases ?? []), actionShortName(action.name)],
           label: actionLocation(action), file: action.file
         }))
-        : this.index.symbols.filter(symbol => !kind || symbol.kind === kind).map(symbol =>
+        : this.index.symbols.filter(symbol => (file === undefined || symbol.file === file) &&
+          (!kind || (kind === 'renderer' ? ['component', 'procedure'].includes(symbol.kind) : symbol.kind === kind))).map(symbol =>
         ({ name: symbol.name, label: declaration(symbol), file: symbol.file }));
     const matches: (typeof candidates[number] & { score: number })[] = [];
     const threshold = Math.max(2, Math.floor(needle.length / 3));
@@ -256,6 +288,10 @@ export class QueryEngine {
       let score = threshold + 1;
       for (const value of names) {
         const name = value.toLowerCase().slice(0, 100);
+        if (kind && needle.length >= 2 && (name.startsWith(needle) ||
+          ((kind === 'page' || kind === 'api') && name.endsWith(needle) && needle.startsWith('/')))) {
+          score = Math.min(score, name === needle ? -2 : -1);
+        }
         if (Math.abs(name.length - needle.length) <= threshold) score = Math.min(score, distance(needle, name));
       }
       if (score <= threshold) matches.push({ ...candidate, score });
@@ -364,7 +400,7 @@ export class QueryEngine {
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
-    const notes = [row('# not wrappers: rendered inside the page')];
+    const notes: Row[] = [];
     if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
     const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
       item.provider ?? item.symbol.endsWith('Provider');
@@ -493,8 +529,9 @@ export class QueryEngine {
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
       const kind = apiEvidence.get(via) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
-      const label = `send   ${location(fetch.file, fetch.line)}`;
-      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${fetch.method} ${via}` +
+      const mention = kind === 'other mention';
+      const label = `${mention ? 'mention' : 'send  '} ${location(fetch.file, fetch.line)}`;
+      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${mention ? '' : fetch.method + ' '}${via}` +
         (fetch.partial ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '');
       rows.push({ ...row(text, fetch.file), pathEnd: label.length });
       if (fetch.owner !== undefined) owners.add(fetch.owner);
@@ -529,8 +566,7 @@ export class QueryEngine {
         !seen.has(`${file}:${line} ${this.symbols.get(owner)?.name ?? 'unknown'}`)
     ));
     const similar = [...new Set(this.index.routes.filter(other => other.kind === 'api' && other.url !== route.url &&
-      (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/') ||
-        other.url.slice(0, other.url.lastIndexOf('/')) === route.url.slice(0, route.url.lastIndexOf('/'))))
+      (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/')))
       .map(other => other.url))].sort().slice(0, 5);
     evidence.set('caller', seen.size);
     const breakdown = ['read', 'mutate', 'fallback key', 'request', 'other mention', 'caller'].flatMap(kind => {
@@ -676,7 +712,13 @@ export class QueryEngine {
           : tool === 'who_renders' ? this.renders(symbol, !!args.direct, expired) : this.rename(symbol, !!args.includeTests, expired);
         result.title = `${symbol.file}#${symbol.name}`;
         result.targets = [symbol.file];
-      } else result.notes = this.suggestions(target.split('#').pop()!, tool === 'who_renders' ? 'component' : undefined, expired);
+      } else {
+        const { file, name } = this.symbolTarget(target);
+        result.notes = this.suggestions(name, tool === 'who_renders' ? 'renderer' : undefined, expired, file);
+        if (tool === 'who_renders' && [...name].length >= 2 && [...name].length <= 200 && oneLine(name) === name) {
+          result.notes.push(row(searchHint(name, name.includes('.') ? 'procedure' : 'component')));
+        }
+      }
     } else {
       const kind = tool === 'wrappers' ? 'page' : 'api';
       const actionPath = tool === 'api_consumers' && target.includes('#') && !target.startsWith('/');
@@ -703,9 +745,24 @@ export class QueryEngine {
         else if (actions.length) result = this.actionConsumers(actions[0], !!args.includeTests, expired);
         else {
           result.notes = this.suggestions(name, 'action', expired, file);
+          if ([...name].length >= 2 && [...name].length <= 200 && oneLine(name) === name) {
+            result.notes.push(row(searchHint(name)));
+          }
           if (!this.index.serverActions) result.partial = 'regenerate legacy index';
         }
-      } else result.notes = this.suggestions(target, kind, expired);
+      } else {
+        result.notes = this.suggestions(target, kind, expired);
+        if (tool === 'wrappers' && this.index.routes.some(route => route.kind === 'page')) {
+          const suggestedFiles = new Set(result.notes.flatMap(note => note.files));
+          const patterns = target.startsWith('/') ? this.matchPathRoute(target, 'page') : [];
+          for (const route of patterns.slice(0, 5)) {
+            if (!suggestedFiles.has(route.file)) {
+              result.notes.push(row(`# matching pattern: ${route.url} ${location(route.file, route.line ?? 1)}`, route.file));
+            }
+          }
+          result.notes.push(row('# try: neorion query search / --kind route'));
+        }
+      }
     }
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
     const status = new Map<string, boolean>();
@@ -769,7 +826,7 @@ export class QueryEngine {
       const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${result.title ?? target}` +
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
-        tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
+        limitHint(args, result.rows.length)})` : '';
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
         omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :

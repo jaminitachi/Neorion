@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
+Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router and Pages Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
@@ -29,7 +29,7 @@ Project: taxonomy
 # complete: indexed JSX paths
 ```
 
-The last line says whether the answer is complete. When it is not, it reads `# partial: <reason>`.
+`# complete` covers the indexed static matches in the stated scope. `# partial: <reason>` explains gaps or uncertainty.
 
 ## What you can ask
 
@@ -46,6 +46,8 @@ The last line says whether the answer is complete. When it is not, it reads `# p
 | `changes` | Which symbols, routes, and wrappers are affected by a Git diff? |
 
 Use `--depth <n>` to set the traversal depth for `impact` or `callees`. Use `--include-tests` with `impact` to include test files and `--uses` with `callees` to include symbols used as values. Give `path` a source and a destination. For `changes`, use `--staged` or `--unstaged` to narrow the diff, or `--base <ref>` to compare against the merge base of `HEAD` and that ref.
+
+Add `--limit <n>` to ask for more rows. Output still has a size cap. In a [source build](#build-from-source), use `query search billing --kind component` to narrow a search.
 
 The CLI runs on Node.js 18 or later without native modules or Python. CLI queries refresh the graph when needed.
 
@@ -72,7 +74,11 @@ Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs t
 
 ```sh
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.6.0/neorion-0.6.0.tgz
+command -v neorion
 ```
+
+If the command is missing and you use a custom npm prefix, add its bin directory to your PATH. In a Unix shell, run `export PATH="$(npm prefix -g)/bin:$PATH"`.
+When you use the release above, start Claude Code and Codex with `neorion` on PATH.
 
 From your project root, build the graph and ask a question.
 
@@ -81,13 +87,18 @@ neorion graph
 neorion query wrappers /
 ```
 
+If your app has no `/` route, search for part of a route name with a command such as `neorion query search login`.
+In the Pages Router, `wrappers` shows the custom `_app` when present. For dynamic routes, quote
+the indexed pattern, such as `'/blog/[slug]'`.
+
 `wrappers` includes third-party components on the page’s wrapper chain and labels
 them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
 in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
 `api_consumers` lists caller files and lines for API routes, server actions, and
 tRPC procedures. Pass a route URL, `signOut`, or a dotted procedure path such as
-`post.create`. Use `path#Name` to disambiguate a name. tRPC routers must be in the
+`post.create`. Replace example names such as `UserAvatar` and `signOut` with names from
+your app. Use `path#Name` to disambiguate a name. tRPC routers must be in the
 indexed project. Routers from other workspace packages may be unresolved.
 
 ## Codex
@@ -110,6 +121,8 @@ The hint sits between `<!-- neorion:start -->` and `<!-- neorion:end -->`. Runni
 
 Pass `--no-hint` to skip updating `AGENTS.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
 
+Codex may leave an empty `config.toml` after removal.
+
 ## Claude Code
 
 From your project root, run setup once and then start Claude Code as usual.
@@ -130,6 +143,8 @@ claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neo
 ```
 
 Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
+
+Claude Code may leave its settings file and backups after removal.
 
 For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
 
@@ -158,14 +173,18 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" setup claude
 claude
 ```
 
-Direct setup from a clone records the clone's path when `neorion` is unavailable on `PATH`. Rerun setup from the new location after moving the clone.
+In a source build, `query search / --kind route` lists indexed pages, and `wrappers` can suggest a pattern for a concrete URL.
+Add `--mcp-config` to `graph` to print an MCP launcher snippet.
+Setup from a source build registers absolute paths to Node.js and the CLI. Rerun setup if either moves.
 
 ## VS Code extension
 
 ![Taxonomy in Routes view with the layouts that wrap /login highlighted](docs/graph-view/after-taxonomy-routes.png)
 
+Use the clone and `NEORION_DIR` from [Build from source](#build-from-source).
+
 ```sh
-cd extension
+cd "$NEORION_DIR/extension"
 npm ci
 npx vsce package
 ```
