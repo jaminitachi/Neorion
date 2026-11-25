@@ -1,10 +1,14 @@
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
-import { AI_SDK_TRANSPORT, type Wrapper } from '../../mcp/Index';
+import { AI_SDK_TRANSPORT, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
 import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
 import { visitKinds } from './CompilerWalk';
+import { bindingOf, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { property, textValue, type NextConfig } from './NextConfig';
+import { matchNextRoutes, normalizeNextUrl, patternRank, routeSegments } from './NextRouteMatch';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { startLine } from './SourceLines';
 
 export function declarationsOf(node: Node): Node[] {
@@ -108,6 +112,39 @@ interface WrapperChain {
   locations: Wrapper[];
   conditional?: boolean;
   contextProvider?: boolean;
+  dispatch?: string;
+  possible?: boolean;
+  getLayout?: boolean;
+}
+
+type PageProperties = {
+  assignments: Map<string, { value: Node; site: Node }>;
+  unknown: Set<string>;
+  opaque: boolean;
+};
+
+type PagesWrapperScope = {
+  page?: PageProperties;
+  issues?: string[];
+  parameter?: string;
+  forwarded?: Node;
+  renderCondition?: (tag: Node, decision: PageRenderCondition) => void;
+};
+
+const unknownValue = Symbol('unknown');
+const truthyValue = Symbol('truthy');
+type StaticValue = string | number | boolean | null | undefined | typeof unknownValue | typeof truthyValue;
+
+function staticValue(node: Node | undefined): StaticValue {
+  const value = valueNode(node);
+  if (Node.isStringLiteral(value) || Node.isNumericLiteral(value)) return value.getLiteralValue();
+  if (Node.isTrueLiteral(value)) return true;
+  if (Node.isFalseLiteral(value)) return false;
+  if (Node.isNullLiteral(value)) return null;
+  if (Node.isIdentifier(value) && value.getText() === 'undefined' && !bindingOf(value)) return undefined;
+  if (Node.isFunctionLikeDeclaration(value) || Node.isClassDeclaration(value) ||
+    Node.isArrayLiteralExpression(value) || Node.isObjectLiteralExpression(value)) return truthyValue;
+  return unknownValue;
 }
 
 const emptyChain: WrapperChain = { path: [], locations: [] };
@@ -152,8 +189,10 @@ const externalProviderName = (name: string) => /(?:Config|Context)$/.test(name);
 const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|ErrorBoundary)$/.test(name);
 
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
-  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), pageParameter?: string): WrapperChain[] {
-  if (seen.has(body)) return [];
+  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), scope?: PagesWrapperScope): WrapperChain[] {
+  if (seen.has(body) || seen.size >= 12) return [];
+  const { page, parameter: pageParameter, forwarded, issues, renderCondition } = scope ?? {};
+  const pagesScope = !!scope;
   seen = new Set(seen).add(body);
   const chains = new Map<string, WrapperChain>();
   const slots = new Set([pageParameter ?? (pagesApp ? 'Component' : 'children')]);
@@ -167,26 +206,173 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       }
     }
   }
-  const isSlot = (node: Node | undefined) => {
-    if (Node.isPropertyAccessExpression(node)) return slots.has(node.getName());
-    return !!node && slots.has(node.getText());
+  const parameterDeclaration = parameter?.getParameters()[0];
+  const isSlot = (node: Node | undefined): boolean => {
+    if (!node) return false;
+    if (!pagesScope) {
+      if (Node.isPropertyAccessExpression(node)) return slots.has(node.getName());
+      return slots.has(node.getText());
+    }
+    const declaration = bindingOf(node);
+    if (forwarded) return declaration === forwarded;
+    if (pageParameter && declaration === parameterDeclaration) return true;
+    if (Node.isBindingElement(declaration)) {
+      const binding = declaration.getParent().getParent();
+      return (declaration.getPropertyNameNode() ?? declaration.getNameNode()).getText() === (pagesApp ? 'Component' : 'children') &&
+        (binding === parameterDeclaration || Node.isVariableDeclaration(binding) &&
+          bindingOf(binding.getInitializer()) === parameterDeclaration);
+    }
+    if (Node.isPropertyAccessExpression(node)) {
+      return node.getName() === (pagesApp ? 'Component' : 'children') &&
+        bindingOf(node.getExpression()) === parameterDeclaration;
+    }
+    const value = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+    if (!value || value === node || !Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value) ||
+      node.getSourceFile() === value.getSourceFile() && value.getStart() >= node.getStart()) return false;
+    return isSlot(value);
   };
-  const visit = (node: Node) => {
-    const slot = pagesApp
-      ? (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
-        isSlot(node.getTagNameNode())
-      : Node.isJsxExpression(node) && isSlot(node.getExpression());
-    if (!slot) return;
-    const ancestors: Node[] = [];
-    let conditional = false;
-    for (let child = node; child !== body;) {
+  const propertySlot = (node: Node | undefined) => {
+    if (Node.isPropertyAccessExpression(node) && isSlot(node.getExpression())) return node.getName();
+    if (Node.isElementAccessExpression(node) && isSlot(node.getExpression())) return textValue(node.getArgumentExpression());
+    const element = Node.isIdentifier(node) ? bindingOf(node) : undefined;
+    if (Node.isBindingElement(element)) {
+      const declaration = element.getParent().getParent();
+      if (Node.isVariableDeclaration(declaration) && isSlot(declaration.getInitializer())) {
+        return (element.getPropertyNameNode() ?? element.getNameNode()).getText();
+      }
+    }
+  };
+  const tests = new Map<Node, { value: StaticValue; properties: Set<string> }>();
+  const test = (node: Node) => {
+    const cached = tests.get(node);
+    if (cached) return cached;
+    const properties = new Set<string>();
+    const read = (expression: Node | undefined, depth = 0): StaticValue => {
+      if (!expression || depth >= 12) return unknownValue;
+      const key = propertySlot(expression);
+      if (key !== undefined && page) {
+        properties.add(key);
+        const assignment = page.assignments.get(key);
+        const value = page.unknown.has(key) ? unknownValue : assignment ? staticValue(assignment.value) :
+          page.opaque ? unknownValue : undefined;
+        return value;
+      }
+      if (Node.isElementAccessExpression(expression) && page && isSlot(expression.getExpression())) {
+        properties.add(expression.getArgumentExpression()?.getText() ?? 'computed key');
+        return unknownValue;
+      }
+      if (Node.isParenthesizedExpression(expression) || Node.isAsExpression(expression) ||
+          Node.isNonNullExpression(expression) || Node.isSatisfiesExpression(expression)) return read(expression.getExpression(), depth + 1);
+      if (Node.isIdentifier(expression)) {
+        const value = valueNode(expression);
+        if (value !== expression) return read(value, depth + 1);
+      }
+      if (Node.isPrefixUnaryExpression(expression) && expression.getOperatorToken() === SyntaxKind.ExclamationToken) {
+        const value = read(expression.getOperand(), depth + 1);
+        return value === unknownValue ? value : !value;
+      }
+      if (Node.isBinaryExpression(expression)) {
+        const op = expression.getOperatorToken().getKind();
+        const left = read(expression.getLeft(), depth + 1);
+        if (op === SyntaxKind.AmpersandAmpersandToken && left !== unknownValue && !left ||
+            op === SyntaxKind.BarBarToken && left !== unknownValue && left ||
+            op === SyntaxKind.QuestionQuestionToken && left !== unknownValue && left != null) return left;
+        const right = read(expression.getRight(), depth + 1);
+        if (op === SyntaxKind.AmpersandAmpersandToken) return left === unknownValue && right !== unknownValue && !right ? false :
+          left === unknownValue ? left : right;
+        if (op === SyntaxKind.BarBarToken) return left === unknownValue && right !== unknownValue && right ? truthyValue :
+          left === unknownValue ? left : right;
+        if (op === SyntaxKind.QuestionQuestionToken) return left === unknownValue ? left : right;
+        if (left === unknownValue || right === unknownValue || left === truthyValue || right === truthyValue) return unknownValue;
+        if (op === SyntaxKind.EqualsEqualsEqualsToken) return left === right;
+        if (op === SyntaxKind.ExclamationEqualsEqualsToken) return left !== right;
+        if (op === SyntaxKind.EqualsEqualsToken) return left == right;
+        if (op === SyntaxKind.ExclamationEqualsToken) return left != right;
+      }
+      if (page && Node.isCallExpression(expression)) {
+        for (const argument of expression.getArguments()) read(argument, depth + 1);
+      }
+      return staticValue(expression);
+    };
+    const value = read(node);
+    const result: { value: StaticValue; properties: Set<string> } = { value, properties };
+    tests.set(node, result);
+    return result;
+  };
+  const branchState = (node: Node, boundary: Node) => {
+    const state = { dead: false, conditional: false, possible: false, readsPage: false };
+    const unresolved = new Set<string>();
+    const check = (expression: Node, accepts: (value: StaticValue) => boolean) => {
+      const result = test(expression);
+      state.readsPage ||= result.properties.size > 0;
+      if (result.value !== unknownValue) state.dead ||= !accepts(result.value);
+      else {
+        state.conditional = true;
+        for (const key of result.properties) unresolved.add(key);
+      }
+    };
+    for (let child = node; child !== boundary;) {
       const parent = child.getParentOrThrow();
-      conditional ||= conditionalChild(child, parent);
+      if (Node.isConditionalExpression(parent) && child !== parent.getCondition()) {
+        check(parent.getCondition(), value => Boolean(value) === (child === parent.getWhenTrue()));
+      } else if (Node.isIfStatement(parent) && child !== parent.getExpression()) {
+        check(parent.getExpression(), value => Boolean(value) === (child === parent.getThenStatement()));
+      } else if (Node.isBinaryExpression(parent) && child === parent.getRight()) {
+        const op = parent.getOperatorToken().getKind();
+        if (op === SyntaxKind.AmpersandAmpersandToken) check(parent.getLeft(), Boolean);
+        if (op === SyntaxKind.BarBarToken) check(parent.getLeft(), value => !value);
+        if (op === SyntaxKind.QuestionQuestionToken) check(parent.getLeft(), value => value == null);
+      } else if (Node.isBlock(parent)) {
+        for (const statement of parent.getStatements()) {
+          if (statement === child) break;
+          if (Node.isReturnStatement(statement) || Node.isThrowStatement(statement)) state.dead = true;
+          if (!Node.isIfStatement(statement)) continue;
+          const otherwise = statement.getElseStatement();
+          if (returnsFromBranch(statement.getThenStatement())) check(statement.getExpression(), value => !value);
+          if (otherwise && returnsFromBranch(otherwise)) check(statement.getExpression(), Boolean);
+        }
+      } else state.conditional ||= conditionalChild(child, parent);
+      child = parent;
+    }
+    if (!state.dead && unresolved.size) {
+      state.possible = true;
+      for (const key of unresolved) issues?.push(`unresolved page property ${key} in wrapper predicate`);
+    }
+    return state;
+  };
+  const layoutCall = (node: Node) => {
+    if (!Node.isCallExpression(node)) return false;
+    const callee = valueNode(node.getExpression()) ?? node.getExpression();
+    const property = Node.isBinaryExpression(callee) &&
+      [SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken].includes(callee.getOperatorToken().getKind()) ? callee.getLeft() : callee;
+    return propertySlot(property) === 'getLayout';
+  };
+  const visit = (node: Node, root = body, outer: Node[] = [], selected = false, possible = false) => {
+    const tag = Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node) ? node.getTagNameNode() : undefined;
+    const dispatch = pagesApp ? propertySlot(tag) : undefined;
+    const slot = pagesApp ? !!tag && isSlot(tag) : Node.isJsxExpression(node) && isSlot(node.getExpression());
+    if (!slot && !dispatch) return;
+    if (dispatch && (!(Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) ||
+      !node.getAttributes().some(attribute => Node.isJsxSpreadAttribute(attribute) &&
+        bindingOf(attribute.getExpression()) === parameterDeclaration))) return;
+    const ancestors: Node[] = [];
+    const state = pagesScope ? branchState(node, root) : undefined;
+    if (state?.dead) return;
+    let conditional = selected || !!state?.conditional;
+    possible ||= !!state?.possible;
+    let getLayout = false;
+    for (let child = node; child !== root;) {
+      const parent = child.getParentOrThrow();
+      if (!state) conditional ||= conditionalChild(child, parent);
+      getLayout ||= pagesApp && layoutCall(parent);
       ancestors.push(parent);
       child = parent;
     }
-    let chain: WrapperChain[] = [{ path: [], locations: [], conditional }];
-    for (const element of ancestors.reverse().filter(Node.isJsxElement)) {
+    ancestors.reverse();
+    ancestors.unshift(...outer);
+    getLayout ||= pagesApp && outer.some(layoutCall);
+    let chain: WrapperChain[] = [{ path: [], locations: [], conditional, possible, dispatch, getLayout }];
+    for (const element of ancestors.filter(Node.isJsxElement)) {
       if (element.getOpeningElement() === node) continue;
       const tag = element.getOpeningElement().getTagNameNode();
       const name = tag.getText();
@@ -208,7 +394,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen) : [];
+      const nestedScope = scope && { page, issues, renderCondition };
+      const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope) : [];
       const primitive = names.some(layoutPrimitive);
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
         const provider = !primitive && (namedProvider || !!next.contextProvider);
@@ -222,47 +409,209 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
             ? relativePath(definition.getSourceFile()) : undefined
         };
         return {
+          ...prefix,
           path: [...prefix.path, label, ...next.path],
           locations: [...prefix.locations, location, ...next.locations],
           conditional: prefix.conditional || next.conditional,
+          possible: prefix.possible || next.possible,
           contextProvider: prefix.contextProvider || contextProvider
         };
       }));
     }
-    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional]), entry);
+    for (const entry of chain) chains.set(JSON.stringify([entry.path, !!entry.conditional, !!entry.possible, entry.dispatch, entry.getLayout]), entry);
   };
-  visit(body);
-  body.forEachDescendant(visit);
+  if (pagesScope) {
+    if (page && renderCondition) {
+      const record = (node: Node, walk?: { skip(): void }) => {
+        if (Node.isFunctionLikeDeclaration(node)) {
+          walk?.skip();
+          return;
+        }
+        if (!Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) return;
+        const state = branchState(node, body);
+        if (state.readsPage && (state.dead || state.possible)) {
+          renderCondition(node.getTagNameNode(), state.dead ? 'excluded' : 'possible');
+        }
+      };
+      record(body);
+      body.forEachDescendant(record);
+    }
+    const scan = (root: Node, outer: Node[], conditional: boolean, possible: boolean, visited: Set<Node>) => {
+      if (visited.has(root) || visited.size >= 12) return;
+      visited = new Set(visited).add(root);
+      const follow = (node: Node, walk?: { skip(): void }) => {
+        if (Node.isFunctionLikeDeclaration(node)) { walk?.skip(); return; }
+        visit(node, root, outer, conditional, possible);
+        if (!Node.isIdentifier(node) || !Node.isVariableDeclaration(bindingOf(node))) return;
+        const value = valueNode(node);
+        if (!value || value === node || !body.containsRange(value.getPos(), value.getEnd())) return;
+        if (node !== root && !Node.isJsxExpression(node.getParent()) && !Node.isConditionalExpression(node.getParent()) && !layoutCall(node.getParentOrThrow())) return;
+        const context: Node[] = [];
+        for (let child: Node = node; child !== root;) {
+          child = child.getParentOrThrow();
+          context.unshift(child);
+        }
+        const state = branchState(node, root);
+        if (!state.dead) scan(value, [...outer, ...context], conditional || state.conditional, possible || state.possible, visited);
+      };
+      follow(root);
+      root.forEachDescendant(follow);
+    };
+    for (const expression of returns(body)) {
+      const state = branchState(expression, body);
+      if (!state.dead) scan(expression, [], state.conditional, state.possible, new Set());
+    }
+  } else {
+    visit(body);
+    body.forEachDescendant(node => visit(node));
+  }
   return [...chains.values()];
 }
 
-// Pages Router applications can wrap the page before inserting it into _app.
-function pageLayout(source: SourceFile | undefined, relativePath: RelativePath, bodies: Map<Node, Node>,
-  projectFiles: Set<SourceFile>) {
-  if (!source || !source.getFullText().includes('getLayout')) return [];
-  const page = new Set<Node>(source.getExportedDeclarations().get('default') ?? []);
-  const chains: WrapperChain[] = [];
-  for (const statement of source.getStatements()) {
-    if (!Node.isExpressionStatement(statement)) continue;
-    const expression = statement.getExpression();
-    if (!Node.isBinaryExpression(expression) ||
-        expression.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) continue;
-    const left = expression.getLeft();
-    const right = expression.getRight();
-    if (!Node.isPropertyAccessExpression(left) || left.getName() !== 'getLayout' ||
-        !declarationsOf(left.getExpression()).some(declaration => page.has(declaration)) ||
-        (!Node.isArrowFunction(right) && !Node.isFunctionExpression(right))) continue;
-    const parameter = right.getParameters()[0]?.getNameNode();
-    if (Node.isIdentifier(parameter)) {
-      chains.push(...wrappedChains(right.getBody(), false, relativePath, bodies, projectFiles, new Set(), parameter.getText()));
+function pageProperties(source: SourceFile | undefined): PageProperties {
+  const assignments = new Map<string, { value: Node; site: Node }>();
+  const unknown = new Set<string>();
+  const exported = new Set(source?.getExportedDeclarations().get('default')?.map(node => valueNode(node)));
+  const page = exported.size === 1 ? [...exported][0] : undefined;
+  let opaque = !functionNode(page);
+  if (Node.isClassDeclaration(page)) {
+    opaque = page.getExtends() !== undefined;
+    for (const member of page.getStaticMembers()) {
+      const name = member.getName();
+      const value = Node.isPropertyDeclaration(member) ? member.getInitializer() : Node.isMethodDeclaration(member) ? member : undefined;
+      if (value) assignments.set(name, { value, site: member });
+      else if (!Node.isPropertyDeclaration(member)) unknown.add(name);
     }
   }
-  return chains;
+  if (!source || !page) return { assignments, unknown, opaque };
+  const invalidate = () => {
+    opaque = true;
+    for (const key of assignments.keys()) unknown.add(key);
+  };
+  for (const file of new Set([page.getSourceFile(), source])) {
+    for (const statement of file.getStatements()) {
+      if (Node.isFunctionLikeDeclaration(statement) || Node.isClassDeclaration(statement)) continue;
+      const inspect = (node: Node, traversal?: { skip(): void }) => {
+        if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node)) {
+          traversal?.skip();
+          return;
+        }
+        if (Node.isBinaryExpression(node) &&
+          node.getOperatorToken().getKind() >= SyntaxKind.FirstAssignment &&
+          node.getOperatorToken().getKind() <= SyntaxKind.LastAssignment) {
+          const left = node.getLeft();
+          if ((!Node.isPropertyAccessExpression(left) && !Node.isElementAccessExpression(left)) ||
+            valueNode(left.getExpression()) !== page) return;
+          const name = Node.isPropertyAccessExpression(left) ? left.getName() : textValue(left.getArgumentExpression());
+          if (!name) invalidate();
+          else if (Node.isExpressionStatement(statement) && statement.getExpression() === node &&
+            node.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
+            assignments.set(name, { value: node.getRight(), site: left });
+            unknown.delete(name);
+          } else unknown.add(name);
+        } else if (Node.isCallExpression(node) && node.getArguments().some(argument => valueNode(argument) === page)) {
+          invalidate();
+        } else if (Node.isDeleteExpression(node)) {
+          const operand = node.getExpression();
+          if (Node.isPropertyAccessExpression(operand) && valueNode(operand.getExpression()) === page) {
+            unknown.add(operand.getName());
+          } else if (Node.isElementAccessExpression(operand) && valueNode(operand.getExpression()) === page) {
+            invalidate();
+          }
+        }
+      };
+      inspect(statement);
+      statement.forEachDescendant(inspect);
+    }
+  }
+  return { assignments, unknown, opaque };
+}
+
+function andThen(outer: WrapperChain, inner: WrapperChain): WrapperChain {
+  return { path: [...outer.path, ...inner.path], locations: [...outer.locations, ...inner.locations],
+    conditional: outer.conditional || inner.conditional, possible: outer.possible || inner.possible };
+}
+
+function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies: Map<Node, Node>,
+  files: Set<SourceFile>, workspace?: WorkspaceBindings) {
+  let application = [emptyChain];
+  const issues: string[] = [];
+  const locations = (node: Node, symbol: string, evidence?: string): Wrapper => ({
+    file: relativePath(node.getSourceFile()), symbol, line: startLine(node), conditional: false, phase: 'application', evidence
+  });
+  let value = valueNode(source.getExportedDeclarations().get('default')?.[0]);
+  for (let depth = 0; depth < 8 && Node.isCallExpression(value); depth++) {
+    const callee = value.getExpression();
+    const origin = importBinding(callee);
+    const tRPC = Node.isPropertyAccessExpression(callee) && callee.getName() === 'withTRPC' &&
+      (() => {
+        const receiver = callee.getExpression();
+        const client = valueNode(receiver) ?? valueNode(workspace?.resolve(receiver));
+        const init = Node.isCallExpression(client) ? client : valueNode(workspace?.resolve(receiver));
+        const factory = Node.isCallExpression(init) ? importBinding(init.getExpression()) : undefined;
+        return (factory?.module === '@trpc/next' && factory.name === 'createTRPCNext') ||
+          (Node.isCallExpression(init) && !!workspace?.origin(init.getExpression(), '@trpc/next', 'createTRPCNext'));
+      })();
+    const factory = functionNode(callee);
+    const parameter = factory?.getParameters()[0];
+    const argument = parameter?.getNameNode().getSymbol();
+    const forwarding = argument ? returns(factory?.getBody()).map(functionNode).filter(fn =>
+      !!fn && returns(fn.getBody()).some(expression =>
+        [expression, ...expression.getDescendants()].some(node =>
+          (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
+          node.getTagNameNode().getSymbol() === argument && node.getAttributes().some(attribute =>
+            Node.isJsxSpreadAttribute(attribute) && bindingOf(attribute.getExpression()) === fn.getParameters()[0])))) : [];
+    const localChains = forwarding.flatMap(fn => {
+      const body = fn?.getBody();
+      return body && parameter ? wrappedChains(body, true, relativePath, bodies, files, new Set(), { forwarded: parameter }) : [];
+    });
+    const forwards = localChains.length > 0;
+    const known = tRPC || forwards || origin?.module === 'next-i18next' && origin.name === 'appWithTranslation';
+    const hoc = locations(value, callee.getText(), known ? undefined : 'possible wrapper');
+    application = application.flatMap(outer => (localChains.length ? localChains : [emptyChain])
+      .map(inner => andThen(outer, { ...inner, locations: [hoc, ...inner.locations] }))).slice(0, 16);
+    if (!known) issues.push(`opaque App wrapper ${callee.getText()} (${relativePath(value.getSourceFile())}:${startLine(value)})`);
+    value = valueNode(value.getArguments()[0]);
+  }
+  const fn = functionNode(value);
+  if (!fn || !files.has(fn.getSourceFile())) {
+    return { chains: application.map(chain => ({ ...chain, path: [relativePath(source), ...chain.path] })),
+      issues: [...issues, 'custom App body unresolved'], body: undefined, paths: undefined };
+  }
+  const name = 'getName' in fn && fn.getName() || fn.getParentIfKind(SyntaxKind.VariableDeclaration)?.getName() || 'default';
+  const app = locations(fn, name);
+  const body = fn.getBody();
+  const paths = (scope: PagesWrapperScope) => {
+    const paths = body ? wrappedChains(body, true, relativePath, bodies, files, new Set(), scope) : [];
+    if (!paths.length) scope.issues?.push('custom App page slot unresolved');
+    return application.flatMap(outer => (paths.length ? paths : [emptyChain]).map(path => ({
+      ...path,
+      conditional: path.conditional || outer.conditional,
+      possible: path.possible || outer.possible,
+      path: [relativePath(source), ...outer.path, ...path.path],
+      locations: [...outer.locations, app, ...path.locations]
+    })));
+  };
+  return { body, issues, chains: application, paths };
+}
+
+function pagesDocument(source: SourceFile, relativePath: RelativePath): Wrapper {
+  const exported = source.getExportedDeclarations().get('default')?.[0];
+  const definition = valueNode(exported) ?? exported ?? source;
+  const name = 'getName' in definition && typeof definition.getName === 'function' ? definition.getName() : undefined;
+  const main = definition.getDescendants().find(node => {
+    if (!Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) return false;
+    const origin = importBinding(node.getTagNameNode());
+    return origin?.module === 'next/document' && origin.name === 'Main';
+  });
+  return { file: relativePath(definition.getSourceFile()), symbol: name || 'default', line: startLine(definition),
+    conditional: false, phase: 'document',
+    evidence: main ? `Main at ${relativePath(main.getSourceFile())}:${startLine(main)}` : 'Main slot unresolved' };
 }
 
 export function collectRenderFacts(
   routes: RouteNode[], components: ComponentNode[], edges: ComponentEdge[],
-  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder
+  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings
 ) {
   const outgoing = new Map<string, string[]>();
   for (const edge of edges) {
@@ -289,18 +638,31 @@ export function collectRenderFacts(
     const id = `cmp:${relativePath(node.getSourceFile())}#${suffix}`;
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
+  const apps = new Map<string, ReturnType<typeof pagesApplication>>();
+  const documents = new Map<string, Wrapper>();
   const wrapperLocations = new Map<string, Wrapper>();
   const wrapperRoots = new Map<string, string>();
   const wrapperChains = new Map<string, WrapperChain[]>();
   const reached = new Map<string, { page: RouteNode; viaLayout: boolean; depth: number }[]>();
   for (const route of routes.filter(route => route.type === 'page')) {
-    const pagesRoot = /^(?:src\/)?pages\//.exec(route.file)?.[0];
+    const pagesRoot = route.pages ? /^(?:src\/)?pages\//.exec(route.file)?.[0] : undefined;
     const layouts = layoutsByPage.get(route.id) ?? [];
-    const app = pagesRoot && ['tsx', 'ts', 'jsx', 'js'].map(ext => pagesRoot + '_app.' + ext)
-      .find(file => filesByPath.has(file));
-    const wrappers = app ? [app] : layouts;
+    const shell = (name: string) => pagesRoot && (config?.extensions ?? ['tsx', 'ts', 'jsx', 'js'])
+      .map(ext => pagesRoot + name + '.' + ext).find(file => filesByPath.has(file));
+    const app = shell('_app');
+    const document = shell('_document');
+    const wrappers = app ? [] : layouts;
+    const issues: string[] = [];
     let chains = [emptyChain];
+    if (document) {
+      if (!documents.has(document)) documents.set(document, pagesDocument(filesByPath.get(document)!, relativePath));
+      const wrapper = documents.get(document)!;
+      if (wrapper.evidence === 'Main slot unresolved') issues.push('custom Document Main slot unresolved');
+      index?.shell(document);
+      chains = [{ path: [], locations: [wrapper] }];
+    }
     const layoutSeeds: (string | undefined)[] = [];
+    const pageWrapperSeeds = new Map<string, number>();
     for (const wrapper of wrappers) {
       if (!wrapperChains.has(wrapper)) {
         const source = filesByPath.get(wrapper);
@@ -310,7 +672,7 @@ export function collectRenderFacts(
         if (component) wrapperRoots.set(wrapper, component);
         const definition = exported[0];
         const symbol = component && componentsById.get(component)?.name || 'default';
-        const paths = body ? wrappedChains(body, !!app, relativePath, bodies, projectFiles) : [];
+        const paths = body ? wrappedChains(body, false, relativePath, bodies, projectFiles) : [];
         wrapperLocations.set(wrapper, {
           file: wrapper, symbol,
           line: definition && definition.getSourceFile() === source ? startLine(definition) : 1, conditional: false,
@@ -327,22 +689,113 @@ export function collectRenderFacts(
         conditional: prefix.conditional || next.conditional
       })));
     }
-    if (app && filesByPath.get(app)?.getFullText().includes('getLayout')) {
-      const pageChains = pageLayout(filesByPath.get(route.file), relativePath, bodies, projectFiles);
-      if (pageChains.length) chains = chains.flatMap(prefix => pageChains.map(chain => ({
-        path: [...prefix.path, ...chain.path],
-        locations: [...prefix.locations, ...chain.locations],
-        conditional: prefix.conditional || chain.conditional
-      })));
+    if (app) {
+      if (!apps.has(app)) apps.set(app, pagesApplication(filesByPath.get(app)!, relativePath, bodies, projectFiles, workspace));
+      const application = apps.get(app)!;
+      const page = pageProperties(filesByPath.get(route.file));
+      const assignments = page.assignments;
+      const scope: PagesWrapperScope = {
+        page, issues,
+        renderCondition: (tag, decision) => index?.pageRenderCondition(route.id, tag, decision)
+      };
+      const applicationChains = application.paths?.(scope) ?? application.chains;
+      index?.shell(app, application.body);
+      layoutSeeds.push(`file:${app}`, application.body && componentByBody.get(application.body));
+      issues.push(...application.issues);
+      const expanded = applicationChains.flatMap(chain => {
+        let branches = [chain];
+        const dispatch = chain.dispatch;
+        if (dispatch) {
+          const assigned = assignments.get(dispatch);
+          if (!assigned) {
+            if (!page.opaque && !page.unknown.has(dispatch)) return [];
+            issues.push(`unresolved page property ${dispatch}`);
+            return [{ ...chain, possible: true }];
+          }
+          if (page.unknown.has(dispatch)) chain = { ...chain, possible: true };
+          const fn = functionNode(assigned.value);
+          const body = fn?.getBody();
+          if (!fn || !body || !projectFiles.has(fn.getSourceFile())) {
+            issues.push(`unresolved page property ${dispatch}`);
+            return [{ ...chain, possible: true }];
+          }
+          const definition = Node.isArrowFunction(fn) || Node.isFunctionExpression(fn)
+            ? fn.getParentIfKind(SyntaxKind.VariableDeclaration) ?? fn : fn;
+          const name = 'getName' in definition && definition.getName() || dispatch;
+          const wrapper: Wrapper = { file: relativePath(fn.getSourceFile()), symbol: name, line: startLine(definition),
+            conditional: false, evidence: `${dispatch} assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`,
+            site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } };
+          const paths = wrappedChains(body, true, relativePath, bodies, projectFiles, new Set(), scope);
+          if (!paths.length) issues.push(`page slot unresolved in ${dispatch}`);
+          branches = (paths.length ? paths : [emptyChain]).map(path => ({
+            ...andThen(andThen(chain, { path: [wrapper.file + '#' + name], locations: [wrapper] }), path),
+            getLayout: path.getLayout
+          }));
+        }
+        const assigned = assignments.get('getLayout');
+        return branches.flatMap(branch => {
+          if (!branch.getLayout) return [branch];
+          if (page.unknown.has('getLayout') || !assigned && page.opaque) {
+            issues.push('getLayout binding unresolved');
+            return [{ ...branch, possible: true }];
+          }
+          if (!assigned) return [branch];
+          const fn = functionNode(assigned.value);
+          const body = fn?.getBody();
+          const parameter = fn?.getParameters()[0]?.getNameNode();
+          if (!body || !Node.isIdentifier(parameter) || !projectFiles.has(body.getSourceFile())) {
+            issues.push('getLayout binding unresolved');
+            return [branch];
+          }
+          const paths = wrappedChains(body, false, relativePath, bodies, projectFiles, new Set(), { ...scope, parameter: parameter.getText() });
+          if (!paths.length) {
+            if (!returns(body).every(node => bindingOf(node) === fn?.getParameters()[0])) issues.push('getLayout page slot unresolved');
+            return [branch];
+          }
+          const origin = declarationsOf(assigned.value)[0];
+          if (origin && projectFiles.has(origin.getSourceFile())) {
+            index?.wrapperDependency(route.id, origin, assigned.site, 'getLayout');
+          }
+          const evidence = `getLayout at ${relativePath(fn!.getSourceFile())}:${startLine(fn!)}; assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`;
+          return paths.map(path => andThen(branch, { ...path, locations: path.locations.map((wrapper, i) =>
+            i === 0 ? { ...wrapper, evidence, site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } } : wrapper) }));
+        });
+      });
+      if (expanded.length) chains = chains.flatMap(prefix => expanded.map(chain => andThen(prefix, chain)));
+      else chains = chains.flatMap(prefix => applicationChains.map(chain => andThen(prefix, chain)));
+      chains = chains.map(chain => chain.possible ? { ...chain, locations: chain.locations.map(wrapper =>
+        wrapper.phase ? wrapper : { ...wrapper, possible: true }) } : chain);
+      for (const chain of [...chains].sort((a, b) => Number(!!a.possible) - Number(!!b.possible))) for (const [position, wrapper] of chain.locations.entries()) {
+        if (wrapper.phase || wrapper.external) continue;
+        const id = `cmp:${wrapper.definitionFile ?? wrapper.file}#${wrapper.symbol}`;
+        if (componentsById.has(id)) {
+          index?.render(`file:${route.file}`, id,
+            wrapper.site?.file === route.file ? wrapper.site.line : route.file === wrapper.file ? wrapper.line :
+              startLine(filesByPath.get(route.file)!.getExportedDeclarations().get('default')?.[0] ?? filesByPath.get(route.file)!),
+            Number(wrapper.conditional || !!chain.conditional), true, chain.possible ? true : undefined);
+          layoutSeeds.push(id);
+          pageWrapperSeeds.set(id, Math.min(pageWrapperSeeds.get(id) ?? Infinity, position + 1));
+        }
+      }
     }
-    index?.page(route.id, layoutSeeds, chains.map(chain => chain.locations));
+    if (issues.length) index?.wrapperIssues(route.id, [...new Set(issues)]);
+    if (route.pages) {
+      const unique = new Map<string, WrapperChain>();
+      for (const chain of chains) {
+        const key = JSON.stringify(chain.locations.map(({ conditional, possible, ...item }) => item));
+        const prior = unique.get(key);
+        if (!prior || prior.possible && !chain.possible || prior.possible === chain.possible && prior.conditional && !chain.conditional) unique.set(key, chain);
+      }
+      chains = [...unique.values()];
+    }
+    index?.page(route.id, app ? [] : layoutSeeds, chains.map(chain => chain.locations));
     for (const { path, conditional } of chains) {
       if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`, path.length);
     }
     const visited = new Set<string>();
-    const layoutRoots = new Set(layoutSeeds);
+    const layoutRoots = new Set(layoutSeeds.filter(id => id === undefined || !pageWrapperSeeds.has(id)));
     const traverse = (seeds: (string | undefined)[], viaLayout: boolean) => {
-      const queue = seeds.map(id => ({ id, depth: 0 }));
+      const queue = seeds.map(id => ({ id, depth: viaLayout && id ? pageWrapperSeeds.get(id) ?? 0 : 0 }));
       for (let i = 0; i < queue.length; i++) {
         const { id, depth } = queue[i];
         if (!id || visited.has(id)) continue;
@@ -354,7 +807,9 @@ export function collectRenderFacts(
           pages.push({ page: route, viaLayout, depth });
           reached.set(id, pages);
         }
-        for (const target of outgoing.get(id) ?? []) queue.push({ id: target, depth: depth + 1 });
+        for (const target of outgoing.get(id) ?? []) {
+          if (!index?.pageRenderExcluded(route.id, id, target)) queue.push({ id: target, depth: depth + 1 });
+        }
       }
     };
     traverse([route.componentId, `file:${route.file}`], false);
@@ -688,7 +1143,7 @@ const spanningSlot = '\x01';
 const unknownSlot = /[\0\x01]/;
 type UrlText = { text: string; dynamic?: boolean; partial?: boolean };
 
-function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
+export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, wholeUrl = true): UrlText[] | undefined {
   if (seen.has(node)) return;
   seen.add(node);
   const resolve = (expression: Node, whole = wholeUrl) => urlTexts(expression, seen, expandConditional, whole);
@@ -775,9 +1230,10 @@ function urlTexts(node: Node, seen = new Set<Node>(), expandConditional = true, 
   }
 }
 
-function apiSegments(url: UrlText) {
+function apiSegments(url: UrlText, config?: NextConfig) {
   const prefix = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
-  const local = prefix ? url.text.slice(prefix.length) : url.text;
+  const raw = prefix ? url.text.slice(prefix.length) : url.text;
+  const local = config ? (normalizeNextUrl(raw, config.url) ?? raw) + (/[?#].*$/.exec(raw)?.[0] ?? '') : raw;
   if (!localApi.test(local)) return;
   const [pathname] = local.split(/[?#]/, 1);
   const spanning = pathname.includes(spanningSlot);
@@ -868,22 +1324,125 @@ function isSwrFallbackKey(node: Node): boolean {
   return origin.module === 'swr' && origin.name === 'SWRConfig';
 }
 
+const requestMethods = ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'];
+
+function axiosInstance(node: Node | undefined) {
+  const init = valueNode(node);
+  if (!Node.isCallExpression(init)) return;
+  const factory = importBinding(init.getExpression());
+  return factory?.module === 'axios' && factory.name === 'create' ? init : undefined;
+}
+
+function playwrightType(node: Node) {
+  const binding = bindingOf(node);
+  const type = Node.isParameterDeclaration(binding) || Node.isVariableDeclaration(binding) ? binding.getTypeNode() : undefined;
+  const origin = type?.getKind() === SyntaxKind.TypeReference ?
+    importBinding(type.asKindOrThrow(SyntaxKind.TypeReference).getTypeName(), true) : undefined;
+  return origin && /^(?:@playwright\/test|playwright)$/.test(origin.module) ? origin.name : undefined;
+}
+
+function playwrightRequest(node: Node) {
+  if (playwrightType(node) === 'APIRequestContext') return true;
+  if (Node.isPropertyAccessExpression(node) && node.getName() === 'request') {
+    const owner = node.getExpression();
+    if (['Page', 'BrowserContext'].includes(playwrightType(owner) ?? '')) return true;
+    if (Node.isCallExpression(owner)) {
+      const method = owner.getExpression();
+      if (Node.isPropertyAccessExpression(method) && method.getName() === 'context' &&
+        playwrightType(method.getExpression()) === 'Page') return true;
+    }
+  }
+  const binding = bindingOf(node);
+  if (!Node.isBindingElement(binding) || (binding.getPropertyNameNode() ?? binding.getNameNode()).getText() !== 'request') return false;
+  const callback = binding.getParent().getParent().getParent();
+  const call = callback.getParentIfKind(SyntaxKind.CallExpression);
+  if (!call || !call.getArguments().some(arg => arg === callback)) return false;
+  const origin = importBinding(call.getExpression());
+  return origin?.module === '@playwright/test' && origin.name === 'test';
+}
+
+function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
+  const expression = call.getExpression();
+  const origin = importBinding(expression);
+  const [url, options] = call.getArguments();
+  if (!url) return;
+  if (/^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+    !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile())) {
+    const methodProperty = property(options, 'method');
+    const method = textValue(methodProperty)?.toUpperCase() ??
+      (options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
+        options.getProperties().some(Node.isSpreadAssignment)) ? '?' : 'GET');
+    return { url, method, via: 'fetch' };
+  }
+  if (!Node.isPropertyAccessExpression(expression) || !requestMethods.includes(expression.getName())) return;
+  const method = expression.getName().toUpperCase();
+  const instance = pages && axiosInstance(expression.getExpression());
+  if (origin?.module === 'axios' && requestMethods.includes(origin.name) || instance) {
+    const options = instance ? instance.getArguments()[0] : undefined;
+    return { url, method, via: 'axios', base: textValue(property(options, 'baseURL')) };
+  }
+  if (pages && playwrightRequest(expression.getExpression())) return { url, method, via: 'Playwright request' };
+}
+
+function trpcRequest(call: import('ts-morph').CallExpression, workspace?: WorkspaceBindings) {
+  let expression = call.getExpression();
+  if (!Node.isPropertyAccessExpression(expression)) return;
+  const operation = expression.getName();
+  const method = ['query', 'useQuery', 'useInfiniteQuery'].includes(operation) ? 'GET' :
+    ['mutate', 'mutateAsync'].includes(operation) ? 'POST' : undefined;
+  if (!method) return;
+  const members: string[] = [];
+  expression = expression.getExpression();
+  const mutation = method === 'POST' && valueNode(expression);
+  if (mutation && Node.isCallExpression(mutation)) {
+    const hook = mutation.getExpression();
+    if (!Node.isPropertyAccessExpression(hook) || hook.getName() !== 'useMutation') return;
+    expression = hook.getExpression();
+  }
+  while (Node.isPropertyAccessExpression(expression)) {
+    members.unshift(expression.getName());
+    expression = expression.getExpression();
+  }
+  if (!members.length) return;
+  const local = valueNode(expression);
+  const init = Node.isCallExpression(local) ? local : valueNode(workspace?.resolve(expression));
+  if (!Node.isCallExpression(init)) return;
+  if (operation.startsWith('use') && property(call.getArguments()[1], 'enabled')?.getKind() === SyntaxKind.FalseKeyword) return;
+  const factory = importBinding(init.getExpression());
+  if (!factory || !['@trpc/client', '@trpc/next', '@trpc/react-query'].includes(factory.module) ||
+      !['createTRPCClient', 'createTRPCProxyClient', 'createTRPCNext', 'createTRPCReact'].includes(factory.name)) return;
+  const links = init.getDescendantsOfKind(SyntaxKind.CallExpression).filter(node => {
+    const origin = importBinding(node.getExpression());
+    return origin?.module === '@trpc/client' && origin.name === 'httpBatchLink';
+  });
+  if (links.length !== 1) return;
+  const url = property(links[0].getArguments()[0], 'url');
+  const prefix = textValue(url);
+  if (!url || !prefix) return;
+  return { url, text: prefix.replace(/\/$/, '') + '/' + members.join('.'), method, via: 'tRPC request',
+    evidence: `httpBatchLink at ${init.getSourceFile().getBaseName()}:${startLine(links[0])}`,
+    partial: !Node.isCallExpression(local) || !!property(call.getArguments()[1], 'enabled') };
+}
+
 const API_REFERENCE_KINDS = new Set([
   SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral,
   SyntaxKind.TemplateExpression, SyntaxKind.BinaryExpression
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
-    segments: route.path.slice(1).split('/')
-  })).map(endpoint => ({ ...endpoint, rank: endpoint.segments.map(part =>
-    part.startsWith('[[...') ? '0' : part.startsWith('[...') ? '1' : part.startsWith('[') ? '2' : '3').join('') }));
+    segments: routeSegments(route.path)
+  })).map(endpoint => ({ ...endpoint, rank: patternRank(endpoint.segments) }));
   if (!endpoints.length) return;
   endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
   const urlMatches = (parsed: NonNullable<ReturnType<typeof apiSegments>>) => {
     const { segments, partial } = parsed;
+    if (config && !segments.some(segment => unknownSlot.test(segment))) {
+      return matchNextRoutes('/' + segments.join('/'), endpoints, endpoint => endpoint.route.path)
+        .map(({ route }) => ({ route, partial, markdown: parsed.markdown, dynamic: undefined }));
+    }
     if (parsed.spanning) {
       return endpoints.filter(({ segments: pattern }) => matchesSpanningPath(pattern, segments))
         .map(({ route }) => ({ route, partial: true, markdown: false, dynamic: true }));
@@ -913,10 +1472,10 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     }
     return matches;
   };
-  const matchesFor = (url: Node | string) => {
+  const matchValues = (values: UrlText[]) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
-    for (const value of typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []) {
-      const parsed = apiSegments(value);
+    for (const value of values) {
+      const parsed = apiSegments(value, config);
       if (!parsed) continue;
       matches ??= new Map();
       for (const match of urlMatches(parsed)) {
@@ -927,6 +1486,28 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       }
     }
     return matches;
+  };
+  const matchesFor = (url: Node | string) => matchValues(typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []);
+  type Request = NonNullable<ReturnType<typeof httpRequest>>;
+  const summaries = new Map<Node, { request: Request; call: Node; parameter: number }[]>();
+  const summarize = (node: Node) => {
+    const fn = functionNode(node);
+    if (!fn || !projectFiles.has(fn.getSourceFile())) return [];
+    if (summaries.has(fn)) return summaries.get(fn)!;
+    const result: { request: Request; call: Node; parameter: number }[] = [];
+    const visit = (node: Node, traversal?: { skip(): void }) => {
+      if (Node.isFunctionLikeDeclaration(node)) { traversal?.skip(); return; }
+      if (!Node.isCallExpression(node) || conditionalAt(node, fn)) return;
+      const request = httpRequest(node, true);
+      if (!request) return;
+      const binding = bindingOf(valueNode(request.url) ?? request.url);
+      const parameter = fn.getParameters().findIndex(parameter => parameter === binding);
+      if (parameter >= 0) result.push({ request, call: node, parameter });
+    };
+    const body = fn.getBody();
+    if (body) { visit(body); body.forEachDescendant(visit); }
+    summaries.set(fn, result);
+    return result;
   };
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
@@ -968,6 +1549,30 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const axiosMethod = !isConstructor && origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
+      if (config && !isConstructor && !isFetch && !isSwr && !axiosMethod && !isAiSdk) {
+        const direct = httpRequest(node, true);
+        const trpc = trpcRequest(node, workspace);
+        const requests = direct ? [{ ...direct, evidence: undefined, text: undefined }] : trpc ? [trpc] :
+          summarize(expression).flatMap(summary => {
+            const url = node.getArguments()[summary.parameter];
+            return url ? [{ ...summary.request, url, text: undefined,
+              evidence: `HTTP client at ${relativePath(summary.call.getSourceFile())}:${startLine(summary.call)}` }] : [];
+          });
+        for (const request of requests) {
+          const base = 'base' in request ? request.base : undefined;
+          const values = request.text ? [{ text: request.text, partial: 'partial' in request && request.partial }] : (urlTexts(request.url) ?? []).map(value =>
+            base && !/^https?:/.test(value.text) ? { ...value, text: base.replace(/\/$/, '') + '/' + value.text.replace(/^\//, '') } : value);
+          const matches = matchValues(values);
+          if (!matches?.size) continue;
+          classify(request.url);
+          for (const { route, partial, dynamic, markdown } of matches.values()) {
+            index?.fetch({ file: source, line: startLine(node), node, route: route.id, method: request.method, url: route.path,
+              via: request.via, partial: partial || undefined, dynamic, evidence: request.evidence });
+            if (markdown) addFact(facts, source, `fetch ${source} -> ${route.file} ${route.path} (${request.via})`);
+          }
+        }
+        return;
+      }
       if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;

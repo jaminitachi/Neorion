@@ -34,7 +34,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
     return symbol;
   });
   const references = index.references.map((reference, offset): IndexedReference => {
-    const [target, file, line, kind, detail, owner, graphOwner] = reference;
+    const [target, file, line, kind, detail, owner, graphOwner, possible] = reference;
     if (kind === 'jsx-use') {
       facts.useSites!.push([offset]);
       return [target, file, line, 'use'];
@@ -43,13 +43,15 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
       facts.useSites!.push([offset, owner]);
       return [target, file, line, kind];
     }
-    if (graphOwner === undefined) return reference;
+    if (graphOwner === undefined || possible) return reference;
     facts.callOwners!.push([offset, graphOwner]);
     return owner === undefined ? [target, file, line, kind] : [target, file, line, kind, detail, owner];
   });
   const routes = index.routes.map(({ methods, handlers, ...route }) => {
-    if (methods || handlers) facts.routeDetails!.push([route.id, { methods, handlers }]);
-    return route;
+    // API consumer queries read Pages method evidence without inflating the graph.
+    const packedMethods = route.pages ? undefined : methods;
+    if (packedMethods || handlers) facts.routeDetails!.push([route.id, { methods: packedMethods, handlers }]);
+    return route.pages && methods ? { ...route, methods } : route;
   });
   return {
     ...rest, symbols, references, routes,

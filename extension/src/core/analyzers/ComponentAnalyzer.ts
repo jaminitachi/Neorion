@@ -1,3 +1,5 @@
+import type { NextConfig } from './NextConfig';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
@@ -204,7 +206,7 @@ function lexicalName(node: Node): string | undefined {
 }
 
 export class ComponentAnalyzer {
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
   public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
     const components = new Map<Node, ComponentNode>();
@@ -496,7 +498,7 @@ export class ComponentAnalyzer {
       }
       for (const target of new Set(targets)) {
         addEdge(from, target.id, 'renders');
-        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body));
+        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, undefined, this.config ? tag : undefined);
       }
     };
     const componentTags = new Set<Node>();
@@ -585,9 +587,9 @@ export class ComponentAnalyzer {
         if (body) bodies.set(node, body);
       }
       collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index, this.config, this.workspace);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

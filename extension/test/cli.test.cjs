@@ -142,7 +142,7 @@ test('CLI graph and query use the workspace cache', t => {
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json', 'tsconfig.json']);
 });
 
-test('CLI wrapper misses point to route search and suggest dynamic Pages Router patterns', t => {
+test('CLI wrapper misses point to route search and concrete Pages URLs resolve to their patterns', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });
   fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["pages/**/*"]}');
@@ -165,13 +165,7 @@ test('CLI wrapper misses point to route search and suggest dynamic Pages Router 
   for (const [url, pattern] of [
     ['/blog/example-post', '/blog/[slug]'], ['/blog/archive', '/blog/archive'], ['/blog/posts/a/b', '/blog/posts/[...parts]']
   ]) {
-    if (url !== pattern) {
-      const concrete = run(['query', 'wrappers', url]);
-      assert.equal(concrete.status, 0, concrete.stderr);
-      assert.ok(concrete.stdout.includes(`# matching pattern: ${pattern} `), concrete.stdout);
-      assert.match(concrete.stdout, /^# partial: target unresolved$/m);
-    }
-    const query = run(['query', 'wrappers', pattern]);
+    const query = run(['query', 'wrappers', url]);
     assert.equal(query.status, 0, query.stderr);
     assert.ok(query.stdout.includes(`# wrappers ${pattern} : 1 file, 1 page`), query.stdout);
     assert.match(query.stdout, /^1 pages\/_app\.tsx:1 MyApp$/m);

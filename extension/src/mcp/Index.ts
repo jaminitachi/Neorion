@@ -1,6 +1,8 @@
-export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 6;
-export const GRAPH_INDEX_REVISION = 9;
+import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
+
+export const WRAPPER_INDEX_REVISION = 4;
+export const QUERY_INDEX_REVISION = 7;
+export const GRAPH_INDEX_REVISION = 10;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -30,27 +32,33 @@ export interface Wrapper {
   symbol: string;
   line: number;
   conditional: boolean;
+  possible?: boolean;
   external?: string;
   provider?: boolean;
   providerTag?: boolean;
   definitionFile?: string;
+  site?: { file: string; line: number };
+  phase?: 'document' | 'application';
+  evidence?: string;
 }
 
 export interface FetchEntry {
   file: string;
   line: number;
   fn: string | null;
+  evidence?: string;
   method: string;
   url: string;
   via: string;
   route: number;
   owner?: number;
   graphOwner?: number;
+  lifecyclePossible?: true;
   partial?: boolean;
   dynamic?: boolean;
 }
 
-type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number];
+type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number, possible?: true];
 export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 // A null path reuses the referenced symbol's defining file.
 export type IndexedReference = Reference | [symbol: number, file: null, ...site: ReferenceSite];
@@ -73,6 +81,21 @@ export interface ServerAction {
   callers: [file: string, line: number, owner?: number][];
 }
 
+export type PageRenderCondition = 'excluded' | 'possible';
+export const renderSiteKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
+
+export interface PagesEdge {
+  from: number;
+  to?: number;
+  route?: number;
+  kind: 'data' | 'wrap' | 'middleware' | 'navigate' | 'redirect' | 'rewrite';
+  file: string;
+  line: number;
+  detail?: string;
+  possible?: boolean;
+  matcher?: { source: string; conditional?: boolean };
+}
+
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
@@ -85,9 +108,12 @@ export interface QueryIndex {
   routes: {
     id: number; url: string; file: string; kind: string; line?: number;
     component?: number; fileSymbol?: number; layouts?: number[];
-    methods?: string[]; handlers?: Record<string, number>;
+    pages?: boolean;
+    methods?: string[];
+    methodBasis?: 'enforced' | 'observed';
+    observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
-  renderEdges: [from: number, to: number, line: number, conditional: number][];
+  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true][];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
@@ -117,5 +143,15 @@ export interface QueryIndex {
   trpcUnbound?: number[];
   trpcIssues?: Record<number, [file: number, line: number][]>;
   trpcFiles?: string[];
+  pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
+  pagesUrlConfig?: NextUrlConfig;
+  pagesEdges?: PagesEdge[];
+  pagesIssues?: Record<number, string[]>;
+  pagesWrapSites?: Record<number, Record<string, [position: number, evidence: string][]>>;
+  pagesRenderConditions?: Record<number, Record<string, PageRenderCondition>>;
+  pagesWrapperIssues?: Record<number, string[]>;
+  pagesApiIssues?: Record<number, string[]>;
+  pagesObservedCalls?: Record<number, [file: string, line: number, expression: string][]>;
+  pagesOwnerIssues?: Record<number, string[]>;
   trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }
