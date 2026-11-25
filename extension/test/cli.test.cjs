@@ -70,6 +70,10 @@ if (action === 'get') {
     console.log(JSON.stringify(Object.entries(data.mcpServers).map(([name, entry]) => ({ name, ...entry }))));
   }
 } else if (action === 'add') {
+  if (process.env.FAKE_ADD_FAILURE) {
+    console.error('Cannot load Codex configuration');
+    process.exit(1);
+  }
   if (${JSON.stringify(agent)} === 'claude' && data.mcpServers.neorion) {
     console.error('Server already exists');
     process.exit(1);
@@ -607,7 +611,7 @@ test('CLI and MCP index a literal reconnect override as a GET request', async t 
   `);
   const override = await query('api_consumers', '/api/other');
   assert.match(override, /1 site in 1 file: 1 request/);
-  assert.match(override, /^send .* reconnectChat GET AI SDK transport$/m);
+  assert.match(override, /^send .* reconnectChat GET AI SDK transport \[possible reconnect\]$/m);
   assert.match(override, /^# complete:/m);
   const configured = await query('api_consumers', '/api/chat');
   assert.match(configured, /^send .* reconnectChat POST AI SDK transport$/m);
@@ -665,6 +669,25 @@ test('CLI query refreshes an older same-version index missing same-file use site
   assert.equal(readJson(file).queryRevision, revision);
 });
 
+test('CLI rejects same-version graph caches from both sides of the render-edge merge', t => {
+  const { run } = fixture(t);
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  const indexPath = path.join(path.dirname(/^Overview: (.+)$/m.exec(graph.stdout)[1]), indexFile);
+  const index = readJson(indexPath);
+  assert.ok(index.wrapperRevision > 5 && index.queryRevision > 8 && index.graphRevision > 11);
+  for (const [wrapperRevision, trailingSlots] of [[5, ['lib/view.tsx']], [4, ['prop body', 'app/page.tsx:2:1']]]) {
+    const renderEdges = index.renderEdges.map(edge => [...edge.slice(0, 4), null, null, ...trailingSlots]);
+    fs.writeFileSync(indexPath, JSON.stringify({ ...index, wrapperRevision, queryRevision: 8, graphRevision: 11, renderEdges }));
+    const query = run(['query', 'who_renders', 'DashboardShell'], { NEORION_AUTOBUILD: '1' });
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /^\/  app\/page\.tsx/m);
+    const refreshed = readJson(indexPath);
+    assert.deepEqual(refreshed.renderEdges, index.renderEdges);
+    assert.equal(refreshed.graphRevision, index.graphRevision);
+  }
+});
+
 test('Codex setup installs the skill and prints config when Codex is unavailable', t => {
   const { home, root, run } = fixture(t);
   const setup = run(['setup', 'codex'], { PATH: home, Path: home });
@@ -706,14 +729,15 @@ test('Codex setup uses bare neorion only when PATH resolves to this entry', { sk
   assert.ok(hint().includes('run `node '));
 });
 
-test('Codex setup writes the hint before failed registration', { skip: process.platform === 'win32' }, t => {
+test('Codex inspection failure leaves the hint and skill absent', { skip: process.platform === 'win32' }, t => {
   const { home, root, run } = fixture(t);
   fs.writeFileSync(path.join(home, 'codex'),
-    '#!/bin/sh\n[ -f AGENTS.md ] || exit 2\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
+    '#!/bin/sh\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
   const setup = run(['setup', 'codex'], { PATH: home });
   assert.equal(setup.status, 1);
-  assert.match(setup.stderr, /registration failed/);
-  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')));
+  assert.match(setup.stderr, /registration failed[\s\S]*CODEX_HOME/);
+  assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion/SKILL.md')), false);
 });
 
 test('Codex setup chooses a temporary npm command or a quoted local entry', t => {
@@ -1236,7 +1260,7 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
       assert.equal(fs.readFileSync(hintFile, 'utf8'), projectInstructions);
       assert.deepEqual(readJson(config).mcpServers, customized ? { neorion: server } : {});
       assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action),
-        customized ? [] : mode === 'upgrade' ? ['remove', 'add', 'remove'] : ['remove']);
+        customized ? [] : mode === 'upgrade' ? ['add', 'remove'] : ['remove']);
     });
   }
 });
@@ -1543,4 +1567,109 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
   assert.equal(query.status, 0, query.stderr);
   assert.equal(query.stdout.split('\n')[0], `Project: ${root}`);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
+});
+
+test('subcommand help succeeds and invalid graph flags include usage', t => {
+  const { run } = fixture(t);
+  for (const args of [[], ['graph'], ['query'], ['mcp'], ['setup'], ['setup', 'codex'], ['setup', 'claude'], ['setup', 'cursor']]) {
+    for (const flag of ['-h', '--help']) {
+      const result = run([...args, flag], { PATH: '' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^Usage:/m);
+    }
+  }
+  assert.match(run(['query', 'search', '--', '-h']).stdout, /# search "-h"/);
+  const invalid = run(['graph', '--unknown']);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Unknown option '--unknown'[\s\S]*Usage:/);
+});
+
+test('CLI and MCP suggest the dominant search kind beyond the visible rows', async t => {
+  const { root, env, run } = fixture(t);
+  for (const name of ['a', 'b', 'c']) {
+    const directory = path.join(root, 'app', 'api', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() {}');
+  }
+  const args = { kind: 'search', target: 'api', limit: 1 };
+  assert.match(run(['query', 'search', 'api', '--limit', '1']).stdout, /^# more: .*--kind api\)/m);
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.match(await server.text('query', args), /^# more: .*filter="api"\)/m);
+});
+
+test('root installation README scopes AI SDK evidence labels to source builds', () => {
+  const readme = fs.readFileSync(path.join(packageRoot, '../README.md'), 'utf8');
+  assert.match(readme, /In source builds,[^\n]*`\[mention\]`[^\n]*`\[possible URL override\]`/);
+});
+
+test('failed Codex MCP registration leaves the project hint and skill untouched', t => {
+  const { root, home, run } = fixture(t);
+  const mock = fakeAgent(home, 'codex');
+  const env = { PATH: home + path.delimiter + process.env.PATH, FAKE_ADD_FAILURE: '1' };
+  const hint = path.join(root, 'AGENTS.md');
+  fs.writeFileSync(hint, '# Project instructions\n');
+  const result = run(['setup', 'codex'], env);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cannot load Codex configuration[\s\S]*Check that CODEX_HOME/);
+  assert.equal(fs.readFileSync(hint, 'utf8'), '# Project instructions\n');
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion')), false);
+  assert.equal(fs.existsSync(mock.config), false);
+  assert.ok(mock.calls().some(([, action]) => action === 'add'));
+});
+
+test('declared React SDK ranges select the hook endpoint without installed types', t => {
+  const { root, run } = fixture(t);
+  for (const route of ['chat', 'custom']) {
+    const directory = path.join(root, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function POST() {}');
+  }
+  fs.writeFileSync(path.join(root, 'app/chat.ts'), `
+    import { useChat } from '@ai-sdk/react';
+    export function useCustomChat() { return useChat({ api: '/api/custom' }); }
+  `);
+  const file = path.join(root, 'package.json');
+  const query = route => run(['query', 'api_consumers', '/api/' + route]).stdout;
+  for (const [range, send, other] of [['^1.2.0', 'custom', 'chat'], ['^2.0.0', 'chat', 'custom']]) {
+    fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': range } }));
+    assert.match(query(send), /useCustomChat POST AI SDK transport/);
+    assert.doesNotMatch(query(other), /useCustomChat POST AI SDK transport/);
+  }
+  fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': '^1.2.0 || ^2.0.0' } }));
+  for (const route of ['custom', 'chat']) assert.match(query(route), /useCustomChat POST AI SDK transport \[partial url\]/);
+});
+
+test('an app inherits the workspace SDK declaration and refreshes when it changes', t => {
+  const { root, run } = fixture(t);
+  const workspace = path.join(root, 'workspace');
+  const app = path.join(workspace, 'apps', 'web');
+  fs.mkdirSync(app, { recursive: true });
+  for (const name of ['app', 'tsconfig.json']) fs.renameSync(path.join(root, name), path.join(app, name));
+  for (const route of ['chat', 'custom']) {
+    const directory = path.join(app, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function POST() {}');
+  }
+  fs.writeFileSync(path.join(app, 'app', 'chat.ts'), `
+    import { useChat } from '@ai-sdk/react';
+    export function useCustomChat() { return useChat({ api: '/api/custom' }); }
+  `);
+  const manifest = (dir, range, fields = {}) => fs.writeFileSync(path.join(dir, 'package.json'),
+    JSON.stringify({ ...fields, dependencies: range ? { '@ai-sdk/react': range } : {} }));
+  manifest(app, undefined, { name: 'web' });
+  const consumer = /useCustomChat POST AI SDK transport/;
+  const query = route => {
+    const result = run(['query', 'api_consumers', '/api/' + route, '--root', app]);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  manifest(workspace, '^2.0.0', { workspaces: ['apps/*'] });
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
+  manifest(workspace, '^1.0.0', { workspaces: ['apps/*'] });
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  manifest(app, '^2.0.0', { name: 'web' });
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
 });

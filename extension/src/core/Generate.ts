@@ -41,14 +41,14 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
                 .some(part => part === 'node_modules' || part === '.next');
     });
     const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const workspace = pagesConfig ? new WorkspaceBindings(projectPath) : undefined;
+    const workspace = new WorkspaceBindings(projectPath, project);
     const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
-        .analyze(sourceFiles, routes, !!(options.markdown || options.index));
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown);
 
     if (analysis.index) analysis.index.projectSnapshot = snapshot;
 

@@ -29,7 +29,7 @@ const help = `Usage:
   neorion setup claude [--no-hint] [--no-hook]
   neorion setup <codex|claude> --remove [--no-hint]
   neorion setup cursor [--remove]
-  neorion --version | --help
+  neorion --version | --help | -h
 
 Query kinds: ${kinds.join(', ')}
 
@@ -95,12 +95,20 @@ function hintCommand(temporary: boolean, onPath: boolean) {
 }
 
 async function main([command, ...args]: string[]) {
-  if ((!command || command === '--help') && !args.length) return console.log(help);
+  const helpFlag = (arg: string | undefined) => arg === '--help' || arg === '-h';
+  if ((!command || helpFlag(command)) && !args.length) return console.log(help);
   if (command === '--version' && !args.length) return console.log(VERSION);
+  const separator = args.indexOf('--');
+  if (command && ['graph', 'query', 'mcp', 'setup'].includes(command) &&
+      args.slice(0, separator === -1 ? args.length : separator).some(helpFlag)) return console.log(help);
   if (command === 'graph') {
-    const { values, positionals } = parseArgs({
-      args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true
-    });
+    let parsed;
+    try {
+      parsed = parseArgs({ args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true });
+    } catch (error) {
+      throw new Error(`${(error as Error).message}\n\n${help}`);
+    }
+    const { values, positionals } = parsed;
     if (positionals.length > 1) throw new Error(help);
     const { run } = require('./graph.cjs') as typeof import('./graph');
     return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
