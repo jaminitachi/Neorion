@@ -1335,6 +1335,19 @@ test('Pages resolves a const alias of the custom App page slot', t => {
   assert.doesNotMatch(query('impact', 'middleware'), /custom App page slot unresolved/);
 });
 
+test('an unguarded App slot with a missing page property stays partial', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component } = props;
+        const Wrapper = Component.PageWrapper;
+        return <Wrapper {...props}/>;
+      }`,
+    'pages/missing.page.tsx': 'export default function Missing() { return <main/>; }'
+  });
+  assert.match(query('wrappers', '/missing'), /^# partial: missing page property PageWrapper in a reachable App slot$/m);
+});
+
 test('Pages callbacks after an early return and in a try block are checker-resolved', t => {
   const config = {
     guard: 'if (!ctx.session) return { redirect: { destination: "/" } }; return callback(ctx);',

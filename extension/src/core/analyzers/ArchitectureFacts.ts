@@ -761,8 +761,8 @@ export function collectRenderFacts(
         if (dispatch) {
           const assigned = assignments.get(dispatch);
           if (!assigned) {
-            if (!page.opaque && !page.unknown.has(dispatch)) return [];
-            issues.push(`unresolved page property ${dispatch}`);
+            issues.push(!page.opaque && !page.unknown.has(dispatch) ?
+              `missing page property ${dispatch} in a reachable App slot` : `unresolved page property ${dispatch}`);
             return [{ ...chain, possible: true }];
           }
           if (page.unknown.has(dispatch)) chain = { ...chain, possible: true };
@@ -1050,7 +1050,7 @@ const sdkModules = new Set(['ai', '@ai-sdk/react', 'ai/react']);
 type SdkRequest = { method: 'POST' | 'GET'; urls: Set<Node | string>; partial: boolean; unbounded: boolean;
   override?: boolean; reconnectBase?: Node | string };
 
-function declaredChatVersion(directory: string, cache: Map<string, 'legacy' | 'transport' | undefined>): 'legacy' | 'transport' | undefined {
+function declaredChatVersion(directory: string, root: string, cache: Map<string, 'legacy' | 'transport' | undefined>): 'legacy' | 'transport' | undefined {
   if (cache.has(directory)) return cache.get(directory);
   let spec: unknown;
   try {
@@ -1065,7 +1065,7 @@ function declaredChatVersion(directory: string, cache: Map<string, 'legacy' | 't
   const legacy = range && intersects(range, '<2.0.0-0');
   const transport = range && intersects(range, '>=2.0.0-0');
   const version = legacy && !transport ? 'legacy' : transport && !legacy ? 'transport' :
-    spec === undefined && parent !== directory ? declaredChatVersion(parent, cache) : undefined;
+    spec === undefined && directory !== root && parent !== directory ? declaredChatVersion(parent, root, cache) : undefined;
   cache.set(directory, version);
   return version;
 }
@@ -1073,7 +1073,7 @@ function declaredChatVersion(directory: string, cache: Map<string, 'legacy' | 't
 function aiSdkRequests(
   node: Node, argument: Node | undefined, name: string, module: string | undefined,
   classify: (url: Node) => void, handledTransports: Set<Node>,
-  versions: Map<string, 'legacy' | 'transport' | undefined>
+  versions: Map<string, 'legacy' | 'transport' | undefined>, root: string
 ): SdkRequest[] {
   const observe = (key: string, value: Node) => {
     if (key === 'api' && value.getSourceFile() === node.getSourceFile()) classify(value);
@@ -1132,7 +1132,7 @@ function aiSdkRequests(
     const variants = type?.isUnion() ? type.getUnionTypes() : type ? [type] : [];
     version = variants.some(variant => variant.getProperty('transport')) ? 'transport' :
       variants.some(variant => variant.getProperty('api')) ? 'legacy' :
-      declaredChatVersion(node.getSourceFile().getDirectoryPath(), versions);
+      declaredChatVersion(path.resolve(node.getSourceFile().getDirectoryPath()), root, versions);
   }
   const knownTransport = delegated || sdkTransports.has(name);
   const mayReconnect = knownTransport || name === 'useChat' && module === '@ai-sdk/react' && version !== 'legacy';
@@ -1521,7 +1521,7 @@ const API_REFERENCE_KINDS = new Set([
   SyntaxKind.TemplateExpression, SyntaxKind.BinaryExpression
 ]);
 
-export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
+export function collectApiFacts(root: string, files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
   actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
@@ -1669,7 +1669,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
-      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions) : undefined;
+      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions, path.resolve(root)) : undefined;
       if (sdkRequests?.some(request => request.partial)) {
         index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded),
           sdkRequests.some(request => request.override));

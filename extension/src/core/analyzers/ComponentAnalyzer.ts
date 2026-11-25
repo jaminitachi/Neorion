@@ -589,7 +589,7 @@ export class ComponentAnalyzer {
       }
       if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts);
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
-      collectApiFacts(files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace);
+      collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace);
     }
     return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, historyOnly), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
