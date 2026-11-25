@@ -4,6 +4,7 @@ import { kinds, type QueryKind } from '../mcp/Tools';
 import { workspaceCache } from './WorkspaceCache';
 
 export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
+export const CURSOR_SETUP_RULE = '.cursor/rules/neorion-query.mdc';
 const queryArguments: Record<QueryKind, string> = {
   who_renders: ' <Component>',
   wrappers: ' <route>',
@@ -43,7 +44,7 @@ interface BlockState {
 export function updateAgentFiles(root: string, graphRoot: string, targets: string[], connect: boolean, mcp = false, instruction?: string) {
   const changes: { file: string; content: string; remove: boolean; removeRulesDirectory: boolean }[] = [];
   for (const target of targets) {
-    if (!AGENT_FILES.includes(target)) throw new Error('Unknown AI instruction file');
+    if (!AGENT_FILES.includes(target) && target !== CURSOR_SETUP_RULE) throw new Error('Unknown AI instruction file');
     const file = path.join(root, target);
     for (let entry = file; entry !== root; entry = path.dirname(entry)) {
       if (fs.lstatSync(entry, { throwIfNoEntry: false })?.isSymbolicLink()) {

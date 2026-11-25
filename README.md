@@ -140,17 +140,25 @@ Setup registers the Neorion MCP server at user scope, installs the skill in `~/.
 
 Pass `--no-hint` to skip updating `CLAUDE.md`, which setup updates only in folders containing `tsconfig.json`, `jsconfig.json`, or `package.json`.
 
+Setup also adds an advisory `PreToolUse` hook for Grep and Glob in `.claude/settings.json`. When a pattern resembles a component, route, or symbol in an indexed Next.js project, the hook suggests a matching `neorion query` command in Claude’s context. It runs locally and lets the search proceed through Claude’s normal permission flow. Use `--no-hook` to disable the advisory while keeping the other setup features. [Claude Code hooks reference](https://code.claude.com/docs/en/hooks#pretooluse)
+
 Ask “Which layouts or providers wrap the / route?” For headless use, allow the registered tool explicitly.
 
 ```sh
 claude -p "Which layouts or providers wrap the / route?" --allowedTools mcp__neorion__neorion_query
 ```
 
-Run `neorion setup claude --remove` from the project to clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Blocks in other projects stay until you run `--remove` there. Pass `--remove --no-hint` to leave the current project's block in place.
+Run `neorion setup claude --remove` from the project to remove the Neorion hook and clear its marked block. It also removes the skill and MCP registration that setup still owns, which unregisters those tools for every project. Run `--remove` in each project to clear its hook and block. Pass `--remove --no-hint` to leave the current project's block in place.
 
 Claude Code may leave its settings file and backups after removal.
 
 For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`. Combining plugin mode with persistent setup makes Claude load two copies of the tool and skill.
+
+## Cursor
+
+From the project root, run `neorion setup cursor`. It adds the Neorion MCP server to `.cursor/mcp.json` and writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+
+Run `neorion setup cursor --remove` from the same project to remove the rule block and the MCP entry owned by setup.
 
 ## Build from source
 

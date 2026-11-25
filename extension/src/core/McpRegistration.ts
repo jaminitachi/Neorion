@@ -14,6 +14,7 @@ export type McpTarget = keyof typeof MCP_TARGETS;
 export const REGISTER_MCP = 'Register Neorion query tools (MCP)';
 export const COPY_MCP = 'Other tools: copy configuration snippet';
 const STATE = '.neorion/connect-state.json';
+const CURSOR_SETUP_STATE = '.neorion/cursor-setup-state.json';
 const BUNDLE = '.neorion/mcp/server.cjs';
 const GRAPH_BUNDLE = '.neorion/mcp/graph.cjs';
 
@@ -113,15 +114,15 @@ export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', projec
 }
 
 export function planMcp(root: string, project: string, targets: McpTarget[], bundled: boolean, bundleSource: string,
-  connect: boolean) {
+  connect: boolean, cursorSetup?: { localEntry?: string }) {
   const changes: Change[] = [];
   const directories = new Set<string>();
   const cache = workspaceCache(root);
   if (exists(cache)?.isSymbolicLink()) throw new Error('Neorion cache is a symbolic link');
-  const stateFile = checked(cache, STATE);
+  const stateFile = checked(cache, cursorSetup ? CURSOR_SETUP_STATE : STATE);
   const originalState = read(stateFile);
-  const legacyStateFile = checked(root, STATE);
-  const legacyState = originalState === null ? read(legacyStateFile) : null;
+  const legacyStateFile = cursorSetup ? undefined : checked(root, STATE);
+  const legacyState = originalState === null && legacyStateFile ? read(legacyStateFile) : null;
   const state: State = JSON.parse(originalState ?? legacyState ?? '{"configs":{}}');
   if (!state.configs || typeof state.configs !== 'object' ||
       Object.keys(state.configs).some(target => !Object.prototype.hasOwnProperty.call(MCP_TARGETS, target))) throw new Error('Invalid Neorion MCP connection state.');
@@ -175,7 +176,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
       ? { command: 'node', args: ['-e', launchBundle, '--', variable ? '${workspaceFolder}' : '.', projectArgument] }
-      : mcpCommand({ root: scopedProject });
+      : mcpCommand({ root: scopedProject, localEntry: cursorSetup?.localEntry });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     if (parsed.entry && !equal(getNodeValue(parsed.entry), entry)) {
@@ -252,11 +253,11 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   }
   const nextState = Object.keys(state.configs).length || state.bundle || state.legacyBundle ? json(state) + '\n' : null;
   if (originalState !== nextState) changes.push({ file: stateFile, content: nextState });
-  if (legacyState !== null) changes.push({ file: legacyStateFile, content: null });
+  if (legacyState !== null && legacyStateFile) changes.push({ file: legacyStateFile, content: null });
   return {
     count: updated.size,
     configured: Object.keys(state.configs).length > 0,
-    commit() {
+    commit(finalize?: () => void) {
       const undo: Change[] = [];
       const created = new Set<string>();
       try {
@@ -269,6 +270,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
             fs.writeFileSync(file, content);
           }
         }
+        finalize?.();
       } catch (error) {
         for (const { file, content } of undo.reverse()) {
           if (content === null) fs.rmSync(file, { force: true });

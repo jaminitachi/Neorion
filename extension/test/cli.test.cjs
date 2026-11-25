@@ -552,6 +552,153 @@ test('Claude setup registers at user scope once, installs the skill and reverses
   assert.ok(!fs.existsSync(path.dirname(skill)));
 });
 
+const setupFixture = file => path.join(__dirname, 'fixtures/setup', file);
+const neorionHooks = settings => (settings.hooks?.PreToolUse ?? []).flatMap(group => group.hooks)
+  .filter(hook => hook.args?.includes('neorion-query-advisory'));
+
+test('Claude setup merges the advisory and removes only its own hook', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const file = path.join(root, '.claude/settings.json');
+  const source = setupFixture('claude-settings.json');
+  const original = readJson(source);
+  fs.mkdirSync(path.dirname(file));
+  fs.copyFileSync(source, file);
+  const installed = run(['setup', 'claude'], env);
+  assert.equal(installed.status, 0, installed.stderr);
+  const settings = readJson(file);
+  const groups = settings.hooks.PreToolUse;
+  assert.deepEqual(groups.slice(0, -1), original.hooks.PreToolUse);
+  assert.deepEqual(settings.permissions, original.permissions);
+  assert.deepEqual(settings.hooks.PostToolUse, original.hooks.PostToolUse);
+  assert.equal(groups.at(-1).matcher, 'Grep|Glob');
+  assert.equal(neorionHooks(settings).length, 1);
+  const contents = fs.readFileSync(file, 'utf8');
+  const repeated = run(['setup', 'claude'], env);
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.equal(fs.readFileSync(file, 'utf8'), contents);
+
+  // Preserve another handler added to the same matcher after setup.
+  const shared = { type: 'command', command: 'another-search-hook' };
+  groups.at(-1).hooks.push(shared);
+  fs.writeFileSync(file, JSON.stringify(settings, null, 2));
+  original.hooks.PreToolUse.push({ matcher: 'Grep|Glob', hooks: [shared] });
+  for (let i = 0; i < 2; i++) {
+    const removed = run(['setup', 'claude', '--remove'], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.deepEqual(readJson(file), original);
+  }
+});
+
+test('Claude --no-hook leaves project settings alone or disables an installed advisory', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const file = path.join(root, '.claude/settings.json');
+  const optOut = () => {
+    const result = run(['setup', 'claude', '--no-hook'], env);
+    assert.equal(result.status, 0, result.stderr);
+  };
+  optOut();
+  assert.ok(!fs.existsSync(file));
+  assertQueryHint(fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8'));
+  fs.mkdirSync(path.dirname(file));
+  fs.copyFileSync(setupFixture('claude-settings.json'), file);
+  const original = fs.readFileSync(file, 'utf8');
+  optOut();
+  assert.equal(fs.readFileSync(file, 'utf8'), original);
+  assert.equal(run(['setup', 'claude', '--no-hint'], env).status, 0);
+  assert.equal(neorionHooks(readJson(file)).length, 1);
+  optOut();
+  assert.deepEqual(readJson(file), JSON.parse(original));
+});
+
+test('Installed Claude hook suggests queries and exits silently when out of scope', t => {
+  const { home, root, env, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const setup = run(['setup', 'claude'], { PATH: home });
+  assert.equal(setup.status, 0, setup.stderr);
+  const [hook] = neorionHooks(readJson(path.join(root, '.claude/settings.json')));
+  assert.equal(hook.command, 'node');
+  assert.equal(hook.onFailure, 'continue');
+  const payload = (tool_name, pattern, path) => JSON.stringify({
+    session_id: 'fixture-session', cwd: root, hook_event_name: 'PreToolUse',
+    tool_name, tool_input: { pattern, path }, tool_use_id: 'fixture-tool'
+  });
+  const invoke = input => {
+    const result = spawnSync(process.execPath, hook.args, { cwd: home, env, input, encoding: 'utf8', timeout: 2000 });
+    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+    assert.equal(result.stderr, '');
+    return result.stdout;
+  };
+  const manifest = path.join(root, 'package.json');
+  const component = payload('Grep', '\\bDashboardShell\\b');
+  fs.writeFileSync(manifest, '{"dependencies":{"next":"^15.0.0"}}');
+  assert.equal(invoke(component), '');
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  for (const [input, command] of [
+    [component, 'who_renders DashboardShell'],
+    [payload('Glob', '**/*DashboardShell*.{tsx,ts}', 'app'), 'who_renders DashboardShell'],
+    [payload('Glob', '**/app/settings/[id]/page.tsx'), 'wrappers "/settings/[id]"'],
+    [payload('Grep', '/api/users'), 'api_consumers "/api/users"'],
+    [payload('Grep', 'useCurrentUser'), 'search useCurrentUser']
+  ]) {
+    const output = invoke(input);
+    assert.equal(output.trimEnd().split('\n').length, 1);
+    assert.deepEqual(JSON.parse(output), { hookSpecificOutput: {
+      hookEventName: 'PreToolUse', additionalContext: 'Neorion index available. Try \x60neorion query ' + command + '\x60.'
+    } });
+  }
+  for (const input of ['{', ' '.repeat(17_000), payload('Bash', 'DashboardShell'),
+    payload('Grep', 'Dashboard.*|Shell'), payload('Glob', '**/*.{tsx,ts}')]) {
+    assert.equal(invoke(input), '');
+  }
+  fs.writeFileSync(manifest, '{"dependencies":{"react":"^19.0.0"}}');
+  assert.equal(invoke(component), '');
+});
+
+test('Cursor setup merges MCP and shares the Claude hint, with idempotent project removal', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const env = { PATH: home };
+  const config = path.join(root, '.cursor/mcp.json');
+  const rule = path.join(root, '.cursor/rules/neorion-query.mdc');
+  const otherRule = path.join(root, '.cursor/rules/other.mdc');
+  fs.mkdirSync(path.dirname(rule), { recursive: true });
+  fs.copyFileSync(setupFixture('cursor-mcp.json'), config);
+  fs.writeFileSync(otherRule, '# Existing rule\n');
+  const original = fs.readFileSync(config, 'utf8');
+  assert.equal(run(['setup', 'claude', '--no-hook'], env).status, 0);
+  const added = run(['setup', 'cursor'], env);
+  assert.equal(added.status, 0, added.stderr);
+  assert.deepEqual(readJson(config), {
+    mcpServers: { ...JSON.parse(original).mcpServers, neorion: mcpCommand({ localEntry: entry, root: '${workspaceFolder}' }) }
+  });
+  const hint = fs.readFileSync(rule, 'utf8');
+  assert.match(hint, /^---\ndescription: .+\nalwaysApply: true\n---\n/);
+  assertQueryHint(hint);
+  const claude = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
+  const guidance = text => text.split('<!-- neorion:start -->\n')[1].split('<!-- neorion:state ')[0];
+  assert.equal(guidance(hint), guidance(claude));
+  const merged = fs.readFileSync(config, 'utf8');
+  assert.equal(run(['setup', 'cursor'], env).status, 0);
+  assert.equal(fs.readFileSync(config, 'utf8'), merged);
+  assert.equal(fs.readFileSync(rule, 'utf8'), hint);
+  for (let i = 0; i < 2; i++) {
+    const removed = run(['setup', 'cursor', '--remove'], env);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    assert.ok(!fs.existsSync(rule));
+    assert.equal(fs.readFileSync(otherRule, 'utf8'), '# Existing rule\n');
+  }
+  assert.ok(!fs.existsSync(path.join(home, '.cursor')));
+  const help = run(['--help']).stdout;
+  assert.match(help, /setup claude .*--no-hook/);
+  assert.match(help, /setup cursor \[--remove\]/);
+});
+
 test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked legacy registration', async t => {
   const legacySkill = path.join(__dirname, 'fixtures/neorion-0.5.2-skill.md');
   for (const mode of ['upgrade', 'direct removal', 'preserve customized server']) {
