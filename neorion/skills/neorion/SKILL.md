@@ -1,12 +1,12 @@
 ---
 name: neorion
-description: Answers architecture questions in Next.js projects written in TypeScript or JavaScript from an index. Use it before renaming or moving a component, editing a layout or provider, or changing an API route or server action. Ask it first to find renderers, wrappers, callers, and symbol references, trace upstream impacts or downstream calls, follow dependency paths, or find routes affected by Git changes.
+description: Answers architecture questions in Next.js projects written in TypeScript or JavaScript from an index. Use it before renaming or moving a component, editing a layout or provider, or changing an API route, server action, or tRPC procedure. Ask it first to find renderers, wrappers, callers, and symbol references, trace upstream impacts or downstream calls, follow dependency paths, or find routes affected by Git changes.
 allowed-tools: mcp__plugin_neorion_neorion__neorion_query, mcp__neorion__neorion_query, Bash(neorion query:*)
 ---
 Call `neorion_query` with `kind` and the arguments for that query.
 - `who_renders` with a component name: which pages and routes render it.
 - `wrappers` with a route such as `/settings` lists layouts and providers on the page’s wrapper chain, including third-party wrappers by default. Use `includeExternal: false` in MCP or `--no-external` in the CLI to hide third-party non-provider wrappers.
-- `api_consumers` lists caller files and lines for an API route or server action. Pass an action name such as `signOut` or a qualified target such as `app/actions.ts#signOut`.
+- `api_consumers` lists caller files and lines for an API route, server action, or tRPC procedure. Pass a route URL, an action name like `signOut`, or a dotted procedure path like `post.create`. Use `path#Name` to disambiguate.
 - `rename_impact` with a symbol: which files must change if it is renamed.
 - `search` with a name or path: where it is defined or used.
 - `impact` with a symbol or file identifies upstream callers and affected routes. Set `depth` or `--depth` to extend the trace, and `includeTests` or `--include-tests` to include test callers.

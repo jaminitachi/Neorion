@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 3;
+export const GRAPH_INDEX_REVISION = 5;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -13,7 +13,7 @@ export interface SymbolEntry {
   id: number;
   file: string;
   name: string;
-  kind: 'component' | 'hook' | 'function' | 'constant';
+  kind: 'component' | 'hook' | 'function' | 'constant' | 'procedure';
   line: number;
   end?: number;
   exported?: boolean;
@@ -53,6 +53,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 export type IndexedReference = Reference | [symbol: number, file: null, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
+export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 
 export interface ServerAction {
@@ -99,6 +100,10 @@ export interface QueryIndex {
   defaultSymbols?: Record<number, number>;
   routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number]>;
   layoutStyles?: Record<string, string[]>;
+  trpcUses?: Record<number, TrpcUse[]>;
+  trpcAliases?: Record<number, number[]>;
+  trpcUnbound?: number[];
+  trpcIssues?: Record<number, [file: number, line: number][]>;
   trpcFiles?: string[];
   trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }
