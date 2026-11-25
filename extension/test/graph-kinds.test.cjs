@@ -275,7 +275,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
   const targetAction = query('impact', 'submitItem');
-  assert.match(targetAction, /depth 5 \(limit 3 \+ renders\/events\)/);
+  assert.match(targetAction, /depth 4 \(limit 3 \+ renders\/events\)/);
   assert.match(targetAction, /# target: server action createItem/);
   assert.match(targetAction, /0 server actions/);
   assert.doesNotMatch(targetAction, /^action createItem/m);
@@ -1067,6 +1067,150 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.match(sync, /call .* start\nevent .*Start jobs/);
   assert.match(sync, /call .* retry\nevent .*Retry job/);
   assert.match(sync, /page \/jobs\s/);
+});
+
+test('default impact depth follows effect locals, sibling handlers and scoped callback props', { timeout: 40_000 }, t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const write = (relative, source) => {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, source);
+  };
+  write('lib/local-actions.ts', `
+    'use server';
+    function effectTarget() {}
+    function load() { effectTarget(); }
+    export async function effectAction() { load(); }
+    function handlerTarget() {}
+    function save() { handlerTarget(); }
+    export async function handlerAction() { save(); }
+    function remoteTarget() {}
+    function remoteOne() { remoteTarget(); }
+    function remoteTwo() { remoteOne(); }
+    export async function remoteAction() { remoteTwo(); }
+  `);
+  write('ui/local.tsx', `
+    'use client';
+    import { useEffect } from 'react';
+    import { effectAction, handlerAction, remoteAction } from '../lib/local-actions';
+    export function EffectPanel() {
+      useEffect(() => { const f = async () => { await effectAction(); }; f(); }, []);
+      return <span/>;
+    }
+    export function Dialog({ onRun }: { onRun: () => void }) {
+      const submit = () => onRun();
+      return <button onClick={() => submit()}>Run</button>;
+    }
+    export function HandlerPanel() {
+      const save = () => handlerAction();
+      const run = () => save();
+      return <Dialog onRun={run}/>;
+    }
+    export function RemotePanel() {
+      const remote = () => remoteAction();
+      return <button onClick={remote}>Remote</button>;
+    }
+  `);
+  write('app/local/layout.tsx', `
+    import { EffectPanel } from '../../ui/local';
+    export default function Layout({ children }) { return <><EffectPanel/>{children}</>; }
+  `);
+  write('app/local/page.tsx', 'export default function Page() { return <main/>; }');
+  write('app/handlers/page.tsx', `
+    import { HandlerPanel } from '../../ui/local';
+    export default function Page() { return <HandlerPanel/>; }
+  `);
+  write('app/other/page.tsx', `
+    import { Dialog, RemotePanel } from '../../ui/local';
+    export default function Page() { return <><Dialog onRun={() => {}}/><RemotePanel/></>; }
+  `);
+  const indexFile = build();
+  const { packGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  fs.writeFileSync(indexFile, JSON.stringify(packGraph(JSON.parse(fs.readFileSync(indexFile, 'utf8')), 0)));
+
+  const effect = query('impact', 'effectTarget');
+  assert.match(effect, /^layout app\/local\/layout\.tsx +wraps 1 route \(\/local\)/m);
+  assert.match(effect, /^d3 call .*EffectPanel < f$/m);
+  assert.match(effect, /^# complete:/m);
+  const handler = query('impact', 'handlerTarget');
+  assert.match(handler, /^page \/handlers\s/m);
+  assert.doesNotMatch(handler, /^page \/other\s/m);
+  assert.match(handler, /^# complete:/m);
+  const remote = query('impact', 'remoteTarget');
+  assert.doesNotMatch(remote, /^page \/other\s/m);
+  assert.match(remote, /^# partial: depth limit/m);
+  assert.match(query('impact', 'remoteTarget', '--depth', '4'), /^page \/other\s/m);
+});
+
+test('component lookup maps resolve static keys and label unresolved choices', { timeout: 40_000 }, t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/lookup.tsx'), `
+    export function Multi() { return <span/>; }
+    export function Ghost() { return <span/>; }
+    export function Exact() { return <span/>; }
+    export const MAP = { m: Multi, g: Ghost } as const;
+    export const EXACT = { a: Exact, b: Ghost } as const;
+    export function LookupLeaf() { return <span/>; }
+    export function touch() {}
+    function Receiver({ slot, ...props }) { return <div {...props}>{slot}</div>; }
+    function Ignorer() { return <div/>; }
+    export const RECEIVERS = { a: Receiver, b: Ignorer } as const;
+  `);
+  const page = (name, source) => {
+    const directory = path.join(root, 'app', name);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'page.tsx'), source);
+  };
+  page('h', `
+    import { MAP } from '../../ui/lookup';
+    export default function Page({ k }: { k: keyof typeof MAP }) { const C = MAP[k]; return <C/>; }
+  `);
+  page('known-key', `
+    import { EXACT } from '../../ui/lookup';
+    const key = 'a';
+    export default function Page() { const C = EXACT[key]; return <C/>; }
+  `);
+  page('known-property', `
+    import { EXACT } from '../../ui/lookup';
+    export default function Page() { return <EXACT.a/>; }
+  `);
+  page('create-element', `
+    import { createElement } from 'react';
+    import { MAP } from '../../ui/lookup';
+    export default function Page() { return createElement(MAP['m']); }
+  `);
+  page('lookup-props', `
+    import { LookupLeaf, RECEIVERS, touch } from '../../ui/lookup';
+    export default function Page({ k }: { k: keyof typeof RECEIVERS }) {
+      const C = RECEIVERS[k];
+      return <C slot={<LookupLeaf/>} onClick={touch}/>;
+    }
+  `);
+  const indexFile = build();
+  const multi = query('who_renders', 'Multi');
+  assert.match(multi, /^\/h\s.*\[possible\]/m);
+  assert.match(multi, /^\/create-element\s[^\n]*depth 1$/m);
+  const ghost = query('who_renders', 'Ghost');
+  assert.match(ghost, /^\/h\s.*\[possible\]/m);
+  assert.doesNotMatch(ghost, /^\/(known-|create-element)/m);
+  for (const output of [multi, ghost, query('impact', 'Ghost'), query('path', '/h', 'Ghost')]) {
+    assert.match(output, /^# partial: component lookup key untraced/m);
+  }
+  const exact = query('who_renders', 'Exact');
+  assert.match(exact, /^\/known-key\s/m);
+  assert.match(exact, /^\/known-property\s/m);
+  assert.doesNotMatch(exact, /\[possible\]/);
+  assert.match(exact, /^# complete:/m);
+  const slot = query('who_renders', 'LookupLeaf');
+  assert.match(slot, /^\/lookup-props\s.*prop slot via Receiver.*\[possible\]/m);
+  assert.match(slot, /^# partial: component lookup key untraced/m);
+  const event = query('impact', 'touch');
+  assert.match(event, /^page \/lookup-props\s.*\[possible\]/m);
+  assert.match(event, /^# partial: component lookup key untraced/m);
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  index.graphRevision--;
+  fs.writeFileSync(indexFile, JSON.stringify(index));
+  assert.match(query('who_renders', 'Exact'), /^# partial: regenerate index for component lookup coverage$/m);
 });
 
 test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {

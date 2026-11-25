@@ -2,12 +2,14 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 4;
 export const QUERY_INDEX_REVISION = 8;
-export const GRAPH_INDEX_REVISION = 11;
+export const GRAPH_INDEX_REVISION = 12;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
+export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
+export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE : 'JSX prop render untraced';
 export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
@@ -43,7 +45,7 @@ export interface Wrapper {
   evidence?: string;
 }
 
-export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true };
+export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true; callback?: true };
 export type FlowCall = [from: number, to: number, file: string, line: number, detail: string, gates?: FlowGate[]];
 
 export interface FetchEntry {
@@ -139,6 +141,7 @@ export interface QueryIndex {
   externalCalls?: ExternalCall[];
   externalModules?: string[];
   flowCalls?: FlowCall[];
+  callableOwners?: Record<number, number>;
   hasFlowCalls?: boolean;
   callGates?: Record<string, FlowGate[]>;
   flowIssues?: Record<number, { reason: string; gates: FlowGate[] }[]>;

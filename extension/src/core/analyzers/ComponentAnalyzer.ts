@@ -3,6 +3,7 @@ import type { WorkspaceBindings } from './WorkspaceBindings';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
+import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
 import {
   collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression
 } from './ArchitectureFacts';
@@ -386,19 +387,23 @@ export class ComponentAnalyzer {
 
     const edges = new Map<string, ComponentEdge>();
     const componentCalls = new Set<Node>();
-    type Imports = Map<Node, import('ts-morph').ImportDeclaration>;
+    type Imports = { byDeclaration: Map<Node, import('ts-morph').ImportDeclaration>; names: Set<string> };
     const importsByFile = new Map<SourceFile, Imports>();
     const importsFor = (file: SourceFile) => {
       const cached = importsByFile.get(file);
       if (cached) return cached;
-      const imports: Imports = new Map();
+      const imports: Imports = { byDeclaration: new Map(), names: new Set() };
       for (const declaration of file.getImportDeclarations()) {
         if (declaration.isTypeOnly()) continue;
         const imported = [declaration.getDefaultImport(), declaration.getNamespaceImport(),
           ...declaration.getNamedImports().filter(specifier => !specifier.isTypeOnly())
             .map(specifier => specifier.getAliasNode() ?? specifier.getNameNode())];
         for (const binding of imported) {
-          for (const bindingDeclaration of binding?.getSymbol()?.getDeclarations() ?? []) imports.set(bindingDeclaration, declaration);
+          if (!binding) continue;
+          imports.names.add(binding.compilerNode.text);
+          for (const bindingDeclaration of binding.getSymbol()?.getDeclarations() ?? []) {
+            imports.byDeclaration.set(bindingDeclaration, declaration);
+          }
         }
       }
 
@@ -407,12 +412,12 @@ export class ComponentAnalyzer {
     };
     const resolveHook = (expression: Node, imports: Imports) => {
       const binding = Node.isPropertyAccessExpression(expression) ? expression.getExpression() : expression;
-      const original = binding.getSymbol()?.getDeclarations() ?? [];
-      const imported = original.find(declaration => imports.has(declaration));
+      const canBeImported = !Node.isIdentifier(binding) || imports.names.has(binding.compilerNode.text);
+      const imported = canBeImported ? binding.getSymbol()?.getDeclarations().find(declaration => imports.byDeclaration.has(declaration)) : undefined;
       const name = Node.isImportSpecifier(imported) ? imported.getName() :
-        Node.isPropertyAccessExpression(expression) ? expression.getName() : expression.getText();
+        Node.isPropertyAccessExpression(expression) ? expression.getName() : Node.isIdentifier(expression) ? expression.compilerNode.text : expression.getText();
       if (!HOOK.test(name)) return;
-      const importDeclaration = imported && imports.get(imported);
+      const importDeclaration = imported && imports.byDeclaration.get(imported);
       const specifier = importDeclaration?.getModuleSpecifierValue();
       if (specifier === 'react' || specifier === 'react-dom') return;
       const targets = declarationsOf(expression);
@@ -447,6 +452,7 @@ export class ComponentAnalyzer {
     }).flatMap(node => resolveComponent(node) ?? []);
     // Discover component-valued bindings before assigning JSX to its owning body.
     const renderTargets = new Map<Node, ComponentNode[]>();
+    const possibleLookups = new Map<Node, Set<string>>();
     const callbackBodies = new Set<ts.Node>();
     for (const file of files) {
       // Keep RENDER_KINDS in sync with the render sites handled here and in the file scan below.
@@ -459,26 +465,35 @@ export class ComponentAnalyzer {
           tag = node.getArguments()[0];
         }
         if (!tag) return;
-        const targets = declarationsOf(tag);
+        const targets = Node.isElementAccessExpression(tag) ? [tag] : declarationsOf(tag);
         const resolved = declaredRenderTargets(targets);
         renderTargets.set(tag, resolved);
         if (resolved.length) return;
-        if (!targets.length && Node.isPropertyAccessExpression(tag)) targets.push(tag);
+        const bindings = Node.isPropertyAccessExpression(tag) ? [tag] : targets;
 
-        for (const fn of renderBindings(targets, projectFiles)) {
-          let binding: Node = fn;
+        const register = (component: ComponentNode, possible: boolean) => {
+          if (possible && !resolved.includes(component)) {
+            const ids = possibleLookups.get(tag) ?? new Set<string>();
+            ids.add(component.id);
+            possibleLookups.set(tag, ids);
+          } else if (!possible) possibleLookups.get(tag)?.delete(component.id);
+          resolved.push(component);
+        };
+        for (const { target, possible } of renderBindings(bindings, projectFiles)) {
+          let binding: Node = target;
           while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
                  Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
           const parent = binding.getParent();
           if (Node.isVariableDeclaration(parent)) binding = parent;
           const existing = resolveComponent(binding);
           if (existing) {
-            resolved.push(existing);
+            register(existing, possible);
             continue;
           }
-          const body = fn.getBody();
+          if (Node.isClassDeclaration(target)) continue;
+          const body = target.getBody();
           if (!body || !hasRender(body)) continue;
-          const source = fn.getSourceFile();
+          const source = target.getSourceFile();
           const relative = relativePath(source);
           const name = lexicalName(binding) ?? tag.getText();
           const component = {
@@ -488,13 +503,14 @@ export class ComponentAnalyzer {
           components.set(binding, component);
           bodies.set(binding, body);
           callbackBodies.add(body.compilerNode);
-          resolved.push(component);
+          register(component, possible);
         }
       });
     }
     const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
+    const uncertainLookups = new Set([...possibleLookups].flatMap(([tag, ids]) => ids.size ? [tag] : []));
     const flow = new PropFlow(bodies, new Map([...renderTargets].map(([tag, targets]) =>
-      [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath);
+      [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath, uncertainLookups);
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
       if (!targets.length && Node.isPropertyAccessExpression(tag)) {
@@ -521,13 +537,16 @@ export class ComponentAnalyzer {
         if (slot && !slot.length && Node.isJsxAttribute(attribute) && !flow.mayRenderSlot(attribute)) continue;
         addEdge(from, target.id, 'renders');
         if (index && from !== target.id) {
+          const possible = possibleLookups.get(tag)?.has(target.id) || undefined;
+          const lookup = possible ? RENDER_LOOKUP_ISSUE : undefined;
           const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
             ? site : undefined;
           if (!slot?.length) {
-            index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, undefined, this.config && tag, undefined, renderSite);
+            index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, possible, this.config && tag, lookup, renderSite);
           } else for (const transfer of slot) {
             index.render(from, target.id, startLine(tag), conditionalAt(tag, body) || Number(transfer.conditional),
-              undefined, transfer.partial ? true : undefined, this.config && tag, transfer.detail, renderSite);
+              undefined, possible || (transfer.partial ? true : undefined), this.config && tag,
+              lookup ? `${lookup}; ${transfer.detail}` : transfer.detail, renderSite);
           }
         }
       }
@@ -578,7 +597,8 @@ export class ComponentAnalyzer {
         }
         if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
-          if (binding.getSymbol()?.getDeclarations().some(declaration => imports.has(declaration))) {
+          if ((!Node.isIdentifier(binding) || imports.names.has(binding.compilerNode.text)) &&
+              binding.getSymbol()?.getDeclarations().some(declaration => imports.byDeclaration.has(declaration))) {
             for (const target of declarationsOf(child)) addEdge(component.id, resolveComponent(target)?.id, 'imports');
           }
         }
@@ -591,7 +611,13 @@ export class ComponentAnalyzer {
         if (hook) usedHooks.add(hook);
       };
       inspect(body);
-      visitKinds(body, COMPONENT_BODY_KINDS, inspect, { skip: callbackBodies });
+      visitKinds(body, COMPONENT_BODY_KINDS, inspect, {
+        skip: callbackBodies,
+        filterRaw: child => {
+          const binding = ts.isPropertyAccessExpression(child) ? child.expression : child;
+          return !ts.isIdentifier(binding) || imports.names.has(binding.text);
+        }
+      });
       component.hooks = [...usedHooks];
     }
 

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -395,7 +395,7 @@ export class QueryEngine {
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
-            issue: entry.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
+            issue: entry.issue ?? (possible && detail ? `${renderIssue(detail)} (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
           });
         }
       }
@@ -424,7 +424,7 @@ export class QueryEngine {
       for (const [from, , line, conditional, , possible, detail] of this.incoming.get(symbol.id) ?? []) {
         if (expired()) break;
         const parent = this.symbols.get(from);
-        if (possible && detail && parent) directIssue ??= `JSX prop render untraced (${location(parent.file, line)})`;
+        if (possible && detail && parent) directIssue ??= `${renderIssue(detail)} (${location(parent.file, line)})`;
         const prior = parents.get(from);
         if (parent && (!prior || line < prior.line)) parents.set(from, { symbol: parent, line, conditional, possible });
       }
@@ -438,7 +438,8 @@ export class QueryEngine {
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
-        (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
+        (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) ??
+        (this.index.schema === INDEX_SCHEMA && this.index.graphRevision !== GRAPH_INDEX_REVISION ? 'regenerate index for component lookup coverage' : undefined) };
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
