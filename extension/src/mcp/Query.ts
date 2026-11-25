@@ -7,6 +7,7 @@ import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } fr
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
 import { changes, validBase, type ChangeScope } from './Changes';
+import { historyBudgetMs } from './ChangesHistory';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
@@ -87,7 +88,7 @@ function validate(name: string, value: unknown) {
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
     api_consumers: ['callers', 'includeTests'], search: [filterKey],
-    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base']
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base', 'depth']
   }[tool];
   for (const key of Object.keys(input)) {
     if (![...(tool === 'changes' ? [] : [targetKey]), 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
@@ -130,6 +131,8 @@ function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliRe
   if (tool === 'search') {
     narrow = 'narrow the text';
     if (filter === 'any') narrow += cli ? ' or use --kind component' : ` or set ${mcpFilterKey}="component"`;
+  } else if (tool === 'changes') {
+    narrow = 'narrow the diff';
   } else if (tool === 'callees' && depth > 1) {
     narrow = cli ? 'use --depth 1 to narrow' : 'set depth=1 to narrow';
   }
@@ -140,7 +143,7 @@ function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliRe
   if (args.limit >= limit) return narrow || 'only the rows within the output cap can be shown';
   const options = [
     ...(tool === 'search' && filter !== 'any' ? ['--kind', filter] : []),
-    ...(tool === 'impact' || tool === 'callees' ? ['--depth', String(depth)] : []),
+    ...(tool === 'impact' || tool === 'callees' || tool === 'changes' ? ['--depth', String(depth)] : []),
     ...((tool === 'impact' || tool === 'api_consumers' || tool === 'rename_impact') && includeTests ? ['--include-tests'] : []),
     ...(tool === 'callees' && uses ? ['--uses'] : []),
     ...(tool === 'wrappers' && !includeExternal ? ['--no-external'] : []),
@@ -671,7 +674,7 @@ export class QueryEngine {
     if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
     if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
     if (tool === 'changes') return {
-      result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
+      result: changes(this.root, this.index, graph, args.scope, args.base, depth, deadline, file => this.checkPath(file))
     };
     if (tool === 'impact' && !this.names.has(target) && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
@@ -723,7 +726,8 @@ export class QueryEngine {
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
-    const deadline = performance.now() + (configured > 0 ? Math.min(1850, configured) : 1850);
+    const budget = tool === 'changes' ? historyBudgetMs : 1850;
+    const deadline = performance.now() + (configured > 0 ? Math.min(budget, configured) : budget);
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;

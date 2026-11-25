@@ -9,6 +9,7 @@ import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex }
 import { QueryEngine } from './Query';
 import { findProject, missingProject } from '../core/FindProject';
 import { ensureFresh, projectText, waitForBuild } from './Build';
+import { historyBudgetMs } from './ChangesHistory';
 import { legacyKind, queryName, tools } from './Tools';
 
 type Call = { id: number; name: string; args: unknown };
@@ -123,6 +124,26 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
     return response;
   }
 
+  async function askChanges(args: unknown) {
+    // An older Git snapshot can take longer to index. Keep it off the
+    // interactive worker used by the other queries.
+    const current = new Worker(__filename, { workerData: project });
+    return new Promise<Response | undefined>(done => {
+      const finish = (response?: Response) => {
+        clearTimeout(timeout);
+        void current.terminate();
+        done(response);
+      };
+      const timeout = setTimeout(finish, historyBudgetMs + 1000);
+      current.on('error', () => finish());
+      current.on('exit', () => finish());
+      current.on('message', (response: Response | 'ready') => {
+        if (response === 'ready') current.postMessage({ id: 0, name: queryName, args } satisfies Call);
+        else finish(response);
+      });
+    });
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
@@ -131,10 +152,11 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);
     }
-    const response = await ask(name, args);
+    const response = await (name === queryName && args.kind === 'changes' ? askChanges(args) : ask(name, args));
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
-    const text = response?.text ?? `# timeout ${legacyKind(name) ?? args.kind ?? 'query'} ${label} : 0 results (partial: timed out)`;
+    const kind = legacyKind(name) ?? args.kind ?? 'query';
+    const text = response?.text ?? `# timeout ${kind}${label ? ' ' + label : ''} : 0 results\n# partial: timed out`;
     return reply(autoBuild && !response?.isError ? projectText(project, text) : text, response?.isError);
   });
   process.stdin.once('end', () => {
