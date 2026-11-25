@@ -343,9 +343,9 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   const directly = query('path', '/items', 'createItem');
   assert.match(directly, /: 3 hops /);
   assert.match(directly, /^0 route \/items.* Items$/m);
-  assert.match(directly, /^1 render .*CreateItem \[cond\]$/m);
+  assert.match(directly, /^1 render .*CreateItem \[when empty\] \[cond\]$/m);
   assert.match(directly, /^2 event .*onSubmit .*onClick <button Create>/m);
-  assert.match(directly, /^3 action .*createItem -> server\/actions\.ts:6$/m);
+  assert.match(directly, /^3 action .*createItem -> server\/actions\.ts:6 \[args "item"\]$/m);
   const fromFile = query('path', 'app/(main)/items/page.tsx', 'server/actions.ts#submitItem');
   assert.equal(fromFile, directly);
   const layout = query('path', '/other', 'createItem');
@@ -414,9 +414,9 @@ test('tRPC resolves router paths, client aliases and server callers while report
   for (const operation of ['invalidate', 'prefetch']) {
     assert.ok(total.split('\n').some(line => line.startsWith('cache-only app/trpc-cache/page.tsx:') && line.endsWith(`(${operation})`)));
   }
-  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
-  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(ensureData\)$/m);
-  assert.match(query('api_consumers', target, '--limit', '1'), /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\)$/m);
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\) \[args 1\]$/m);
+  assert.match(total, /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(ensureData\) \[args 1\]$/m);
+  assert.match(query('api_consumers', target, '--limit', '1'), /^call app\/trpc-cache\/page\.tsx:\d+ CachePage \(fetch\) \[args 1\]$/m);
   assert.doesNotMatch(total, /unrelated/);
   assert.match(query('path', '/trpc-cache', target), /1 trpc .*invoices\.total .*\(fetch\)/);
   assert.match(query('path', '/trpc-cache', 'history.total'), /no directed path/);
@@ -1065,7 +1065,7 @@ test('queries preserve scoped JSX values, callback registrations and store effec
 
   const sync = query('api_consumers', 'syncJobs');
   assert.match(sync, /call .* start\nevent .*Start jobs/);
-  assert.match(sync, /call .* retry\nevent .*Retry job/);
+  assert.match(sync, /call .* retry\ncall .* -> retry \(via useJobControls.*\)\nevent .*Retry job/);
   assert.match(sync, /page \/jobs\s/);
 });
 
@@ -1320,4 +1320,49 @@ test('Pages middleware paths check concrete catch-all URLs against the matcher',
   assert.match(query('path', '/api/auth/[...parts]', 'middleware'), /1 middleware .*\[possible\]/);
   assert.match(query('path', '/base/api/auth/csrf/embed?check=1', 'middleware'), /1 middleware .*\/:path\*\/embed/);
   assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
+});
+
+test('queries preserve MDX layouts, conditional list renders, callbacks, and HTTP and literal evidence', { timeout: 40_000 }, t => {
+  const source = path.join(__dirname, 'fixtures/agent-evidence');
+  const { build, query } = fixture(t, false, source);
+  const indexFile = build();
+  const { packGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  fs.writeFileSync(indexFile, JSON.stringify(packGraph(index, 0)));
+
+  const wrappers = query('wrappers', '/guide');
+  assert.match(wrappers, /page app\/guide\/page.mdx:1/);
+  assert.match(wrappers, /# providers .*ThemeProvider/);
+  assert.doesNotMatch(wrappers, /# providers .*LoggingProvider/);
+  assert.match(wrappers, /# partial: MDX page body and imports untraced/);
+
+  const renders = query('who_renders', 'ResourceRow', '--direct');
+  assert.match(renders, /app\/page\.tsx:7#Page .*when .*enabled.*ready.*useAlternate/);
+  assert.match(renders, /ui\/panel\.tsx:33#ResourcePanel .*when .*items\.length > 0.*item\.visible.*list items\.map/);
+  const impact = query('impact', 'ResourceRow');
+  assert.match(impact, /render ui\/panel\.tsx:33 ResourceRow .*list items\.map/);
+
+  const callbacks = query('api_consumers', 'sendResource');
+  assert.match(callbacks, /onChange <input> -> select/);
+  assert.match(callbacks, /onChange <input> -> markdownPick/);
+  assert.match(callbacks, /select -> send \(prop onPick/);
+  assert.match(callbacks, /page \/ /);
+
+  const status = query('callees', 'chooseStatus');
+  assert.match(status, /return router\.ts:6 \{status: "pending_review", title \(parameter\)\}/);
+  assert.match(status, /return router\.ts:7 \{status: "live", title \(parameter\)\}/);
+  const submit = query('callees', 'ResourcePanel', '--depth', '3', '--limit', '60');
+  assert.match(submit, /submit .*\[args true\]/);
+  assert.match(submit, /resources\.store .*kind: "RESOURCE"/);
+  assert.doesNotMatch(submit, /should-stay-private/);
+  assert.match(submit, /POST \/api\/dispatch\/\[procedure\]/);
+  const trpc = query('api_consumers', '/api/dispatch/[procedure]');
+  assert.match(trpc, /POST tRPC request \(resources\.store via ui\/rpc\.ts:/);
+
+  const consumers = query('api_consumers', '/services/refresh');
+  assert.match(consumers, /worker\/tasks\.ts:6 runTasks POST fetch/);
+  assert.match(consumers, /worker\/tasks\.ts:7 runTasks POST Node HTTP request/);
+  assert.doesNotMatch(consumers, /ignoreLiteral/);
+  assert.match(consumers, /# partial: .*deployment trigger untraced/);
+  assert.match(query('impact', 'refreshResources'), /fetch worker\/tasks\.ts:6 POST \/services\/refresh/);
 });

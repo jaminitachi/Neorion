@@ -1,5 +1,9 @@
 import { Node, SyntaxKind, type CallExpression, type SourceFile } from 'ts-morph';
-import { declarationsOf } from './ArchitectureFacts';
+import { declarationsOf, urlTexts } from './ArchitectureFacts';
+import type { RouteNode } from '../types/GraphTypes';
+import { property, textValue } from './NextConfig';
+import { matchNextRoutes } from './NextRouteMatch';
+import { functionNode, returns, valueNode } from './StaticBindings';
 import { visitKinds } from './CompilerWalk';
 
 const TRPC_DISCOVERY_KINDS = new Set([SyntaxKind.CallExpression]);
@@ -15,13 +19,17 @@ const queryOperations = /^(?:fetch|fetchInfinite|ensureData)$/;
 const optionsOperations = /^(?:queryOptions|infiniteQueryOptions|mutationOptions|subscriptionOptions)$/;
 const keyOperations = /^(?:queryKey|infiniteQueryKey|mutationKey|pathKey|queryFilter|infiniteQueryFilter|pathFilter)$/;
 const clientOperations = /^(?:query|mutate|subscribe)$/;
+const httpLinks = /^(?:httpLink|httpBatchLink|httpBatchStreamLink|unstable_httpBatchStreamLink)$/;
+const mutationCalls = /^(?:mutate|mutateAsync)$/;
 const procedureOperations = /^(?:query|mutation|subscription)$/;
 
 type Procedure = { property: Node; body: CallExpression; resolver: Node };
 type Router = { entries: Map<string, Procedure | Router>; unresolved?: Node };
-type Proxy = { kind: 'react' | 'client' | 'caller' | 'cache' | 'hydration' | 'context' | 'options'; router?: Router; prefix: (string | undefined)[] };
+type Proxy = { kind: 'react' | 'client' | 'caller' | 'cache' | 'hydration' | 'context' | 'options'; router?: Router; client?: CallExpression; mutation?: true; prefix: (string | undefined)[] };
 type ProcedurePath = Procedure & { name: string; clientsKnown: boolean; unresolved?: Node };
-type ProcedureUse = { site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
+type HttpLink = { prefix: string; site: CallExpression; methodOverride?: string };
+type HttpHandler = { route: RouteNode; endpoint: string };
+type ProcedureUse = { transport?: { method: string; route: RouteNode; link: CallExpression }; transportIssue?: string; site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
 
 function unwrap(node: Node | undefined): Node | undefined {
   while (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node) ||
@@ -71,9 +79,11 @@ export class TrpcFacts {
   private nested = new Set<Router>();
   private proxies = new Map<Node, Proxy | null>();
   private rootPaths = new Map<Router, Map<string, ProcedurePath>>();
+  private links = new Map<CallExpression, HttpLink[]>();
+  private handlers = new Map<Router, HttpHandler[]>();
   private allPaths = new Map<Router, Map<string, ProcedurePath[]>>();
 
-  constructor(files: SourceFile[], sources: Set<SourceFile>) {
+  constructor(files: SourceFile[], sources: Set<SourceFile>, apiRoutes: Map<SourceFile, RouteNode>) {
     const clientFiles = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       !entry.isTypeOnly() && proxyPackage.test(entry.getModuleSpecifierValue()))));
     this.active = sources.size > 0 || clientFiles.size > 0;
@@ -107,7 +117,7 @@ export class TrpcFacts {
     const roots = [...this.routers.values()].filter(router => !this.nested.has(router));
     for (const { factory, kind, type, router: typedRouter } of clients) {
       const router = type ? typedRouter : roots.length === 1 ? roots[0] : undefined;
-      this.proxies.set(factory, { kind, router, prefix: [] });
+      this.proxies.set(factory, { kind, router, client: factory, prefix: [] });
       if (router) clientRoots.add(router);
     }
     for (const root of new Set([...roots, ...clientRoots])) {
@@ -138,6 +148,91 @@ export class TrpcFacts {
       };
       walk(root, [], new Map());
     }
+    for (const [factory, kind] of factories) {
+      if (kind === 'client') this.addLinks(factory, factory.getArguments()[0]);
+    }
+    for (const file of files.filter(file => file.getFullText().includes('createClient'))) visitKinds(file, TRPC_DISCOVERY_KINDS, node => {
+      if (!Node.isCallExpression(node)) return;
+      const callee = member(node.getExpression());
+      if (callee?.key !== 'createClient') return;
+      const proxy = this.proxy(callee.base);
+      if (proxy?.kind === 'react' && proxy.client && !proxy.prefix.length) this.addLinks(proxy.client, node.getArguments()[0]);
+    });
+    for (const [file, route] of apiRoutes) {
+      if (!file.getFullText().includes('@trpc/server/adapters/')) continue;
+      const exports = file.getExportedDeclarations();
+      const methods = new Map((route.methods ?? []).flatMap(method =>
+        (exports.get(method) ?? []).flatMap(node => {
+          const fn = functionNode(node);
+          return fn ? [[method, fn] as const] : [];
+        })));
+      visitKinds(file, TRPC_DISCOVERY_KINDS, node => {
+        if (!Node.isCallExpression(node) ||
+            !imported(node.getExpression(), /^@trpc\/server\/adapters\/fetch$/, /^fetchRequestHandler$/)) return;
+        const owner = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+        const handled = [...methods].filter(([, fn]) => fn === owner).map(([method]) => method);
+        if (!handled.length) return;
+        const options = valueNode(node.getArguments()[0]);
+        const endpoint = textValue(property(options, 'endpoint'));
+        const router = this.router(property(options, 'router'));
+        if (!router || !endpoint) return;
+        const handlers = this.handlers.get(router) ?? [];
+        handlers.push({ route: { ...route, methods: handled }, endpoint: endpoint.replace(/\/$/, '') });
+        this.handlers.set(router, handlers);
+      });
+    }
+  }
+
+  private addLinks(factory: CallExpression, options: Node | undefined) {
+    const links = valueNode(property(valueNode(options), 'links'));
+    if (!Node.isArrayLiteralExpression(links)) return;
+    for (const link of links.getElements()) {
+      if (!Node.isCallExpression(link) || !imported(link.getExpression(), /^@trpc\/client$/, httpLinks)) continue;
+      const settings = valueNode(link.getArguments()[0]);
+      const url = property(settings, 'url');
+      const override = property(settings, 'methodOverride');
+      const methodOverride = textValue(override);
+      if (!url || property(settings, 'fetch') || override && methodOverride !== 'POST') continue;
+      const pathOf = (text: string) => text.replace(/^(?:https?:\/\/[^/?#]+|[\0\x01]+)(?=\/)/, '').replace(/\/$/, '');
+      const seen = new Set<Node>();
+      let remaining = 24;
+      const resolve = (value: Node): ReturnType<typeof urlTexts> => urlTexts(value, undefined, true, true, part => {
+        if (!Node.isCallExpression(part) || part.getArguments().length || seen.size >= 4 || remaining-- <= 0) return;
+        const fn = functionNode(part.getExpression());
+        if (!fn || !this.files.has(fn.getSourceFile()) || seen.has(fn) || fn.getParameters().length) return;
+        const returned = returns(fn.getBody());
+        if (returned.length > 4) return;
+        seen.add(fn);
+        const values = returned.flatMap(expression => resolve(expression) ?? [{ text: '\0' }]);
+        seen.delete(fn);
+        return values.length ? values : undefined;
+      });
+      const urls = resolve(url);
+      const paths = new Set(urls?.map(value => pathOf(value.text)));
+      if (paths.size !== 1) continue;
+      const [prefix] = paths;
+      if (!/^\/(?!\/)[\w/.-]+$/.test(prefix)) continue;
+      const entries = this.links.get(factory) ?? [];
+      entries.push({ prefix, site: link, methodOverride });
+      this.links.set(factory, entries);
+    }
+  }
+
+  private httpDispatch(site: CallExpression, proxy: Proxy, name: string, operation: string): Pick<ProcedureUse, 'transport' | 'transportIssue'> {
+    const method = mutationCalls.test(operation) ? 'POST' :
+      /^(?:query|useQuery|useSuspenseQuery|useInfiniteQuery|useSuspenseInfiniteQuery)$/.test(operation) ? 'GET' : undefined;
+    if (operation.startsWith('use') && Node.isFalseLiteral(valueNode(property(valueNode(site.getArguments()[1]), 'enabled')))) return {};
+    if (!method || !proxy.client || !proxy.router || proxy.kind !== 'react' && proxy.kind !== 'client') return {};
+    const links = this.links.get(proxy.client) ?? [];
+    const candidates = links.flatMap(link => {
+      const methodToSend = link.methodOverride === 'POST' ? 'POST' : method;
+      const handlers = (this.handlers.get(proxy.router!) ?? []).filter(handler =>
+        handler.endpoint === link.prefix && handler.route.methods?.includes(methodToSend));
+      const [match] = matchNextRoutes(link.prefix + '/' + name, handlers, handler => handler.route.path);
+      return match ? [{ method: methodToSend, route: match.route, link: link.site }] : [];
+    });
+    if (links.length === 1 && candidates.length === 1) return { transport: candidates[0] };
+    return links.length || this.handlers.has(proxy.router) ? { transportIssue: 'tRPC HTTP handler or client dispatch unresolved' } : {};
   }
 
   procedures() {
@@ -309,6 +404,9 @@ export class TrpcFacts {
       const router = this.callerRouter(expression);
       if (router) return { kind: 'caller', router, prefix: [] };
       const hook = this.proxy(expression, seen);
+      if (hook?.kind === 'react' && hook.prefix.at(-1) === 'useMutation') {
+        return { ...hook, prefix: hook.prefix.slice(0, -1), mutation: true };
+      }
       if (hook?.prefix.length === 1) {
         const [operation] = hook.prefix;
         if (hook.kind === 'react' && (operation === 'useUtils' || operation === 'useContext')) {
@@ -364,6 +462,10 @@ export class TrpcFacts {
     const operation = path.pop();
     if (operation === undefined) return [this.unresolvedUse(call, proxy, path, 'call', false)];
     if (proxy.kind === 'context') return;
+    if (proxy.mutation) {
+      if (mutationCalls.test(operation)) return [this.pathUse(call, proxy, path, operation, false)];
+      return;
+    }
     if (proxy.kind === 'react' && !path.length && batchHooks.test(operation)) {
       return this.batchUses(call, proxy, operation);
     }
@@ -414,7 +516,8 @@ export class TrpcFacts {
     const key = path.join('.');
     if (registry && path.every(segment => segment !== undefined)) {
       const exact = registry.get(key);
-      if (exact) return { site, operation, cache, targets: Array.isArray(exact) ? exact : [exact] };
+      if (exact) return { site, operation, cache, targets: Array.isArray(exact) ? exact : [exact],
+        ...!cache && this.httpDispatch(site, proxy, key, operation) };
       if (cache && (proxy.kind === 'cache' || operation === 'pathFilter' || operation === 'pathKey')) {
         const targets = this.under(registry, key);
         if (targets.length) return { site, operation, cache, targets };

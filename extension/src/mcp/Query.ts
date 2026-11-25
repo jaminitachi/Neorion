@@ -6,7 +6,7 @@ import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
-import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
+import { DependencyGraph, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
 import { changes, validBase, type ChangeScope } from './Changes';
 import { historyBudgetMs } from './ChangesHistory';
@@ -28,7 +28,7 @@ const generatedFile = (file: string) =>
   /(?:^|\/)(?:generated|__generated__)\/|\.generated\.[^/]+$|\.gen\.[cm]?[jt]sx?$|\.d\.[cm]?ts$/.test(file);
 const apiEvidence = new Map([
   ['SWR key', 'read'], ['SWR mutate', 'mutate'], ['SWR fallback key', 'fallback key'],
-  ['fetch', 'request'], ['axios', 'request'], ['Playwright request', 'request'], ['tRPC request', 'request'],
+  ['fetch', 'request'], ['axios', 'request'], ['Node HTTP request', 'request'], ['Playwright request', 'request'], ['tRPC request', 'request'],
   [AI_SDK_TRANSPORT, 'request']
 ]);
 const shellArg = (value: string) => /^[\w./:-]+$/.test(value) ? value : process.platform === 'win32'
@@ -384,7 +384,7 @@ export class QueryEngine {
           const previous = reached.get(route.id);
           if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
         }
-        for (const [from, to, line, conditional, wrapper, possible, detail] of this.incoming.get(entry.id) ?? []) {
+        for (const [from, to, line, conditional, wrapper, possible, detail, site] of this.incoming.get(entry.id) ?? []) {
           if (expired()) break;
           if (visited.has(from)) continue;
           const decision = conditions?.[renderSiteKey(from, to, line)];
@@ -395,7 +395,7 @@ export class QueryEngine {
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
-            issue: entry.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
+            issue: entry.issue ?? (site ? this.index.renderEvidence?.[site]?.issue : undefined) ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
           });
         }
       }
@@ -420,17 +420,20 @@ export class QueryEngine {
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
-      const parents = new Map<number, { symbol: SymbolEntry; line: number; conditional: number; possible?: true }>();
-      for (const [from, , line, conditional, , possible, detail] of this.incoming.get(symbol.id) ?? []) {
+      const parents = new Map<string, { symbol: SymbolEntry; line: number; conditional: number; possible?: true;
+        render?: NonNullable<QueryIndex['renderEvidence']>[string] }>();
+      for (const [from, , line, conditional, , possible, detail, site] of this.incoming.get(symbol.id) ?? []) {
         if (expired()) break;
         const parent = this.symbols.get(from);
         if (possible && detail && parent) directIssue ??= `JSX prop render untraced (${location(parent.file, line)})`;
-        const prior = parents.get(from);
-        if (parent && (!prior || line < prior.line)) parents.set(from, { symbol: parent, line, conditional, possible });
+        const render = site ? this.index.renderEvidence?.[site] : undefined;
+        directIssue ??= render?.issue;
+        const key = site ?? `${from}:${line}`;
+        if (parent && !parents.has(key)) parents.set(key, { symbol: parent, line, conditional, possible, render });
       }
-      for (const { symbol, line, conditional, possible } of [...parents.values()].sort((a, b) => bySymbol(a.symbol, b.symbol))) {
+      for (const { symbol, line, conditional, possible, render } of [...parents.values()].sort((a, b) => bySymbol(a.symbol, b.symbol) || a.line - b.line)) {
         const label = `direct ${location(symbol.file, line)}#${symbol.name}`;
-        rows.push({ ...row(label + flagTest(symbol.file) + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : ''), symbol.file), pathEnd: label.length });
+        rows.push({ ...row(label + renderSuffix(render) + flagTest(symbol.file) + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : ''), symbol.file), pathEnd: label.length });
       }
     }
     const directCount = rows.length - reached.size;
@@ -445,6 +448,7 @@ export class QueryEngine {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
     const notes: Row[] = [];
+    const guardIssues = new Set<string>();
     if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
     const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
       item.provider ?? item.symbol.endsWith('Provider');
@@ -480,6 +484,10 @@ export class QueryEngine {
           ...new Set(providers.map(item => item.file))));
       }
       const entries: Row[] = [];
+      for (const item of items) {
+        if (item.guardIssue) guardIssues.add(item.guardIssue);
+        if (item.guards?.length) notes.push(row(`# ${item.symbol}${renderSuffix({ conditions: item.guards })}`, item.file));
+      }
       if (chains.length > 1) entries.push(row(branchLabel));
       if (document && branch === 0) {
         const label = `document ${location(document.file, document.line)}`;
@@ -512,7 +520,7 @@ export class QueryEngine {
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
     return { rows, title: route.url, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}, 1 page`, targets: [route.file],
-      notes, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
+      notes, partial: [...this.index.pagesWrapperIssues?.[route.id] ?? [], ...guardIssues].join('; ') || undefined };
   }
 
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
@@ -660,10 +668,10 @@ export class QueryEngine {
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
         ([this.index.pagesApiIssues?.[route.id]?.join('; '), transportOverride ? AI_SDK_URL_OVERRIDE : undefined]
           .filter(Boolean).join('; ') || undefined) ??
-        (fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' :
+        (fetches.find(fetch => fetch.uncertainty)?.uncertainty ?? (fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' :
           fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
           fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
-          propIssue ?? (moreCallers ? 'caller depth limit' : undefined)),
+          propIssue ?? (moreCallers ? 'caller depth limit' : undefined))),
       notes: [
         ...(route.pages && route.methodBasis === 'enforced' && route.methods?.length
           ? [row(`# methods enforced: ${route.methods.join(', ')}`, route.file)] : []),
@@ -689,8 +697,8 @@ export class QueryEngine {
           evidence = graph.consumerEvidence(owner, includeTests, expired, gates);
           detailed.set(owner, evidence);
         }
-        if (!evidence.rows.length) return [];
         partial ??= evidence.partial;
+        if (!evidence.rows.length) return [];
         return [{ line, owner, evidence }];
       });
       if (enriched.length) {

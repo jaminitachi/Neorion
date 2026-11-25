@@ -11,6 +11,7 @@ import { packageMember } from './CallableFlow';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { jsxValue, PropFlow } from './PropFlow';
 import { renderBindings } from './RenderBindings';
+import { renderEvidence } from './RenderEvidence';
 import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
@@ -210,7 +211,7 @@ function lexicalName(node: Node): string | undefined {
 export class ComponentAnalyzer {
   constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
-  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
+  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, httpSources = new Set<SourceFile>(), appConfig?: NextConfig) {
     const components = new Map<Node, ComponentNode>();
     const index = includeFacts ? new QueryIndexBuilder() : undefined;
     const bodies = new Map<Node, Node>();
@@ -523,10 +524,13 @@ export class ComponentAnalyzer {
         if (index && from !== target.id) {
           const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
             ? site : undefined;
+          const evidence = renderEvidence(tag, body);
+          const conditional = Number(!!(evidence?.conditions?.length || evidence?.lists?.length || conditionalAt(tag, body)));
+          if (renderSite && evidence) index.renderEvidence(renderSite, evidence);
           if (!slot?.length) {
-            index.render(from, target.id, startLine(tag), conditionalAt(tag, body), undefined, undefined, this.config && tag, undefined, renderSite);
+            index.render(from, target.id, startLine(tag), conditional, undefined, undefined, this.config && tag, undefined, renderSite);
           } else for (const transfer of slot) {
-            index.render(from, target.id, startLine(tag), conditionalAt(tag, body) || Number(transfer.conditional),
+            index.render(from, target.id, startLine(tag), conditional || Number(transfer.conditional),
               undefined, transfer.partial ? true : undefined, this.config && tag, transfer.detail, renderSite);
           }
         }
@@ -649,7 +653,7 @@ export class ComponentAnalyzer {
       }
       collectRenameFacts(files, relativePath, symbols, facts);
       collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index, this.config, this.workspace);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace, flow);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace, flow, httpSources, appConfig);
     }
     return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }

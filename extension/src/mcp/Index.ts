@@ -1,8 +1,9 @@
+import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 4;
-export const QUERY_INDEX_REVISION = 8;
-export const GRAPH_INDEX_REVISION = 11;
+export const WRAPPER_INDEX_REVISION = 5;
+export const QUERY_INDEX_REVISION = 9;
+export const GRAPH_INDEX_REVISION = 12;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -41,6 +42,8 @@ export interface Wrapper {
   site?: { file: string; line: number };
   phase?: 'document' | 'application';
   evidence?: string;
+  guards?: string[];
+  guardIssue?: string;
 }
 
 export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true };
@@ -61,6 +64,7 @@ export interface FetchEntry {
   partial?: boolean;
   dynamic?: boolean;
   propUrlUnknown?: true;
+  uncertainty?: string;
   binding?: { file: string; line: number; name: string; supplier?: number; site: string };
   gates?: FlowGate[];
 }
@@ -72,7 +76,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
-export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
+export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number, args?: string, transport?: string, transportIssue?: string];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
 export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export' | 'type',
@@ -144,7 +148,11 @@ export interface QueryIndex {
   flowIssues?: Record<number, { reason: string; gates: FlowGate[] }[]>;
   callIssues?: Record<string, string>;
   refEvidence?: Record<string, string>;
+  callLiterals?: Record<string, string>;
+  unresolvedCallLiterals?: Record<number, [line: number, callee: string, args: string][]>;
+  literalReturns?: Record<number, [line: number, value: string][]>;
   renderLabels?: Record<string, string>;
+  renderEvidence?: Record<string, RenderEvidence>;
   uncertainPropRequests?: { file: string; owner: number; method?: string; gates?: FlowGate[] }[];
   unresolvedCalls?: Record<number, number>;
   fileSymbols?: number[]; // In the same order as the keys of files.

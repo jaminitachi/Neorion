@@ -4,7 +4,7 @@ import type { IndexedReference, QueryIndex } from './Index';
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
   'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues' |
-  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels'> & {
+  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callLiterals' | 'literalReturns' | 'unresolvedCallLiterals'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -18,12 +18,12 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, ...rest } = index;
+    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, literalReturns, unresolvedCallLiterals, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels
+    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, literalReturns, unresolvedCallLiterals
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 
@@ -66,7 +66,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   facts.renderSites = [];
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
-    if (!site) return edge;
+    if (!site || index.renderEvidence?.[site]) return edge;
     facts.renderSites!.push([offset, site]);
     return edge.slice(0, edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4) as typeof edge;
   });

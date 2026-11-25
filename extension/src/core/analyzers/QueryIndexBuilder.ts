@@ -13,11 +13,13 @@ import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
-import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
+import { literalArgs, literalReturn } from './LiteralEvidence';
+import type { RenderEvidence } from './RenderEvidence';
 import { TrpcFacts } from './TrpcFacts';
 
 type RelativePath = (source: SourceFile) => string;
@@ -29,7 +31,7 @@ const REFERENCE_KINDS = new Set([
   SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
   SyntaxKind.ExportSpecifier, SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.TaggedTemplateExpression,
   SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.ShorthandPropertyAssignment,
-  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier
+  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier, SyntaxKind.ReturnStatement
 ]);
 const FLOW_KINDS = new Set([SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
 const MOCK_KEY_KINDS = new Set([SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.MethodDeclaration]);
@@ -91,6 +93,12 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
+  private renderFacts = new Map<RenderSite, RenderEvidence>();
+
+  renderEvidence(site: RenderSite, evidence: RenderEvidence) {
+    this.renderFacts.set(site, evidence);
+  }
+
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?][] = [];
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
@@ -270,7 +278,11 @@ export class QueryIndexBuilder {
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
-    const trpcFacts = new TrpcFacts(files, trpcSources);
+    const apiRoutes = new Map(routes.flatMap(route => {
+      const file = fileByName.get(path.join(root, route.file));
+      return file && !route.pages && route.type === 'api' ? [[file, route] as const] : [];
+    }));
+    const trpcFacts = new TrpcFacts(files, trpcSources, apiRoutes);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
     const procedureResolvers = new Map<Node, Node>();
@@ -332,7 +344,9 @@ export class QueryIndexBuilder {
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
       let parent: Node | undefined = fn.getParent();
-      while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned)) {
+      while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned ||
+          Node.isCallExpression(parent) && parent.getArguments()[0] === returned &&
+          packageMember(parent.getExpression(), 'react') === 'useCallback')) {
         returned = parent;
         parent = parent.getParent();
       }
@@ -481,6 +495,8 @@ export class QueryIndexBuilder {
     const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
       const line = startLine(node);
       const applicable = gatesOf([...flow.gates(node), ...gates]);
+      const literals = Node.isCallExpression(node) ? literalArgs(node) : undefined;
+      if (literals) (index.callLiterals ??= {})[gateKey(from, to, line)] = literals;
       (index.flowCalls ??= []).push([from, to, relativePath(node.getSourceFile()), line, detail,
         applicable.length ? applicable : undefined]);
     };
@@ -511,7 +527,11 @@ export class QueryIndexBuilder {
         });
       });
       for (const { id, via, gates } of targets) {
-        const detail = [via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
+        const prop = flow.read(call.getExpression());
+        const supplied = prop && gates?.[0]?.sites[0];
+        const viaProp = prop ? 'prop ' + prop.name +
+          (supplied ? ` supplied at ${relativePath(supplied.getSourceFile())}:${startLine(supplied)}` : '') : '';
+        const detail = [viaProp, via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
         addFlowCall(from, id, call, detail, gates);
         if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
       }
@@ -608,17 +628,17 @@ export class QueryIndexBuilder {
       if (chains.length) index.routeWrap[id] = chains[0];
       if (chains.length > 1) index.branches![id] = chains;
     }
+    const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
+      const id = routeIds.get(route);
+      return id === undefined ? [] : [[id, [...reasons]]];
+    }));
+    if (this.wrapperProblems.size) index.pagesWrapperIssues = issues(this.wrapperProblems);
     if (pages && config) {
       const routeEntries = new Map(index.routes.map(route => [route.id, route]));
       const routeStart = (id: number | undefined) => id === undefined ? undefined : routeEntries.get(id)?.fileSymbol;
-      const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
-        const id = routeIds.get(route);
-        return id === undefined ? [] : [[id, [...reasons]]];
-      }));
       index.pagesUrlConfig = config.url;
       index.pagesWorkspaceInputs = workspace?.snapshot();
       index.pagesIssues = issues(pages.issues);
-      index.pagesWrapperIssues = issues(this.wrapperProblems);
       if (this.pageConditions.size) {
         index.pagesRenderConditions = {};
         for (const [route, conditions] of this.pageConditions) {
@@ -664,6 +684,8 @@ export class QueryIndexBuilder {
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
+      const evidence = site && this.renderFacts.get(site);
+      if (site && evidence) (index.renderEvidence ??= {})[siteKey(site)] = evidence;
       index.renderEdges.push(site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
@@ -799,13 +821,26 @@ export class QueryIndexBuilder {
       const recordTrpcUse = (use: NonNullable<ReturnType<TrpcFacts['uses']>>[number], owner?: number) => {
         const line = startLine(use.site);
         const operation = use.cache ? 'cache:' + use.operation : use.operation;
+        const args = use.cache || use.operation === 'useMutation' ? undefined : literalArgs(use.site);
+        const transport = use.transport;
+        const link = transport && `${relativePath(transport.link.getSourceFile())}:${startLine(transport.link)}`;
+        const destination = transport && `${transport.method} ${transport.route.path} via ${link}`;
         for (const procedure of use.targets) {
           const id = procedureIds.get(procedure);
           if (id === undefined) continue;
           const key = JSON.stringify([id, line, operation, owner]);
           if (trpcUseKeys.has(key)) continue;
           trpcUseKeys.add(key);
-          ((index.trpcUses ??= {})[fileId] ??= []).push([id, line, operation, owner]);
+          const entry: import('../../mcp/Index').TrpcUse = [id, line, operation, owner];
+          if (args || destination || use.transportIssue) entry[4] = args;
+          if (destination || use.transportIssue) entry[5] = destination;
+          if (use.transportIssue) entry[6] = use.transportIssue;
+          ((index.trpcUses ??= {})[fileId] ??= []).push(entry);
+          if (transport) {
+            index.fetches.push({ file: relative, line, route: routeIds.get(transport.route.id)!, method: transport.method,
+              url: transport.route.path, via: 'tRPC request', owner, fn: owner === undefined ? null : index.symbols[owner - 1].name,
+              evidence: `${procedure.name} via ${link}` });
+          }
           if (!use.cache && !isTestFile(relative)) boundProcedures.add(id);
         }
         if (!use.unresolved) return;
@@ -831,9 +866,13 @@ export class QueryIndexBuilder {
             const from = graphOwner ?? caller ?? fileId;
             const gates = gatesOf(flow.gates(node));
             if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
-            if (Node.isCallExpression(node) && refWrites.size) {
-              const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
-              if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
+            if (Node.isCallExpression(node)) {
+              const literals = literalArgs(node);
+              if (literals) (index.callLiterals ??= {})[gateKey(from, id, line)] = literals;
+              if (refWrites.size) {
+                const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
+                if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
+              }
             }
           }
           let referenceKind = kind;
@@ -918,10 +957,20 @@ export class QueryIndexBuilder {
         }
         if (found) return;
         const targets = members.length ? declarationsOf(root).flatMap(target => byNode.get(target) ?? []) : [];
-        for (const id of targets) recordGraph(id, startLine(node), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
+        for (const id of targets) {
+          const line = startLine(node);
+          recordGraph(id, line, GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
+          const args = Node.isCallExpression(node) ? literalArgs(node) : undefined;
+          if (args) (index.callLiterals ??= {})[gateKey(owner, id, line)] = args;
+        }
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
+          const args = Node.isCallExpression(node) ? literalArgs(node) : undefined;
+          if (args) {
+            const sites = (index.unresolvedCallLiterals ??= {})[owner] ??= [];
+            if (sites.length < 6) sites.push([startLine(node), [root.getText(), ...members].join('.'), args]);
+          }
           if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
             const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
             sites.push([relative, startLine(node), expression.getText()]);
@@ -1014,7 +1063,21 @@ export class QueryIndexBuilder {
       // Keep REFERENCE_KINDS in sync with the node kinds handled below, including tRPC calls and resolver owners.
       visitKinds(file, REFERENCE_KINDS, node => {
         if (namespaces.size && Node.isIdentifier(node)) recordNamespaceUse(node);
-        if (Node.isImportSpecifier(node)) {
+        if (Node.isReturnStatement(node)) {
+          const expression = node.getExpression();
+          const value = expression && wrappedExpression(expression) || expression;
+          if (!value || !Node.isObjectLiteralExpression(value)) return;
+          const fn = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+          const container = fn?.getParent();
+          const owner = fn && (byNode.get(fn) ?? (container && (Node.isVariableDeclaration(container) ||
+            procedureResolvers.get(container) === fn) ? byNode.get(container) : undefined));
+          if (owner === undefined) return;
+          const summary = literalReturn(value);
+          if (summary) {
+            const rows = (index.literalReturns ??= {})[owner] ??= [];
+            if (rows.length < 8) rows.push([startLine(node), summary]);
+          }
+        } else if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
         } else if (Node.isImportClause(node)) {
@@ -1159,7 +1222,10 @@ export class QueryIndexBuilder {
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
+      const site = edge[7];
+      if (site && !scopes.has(edge[1]) && !suppliers.has(edge[1]) && !index.renderEvidence?.[site]) {
+        edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
+      }
     }
     return index;
   }

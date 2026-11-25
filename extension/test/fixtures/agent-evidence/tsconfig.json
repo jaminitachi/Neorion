@@ -1,0 +1,5 @@
+{
+  "compilerOptions": { "jsx": "preserve", "moduleResolution": "bundler", "module": "esnext" },
+  "include": ["app/**/*.ts", "app/**/*.tsx", "ui/**/*.ts", "ui/**/*.tsx", "router.ts"],
+  "exclude": ["worker"]
+}

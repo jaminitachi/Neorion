@@ -34,7 +34,7 @@ export function readNextConfig(root: string, files: SourceFile[]): NextConfig {
   const result: NextConfig = { url: {}, rules: [], issues: [] };
   const file = ['js', 'mjs', 'ts', 'cjs'].map(ext => path.join(root, 'next.config.' + ext)).find(existsSync);
   if (!file) return result;
-  const source = files.find(source => source.getFilePath() === file) ?? new Project().addSourceFileAtPath(file);
+  const source = files.find(source => source.getFilePath() === file) ?? new Project({ compilerOptions: { allowJs: true } }).addSourceFileAtPath(file);
   const exported = source.getExportedDeclarations().get('default')?.[0] ??
     source.getStatements().flatMap(statement => {
       const expression = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;

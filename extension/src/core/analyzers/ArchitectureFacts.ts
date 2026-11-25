@@ -11,6 +11,7 @@ import { property, textValue, type NextConfig } from './NextConfig';
 import { matchNextRoutes, normalizeNextUrl, patternRank, routeSegments } from './NextRouteMatch';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { startLine } from './SourceLines';
+import { renderEvidence } from './RenderEvidence';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
@@ -383,14 +384,14 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const declarations = declarationsOf(tag);
       const definition = declarations.find(declaration => projectFiles.has(declaration.getSourceFile()));
       const local = definition && bodies.get(definition);
-      let root = tag;
-      while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
-      const binding = root.getSymbol()?.getDeclarations()[0];
+      let bindingRoot = tag;
+      while (Node.isPropertyAccessExpression(bindingRoot)) bindingRoot = bindingRoot.getExpression();
+      const binding = bindingRoot.getSymbol()?.getDeclarations()[0];
       const module = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
       const external = !definition && module && isPackageSpecifier(module) ? module : undefined;
       const exportedName = Node.isFunctionDeclaration(definition) || Node.isClassDeclaration(definition) ||
         Node.isVariableDeclaration(definition) ? definition.getName() ?? name : name;
-      const importedName = root === tag && Node.isImportSpecifier(binding) ? binding.getName() : name;
+      const importedName = bindingRoot === tag && Node.isImportSpecifier(binding) ? binding.getName() : name;
       const names = [name, exportedName, importedName];
       const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
@@ -398,14 +399,29 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const nestedScope = scope && { page, issues, renderCondition };
       const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope) : [];
       const primitive = names.some(layoutPrimitive);
+      const implementation = namedProvider ? functionNode(definition) : undefined;
+      const parameter = implementation?.getParameters()[0];
+      const returned = parameter ? returns(implementation?.getBody()) : [];
+      const passThrough = returned.length > 0 && returned.every(expression => {
+        const value = wrappedExpression(expression) ?? expression;
+        if (Node.isPropertyAccessExpression(value)) {
+          return value.getName() === 'children' && bindingOf(value.getExpression()) === parameter;
+        }
+        const binding = Node.isIdentifier(value) ? bindingOf(value) : undefined;
+        return Node.isBindingElement(binding) && binding.getParent().getParent() === parameter &&
+          (binding.getPropertyNameNode() ?? binding.getNameNode()).getText() === 'children';
+      });
+      const evidence = pagesScope ? undefined : renderEvidence(tag, root);
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
-        const provider = !primitive && (namedProvider || !!next.contextProvider);
+        const provider = !primitive && (!passThrough && namedProvider || !!next.contextProvider || contextProvider);
         // A dedicated component gets its own row. Inline provider tags belong to the file rendering them.
         const providerTag = provider && (!local || definition.getSourceFile() === tag.getSourceFile());
         const source = providerTag ? tag : definition ?? tag;
         const location: Wrapper = {
           file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
-          line: startLine(source), conditional, provider, providerTag, external,
+          line: startLine(source), conditional: pagesScope ? conditional : !!evidence?.conditions?.length || conditionalAt(tag, root) > 0,
+          provider, providerTag, external, guards: evidence?.conditions,
+          guardIssue: evidence?.issue,
           definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
             ? relativePath(definition.getSourceFile()) : undefined
         };
@@ -654,6 +670,7 @@ export function collectRenderFacts(
     const document = shell('_document');
     const wrappers = app ? [] : layouts;
     const issues: string[] = [];
+    if (/\.mdx?$/.test(route.file)) issues.push('MDX page body and imports untraced');
     let chains = [emptyChain];
     if (document) {
       if (!documents.has(document)) documents.set(document, pagesDocument(filesByPath.get(document)!, relativePath));
@@ -772,7 +789,8 @@ export function collectRenderFacts(
         if (componentsById.has(id)) {
           index?.render(`file:${route.file}`, id,
             wrapper.site?.file === route.file ? wrapper.site.line : route.file === wrapper.file ? wrapper.line :
-              startLine(filesByPath.get(route.file)!.getExportedDeclarations().get('default')?.[0] ?? filesByPath.get(route.file)!),
+              filesByPath.has(route.file) ? startLine(filesByPath.get(route.file)!.getExportedDeclarations().get('default')?.[0] ??
+                filesByPath.get(route.file)!) : 1,
             Number(wrapper.conditional || !!chain.conditional), true, chain.possible ? true : undefined);
           layoutSeeds.push(id);
           pageWrapperSeeds.set(id, Math.min(pageWrapperSeeds.get(id) ?? Infinity, position + 1));
@@ -1234,11 +1252,12 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
   }
 }
 
-function apiSegments(url: UrlText, config?: NextConfig) {
-  const prefix = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
+function apiSegments(url: UrlText, config?: NextConfig, requestPath = false) {
+  const origin = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/(?!\/))/.exec(url.text)?.[0];
+  const prefix = requestPath || origin && localApi.test(url.text.slice(origin.length)) ? origin : undefined;
   const raw = prefix ? url.text.slice(prefix.length) : url.text;
   const local = config ? (normalizeNextUrl(raw, config.url) ?? raw) + (/[?#].*$/.exec(raw)?.[0] ?? '') : raw;
-  if (!localApi.test(local)) return;
+  if (!localApi.test(local) && (!requestPath || !/^\/(?!\/)/.test(local))) return;
   const [pathname] = local.split(/[?#]/, 1);
   const spanning = pathname.includes(spanningSlot);
   const trailingSlash = pathname.endsWith('/');
@@ -1434,7 +1453,8 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow) {
+  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow,
+  httpSources = new Set<SourceFile>(), appConfig?: NextConfig) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: routeSegments(route.path)
@@ -1476,10 +1496,11 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     }
     return matches;
   };
-  const matchValues = (values: UrlText[]) => {
+  const matchValues = (values: UrlText[], requestPath = false) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
     for (const value of values) {
-      const parsed = apiSegments(value, config);
+      const parsed = apiSegments(value, config) ??
+        (requestPath ? apiSegments(value, appConfig ?? config, true) : undefined);
       if (!parsed) continue;
       matches ??= new Map();
       for (const match of urlMatches(parsed)) {
@@ -1544,15 +1565,20 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   for (const file of files) {
     if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const source = relativePath(file);
+    const excludedRequest = httpSources.has(file);
     const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
-      ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
+      ['swr', 'swr/immutable', 'axios', 'node-fetch', 'undici', 'http', 'https', 'node:http', 'node:https'].includes(declaration.getModuleSpecifierValue()) ||
       sdkModules.has(declaration.getModuleSpecifierValue()));
     const handledTransports = new Set<Node>();
     const collectRequest = (node: CallExpression | NewExpression) => {
       const isConstructor = Node.isNewExpression(node);
       const expression = node.getExpression();
-      const isFetch = !isConstructor && isGlobalFetch(expression);
-      const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
+      const globalFetch = !isConstructor && isGlobalFetch(expression);
+      const origin = !globalFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
+      const isFetch = globalFetch || !isConstructor && (origin?.module === 'node-fetch' && origin.name === 'default' ||
+        origin?.module === 'undici' && origin.name === 'fetch');
+      const nodeHttp = !isConstructor && origin?.module && /^(?:node:)?https?$/.test(origin.module) &&
+        ['get', 'request'].includes(origin.name) ? origin.name : undefined;
       const isAiSdk = origin && (isConstructor ? origin.module === 'ai' && sdkTransports.has(origin.name) :
         (origin.module === '@ai-sdk/react' || origin.module === 'ai/react') && sdkHooks.has(origin.name));
       const isSwr = !isConstructor && (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
@@ -1561,7 +1587,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const axiosMethod = !isConstructor && origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
-      if (config && !isConstructor && !isFetch && !isSwr && !axiosMethod && !isAiSdk) {
+      if (config && !isConstructor && !isFetch && !isSwr && !axiosMethod && !isAiSdk && !nodeHttp) {
         const direct = httpRequest(node, true);
         const trpc = trpcRequest(node, workspace);
         const requests = direct ? [{ ...direct, evidence: undefined, text: undefined }] : trpc ? [trpc] :
@@ -1585,26 +1611,26 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
         }
         return;
       }
-      if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
+      if (!isFetch && !isSwr && !axiosMethod && !isAiSdk && !nodeHttp) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
       const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports) : undefined;
       if (sdkRequests?.some(request => request.partial)) {
         index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded));
       }
-      const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
-      const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
-      const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
-        options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
-          options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
+      const requestOptions = options;
+      const methodProperty = property(requestOptions, 'method');
+      const fetchMethod = textValue(methodProperty)?.toUpperCase() ??
+        (options && (!Node.isObjectLiteralExpression(requestOptions) || methodProperty ||
+          requestOptions.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET');
       const via = sdkRequests ? AI_SDK_TRANSPORT :
-        isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
+        isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : nodeHttp ? 'Node HTTP request' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
       const subject = action ? action.slice('action:'.length) : source;
       const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
       const kind = via === 'fetch' ? '' : ` (${via})`;
       const requests = sdkRequests ?? [{
-        urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : axiosMethod,
+        urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : nodeHttp ? nodeHttp === 'get' ? 'GET' : fetchMethod : axiosMethod,
         partial: false, unbounded: false
       }];
       for (const request of requests) {
@@ -1640,7 +1666,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           }) : [{ values: typeof input === 'string' ? [{ text: input }] : urlTexts(input) ?? [],
             binding: undefined, gates: [], unknown: false }];
           for (const { values, binding, gates, unknown } of candidates) {
-            const matches = matchValues(values);
+            const matches = matchValues(values, isFetch || !!axiosMethod || !!nodeHttp);
             if (!matches) continue;
             const url = binding?.value ?? input;
             if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
@@ -1656,6 +1682,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
                 file: source, line, node, route: route.id,
                 method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
                 partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
+                uncertainty: excludedRequest ? 'HTTP caller outside the app compiler inputs; deployment trigger untraced' : undefined,
                 propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates
               });
               if (isSwr || !mapFact) continue;

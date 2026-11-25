@@ -40,15 +40,22 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
             !path.relative(projectPath, filePath).split(path.sep)
                 .some(part => part === 'node_modules' || part === '.next');
     });
-    const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
+    const appConfig = fs.existsSync(appDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
+    const pagesConfig = fs.existsSync(pagesDir) ? appConfig ?? readNextConfig(projectPath, sourceFiles) : undefined;
     const workspace = pagesConfig ? new WorkspaceBindings(projectPath) : undefined;
-    const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
+    const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace, appConfig).analyze(sourceFiles, [
+        ...staticRouteFiles(appDir), ...(pagesConfig?.extensions?.some(ext => /^(?:md|mdx)$/.test(ext)) ? staticRouteFiles(pagesDir, true) : [])
+    ]);
+    const httpSources = options.markdown || options.index
+        ? addHttpSources(project, projectPath, sourceFiles, routes.some(route => route.type === 'api' && !route.pages))
+        : new Set<import('ts-morph').SourceFile>();
+    sourceFiles.push(...httpSources);
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
-        .analyze(sourceFiles, routes, !!(options.markdown || options.index));
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index), httpSources, appConfig);
 
     if (analysis.index) analysis.index.projectSnapshot = snapshot;
 
@@ -123,14 +130,33 @@ function openProject(root: string): Project {
     return project;
 }
 
-function staticMetadataFiles(directory: string): string[] {
+// App tsconfigs often exclude independently deployed scripts and workers.
+function addHttpSources(project: Project, root: string, files: import('ts-morph').SourceFile[], hasEndpoints: boolean) {
+    const extra = new Set<import('ts-morph').SourceFile>();
+    if (!hasEndpoints) return extra;
+    const present = new Set<string>(files.map(file => file.getFilePath()));
+    const excluded = [...ignoredProjectDirectories, '.git', '.next', '.neorion'];
+    for (const file of ts.sys.readDirectory(root, ['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs', '.tsx', '.jsx'], excluded)) {
+        if (present.has(file) || /\.d\.[cm]?ts$/.test(file)) continue;
+        const stat = fs.lstatSync(file, { throwIfNoEntry: false });
+        if (!stat?.isFile()) continue;
+        const text = ts.sys.readFile(file);
+        if (text && /\bfetch\s*\(|['"](?:axios|node-fetch|undici|(?:node:)?https?)['"]/.test(text)) {
+            extra.add(project.addSourceFileAtPath(file));
+        }
+    }
+    return extra;
+}
+
+function staticRouteFiles(directory: string, pages = false): string[] {
     if (!fs.existsSync(directory)) return [];
     return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
         const file = path.join(directory, entry.name);
-        if (entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.')) {
-            return staticMetadataFiles(file);
+        if (entry.isDirectory() && (pages || !entry.name.startsWith('_')) && !entry.name.startsWith('.')) {
+            return staticRouteFiles(file, pages);
         }
-        return entry.isFile() && /^(?:opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name)
+        return entry.isFile() && (pages ? /\.mdx?$/.test(entry.name) :
+            /^(?:page\.mdx?|opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name))
             ? [file] : [];
     }).sort();
 }

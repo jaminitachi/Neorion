@@ -3,7 +3,7 @@ import { readdirSync, realpathSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve, sep } from 'node:path';
 
 const ignored = new Set(['node_modules', '.git', '.next', '.neorion']);
-const inputs = /\.(?:[cm]?[jt]sx?|json|png|jpe?g|gif|txt|xml)$/i;
+const inputs = /\.(?:[cm]?[jt]sx?|json|mdx?|png|jpe?g|gif|txt|xml)$/i;
 
 // Include candidate inputs even when TypeScript excludes them. This detects
 // additions before the next graph build has resolved the tsconfig and imports.
