@@ -4,8 +4,9 @@ import * as path from 'node:path';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
-  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION, isMiddlewareFile, isTestFile, type ExternalCall, type FetchEntry,
-  type FlowGate, type GraphReference, type ModuleImport, type NamespaceUse, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
+  isMiddlewareFile, isTestFile, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
@@ -14,6 +15,9 @@ import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate } from './PropFlow';
+import { collectPagesFacts, type PagesDependency } from './PagesFacts';
+import type { NextConfig } from './NextConfig';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 
 type RelativePath = (source: SourceFile) => string;
@@ -87,17 +91,63 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
-  private edges: [string, string, Node, number, string?, JsxSite?][] = [];
+  private edges: [string, string, number, number, true?, true?, string?, JsxSite?][] = [];
+  private renderSites = new Map<Node, typeof this.edges>();
+  private renderPairs = new Map<string, typeof this.edges>();
+  private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
   private renderIssues: [string, string, Node][] = [];
   private propRequests: [string, Node][] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
+  private shells = new Map<string, Node | undefined>();
+  private wrapperProblems = new Map<string, string[]>();
+  private wrapperDependencies: PagesDependency[] = [];
+
+  shell(file: string, body?: Node) {
+    this.shells.set(file, body);
+  }
+
+  wrapperIssues(route: string, reasons: string[]) {
+    this.wrapperProblems.set(route, reasons);
+  }
+
+  wrapperDependency(route: string, target: Node, site: Node, detail: string) {
+    this.wrapperDependencies.push({ route, target, site, detail, kind: 'wrap' });
+  }
+
   private fetches: PendingFetch[] = [];
   private uncertainChatTransports: { file: string; node: Node; unbounded: boolean }[] = [];
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, tag: Node, conditional: number, detail?: string, site?: JsxSite) {
-    this.edges.push([from, to, tag, conditional, detail, site]);
+  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: JsxSite) {
+    const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
+      layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
+    if (detail) edge[6] = detail;
+    if (site) edge[7] = site;
+    this.edges.push(edge);
+    if (tag) {
+      const entries = this.renderSites.get(tag) ?? [];
+      entries.push(edge);
+      this.renderSites.set(tag, entries);
+      const key = from + '\0' + to;
+      const pair = this.renderPairs.get(key) ?? [];
+      pair.push(edge);
+      this.renderPairs.set(key, pair);
+    }
+  }
+
+  pageRenderCondition(route: string, tag: Node, decision: PageRenderCondition) {
+    for (const edge of this.renderSites.get(tag) ?? []) {
+      const conditions = this.pageConditions.get(route) ?? new Map();
+      conditions.set(edge, decision);
+      this.pageConditions.set(route, conditions);
+    }
+  }
+
+  pageRenderExcluded(route: string, from: string, to: string) {
+    const conditions = this.pageConditions.get(route);
+    const pair = conditions && this.renderPairs.get(from + '\0' + to);
+    return !!pair?.length && pair.every(edge => conditions?.get(edge) === 'excluded');
   }
 
   unresolvedRender(from: string, to: string, site: Node) {
@@ -136,7 +186,8 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, flow: PropFlow): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow): QueryIndex {
+    const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
       wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
@@ -201,13 +252,24 @@ export class QueryIndexBuilder {
       if (isMiddlewareFile(relative)) {
         const matcher = middlewareMatcher(file.compilerNode);
         index.routeFiles![relative] = ['middleware', '/', matcher?.label, undefined, matcher?.values];
-      } else if (/^(?:src\/)?pages\/_(?:app|document)\.[jt]sx?$/.test(relative)) {
+      } else if (this.shells.has(relative)) {
         index.routeFiles![relative] = ['app-shell', '/'];
       }
     }
     for (const [node, targets] of aliases) {
       const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
       if (id !== undefined) byNode.set(node, id);
+    }
+    if (pages) for (const [node, name] of pages.lifecycleNames) {
+      const id = byNode.get(node) ?? add(node, name, 'function', null);
+      index.symbols[id - 1].kind = 'function';
+    }
+    for (const [file, body] of this.shells) {
+      const parent = body?.getParent();
+      if (!parent) continue;
+      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ?? parent;
+      const id = byNode.get(declaration);
+      if (id !== undefined) index.routeFiles![file][3] = id;
     }
     const hasValueBinding = (entry: ReturnType<SourceFile['getImportDeclarations']>[number]) => !entry.isTypeOnly() &&
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
@@ -358,9 +420,13 @@ export class QueryIndexBuilder {
       });
     }
 
-    const owners = (node: Node): [legacy?: number, graph?: number] => {
+    const owners = (node: Node): [legacy?: number, graph?: number, possible?: boolean] => {
       let graph: number | undefined;
-      for (const parent of node.getAncestors()) {
+      for (const parent of [node, ...node.getAncestors()]) {
+        const lifecycle = pages?.owners.get(parent);
+        const entry = lifecycle?.declaration && byNode.get(lifecycle.declaration);
+        if (entry !== undefined && entry !== null) return [entry, entry, lifecycle?.possible];
+        if (parent === node) continue;
         const id = byNode.get(parent);
         if (id === undefined || index.symbols[id - 1].kind === 'constant') continue;
         graph ??= id;
@@ -484,23 +550,84 @@ export class QueryIndexBuilder {
         id, url: route.path, file: route.file, kind: route.type, line: symbol && symbol.file === route.file ? symbol.line : site ? startLine(site) : 1,
         component, fileSymbol: byGraphId.get(`file:${route.file}`),
         layouts: page?.layouts.flatMap(layout => byGraphId.get(layout) ?? []), methods: route.methods,
-        handlers: Object.keys(handlers).length ? handlers : undefined
+        handlers: Object.keys(handlers).length ? handlers : undefined,
+        pages: route.pages, methodBasis: route.methodBasis, observedMethods: route.observedMethods
       });
       const chains = [...new Set(page?.chains.map(chain => {
-        const key = createHash('sha1').update(JSON.stringify(chain)).digest('hex').slice(0, 12);
-        index.wrapChains[key] = chain;
+        const annotations: [number, string][] = [];
+        const shared = route.pages ? chain.map((wrapper, position) => {
+          const { site, evidence, ...location } = wrapper;
+          if (!site || !evidence) return wrapper;
+          annotations.push([position, evidence]);
+          return location;
+        }) : chain;
+        const key = createHash('sha1').update(JSON.stringify(shared)).digest('hex').slice(0, 12);
+        index.wrapChains[key] = shared;
+        if (annotations.length) ((index.pagesWrapSites ??= {})[id] ??= {})[key] = annotations;
         return key;
       }))];
       if (chains.length) index.routeWrap[id] = chains[0];
       if (chains.length > 1) index.branches![id] = chains;
     }
-    for (const [from, to, tag, conditional, detail, site] of this.edges) {
+    if (pages && config) {
+      const routeEntries = new Map(index.routes.map(route => [route.id, route]));
+      const routeStart = (id: number | undefined) => id === undefined ? undefined : routeEntries.get(id)?.fileSymbol;
+      const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
+        const id = routeIds.get(route);
+        return id === undefined ? [] : [[id, [...reasons]]];
+      }));
+      index.pagesUrlConfig = config.url;
+      index.pagesWorkspaceInputs = workspace?.snapshot();
+      index.pagesIssues = issues(pages.issues);
+      index.pagesWrapperIssues = issues(this.wrapperProblems);
+      if (this.pageConditions.size) {
+        index.pagesRenderConditions = {};
+        for (const [route, conditions] of this.pageConditions) {
+          const id = routeIds.get(route);
+          if (id === undefined) continue;
+          const entries: Record<string, PageRenderCondition> = {};
+          for (const [edge, decision] of conditions) {
+            const [from, to, line] = edge;
+            const source = byGraphId.get(from);
+            const target = byGraphId.get(to);
+            if (source === undefined || target === undefined) continue;
+            const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line)
+              .map(other => conditions.get(other));
+            if (combined?.includes(undefined)) continue;
+            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' : decision;
+          }
+          index.pagesRenderConditions[id] = entries;
+        }
+      }
+      index.pagesApiIssues = issues(pages.apiIssues);
+      index.pagesOwnerIssues = {};
+      for (const [node, reasons] of pages.ownerIssues) {
+        const id = byNode.get(node) ?? owners(node)[1] ?? byGraphId.get(`file:${relativePath(node.getSourceFile())}`);
+        if (id !== undefined) index.pagesOwnerIssues[id] = [...new Set([...index.pagesOwnerIssues[id] ?? [], ...reasons])];
+      }
+      index.pagesEdges = [];
+      const seen = new Set<string>();
+      for (const edge of [...pages.dependencies, ...this.wrapperDependencies]) {
+        const file = relativePath(edge.site.getSourceFile());
+        const route = edge.destination ? routeIds.get(edge.destination) : undefined;
+        const from = edge.route ? routeStart(routeIds.get(edge.route)) : edge.owner ? byNode.get(edge.owner) :
+          owners(edge.site)[1] ?? byGraphId.get(`file:${file}`);
+        const to = edge.target ? byNode.get(edge.target) : undefined;
+        if (from === undefined || to === undefined && route === undefined) continue;
+        const row = { from, to, route, kind: edge.kind, file, line: startLine(edge.site), detail: edge.detail, possible: edge.possible, matcher: edge.matcher };
+        const key = JSON.stringify(row);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        index.pagesEdges.push(row);
+      }
+    }
+    for (const [from, to, line, conditional, layout, possible, detail, site] of this.edges) {
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
-      const line = startLine(tag);
-      index.renderEdges.push(site || detail ? [source, target, line, conditional, detail, site && siteKey(site)] :
-        [source, target, line, conditional]);
+      index.renderEdges.push(site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
+        possible ? [source, target, line, conditional, layout, possible] : layout ?
+          [source, target, line, conditional, layout] : [source, target, line, conditional]);
     }
     for (const [from, to, site] of this.renderIssues) {
       const supplier = byGraphId.get(from);
@@ -510,18 +637,19 @@ export class QueryIndexBuilder {
       if (target !== undefined) (index.renderIssues ??= {})[target] ??= issue;
     }
     for (const { node, route, prop, ...entry } of this.fetches) {
-      const [owner, graphOwner] = owners(node);
+      if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
+      const [owner, graphOwner, possible] = owners(node);
       const key = prop && siteKey(prop.site);
       const binding = prop && key ? {
         file: relativePath(prop.value.getSourceFile()), line: startLine(prop.value), name: prop.name,
         supplier: owners(prop.site)[1], site: key
       } : undefined;
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
-        fn: owner ? index.symbols[owner - 1].name : null, binding,
+        lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
         gates: prop ? gatesOf(prop.gates) : undefined });
     }
     const suppliers = new Set(index.fetches.flatMap(fetch => fetch.binding?.supplier ?? []));
-    for (const [, to, , , , site] of this.edges) {
+    for (const [, to, , , , , , site] of this.edges) {
       if (!site || !suppliers.has(byGraphId.get(to)!)) continue;
       const label = sectionLabels(site);
       if (label) (index.renderLabels ??= {})[siteKey(site)] = label;
@@ -658,7 +786,7 @@ export class QueryIndexBuilder {
         if (detail !== undefined) ref[4] = detail;
         graphReferences.set(key, ref);
       };
-      const record = (node: Node, declarations: Node[], kind: string, detail?: string, caller?: number, graphOwner?: number) => {
+      const record = (node: Node, declarations: Node[], kind: string, detail?: string, caller?: number, graphOwner?: number, possible?: true) => {
         const line = startLine(node);
         let found = false;
         for (const declaration of declarations) {
@@ -692,13 +820,16 @@ export class QueryIndexBuilder {
               referenceOwner = undefined;
               referenceKind = 'binding-use';
             }
-            if (sameFile && !jsx && !signature && !executable && referenceOwner !== id &&
+            const callbackUse = pages?.callbackUses.has(node) ||
+              !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
+            if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
               recordGraph(id, line, GraphReferenceKind.Use, referenceOwner);
             }
             moduleUse = !jsx && !signature && referenceOwner === undefined;
             referenceCaller = sameFile ? undefined : referenceOwner;
             if (sameFile) referenceOwner = undefined;
+            else if (callbackUse) referenceKind = 'callback-argument';
             else if (jsx) referenceKind = 'jsx-use';
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
@@ -709,12 +840,13 @@ export class QueryIndexBuilder {
           const lines = references.get(id) ?? new Map<number, Reference[]>();
           const entries = lines.get(line) ?? [];
           const same = entries.some(entry => entry[3] === referenceKind && entry[4] === detail && entry[5] === referenceCaller &&
-            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller));
+            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller) && !!entry[7] === !!possible);
           if (same || (kind === 'use' && entries.some(entry => entry[3] === 'call'))) continue;
           const entry: Reference = [id, relative, line, referenceKind];
           if (detail !== undefined || referenceCaller !== undefined) entry[4] = detail;
           if (referenceCaller !== undefined) entry[5] = referenceCaller;
           if (referenceOwner !== undefined && referenceOwner !== referenceCaller) entry[6] = referenceOwner;
+          if (possible) entry[7] = possible;
           // A call on the same line already records the resolved use for rename.
           lines.set(line, kind === 'call' ? [...entries.filter(entry => entry[3] !== 'use' && entry[3] !== 'jsx-use'), entry] :
             [...entries, entry]);
@@ -729,6 +861,11 @@ export class QueryIndexBuilder {
         const imported = packageBindings.get(root.getText());
         const declaration = imported || !found ? root.getSymbol()?.getDeclarations()[0] : undefined;
         if (imported && declaration === imported.binding) {
+          if (pages && workspace?.has(imported.module)) {
+            const reasons = (index.pagesOwnerIssues![owner] ??= []);
+            const reason = `workspace import ${imported.module} outside indexed root`;
+            if (!reasons.includes(reason)) reasons.push(reason);
+          }
           const name = [imported.name, ...members].slice(0, 2).join('.');
           const calls = externalCalls.get(owner) ?? new Map();
           const key = imported.module + '\0' + name;
@@ -751,6 +888,12 @@ export class QueryIndexBuilder {
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
+          if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
+            const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
+            sites.push([relative, startLine(node), expression.getText()]);
+            const reasons = (index.pagesOwnerIssues![owner] ??= []);
+            if (!reasons.includes('lifecycle calls on locals/params unresolved')) reasons.push('lifecycle calls on locals/params unresolved');
+          }
         }
       };
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
@@ -864,8 +1007,9 @@ export class QueryIndexBuilder {
         } else if (Node.isExportSpecifier(node)) {
           record(node, declarationsOf(node.getAliasNode() ?? node.getNameNode()), 're-export');
         } else if (Node.isCallExpression(node) || Node.isNewExpression(node) || Node.isTaggedTemplateExpression(node)) {
+          if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return;
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
-          const [owner, graphOwner] = owners(node);
+          const [owner, graphOwner, possible] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             recordDynamic(node, node.getArguments()[0], graphOwner);
           }
@@ -883,7 +1027,7 @@ export class QueryIndexBuilder {
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression), 'call', undefined, owner, graphOwner);
+          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression), 'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
@@ -977,7 +1121,7 @@ export class QueryIndexBuilder {
       ...index.fetches.flatMap(fetch => fetch.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1])) edge.length = edge[4] ? 5 : 4;
+      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
     }
     return index;
   }

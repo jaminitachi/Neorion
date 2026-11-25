@@ -39,7 +39,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   });
   const fileOffsets = new Map(Object.keys(index.files).map((file, offset) => [file, offset]));
   const references = index.references.map((reference, offset): IndexedReference => {
-    const [target, path, line, kind, detail, owner, graphOwner] = reference;
+    const [target, path, line, kind, detail, owner, graphOwner, possible] = reference;
     const file = typeof path === 'string' ? fileOffsets.get(path) ?? path : path;
     if (kind === 'jsx-use') {
       facts.useSites!.push([offset]);
@@ -49,7 +49,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
       facts.useSites!.push([offset, owner]);
       return [target, file, line, kind];
     }
-    if (graphOwner === undefined) {
+    if (graphOwner === undefined || possible) {
       if (file === path) return reference;
       const [, , ...site] = reference;
       return [target, file, ...site];
@@ -58,15 +58,17 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
     return owner === undefined ? [target, file, line, kind] : [target, file, line, kind, detail, owner];
   });
   const routes = index.routes.map(({ methods, handlers, ...route }) => {
-    if (methods || handlers) facts.routeDetails!.push([route.id, { methods, handlers }]);
-    return route;
+    // API consumer queries read Pages method evidence without inflating the graph.
+    const packedMethods = route.pages ? undefined : methods;
+    if (packedMethods || handlers) facts.routeDetails!.push([route.id, { methods: packedMethods, handlers }]);
+    return route.pages && methods ? { ...route, methods } : route;
   });
   facts.renderSites = [];
   const renderEdges = index.renderEdges.map((edge, offset) => {
-    const site = edge[5];
+    const site = edge[7];
     if (!site) return edge;
     facts.renderSites!.push([offset, site]);
-    return edge.slice(0, edge[4] ? 5 : 4) as typeof edge;
+    return edge.slice(0, edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4) as typeof edge;
   });
   return {
     ...rest, symbols, references, routes, renderEdges, hasFlowCalls: !!flowCalls?.length || undefined,
@@ -103,8 +105,9 @@ export function unpackGraph(index: QueryIndex): QueryIndex {
   const routes = index.routes.map(route => ({ ...route, ...details.get(route.id) }));
   const renderEdges = index.renderEdges.slice();
   for (const [offset, site] of renderSites ?? []) {
-    const [from, to, line, conditional, detail] = renderEdges[offset];
-    renderEdges[offset] = [from, to, line, conditional, detail, site];
+    const edge = renderEdges[offset].slice() as QueryIndex['renderEdges'][number];
+    edge[7] = site;
+    renderEdges[offset] = edge;
   }
   return { ...index, ...facts, references, routes, renderEdges, symbols };
 }

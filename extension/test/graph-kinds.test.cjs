@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -939,7 +939,13 @@ test('changes handles top-level edits, reports module stops and can rerun deeper
 });
 
 test('packing and unpacking the graph preserves default-suite query output', { timeout: 35_000 }, t => {
-  const { query, build } = fixture(t);
+  const { query, build, root } = fixture(t);
+  const pagesApi = path.join(root, 'pages/api');
+  fs.mkdirSync(pagesApi, { recursive: true });
+  fs.writeFileSync(path.join(pagesApi, 'enforced.ts'), `export default function handler(req, res) {
+    if (req.method !== 'POST') return res.status(405).end();
+    return res.status(200).end();
+  }`);
   const indexFile = build();
   const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
   const { outputFiles } = buildSync({
@@ -950,8 +956,9 @@ test('packing and unpacking the graph preserves default-suite query output', { t
   new Function('module', 'require', outputFiles[0].text)(compiled, require);
   const { packGraph, unpackGraph } = compiled.exports;
   const queries = [['impact', 'normalize'], ['callees', 'createItem'], ['path', '/items', 'createItem'],
-    ['search', 'getData'], ['impact', 'feed.nested.deep.item']];
+    ['search', 'getData'], ['impact', 'feed.nested.deep.item'], ['api_consumers', '/api/enforced']];
   const expected = queries.map(args => query(...args));
+  assert.match(expected.at(-1), /^# methods enforced: POST$/m);
   const packed = packGraph(index, 0);
   assert.equal(typeof packed.packedGraph, 'string');
   assert.equal(packed.graphReferences, undefined);
@@ -1027,4 +1034,257 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.match(sync, /call .* start\nevent .*Start jobs/);
   assert.match(sync, /call .* retry\nevent .*Retry job/);
   assert.match(sync, /page \/jobs\s/);
+});
+
+test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {
+  const { build, query, env, root } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  const index = JSON.parse(fs.readFileSync(build(), 'utf8'));
+  const wrappers = query('wrappers', '/base/ko/posts/article?preview=true');
+  assert.match(wrappers, /document pages\/_document.page.tsx:3 HtmlDocument \[server; Main at pages\/_document.page.tsx:5\]/);
+  assert.match(wrappers, /_app.page.tsx:12 translate, App/);
+  assert.match(wrappers, /providers \(outermost first\): OuterProvider, LayoutProvider/);
+  assert.match(wrappers, /LayoutProvider \[getLayout at lib\/shells.tsx:6; assigned at pages\/posts\/\[slug\].page.tsx:8\]/);
+  assert.doesNotMatch(wrappers, /PageBodyProvider|Never|Maintenance|PropertyWrapper/);
+  assert.match(query('wrappers', '/posts/new'), /PropertyWrapper \[PageWrapper assigned at pages\/posts\/new.page.tsx:5\]/);
+  assert.doesNotMatch(query('wrappers', '/modern'), /Document|OuterProvider/);
+  assert.match(query('wrappers', 'pages/_document.page.tsx'), /custom shell applies to Pages routes/);
+  assert.equal(query('wrappers', '/guide'), query('wrappers', '/guide/one/two'));
+  assert.match(query('who_renders', 'LayoutProvider'), /\/posts\/\[slug\]/);
+  assert.match(query('who_renders', 'PropertyWrapper'), /\/posts\/new/);
+  assert.match(query('path', '/posts/one', 'loadArticle'), /1 data .*getStaticProps · build\/revalidation\)\n2 call .*loadArticle/);
+  assert.match(query('path', '/posts/one', 'findArticles'), /getStaticPaths · build\/enumeration/);
+  assert.match(query('callees', '/posts/new', '--depth', '2'), /getInitialProps · page initial request\/client transition/);
+  assert.match(query('callees', '/posts/new', '--depth', '2'), /getInitialProps · Document server render/);
+  const lifecycle = query('callees', 'pages/posts/new.page.tsx#getServerSideProps');
+  assert.match(lifecycle, /d1 call .*loadUser/);
+  assert.doesNotMatch(lifecycle, /loadUnrelated/);
+  assert.match(query('impact', 'loadArticle'), /page \/posts\/\[slug\]/);
+  assert.match(query('path', '/opaque', 'loadUser'), /# partial:.*callback invocation/);
+  assert.match(query('path', '/posts/new', 'middleware'), /1 middleware middleware.ts:9 middleware/);
+  assert.match(query('path', '/api/auth/signup', 'middleware'), /1 middleware middleware.ts:10 middleware/);
+  assert.match(query('path', '/guide', 'middleware'), /# partial: possible middleware edge/);
+  assert.match(query('path', '/excluded', 'middleware'), /no directed path/);
+  assert.match(query('impact', 'middleware'), /3 exact, 2 possible Pages routes/);
+  assert.match(query('path', '/redirect', '/target'), /1 redirect next.config.js:6 \/target/);
+  assert.match(query('path', '/', '/guide/testing'), /navigate pages\/index.page.tsx:7 .*as \/displayed/);
+  assert.match(query('path', '/', '/target'), /navigate pages\/index.page.tsx:13/);
+  assert.match(query('path', '/', '/excluded'), /# partial: dynamic client navigation destination/);
+  assert.doesNotMatch(query('impact', 'TargetBody'), /page \/  /);
+  assert.doesNotMatch(query('who_renders', 'TargetBody'), /^\/  /m);
+  assert.match(query('search', '/base/ko/posts/article'), /pages\/posts\/\[slug\].page.tsx/);
+
+  const route = file => index.routes.find(route => route.file === file);
+  assert.deepEqual(route('pages/api/auth/signup.page.ts').methods, ['POST']);
+  assert.deepEqual(route('pages/api/table.page.ts').methods, ['POST']);
+  assert.equal(route('pages/api/table.page.ts').methodBasis, 'enforced');
+  assert.ok(!index.routes.some(route => /verification.test|unrelated|ignored/.test(route.file)));
+  assert.match(query('api_consumers', '/api/table'), /POST axios .*HTTP client at lib\/requests.ts:6/);
+  const api = query('api_consumers', '/base/api/auth/token');
+  assert.match(api, /GET Playwright request \[test\]/);
+  assert.match(api, /request.spec.ts:9 csrf GET Playwright request/);
+  assert.match(api, /GET tRPC request/);
+  assert.match(api, /POST tRPC request/);
+  assert.doesNotMatch(api, /POST fetch|POST Playwright request/);
+  assert.match(query('api_consumers', '/api/auth/signup'), /POST fetch/);
+  assert.match(query('api_consumers', '/api/auth/signup'), /POST Playwright request/);
+  assert.doesNotMatch(query('api_consumers', '/api/auth'), /send /);
+  assert.match(query('api_consumers', '/api/auth/shadow'), /mention .*route literal/);
+
+  const mcp = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.equal(await mcp.text('query', { kind: 'wrappers', target: '/base/ko/posts/article?preview=true' }), wrappers);
+
+  const git = (...args) => execFileSync('git', args, { cwd: root, stdio: 'pipe' });
+  git('init', '-q');
+  git('add', '.');
+  git('-c', 'user.email=fixture@example.test', '-c', 'user.name=Fixture', 'commit', '-qm', 'Fixture');
+  const edit = (file, before, after) => {
+    const target = path.join(root, file);
+    fs.writeFileSync(target, fs.readFileSync(target, 'utf8').replace(before, after));
+  };
+  edit('lib/data.ts', "return 'article'", "return 'changed'");
+  edit('middleware.ts', "'/target'", "'/target?changed=1'");
+  build();
+  const changes = query('changes');
+  assert.match(changes, /route page \/posts\/\[slug\].*loadArticle/);
+  assert.match(changes, /route page \/guide\/\[\[\.\.\.steps\]\].*middleware d1 \[possible\]/);
+  assert.doesNotMatch(changes, /route page \/excluded|route page \/target/);
+});
+
+test('Pages API workspace proof is scoped and invalidates the index after sibling changes', t => {
+  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-pages-workspace-'));
+  t.after(() => fs.rmSync(temporary, { recursive: true, force: true }));
+  const workspace = path.join(temporary, 'workspace');
+  fs.cpSync(path.join(__dirname, 'fixtures/pages-router-workspace'), workspace, { recursive: true });
+  const cwd = path.join(workspace, 'web');
+  const cache = path.join(temporary, 'cache');
+  const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, NEORION_AUTOBUILD: '1' };
+  const run = (...args) => {
+    const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: 30_000 });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const overview = /^Overview: (.+)$/m.exec(run('graph'))[1];
+  const indexFile = path.join(path.dirname(overview), indexPath);
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  assert.deepEqual(index.routes.find(route => route.url === '/api/fixture').methods, ['POST']);
+  assert.deepEqual(index.routes.find(route => route.url === '/api/alias').methods, ['ALL']);
+  assert.ok(index.pagesWorkspaceInputs.files.includes('packages/dispatch/handler.ts'));
+  assert.ok(index.pagesWorkspaceInputs.files.every(file => !file.includes('packages/unused/')));
+  assert.ok(Object.keys(index.files).every(file => !file.startsWith('../')));
+  fs.writeFileSync(path.join(workspace, 'packages/dispatch/handler.ts'), 'export const dispatch = () => () => null;\n');
+  const query = run('query', 'api_consumers', '/api/fixture');
+  assert.match(query, /# partial: API handler factory or re-export unresolved/);
+  assert.deepEqual(JSON.parse(fs.readFileSync(indexFile, 'utf8')).routes.find(route => route.url === '/api/fixture').methods, ['ALL']);
+});
+
+function pagesReviewFixture(t, files) {
+  const { root, build, query } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  for (const [file, content] of Object.entries(files)) {
+    const target = path.join(root, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content);
+  }
+  build();
+  return query;
+}
+
+test('Pages wrapper predicates use the effective page properties', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component, pageProps } = props;
+        return Component.PageWrapper ? <Component.PageWrapper {...props} /> : <Component {...pageProps} />;
+      }`,
+    'lib/license.tsx': `
+      export function LicenseRequired({ children }) { return <section>{children}</section>; }
+      export function PageWrapper({ Component: Screen, pageProps }) {
+        const requiresLicense = Screen.requiresLicense;
+        return requiresLicense ? <LicenseRequired><Screen {...pageProps} /></LicenseRequired> : <Screen {...pageProps} />;
+      }`,
+    'pages/index.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function Home() { return <div />; }
+      Home.PageWrapper = PageWrapper;`,
+    'pages/licensed.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function Licensed() { return <div />; }
+      Licensed.PageWrapper = PageWrapper;
+      Licensed.requiresLicense = true;`,
+    'pages/unknown-license.page.tsx': `
+      import { PageWrapper } from '../lib/license';
+      export default function UnknownLicense() { return <div />; }
+      UnknownLicense.PageWrapper = PageWrapper;
+      UnknownLicense.requiresLicense = process.env.REQUIRES_LICENSE === '1';`
+  });
+  const home = query('wrappers', '/');
+  assert.match(home, /PageWrapper assigned at/);
+  assert.doesNotMatch(home, /LicenseRequired/);
+  assert.match(home, /# complete:/);
+  const renders = query('who_renders', 'LicenseRequired');
+  assert.doesNotMatch(renders, /^\/  /m);
+  assert.match(renders, /^\/licensed  .*\n/m);
+  assert.match(renders, /^\/unknown-license  .*\[possible\]/m);
+  assert.match(renders, /# partial:.*requiresLicense/);
+  assert.match(query('path', '/', 'lib/license.tsx#LicenseRequired'), /# complete: no directed path/);
+  assert.match(query('path', '/licensed', 'LicenseRequired'), /1 render .*LicenseRequired/);
+  assert.doesNotMatch(query('callees', '/', '--depth', '2'), /LicenseRequired/);
+  const impact = query('impact', 'LicenseRequired');
+  assert.doesNotMatch(impact, /^page \/  /m);
+  assert.match(impact, /^page \/licensed  /m);
+  const unknown = query('path', '/unknown-license', 'LicenseRequired');
+  assert.match(unknown, /1 render .*\[possible\]/);
+  assert.match(unknown, /# partial:.*requiresLicense/);
+  assert.match(query('wrappers', '/unknown-license'), /LicenseRequired.*\[possible\]/);
+});
+
+test('Pages lifecycle callbacks need reachable invocation or forwarding', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/ghost.page.tsx': `
+      export default function Ghost() { return <div />; }
+      function wrap(callback) {
+        return () => {
+          const neverCalled = () => callback();
+          return { props: {} };
+          callback();
+        };
+      }
+      export const getServerSideProps = wrap(() => unreachable());
+      function unreachable() {}`,
+    'pages/forwarded.page.tsx': `
+      export default function Forwarded() { return <div />; }
+      const makeHandler = callback => () => callback();
+      function wrap(callback) {
+        const run = () => callback();
+        return makeHandler(run);
+      }
+      export const getServerSideProps = wrap(() => reachable());
+      function reachable() {}`,
+    'pages/uncertain.page.tsx': `
+      import { run } from 'opaque-runner';
+      export default function Uncertain() { return <div />; }
+      function wrap(callback) {
+        return () => run(callback);
+      }
+      export const getServerSideProps = wrap(() => uncertain());
+      function uncertain() {}`
+  });
+  assert.match(query('path', '/ghost', 'unreachable'), /# complete: no directed path/);
+  assert.doesNotMatch(query('callees', 'pages/ghost.page.tsx#getServerSideProps'), /unreachable/);
+  assert.match(query('path', '/forwarded', 'reachable'), /2 call .*reachable/);
+  const uncertain = query('path', '/uncertain', 'uncertain');
+  assert.match(uncertain, /2 call .*uncertain.*\[possible\]/);
+  assert.match(uncertain, /# partial:.*callback invocation/);
+});
+
+test('Pages API methods follow unconditional rejection and Pages handlers receive HEAD as sent', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/index.page.tsx': `
+      export default function Home() { return <div />; }
+      export function readStatus() { return fetch('/api/status'); }
+      export function sendHead() { return fetch('/api/read-only', { method: 'HEAD' }); }
+      export function appHead() { return fetch('/api/app-read', { method: 'HEAD' }); }
+      export function sendPost() { return fetch('/api/oidc', { method: 'POST' }); }
+      export function readDynamic() { return fetch('/api/runtime-method'); }`,
+    'pages/api/status.page.ts': `
+      export default function handler(req, res) {
+        if (req.method === 'POST' && !req.body) return res.status(405).end();
+        return res.status(200).end();
+      }`,
+    'pages/api/oidc.page.ts': `
+      export default function handler(req, res) {
+        if (req.method !== 'GET') return res.status(400).send('Method not allowed');
+        return res.status(200).end();
+      }`,
+    'pages/api/read-only.page.ts': `
+      export default function handler(req, res) {
+        if (req.method !== 'GET') return res.status(405).end();
+        return res.status(200).end();
+      }`,
+    'pages/api/runtime-method.page.ts': `
+      export default function handler(req, res) {
+        if (isAllowed(req.method)) return res.status(200).end();
+        return res.status(405).end();
+      }`,
+    'app/api/app-read/route.ts': 'export function GET() { return new Response(null); }'
+  });
+  const status = query('api_consumers', '/api/status');
+  assert.match(status, /GET fetch/);
+  assert.doesNotMatch(status, /methods enforced/);
+  assert.match(query('path', 'readStatus', '/api/status'), /1 fetch .*GET \/api\/status/);
+  assert.match(query('api_consumers', '/api/oidc'), /# methods enforced: GET/);
+  assert.match(query('path', 'sendPost', '/api/oidc'), /# complete: no directed path/);
+  assert.match(query('path', 'sendHead', '/api/read-only'), /# complete: no directed path/);
+  const runtimeMethod = query('path', 'readDynamic', '/api/runtime-method');
+  assert.match(runtimeMethod, /1 fetch .*\[possible\]/);
+  assert.match(runtimeMethod, /# partial: Pages API method enforcement unresolved/);
+  assert.match(query('path', 'appHead', '/api/app-read'), /1 fetch .*HEAD \/api\/app-read/);
+});
+
+test('Pages middleware paths check concrete catch-all URLs against the matcher', t => {
+  const { build, query } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  build();
+  assert.match(query('path', '/base/api/auth/csrf?check=1', 'middleware'), /no directed path/);
+  assert.match(query('path', '/api/auth/[...parts]', 'middleware'), /1 middleware .*\[possible\]/);
+  assert.match(query('path', '/base/api/auth/csrf/embed?check=1', 'middleware'), /1 middleware .*\/:path\*\/embed/);
+  assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
 });

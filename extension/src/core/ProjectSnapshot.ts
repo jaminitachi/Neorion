@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, realpathSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve, sep } from 'node:path';
 
 const ignored = new Set(['node_modules', '.git', '.next', '.neorion']);
 const inputs = /\.(?:[cm]?[jt]sx?|json|png|jpe?g|gif|txt|xml)$/i;
@@ -30,4 +30,18 @@ export function projectSnapshot(root: string) {
     }
     visit('');
     return hash.digest('hex');
+}
+
+export function workspaceInputsHash(root: string, offset: string, files: string[]) {
+  if (offset !== '' && !/^\.\.(?:\/\.\.){0,7}$/.test(offset) || files.length > 256) return;
+  const base = resolve(root, offset);
+  const hash = createHash('sha256');
+  for (const file of files) {
+    if (!file || isAbsolute(file) || /[\\\x00-\x1f]/.test(file) || file.split('/').includes('..')) return;
+    const absolute = join(base, file);
+    const stat = statSync(absolute, { throwIfNoEntry: false });
+    if (!stat?.isFile() || !realpathSync(absolute).startsWith(base + sep)) return;
+    hash.update(JSON.stringify([file, stat.size, stat.mtimeMs, stat.ctimeMs]));
+  }
+  return hash.digest('hex');
 }

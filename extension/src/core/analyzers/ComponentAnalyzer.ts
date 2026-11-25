@@ -1,3 +1,5 @@
+import type { NextConfig } from './NextConfig';
+import type { WorkspaceBindings } from './WorkspaceBindings';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
@@ -206,7 +208,7 @@ function lexicalName(node: Node): string | undefined {
 }
 
 export class ComponentAnalyzer {
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
   public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
     const components = new Map<Node, ComponentNode>();
@@ -525,7 +527,7 @@ export class ComponentAnalyzer {
         if (index && from !== target.id) {
           for (const transfer of slot ?? [{ detail: undefined, conditional: false, partial: false }]) {
             if (transfer.partial) index.unresolvedRender(from, target.id, attribute ?? tag);
-            index.render(from, target.id, tag, conditionalAt(tag, body) || Number(transfer.conditional), transfer.detail,
+            index.render(from, target.id, startLine(tag), conditionalAt(tag, body) || Number(transfer.conditional), undefined, undefined, tag, transfer.detail,
               Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) ? site : undefined);
           }
         }
@@ -622,9 +624,9 @@ export class ComponentAnalyzer {
         if (body) bodies.set(node, body);
       }
       collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, flow);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index, this.config, this.workspace);
+      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace, flow);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, flow), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

@@ -452,6 +452,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const pageFiles = new Set<string>();
   const apiFiles = new Set<string>();
   const otherFiles = new Set<string>();
+  const possibleFiles = new Set<string>();
   let unknownMiddleware = [...middlewareFiles].some(([file]) => !history?.previousMiddleware.get(file) || !graph.middleware(file));
   const currentRoutes = new Set(trace.routes.map(({ terminal }) => JSON.stringify([terminal.kind, terminal.file, terminal.name])));
   const impacts = new Map(trace.routes.map(result => [JSON.stringify([result.terminal.kind, result.terminal.file, result.terminal.name]),
@@ -497,8 +498,10 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     if (kind === 'api') apiFiles.add(file);
     else if (kind === 'page') pageFiles.add(file);
     else otherFiles.add(file);
-    const labels = [...new Set(origins.map(({ origin, depth, fetch }) =>
-      `${origin.name}${origin.removed ? ' [removed]' : origin.renamed ? ' [renamed]' : ''} d${depth}${fetch ? ` via fetch ${fetch}` : ''}`))];
+    if (origins.every(origin => origin.possible)) possibleFiles.add(file);
+    const labels = [...new Set(origins.map(({ origin, depth, fetch, possible }) =>
+      `${origin.name}${origin.removed ? ' [removed]' : origin.renamed ? ' [renamed]' : ''} d${depth}` +
+      (fetch ? ` via fetch ${fetch}` : '') + (possible ? ' [possible]' : '')))];
     const chain = ` <- ${labels.slice(0, 3).join(', ')}${labels.length > 3 ? ', +' + (labels.length - 3) : ''}`;
     const isCurrent = currentRoutes.has(key);
     rows.push(graphRow(`route ${kind} ${name}  ${file}${isCurrent ? '' : ' [base]'}${chain}`, ...isCurrent ? [file] : []));
@@ -515,6 +518,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   notes.push(graphRow(`# risk: ${quantity(changedSymbols.size, 'changed symbol')} (${quantity(actionCount, 'action')}` +
     `${tracedSymbols < changedSymbols.size ? `, ${tracedSymbols} traced` : ''}); ${quantity(routes, 'route')} reached ` +
     `(${quantity(pageFiles.size, 'page')}, ${quantity(apiFiles.size, 'API')}); ` +
+    (possibleFiles.size ? `${possibleFiles.size} possible; ` : '') +
     `${quantity(wrapperRoutes, 'route')} under touched wrappers; ${quantity(configFiles, 'config file')}` +
     (otherFiles.size ? `; ${quantity(otherFiles.size, 'special file')}` : '')));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';

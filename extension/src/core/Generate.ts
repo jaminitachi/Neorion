@@ -4,6 +4,8 @@ import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
 import { ignoredProjectDirectories, projectConfig } from './FindProject';
 import { projectSnapshot } from './ProjectSnapshot';
+import { readNextConfig } from './analyzers/NextConfig';
+import { WorkspaceBindings } from './analyzers/WorkspaceBindings';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
 import { writeGraph } from './serializers/GraphOutput';
@@ -38,12 +40,15 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
             !path.relative(projectPath, filePath).split(path.sep)
                 .some(part => part === 'node_modules' || part === '.next');
     });
-    const routes = new RouteAnalyzer(appDir, pagesDir, projectPath).analyze(sourceFiles, staticMetadataFiles(appDir));
+    const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
+    const workspace = pagesConfig ? new WorkspaceBindings(projectPath) : undefined;
+    const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
-    const analysis = new ComponentAnalyzer(projectPath).analyze(sourceFiles, routes, !!(options.markdown || options.index));
+    const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index));
 
     if (analysis.index) analysis.index.projectSnapshot = snapshot;
 
