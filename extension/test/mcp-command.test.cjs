@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const { test } = require('node:test');
 const { name, version } = require('../../neorion/package.json');
-const { mcpCommand } = require('./mcp-command.cjs');
+const { mcpCommand, releaseSpec } = require('./mcp-command.cjs');
 
 test('MCP cache detection handles npm, pnpm, and Bun CLI installs', () => {
   const pinned = ['-y', `${name}@${version}`, 'mcp'];
@@ -62,4 +62,14 @@ test('Windows MCP launcher keeps the project path outside the shell command', ()
     new Function('require', 'process', args[1])(requireStub, processStub);
     assert.equal(processStub.exitCode, 7);
   }
+});
+
+test('Release MCP configuration uses the same launcher on Windows and Unix', () => {
+  const root = '${workspaceFolder}/project with spaces';
+  const windows = mcpCommand({ root, platform: 'win32', useRelease: true });
+  assert.deepEqual(mcpCommand({ root, platform: 'linux', useRelease: true }), windows);
+  assert.equal(windows.command, 'node');
+  assert.deepEqual([windows.args[0], ...windows.args.slice(2)], ['-e', '--', root]);
+  assert.ok(windows.args[1].includes(`npx -y ${releaseSpec()} mcp`));
+  assert.ok(!windows.args[1].includes(root));
 });

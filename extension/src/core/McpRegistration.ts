@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
+import { valid } from 'semver';
 import { applyEdits, findNodeAtLocation, modify, parseTree, getNodeValue, type ParseError, type Node } from 'jsonc-parser';
 import { workspaceCache } from './WorkspaceCache';
 import { mcpCommand } from './McpCommand';
@@ -114,6 +115,37 @@ const launchBundle = (flag: string) => [
   'require(server);'
 ].join('\n');
 
+function isCursorNeorionEntry(value: unknown, localEntry: string) {
+  if (!value || typeof value !== 'object') return false;
+  const { type, command, args } = value as Command;
+  if ((type !== undefined && type !== 'stdio') || !Array.isArray(args) ||
+      !args.every(arg => typeof arg === 'string')) return false;
+  const workspace = '${workspaceFolder}';
+  const matches = (expected: Command) => command === expected.command && JSON.stringify(args) === JSON.stringify(expected.args);
+  if (matches(mcpCommand({ root: workspace, localEntry }))) return true;
+
+  const root = args.at(-1);
+  if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
+  // Compare the full launch arguments after extracting the installed package's version.
+  const spec = (command === 'npx' ? args[1] : /\bnpx -y (\S+) mcp\b/.exec(args[1] ?? '')?.[1]) ?? '';
+  const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
+  const version = valid(releaseVersion ?? spec.split('@').at(-1) ?? '');
+  const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
+  return !!version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
+    matches(mcpCommand({ ...options, discover, platform: 'win32' })));
+}
+
+function isExtensionCursorEntry(cache: string, entry: unknown) {
+  try {
+    // The generated bundle launcher can differ across CLI and extension builds.
+    const source = read(checked(cache, STATE));
+    const registered = source && (JSON.parse(source) as State | null)?.configs?.Cursor?.entry;
+    return !!registered && equal(entry, registered);
+  } catch {
+    return false;
+  }
+}
+
 export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', root: string, bundleSource: string, discover: boolean) {
   const command: Command = { command: 'node', args: [bundleSource, discover ? '--workspace' : '--root', root] };
   return tool === 'Codex CLI'
@@ -122,7 +154,7 @@ export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', root: 
 }
 
 export function planMcp(root: string, project: string, targets: McpTarget[], bundled: boolean, bundleSource: string,
-  connect: boolean, { discover = false, cursorSetup }: { discover?: boolean; cursorSetup?: { localEntry?: string } } = {}) {
+  connect: boolean, { discover = false, cursorSetup }: { discover?: boolean; cursorSetup?: { legacyLocalEntry: string } } = {}) {
   const changes: Change[] = [];
   const directories = new Set<string>();
   const cache = workspaceCache(root);
@@ -185,16 +217,19 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     const entry: Command = bundled
       ? { command: 'node', args: ['-e', launchBundle(discover ? '--workspace' : '--root'), '--',
           variable ? '${workspaceFolder}' : '.', projectArgument] }
-      : mcpCommand({ root: scopedProject, discover, localEntry: cursorSetup?.localEntry });
+      : mcpCommand({ root: scopedProject, discover, useRelease: !!cursorSetup });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
+    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
+        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });
     const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
     if (parsed.entry && !equal(current, entry) && !implicitStdio) {
       if (!previous || previous.hadNeorion || !equal(getNodeValue(parsed.entry), previous.entry)) {
-        throw new Error(`Neorion MCP server conflicts with an existing entry in ${configFile}`);
+        const next = cursorSetup ? '. Keep the existing entry or remove it from Cursor (or through the extension that registered it) before rerunning setup.' : '';
+        throw new Error(`Neorion MCP server conflicts with an existing entry in ${configFile}${next}`);
       }
       const source = original!;
       const start = parsed.bom + parsed.entry.offset;

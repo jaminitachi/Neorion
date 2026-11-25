@@ -2,15 +2,16 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { applyEdits, createScanner, findNodeAtLocation, getNodeValue, modify, parseTree, SyntaxKind, type ParseError } from 'jsonc-parser';
+import { applyEdits, createScanner, findNodeAtLocation, getNodeValue, modify, parseTree, SyntaxKind, type Node, type ParseError } from 'jsonc-parser';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { INDEX_PATH, LEGACY_INDEX_PATH } from '../mcp/Index';
 import { isEntry } from './AgentMcp';
-import { read } from './SetupFiles';
+import { errorCode, read } from './SetupFiles';
 
 const matcher = 'Grep|Glob';
 const marker = 'neorion-query-advisory';
 const createdSettings = 'created-settings';
+const createdDirectory = 'created-directory';
 const settingsPath = '.claude/settings.json';
 
 // Serialized into the command hook so it works with Node alone, even after an npx install expires.
@@ -85,6 +86,10 @@ function runAdvisory(cacheFor: typeof workspaceCache, indexPath: string, legacyP
       }
       const route = /^\/[\w.[\]/-]*$/.test(target) && !target.includes('//');
       const symbol = /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(target);
+      if (symbol && (/^(?:on[A-Z]\w*|className|dangerouslySetInnerHTML|htmlFor|tabIndex|autoFocus|suppressHydrationWarning)$/.test(target) ||
+          /^(?:getInitialProps|getServerSideProps|getStaticPaths|getStaticProps|generateMetadata|generateStaticParams|generateViewport|generateImageMetadata|generateSitemaps|fetchCache|dynamicParams|preferredRegion|maxDuration)$/.test(target) ||
+          /^(?:NextRequest|NextResponse|NextApiRequest|NextApiResponse|NextPage|NextConfig|Metadata|ResolvingMetadata|Viewport|ImageResponse)$/.test(target) ||
+          /^[A-Z]\w*(?:Props|Type)$/.test(target))) return;
       const kind = route ? (routeHandler || /^\/api(?:\/|$)/.test(target) ? 'api_consumers' : 'wrappers') :
         symbol && /^[A-Z]/.test(target) && /[a-z]/.test(target)
           ? (/^(?:Error|Promise|React|Props)$/.test(target) ? undefined : 'who_renders')
@@ -148,16 +153,50 @@ function hasComments(source: string) {
   return false;
 }
 
-function removeSetting(source: string, path: (string | number)[]) {
+function appendGroup(source: string, array: Node, group: unknown) {
+  const last = array.children?.at(-1);
+  const end = array.offset + array.length - 1;
+  const afterLast = last ? last.offset + last.length : array.offset + 1;
+  const closing = /(\r?\n)([\t ]*)$/.exec(source.slice(afterLast, end));
+  if (!closing) return applyEdits(source, modify(source, ['hooks', 'PreToolUse', -1], group, {}));
+
+  const [, eol, closingIndent] = closing;
+  const scanner = createScanner(source, true);
+  scanner.setPosition(afterLast);
+  const trailingComma = !!last && scanner.scan() === SyntaxKind.CommaToken;
+  const lastIndent = last && /^[\t ]*/.exec(source.slice(source.lastIndexOf('\n', last.offset - 1) + 1))![0];
+  const indent = lastIndent && lastIndent.length > closingIndent.length ? lastIndent : closingIndent + '  ';
+  const unit = indent.slice(closingIndent.length);
+  const rendered = JSON.stringify(group, null, unit).replace(/\n/g, eol + indent);
+  return applyEdits(source, [
+    { offset: end - closingIndent.length, length: 0, content: indent + rendered + (trailingComma ? ',' : '') + eol },
+    ...(last && !trailingComma ? [{ offset: afterLast, length: 0, content: ',' }] : [])
+  ]);
+}
+
+function removeSetting(source: string, path: (string | number)[], wholeGroup = false) {
   const node = findNodeAtLocation(parseTree(source)!, path)!;
   const item = node.parent?.type === 'property' ? node.parent : node;
   const siblings = item.parent?.children ?? [];
   const previous = siblings[siblings.indexOf(item) - 1];
   const scanner = createScanner(source, true);
+  const end = item.offset + item.length;
+  if (wholeGroup && previous && /^,[\t ]*$/.test(source.slice(previous.offset + previous.length, item.offset)) &&
+      siblings.at(-1) === item) {
+    return source.slice(0, previous.offset + previous.length) + source.slice(end);
+  }
   // Remove the node and the adjacent comma separately so JSONC trivia survives.
   const edits = [{ offset: item.offset, length: item.length, content: '' }];
-  scanner.setPosition(item.offset + item.length);
+  scanner.setPosition(end);
   let token = scanner.scan();
+  if (wholeGroup) {
+    const lineStart = source.lastIndexOf('\n', item.offset - 1) + 1;
+    const suffix = /^[\t ]*,?[\t ]*\r?\n/.exec(source.slice(end));
+    if (suffix && /^[\t ]*$/.test(source.slice(lineStart, item.offset))) {
+      edits[0] = { offset: lineStart, length: end + suffix[0].length - lineStart, content: '' };
+      if (token === SyntaxKind.CommaToken && suffix[0].includes(',')) return applyEdits(source, edits);
+    }
+  }
   if (token !== SyntaxKind.CommaToken && previous) {
     scanner.setPosition(previous.offset + previous.length);
     token = scanner.scan();
@@ -168,9 +207,18 @@ function removeSetting(source: string, path: (string | number)[]) {
   return applyEdits(source, edits);
 }
 
+function removeEmptyClaudeDirectory(directory: string) {
+  try {
+    fs.rmdirSync(directory);
+  } catch (error) {
+    if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(errorCode(error) ?? '')) throw error;
+  }
+}
+
 function editClaudeSettings(root: string, install: boolean) {
   const file = join(root, settingsPath);
-  for (const path of [dirname(file), file]) {
+  const directory = dirname(file);
+  for (const path of [directory, file]) {
     if (fs.lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
       throw new Error(`Claude settings path is a symbolic link: ${path}`);
     }
@@ -189,16 +237,18 @@ function editClaudeSettings(root: string, install: boolean) {
   }
   const eventPath = ['hooks', 'PreToolUse'];
   const groups: unknown[] = events ? getNodeValue(events) : [];
-  const created = original === undefined || groups.some(group => isEntry(group) && Array.isArray(group.hooks) &&
-    group.hooks.some(hook => ownsHook(hook) && hook.args[4] === createdSettings));
+  const ownedHooks = groups.flatMap(group => isEntry(group) && Array.isArray(group.hooks)
+    ? group.hooks.filter(ownsHook) : []);
+  const created = original === undefined || ownedHooks.some(hook => hook.args[4] === createdSettings);
+  const madeDirectory = install && fs.mkdirSync(directory, { recursive: true }) !== undefined;
+  const ownsDirectory = madeDirectory || ownedHooks.some(hook => hook.args[4] === createdSettings && hook.args[5] === createdDirectory);
   const jsonc = hasComments(source);
-  const edit = (path: (string | number)[], value: unknown, insertion = false) => {
+  const edit = (path: (string | number)[], value: unknown) => {
     if (value === undefined && jsonc) {
       source = removeSetting(source, path);
       return;
     }
     source = applyEdits(source, modify(source, path, value, {
-      isArrayInsertion: insertion,
       formattingOptions: { insertSpaces: true, tabSize: 2, eol: source.includes('\r\n') ? '\r\n' : '\n' }
     }));
   };
@@ -207,7 +257,7 @@ function editClaudeSettings(root: string, install: boolean) {
     type: 'command',
     command: 'node',
     args: ['-e', `(${runAdvisory.toString()})(${workspaceCache.toString()}, ${JSON.stringify(INDEX_PATH)}, ${JSON.stringify(LEGACY_INDEX_PATH)})`,
-      '--', marker, ...(created ? [createdSettings] : [])],
+      '--', marker, ...(created ? [createdSettings] : []), ...(ownsDirectory ? [createdDirectory] : [])],
     timeout: 1,
     onFailure: 'continue'
   } : undefined;
@@ -219,9 +269,10 @@ function editClaudeSettings(root: string, install: boolean) {
     if (!owned.length) continue;
     if ((!command || installed) && owned.length === group.hooks.length &&
         group.matcher === matcher && Object.keys(group).length === 2) {
-      const node = jsonc && findNodeAtLocation(parseTree(source)!, [...eventPath, i]);
-      if (!node || !hasComments(source.slice(node.offset, node.offset + node.length))) {
-        edit([...eventPath, i], undefined);
+      const path = [...eventPath, i];
+      const node = findNodeAtLocation(parseTree(source)!, path)!;
+      if (!jsonc || !hasComments(source.slice(node.offset, node.offset + node.length))) {
+        source = removeSetting(source, path, true);
         continue;
       }
     }
@@ -236,7 +287,8 @@ function editClaudeSettings(root: string, install: boolean) {
   }
   if (command && !installed) {
     const group = { matcher, hooks: [command] };
-    if (events) edit([...eventPath, -1], group, true);
+    const array = findNodeAtLocation(parseTree(source)!, eventPath);
+    if (array) source = appendGroup(source, array, group);
     else edit(eventPath, [group]);
   }
   if (!install && bom + source !== original) {
@@ -255,18 +307,21 @@ function editClaudeSettings(root: string, install: boolean) {
   if (!install && created && !parseTree(source)?.children?.length && !hasComments(source)) {
     checkUnchanged();
     fs.unlinkSync(file);
+    if (ownsDirectory) removeEmptyClaudeDirectory(directory);
     console.log(`${file} (Neorion hook removed)`);
     return;
   }
-  fs.mkdirSync(dirname(file), { recursive: true });
-  const temporary = join(dirname(file), `.neorion-settings-${randomUUID()}.tmp`);
+  const temporary = join(directory, `.neorion-settings-${randomUUID()}.tmp`);
+  let written = false;
   try {
     const mode = fs.statSync(file, { throwIfNoEntry: false })?.mode;
     fs.writeFileSync(temporary, content, { flag: 'wx', mode });
     checkUnchanged();
     fs.renameSync(temporary, file);
+    written = true;
   } finally {
     fs.rmSync(temporary, { force: true });
+    if (madeDirectory && !written) removeEmptyClaudeDirectory(directory);
   }
   console.log(`${file} (Neorion hook ${install ? 'installed' : 'removed'})`);
 }

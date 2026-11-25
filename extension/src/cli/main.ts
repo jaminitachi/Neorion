@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util';
 import { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } from '../core/AgentInstructions';
 import { missingProject, selectProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
-import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
+import { isTemporaryCliInstall, mcpCommand, packageSpec, releaseSpec } from '../core/McpCommand';
 import { MCP_TARGETS, planMcp } from '../core/McpRegistration';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
@@ -46,6 +46,8 @@ function isProjectDirectory(root: string) {
   return ['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)));
 }
 
+const missingProjectMarker = 'the current directory has no tsconfig.json, jsconfig.json, or package.json.';
+
 function isHomeDirectory(root: string) {
   const home = homedir();
   return root === home || (existsSync(home) && root === realpathSync(home));
@@ -54,7 +56,7 @@ function isHomeDirectory(root: string) {
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();
   if (!isProjectDirectory(root)) {
-    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json, jsconfig.json, or package.json.`);
+    console.log(`Skipping ${file} hint: ${missingProjectMarker}`);
     return false;
   }
   const changed = updateAgentFiles(root, root, [file], true, false, instruction);
@@ -115,16 +117,13 @@ async function main([command, ...args]: string[]) {
         remove: { type: 'boolean' }
       }
     });
-    const temporary = !values.local && isTemporaryCliInstall(__filename);
-    const onPath = !values.local && !temporary && runsCurrentEntry();
-    const localEntry = temporary ? undefined : __filename;
     const root = process.cwd();
     const remove = !!values.remove;
     if (agent === 'cursor') {
-      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { cursorSetup: { localEntry } });
+      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { cursorSetup: { legacyLocalEntry: __filename } });
       mcp.commit(() => {
         const writeRule = !remove && !hasActiveCursorRule(root, CURSOR_EXTENSION_RULE);
-        if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(hintCommand(temporary, onPath)))) {
+        if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(`npx -y ${releaseSpec()}`))) {
           console.log(`${join(root, CURSOR_SETUP_RULE)} (${writeRule ? 'written' : 'Neorion block removed'})`);
         }
       });
@@ -132,6 +131,9 @@ async function main([command, ...args]: string[]) {
       if (mcp.count) console.log(`${config} (Neorion MCP setup ${remove ? 'removed' : 'configured'})`);
       return;
     }
+    const temporary = !values.local && isTemporaryCliInstall(__filename);
+    const onPath = !values.local && !temporary && runsCurrentEntry();
+    const localEntry = temporary ? undefined : __filename;
     const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     let skippedHint = false;
     setupAgent(agent, __filename, mcpCommand({ localEntry }), remove, () => {
@@ -144,9 +146,9 @@ async function main([command, ...args]: string[]) {
       }
       if (agent === 'claude') {
         if (remove || values['no-hook']) updateClaudeHook(root, false);
-        else if (isProjectDirectory(root) && !isHomeDirectory(root)) {
-          updateClaudeHook(root, true);
-        }
+        else if (isHomeDirectory(root)) console.warn('Skipping Neorion Claude hook: the current directory is your home directory.');
+        else if (!isProjectDirectory(root)) console.warn(`Skipping Neorion Claude hook: ${missingProjectMarker}`);
+        else updateClaudeHook(root, true);
       }
     });
     if (codex && !values.remove) {

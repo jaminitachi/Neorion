@@ -1,5 +1,6 @@
 const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -126,6 +127,23 @@ test('Connect AI tools registers workspace discovery when the selected root is a
   });
   await env.disconnect();
   assert.ok(!fs.existsSync(env.file('.mcp.json')));
+});
+
+test('Cursor CLI setup reuses the bundled extension server without taking ownership', async t => {
+  const env = setup(t);
+  env.selections.mode = bundledMode;
+  env.selections.targets = ['Cursor'];
+  await env.connect();
+  const file = files.Cursor;
+  const original = env.read(file);
+  const cli = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
+  for (const flags of [[], ['--remove']]) {
+    const result = spawnSync(process.execPath, [cli, 'setup', 'cursor', ...flags], { cwd: env.file('.'), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(env.read(file), original);
+  }
+  await env.disconnect();
+  assert.ok(!fs.existsSync(env.file(file)));
 });
 
 test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and reverse registration', async t => {

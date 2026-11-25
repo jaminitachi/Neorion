@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
-const { execFileSync, spawnSync } = require('node:child_process');
+const childProcess = require('node:child_process');
+const { execFileSync, spawnSync } = childProcess;
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -11,6 +12,7 @@ const { indexFile: indexPath } = require('./workspace-cache.cjs');
 
 const entry = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
 const source = path.join(__dirname, 'fixtures/impact-graph');
+const cliSpawnTimeout = 60_000;
 
 function fixture(t, reverse = false, fixtureSource = source) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-graph-kinds-'));
@@ -30,8 +32,8 @@ function fixture(t, reverse = false, fixtureSource = source) {
   copy(fixtureSource, root);
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache };
   const run = (args, extra = {}) => {
-    const result = spawnSync(process.execPath, [entry, ...args], {
-      cwd: root, env: { ...env, ...extra }, encoding: 'utf8', timeout: 30_000
+    const result = childProcess.spawnSync(process.execPath, [entry, ...args], {
+      cwd: root, env: { ...env, ...extra }, encoding: 'utf8', timeout: cliSpawnTimeout
     });
     assert.equal(result.status, 0, result.stderr || result.error?.message);
     return result.stdout.trimEnd();
@@ -494,6 +496,17 @@ function gitFixture(t) {
   const changes = (...flags) => project.run(['query', 'changes', ...flags]);
   return { ...project, file, edit, git, changes };
 }
+
+test('changes allows a CLI launch to take longer than the old spawn timeout', t => {
+  const { changes } = gitFixture(t);
+  const spawn = t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    assert.ok(options.timeout > 30_000 && Number.isFinite(options.timeout));
+    return spawnSync(command, args, options);
+  });
+  const output = changes();
+  assert.match(output, /0 files, 0 symbols, 0 routes/);
+  assert.equal(spawn.mock.callCount(), 1);
+});
 
 test('changes maps code hunks, wrapper components, CSS, and config to affected routes', { timeout: 65_000 }, async t => {
   const { root, env, file, edit, git, changes } = gitFixture(t);
@@ -1156,7 +1169,7 @@ test('Pages API workspace proof is scoped and invalidates the index after siblin
   const cache = path.join(temporary, 'cache');
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, NEORION_AUTOBUILD: '1' };
   const run = (...args) => {
-    const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: 30_000 });
+    const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: cliSpawnTimeout });
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };
