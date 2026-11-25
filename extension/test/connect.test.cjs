@@ -80,6 +80,19 @@ test('VS Code reports the guessed directory and candidate paths after graph gene
   assert.deepEqual(messages, [`Neorion guessed ${admin}. Candidates: ${admin}, ${web}.`]);
 });
 
+test('Connect AI tools reuses an active Cursor rule from CLI setup', async t => {
+  const env = setup(t);
+  const setupRule = '.cursor/rules/neorion-query.mdc';
+  const extensionRule = '.cursor/rules/neorion.mdc';
+  const rule = '---\nalwaysApply: true\n---\n<!-- neorion:start -->\nCLI guidance\n<!-- neorion:end -->\n';
+  env.write(setupRule, rule);
+  env.selections.instructions = [extensionRule];
+  await env.connect();
+  await env.disconnect();
+  assert.ok(!fs.existsSync(env.file(extensionRule)));
+  assert.equal(env.read(setupRule), rule);
+});
+
 test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and reverse registration', async t => {
   const env = setup(t);
   env.write('.mcp.json', original);
@@ -91,7 +104,7 @@ test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and rever
     const expected = mcpCommand({ root: target === 'Claude Code' ? '.' : '${workspaceFolder}' });
     assert.equal(entry.command, expected.command);
     assert.deepEqual(entry.args, expected.args);
-    assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
+    assert.equal(entry.type, 'stdio');
   }
   assert.match(env.read('CLAUDE.md'), /`neorion_query` tool before grepping/);
   assert.doesNotMatch(env.read('CLAUDE.md'), /read the Neorion overview .*codebase_graph\.md/);
@@ -169,7 +182,7 @@ test('R5 bundled registration resolves the server and monorepo root for each cli
     assert.deepEqual(entry.args.slice(2), ['--', workspace, 'apps/web']);
     assert.equal(entry.args[0], '-e');
     assert.ok(!env.read(file).includes(env.file('.')));
-    assert.equal(entry.type, target === 'Cursor' ? undefined : 'stdio');
+    assert.equal(entry.type, 'stdio');
     const args = entry.args.map(arg => arg === '${workspaceFolder}' ? env.file('.') : arg);
     const client = await openMcp(t, env.file('.'), { command: entry.command, args, cwd: env.file('.') });
     assert.match(await client.text('search', { text: 'Example' }), /constant example\.ts:1#Example/);
