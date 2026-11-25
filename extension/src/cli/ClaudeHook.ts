@@ -89,7 +89,8 @@ function runAdvisory(cacheFor: typeof workspaceCache, indexPath: string, legacyP
       if (symbol && (/^(?:on[A-Z]\w*|className|dangerouslySetInnerHTML|htmlFor|tabIndex|autoFocus|suppressHydrationWarning)$/.test(target) ||
           /^(?:getInitialProps|getServerSideProps|getStaticPaths|getStaticProps|generateMetadata|generateStaticParams|generateViewport|generateImageMetadata|generateSitemaps|fetchCache|dynamicParams|preferredRegion|maxDuration)$/.test(target) ||
           /^(?:NextRequest|NextResponse|NextApiRequest|NextApiResponse|NextPage|NextConfig|Metadata|ResolvingMetadata|Viewport|ImageResponse)$/.test(target) ||
-          /^[A-Z]\w*(?:Props|Type)$/.test(target))) return;
+          /^(?:CoreMessage|ModelMessage|UIMessage|UIMessageChunk|LanguageModel|LanguageModelUsage)$/.test(target) ||
+          /^[A-Z]\w*(?:Props|Type|Error|Kind)$/.test(target))) return;
       const kind = route ? (routeHandler || /^\/api(?:\/|$)/.test(target) ? 'api_consumers' : 'wrappers') :
         symbol && /^[A-Z]/.test(target) && /[a-z]/.test(target)
           ? (/^(?:Error|Promise|React|Props)$/.test(target) ? undefined : 'who_renders')
@@ -158,16 +159,21 @@ function appendGroup(source: string, array: Node, group: unknown) {
   const end = array.offset + array.length - 1;
   const afterLast = last ? last.offset + last.length : array.offset + 1;
   const closing = /(\r?\n)([\t ]*)$/.exec(source.slice(afterLast, end));
-  if (!closing) return applyEdits(source, modify(source, ['hooks', 'PreToolUse', -1], group, {}));
+  if (!closing && last) return applyEdits(source, modify(source, ['hooks', 'PreToolUse', -1], group, {}));
 
-  const [, eol, closingIndent] = closing;
+  const eol = closing?.[1] ?? (source.includes('\r\n') ? '\r\n' : '\n');
+  const closingIndent = closing?.[2] ?? /^[\t ]*/.exec(source.slice(source.lastIndexOf('\n', array.offset - 1) + 1))![0];
   const scanner = createScanner(source, true);
   scanner.setPosition(afterLast);
   const trailingComma = !!last && scanner.scan() === SyntaxKind.CommaToken;
   const lastIndent = last && /^[\t ]*/.exec(source.slice(source.lastIndexOf('\n', last.offset - 1) + 1))![0];
-  const indent = lastIndent && lastIndent.length > closingIndent.length ? lastIndent : closingIndent + '  ';
+  const indent = lastIndent && lastIndent.length > closingIndent.length
+    ? lastIndent : closingIndent + (closingIndent.includes('\t') ? '\t' : '  ');
   const unit = indent.slice(closingIndent.length);
   const rendered = JSON.stringify(group, null, unit).replace(/\n/g, eol + indent);
+  if (!closing) {
+    return source.slice(0, afterLast) + eol + indent + rendered + eol + closingIndent + source.slice(afterLast);
+  }
   return applyEdits(source, [
     { offset: end - closingIndent.length, length: 0, content: indent + rendered + (trailingComma ? ',' : '') + eol },
     ...(last && !trailingComma ? [{ offset: afterLast, length: 0, content: ',' }] : [])
@@ -278,7 +284,9 @@ function editClaudeSettings(root: string, install: boolean) {
     }
     for (const j of owned.reverse()) {
       if (command && !installed && group.matcher === matcher) {
-        if (!isDeepStrictEqual(group.hooks[j], command)) edit([...eventPath, i, 'hooks', j], command);
+        // jsonc-parser gives parsed objects a null prototype.
+        const current = JSON.parse(JSON.stringify(group.hooks[j]));
+        if (!isDeepStrictEqual(current, command)) edit([...eventPath, i, 'hooks', j], command);
         installed = true;
       } else {
         edit([...eventPath, i, 'hooks', j], undefined);

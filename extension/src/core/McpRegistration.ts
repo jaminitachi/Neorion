@@ -125,7 +125,9 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
   if (matches(mcpCommand({ root: workspace, localEntry }))) return true;
 
   const root = args.at(-1);
+  if (command === 'neorion' && args[0] === 'mcp' && args.length === 1) return true;
   if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
+  if (command === 'neorion') return args.length === 3 && args[0] === 'mcp' && args[1] === '--root';
   // Compare the full launch arguments after extracting the installed package's version.
   const spec = (command === 'npx' ? args[1] : /\bnpx -y (\S+) mcp\b/.exec(args[1] ?? '')?.[1]) ?? '';
   const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
@@ -175,6 +177,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   const projectArgument = relativeProject || '.';
   const updated = new Set<McpTarget>();
 
+  let reusedCursorEntry = false;
   let preserveLegacyBundle = false;
   for (const target of connect ? targets : Object.keys(state.configs) as McpTarget[]) {
     const { file: configFile, key, type, variable } = MCP_TARGETS[target];
@@ -221,7 +224,10 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
     if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
-        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
+        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) {
+      reusedCursorEntry = true;
+      continue;
+    }
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });
     const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
@@ -303,6 +309,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   if (legacyState !== null && legacyStateFile) changes.push({ file: legacyStateFile, content: null });
   return {
     count: updated.size,
+    reusedCursorEntry,
     configured: Object.keys(state.configs).length > 0,
     commit(finalize?: () => void) {
       const undo: Change[] = [];

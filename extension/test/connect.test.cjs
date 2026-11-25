@@ -91,6 +91,7 @@ test('Cursor CLI setup reuses the bundled extension server without taking owners
   for (const flags of [[], ['--remove']]) {
     const result = spawnSync(process.execPath, [cli, 'setup', 'cursor', ...flags], { cwd: env.file('.'), encoding: 'utf8' });
     assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.includes('(existing Neorion entry kept)'), flags.length === 0);
     assert.equal(env.read(file), original);
   }
   await env.disconnect();
