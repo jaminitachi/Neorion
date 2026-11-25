@@ -63,7 +63,7 @@ The ShareTab tRPC support, index build optimizations, and the agent-query fixes 
 
 ### Native queries
 
-We scored 30 Next.js App Router questions, 10 per app, across rep-deck, ShareTab, and slugy using each tool's CLI directly with no LLM. Graphify 0.9.115 and GitNexus 1.6.12 kept their original scores. Only Neorion was rescored after the original 0.5.2 run. The totals use its impact and path scores from `a70c2a6` and the ShareTab tRPC rerun at `81cd24b`. The tRPC changes landed in [PR #18](https://github.com/jaminitachi/Neorion/pull/18). [Original benchmark method](benchmark/parity/README.md#method)
+We scored 30 Next.js App Router questions, 10 per app, across rep-deck, ShareTab, and slugy using each tool's CLI directly with no LLM. Graphify 0.9.115 and GitNexus 1.6.12 kept their original scores. Only Neorion was rescored after the original 0.5.2 run. The totals use its impact and path scores from `a70c2a6` and the ShareTab tRPC rerun at `81cd24b`. Its wrapper, renderer and caller scores are from 0.5.2. The tRPC changes landed in [PR #18](https://github.com/jaminitachi/Neorion/pull/18). [Original benchmark method](benchmark/parity/README.md#method)
 
 Slugy was used for development checks. ShareTab's impact and path targets were used to verify tRPC support, so those questions were part of development for that change. Neorion scored 16/20 on rep-deck and ShareTab before the tRPC rerun.
 
@@ -113,7 +113,7 @@ Graphify 0.9.115 used one AST-only run per app and different file-selection rule
 | sharetab | 11.31 → 6.375 | 6.38 | 706,092 → 613,260 | 104,060 |
 | dub | 18.545 → 10.555 | 18.91 | 924,728 → 886,748 | 187,448 |
 
-A fresh ShareTab index build on `master` (`c6f5fb1`) took a median of 7.71 s across three runs.
+Later tRPC tracing (#18) and query fixes (#23) add build time. A fresh ShareTab index build on `master` (`c6f5fb1`) took a median of 7.71 s across three runs in a separate session, so it is not directly comparable to the table.
 
 ## Install
 
