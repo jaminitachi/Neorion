@@ -2,8 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { compare, graphRow, moduleStops, quantity, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
-import { routeAsset, sourceFile, traceRemovals, type Removal } from './ChangesHistory';
-import type { QueryIndex, SymbolEntry } from './Index';
+import { routeAsset, sourceFile, traceHistory, type Removal } from './ChangesHistory';
+import { isMiddlewareFile, type QueryIndex, type SymbolEntry } from './Index';
 
 export type ChangeScope = 'all' | 'staged' | 'unstaged';
 const maxFiles = 200;
@@ -15,6 +15,19 @@ type Hunk = { line: number; oldLine: number; added: string[]; removed: string[] 
 type DiffFile = { file: string; old?: string; status: string; hunks: Hunk[] };
 type Edit = { file: string; symbol?: SymbolEntry; line: number; added: number; removed: number; comment: boolean };
 const config = /^(?:(?:next\.config|tsconfig)(?:\.[^/]+)?\.(?:json|[cm]?[jt]s)|package\.json|\.env[^/]*)$/;
+const identifier = /[$a-zA-Z_][\w$]*/.source;
+const argument = /(?:[$a-zA-Z_][\w$]*|\d+(?:\.\d+)?|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|\/(?:\\[a-zA-Z]|[a-zA-Z\d+^$. -])+\/[dgimsuvy]*)/.source;
+const call = '\\([ \\t]*(?:' + argument + '(?:[ \\t]*,[ \\t]*' + argument + ')*)?[ \\t]*\\)';
+const simpleReturn = new RegExp('^[ \\t]+return[ \\t]+' + identifier + '(?:' + call + ')?(?:\\.' + identifier + '(?:' + call + ')?)*;[ \\t]*\\r?$');
+
+function simpleBodyEdit({ added, removed, line }: Hunk, symbols: SymbolEntry[]) {
+  // Both lines must be self-contained return expressions. Leave syntax that
+  // could affect exports, comments or multiline tokens to the parser.
+  return added.length === 1 && removed.length === 1 &&
+    symbols.some(symbol => symbol.kind === 'function' && symbol.line < line && line < (symbol.end ?? line)) &&
+    [added[0], removed[0]].every(text => text.length < 1024 &&
+      !/[\x60{}<>\u2028\u2029]|\/[/*]|\*\//.test(text) && simpleReturn.test(text));
+}
 
 function parseDiff(diff: string): DiffFile[] {
   if (!diff) return [];
@@ -41,7 +54,7 @@ function parseDiff(diff: string): DiffFile[] {
     } else if (line.startsWith('@@ ')) {
       const range = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (!range || !files[file]) continue;
-      hunk = { line: Math.max(1, Number(range[2])), oldLine: Math.max(1, Number(range[1])), added: [], removed: [] };
+      hunk = { line: Number(range[2]), oldLine: Math.max(1, Number(range[1])), added: [], removed: [] };
       files[file].hunks.push(hunk);
     } else if (hunk && line.startsWith('+')) hunk.added.push(line.slice(1));
     else if (hunk && line.startsWith('-')) hunk.removed.push(line.slice(1));
@@ -165,7 +178,10 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   let limited = false;
   let untrackedBytes = 0;
   const removals: Removal[] = [];
+  const middlewareFiles = new Map<string, string>();
   let missingSource = 0;
+  let unmappedDeletions = 0;
+  let unresolvedRenames = 0;
   if (rootPackage) changes.push(graphRow('file package.json [repository config: all routes]'));
   const readSource = (file: string) => {
     try {
@@ -214,7 +230,10 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       } else if (!isConfig) missingSource++;
       continue;
     }
-    if (old && old !== file) changes.push(graphRow(`renamed ${old} -> ${file}${worktree}`, file));
+    if (old && old !== file) {
+      changes.push(graphRow(`renamed ${old} -> ${file}${worktree}`, file));
+      if (status === 'R' && (sourceFile.test(old) || routeAsset.test(old))) removals.push({ file: old, renamed: true });
+    }
 
     if (status === '?' && (sourceFile.test(file) || file.endsWith('.css'))) {
       try {
@@ -242,46 +261,49 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     };
     const hasRemovals = entry.hunks.some(hunk => hunk.removed.length);
     const scanComments = entry.hunks.some(commentCandidate);
-    let removedNames: string[] = [];
-    let oldCode: Set<number> | undefined;
+    let previous: ReturnType<typeof import('../cli/graph').inspectChangeSource> | undefined;
+    const removedNames = new Set<string>();
+    const removedStars = new Set<string>();
     let newCode: Set<number> | undefined;
-    if (sourceFile.test(file) && (hasRemovals || scanComments)) {
+    const needsSource = scanComments || hasRemovals && !entry.hunks.every(hunk => simpleBodyEdit(hunk, indexes));
+    if (sourceFile.test(file) && needsSource) {
       const { inspectChangeSource } = require('./graph.cjs') as typeof import('../cli/graph');
       const before = hasRemovals ? show(comparison, old ?? file) : '';
       const after = worktree ? show(undefined, file) : readSource(file);
       if (before !== undefined && after !== undefined && !before.includes('\0') && !after.includes('\0')) {
-        const previous = inspectChangeSource(old ?? file, before, scanComments);
+        previous = inspectChangeSource(old ?? file, before, scanComments);
         const next = inspectChangeSource(file, after, scanComments);
-        oldCode = previous.code;
         newCode = next.code;
         const current = graph.exports(file);
-        removedNames = [...previous.names].filter(name => worktree ? !next.names.has(name) :
-          !Object.prototype.hasOwnProperty.call(current, name));
-        if ([...previous.stars].some(star => !next.stars.has(star))) {
-          removals.push({ file: old ?? file, names: removedNames, compareExports: true, currentFile: file });
-        } else if (removedNames.length) {
-          removals.push({ file: old ?? file, names: removedNames, currentFile: file });
-        }
+        for (const name of previous.names) if (!next.names.has(name) &&
+          (worktree || !Object.prototype.hasOwnProperty.call(current, name))) removedNames.add(name);
+        for (const star of previous.stars) if (!next.stars.has(star)) removedStars.add(star);
+        if (removedNames.size || removedStars.size) removals.push({ file: old ?? file, names: [...removedNames],
+          compareExports: removedStars.size > 0, currentFile: file });
       } else if (hasRemovals) missingSource++;
     }
-    const commentOnly = (hunk: Hunk) => commentCandidate(hunk) && !!oldCode && !!newCode &&
-      hunk.added.every((_, i) => !newCode.has(hunk.line + i)) && hunk.removed.every((_, i) => !oldCode.has(hunk.oldLine + i));
+    const commentOnly = (hunk: Hunk) => commentCandidate(hunk) && !!previous && !!newCode &&
+      hunk.added.every((_, i) => !newCode.has(hunk.line + i)) && hunk.removed.every((_, i) => !previous!.code.has(hunk.oldLine + i));
     const substantive: Hunk[] = [];
     const commentHunks: Hunk[] = [];
     for (const hunk of entry.hunks) (commentOnly(hunk) ? commentHunks : substantive).push(hunk);
-    const record = (line: number, comment: boolean, added: number, removed: number) => {
-      const symbol = indexes.find(symbol => symbol.line <= line && line <= (symbol.end ?? symbol.line));
+    const record = (line: number, comment: boolean, added: number, removed: number,
+      symbol = indexes.find(symbol => symbol.line <= line && line <= (symbol.end ?? symbol.line)) ?? null) => {
       const key = JSON.stringify([file, symbol?.id, comment]);
-      const edit = modified.get(key) ?? { file, symbol, line, added: 0, removed: 0, comment };
+      const edit = modified.get(key) ?? { file, symbol: symbol ?? undefined, line, added: 0, removed: 0, comment };
       edit.added += added;
       edit.removed += removed;
       edit.line = Math.min(edit.line, line);
       modified.set(key, edit);
     };
     for (const hunk of commentHunks) {
-      record(hunk.line, true, hunk.added.length, hunk.removed.length);
+      record(Math.max(1, hunk.line), true, hunk.added.length, hunk.removed.length);
     }
     if (!substantive.length && commentHunks.length && !old) continue;
+    if (isMiddlewareFile(file)) {
+      useSeed(file, file, graph.moduleSeeds(file));
+      if (status !== 'A' && status !== '?' && isMiddlewareFile(old ?? file)) middlewareFiles.set(file, old ?? file);
+    }
     if (config.test(file)) {
       configFiles++;
       changes.push(graphRow(`file ${file} [config: all routes]${worktree}`, file));
@@ -299,20 +321,58 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     }
     if (!registered(file) && !graph.moduleSeeds(file).length) {
       changes.push(graphRow(`file ${file} [not indexed]${worktree}`, file));
+      if (sourceFile.test(file)) {
+        unmappedDeletions += substantive.filter(hunk => !hunk.added.length && hunk.removed.some(line => line.trim())).length;
+      }
       continue;
     }
     if (!substantive.length && (old || !entry.hunks.length)) {
       useSeed(file, file, old ? graph.fileSeeds(file) : graph.moduleSeeds(file));
       if (!old) changes.push(graphRow(`file ${file}${worktree}`, file));
     }
+    let statementIndex = 0;
+    const statementsAt = (line: number) => {
+      const statements = previous?.statements;
+      if (!statements) return [];
+      while (statementIndex < statements.length && statements[statementIndex].end < line) statementIndex++;
+      let end = statementIndex;
+      while (end < statements.length && statements[end].start <= line) end++;
+      return statements.slice(statementIndex, end);
+    };
+    const removedStatement = ({ exports, star }: NonNullable<typeof previous>['statements'][number]) =>
+      star !== undefined ? removedStars.has(star) : exports.size > 0 && [...exports].every(name => removedNames.has(name));
     for (const hunk of substantive) {
       if (expired()) break;
-      if (removedNames.length && hunk.removed.length === 1 && hunk.added.length === 1 &&
-          hunk.removed[0].replace(/^(\s*)export\s+/, '$1') === hunk.added[0]) continue;
-      for (let i = 0; i < hunk.added.length; i++) record(hunk.line + i, false, 1, 0);
-      if (!removedNames.length || hunk.added.length) {
-        for (let i = 0; i < hunk.removed.length; i++) record(hunk.line + Math.max(0, Math.min(i, hunk.added.length - 1)), false, 0, 1);
+      if (hunk.removed.length === 1 && hunk.added.length === 1 &&
+          hunk.removed[0].replace(/^(\s*)export(?:\s+default)?\s+/, '$1') === hunk.added[0]) {
+        const owners = statementsAt(hunk.oldLine);
+        if (owners.length && owners.every(removedStatement)) continue;
       }
+      for (let i = 0; i < hunk.added.length; i++) record(hunk.line + i, false, 1, 0);
+      if (hunk.added.length || !sourceFile.test(file)) {
+        for (let i = 0; i < hunk.removed.length; i++) {
+          record(Math.max(1, hunk.line + Math.max(0, Math.min(i, hunk.added.length - 1))), false, 0, 1);
+        }
+        continue;
+      }
+      // In a zero-context deletion Git's new line is the line before the
+      // gap. Match surviving lines of the old statement around that gap.
+      const last = hunk.oldLine + hunk.removed.length - 1;
+      let unmapped = false;
+      for (const [offset, text] of hunk.removed.entries()) {
+        const owners = statementsAt(hunk.oldLine + offset);
+        if (owners.length && owners.every(statement => removedStatement(statement) &&
+          (statement.start >= hunk.oldLine && statement.end <= last || /^\s*export(?:\s+default)?\s*$/.test(text)))) continue;
+        const anchors = owners.length === 1 ? [
+          ...(owners[0].start < hunk.oldLine ? [hunk.line] : []),
+          ...(owners[0].end > last ? [hunk.line + 1] : [])
+        ] : [];
+        const symbol = anchors.length ? indexes.find(symbol =>
+          anchors.every(line => symbol.line <= line && line <= (symbol.end ?? symbol.line))) : undefined;
+        if (!symbol && text.trim()) unmapped = true;
+        record(Math.max(1, anchors[0] ?? hunk.line), false, 0, 1, symbol ?? null);
+      }
+      if (unmapped) unmappedDeletions++;
     }
   }
 
@@ -339,15 +399,19 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     }
   }
 
-  let history: ReturnType<typeof traceRemovals> | undefined;
-  if (removals.length && !expired()) {
-    const renamed = new Map(files.flatMap(({ old, file }) => old ? [[old, file]] : []));
+  let history: ReturnType<typeof traceHistory> | undefined;
+  if ((removals.length || middlewareFiles.size) && !expired()) {
+    const renamed = new Map(files.flatMap(({ old, file, status }) => old && status === 'R' ? [[old, file]] : []));
     try {
-      history = traceRemovals(removals.slice(0, maxSeeds), graph, renamed, gitBytes, comparison, prefix, depth, deadline);
+      history = traceHistory(root, removals.slice(0, maxSeeds), middlewareFiles, graph, renamed, gitBytes,
+        comparison, prefix, depth, deadline);
       changes.push(...history.rows);
     } catch {
-      missingSource += removals.length;
-      for (const { file, names } of removals) for (const name of names ?? []) changes.push(graphRow(`removed ${file} ${name}`));
+      for (const { file, names, renamed } of removals) {
+        if (renamed) unresolvedRenames++;
+        else missingSource++;
+        for (const name of names ?? []) changes.push(graphRow(`removed ${file} ${name}`));
+      }
     }
     if (removals.length > maxSeeds) limited = true;
   }
@@ -363,17 +427,20 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const pageFiles = new Set<string>();
   const apiFiles = new Set<string>();
   const otherFiles = new Set<string>();
-  let unknownMiddleware = false;
+  let unknownMiddleware = [...middlewareFiles].some(([file]) => !history?.previousMiddleware.get(file) || !graph.middleware(file));
   const currentRoutes = new Set(trace.routes.map(({ terminal }) => JSON.stringify([terminal.kind, terminal.file, terminal.name])));
   const impacts = new Map(trace.routes.map(result => [JSON.stringify([result.terminal.kind, result.terminal.file, result.terminal.name]),
     { terminal: result.terminal, origins: [...result.origins] }]));
+  const liveMiddleware = new Set(trace.routes.filter(({ terminal }) => terminal.kind === 'middleware').map(({ terminal }) => terminal.file));
   for (const result of baseTrace?.routes ?? []) {
     const { terminal, origins } = result;
+    if (terminal.kind === 'middleware' && middlewareFiles.has(terminal.file) && liveMiddleware.has(terminal.file)) continue;
     const key = JSON.stringify([terminal.kind, terminal.file, terminal.name]);
     const live = impacts.get(key);
     if (!live) impacts.set(key, { terminal, origins: [...origins] });
     else for (const impact of origins) {
-      if (!live.origins.some(({ origin }) => origin.removed && origin.file === impact.origin.file && origin.name === impact.origin.name)) {
+      if (!live.origins.some(({ origin }) => origin.removed === impact.origin.removed && origin.renamed === impact.origin.renamed &&
+        origin.file === impact.origin.file && origin.name === impact.origin.name)) {
         live.origins.push(impact);
       }
     }
@@ -382,15 +449,31 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     const { kind, name, file } = terminal;
     if (kind === 'middleware') {
       unknownMiddleware ||= !terminal.matchedRoutes;
-      for (const route of terminal.matchedRoutes ?? []) (route.kind === 'page' ? pageFiles : apiFiles).add(route.file);
-      rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}`, file));
+      const previous = history?.previousMiddleware.get(file);
+      if (previous && !previous.matchedRoutes) unknownMiddleware = true;
+      for (const route of [...terminal.matchedRoutes ?? [], ...previous?.matchedRoutes ?? []]) {
+        (route.kind === 'page' ? pageFiles : apiFiles).add(route.file);
+      }
+      const routeKey = (route: QueryIndex['routes'][number]) => JSON.stringify([route.kind, route.file, route.url]);
+      let coverage = '';
+      if (previous?.matchedRoutes && terminal.matchedRoutes) {
+        const before = new Set(previous.matchedRoutes.map(routeKey));
+        const after = new Set(terminal.matchedRoutes.map(routeKey));
+        const lost = [...before].filter(route => !after.has(route)).length;
+        const gained = [...after].filter(route => !before.has(route)).length;
+        if (lost || gained || previous.name !== name) {
+          coverage = ` (previous matcher: ${previous.name === '/' ? 'all routes' : previous.name}, ` +
+            `${quantity(lost, 'route')} no longer matched, ${quantity(gained, 'route')} newly matched)`;
+        }
+      }
+      rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}${coverage}`, file));
       continue;
     }
     if (kind === 'api') apiFiles.add(file);
     else if (kind === 'page') pageFiles.add(file);
     else otherFiles.add(file);
     const labels = [...new Set(origins.map(({ origin, depth, fetch }) =>
-      `${origin.name}${origin.removed ? ' [removed]' : ''} d${depth}${fetch ? ` via fetch ${fetch}` : ''}`))];
+      `${origin.name}${origin.removed ? ' [removed]' : origin.renamed ? ' [renamed]' : ''} d${depth}${fetch ? ` via fetch ${fetch}` : ''}`))];
     const chain = ` <- ${labels.slice(0, 3).join(', ')}${labels.length > 3 ? ', +' + (labels.length - 3) : ''}`;
     const isCurrent = currentRoutes.has(key);
     rows.push(graphRow(`route ${kind} ${name}  ${file}${isCurrent ? '' : ' [base]'}${chain}`, ...isCurrent ? [file] : []));
@@ -410,11 +493,18 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     (otherFiles.size ? `; ${quantity(otherFiles.size, 'special file')}` : '')));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';
   const sizePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : undefined;
-  const untraced = missingSource + (history?.missing.length ?? 0);
-  const noRemovalRoutes = !untraced && !routes && !stops &&
-    (history?.removed || removals.some(removal => !removal.names));
+  let untraced = missingSource + (history?.skipped ?? 0);
+  let noRemovalRoutes = false;
+  for (const { origins, evidence } of history?.checks ?? []) {
+    if (origins.some(origin => trace.traced.has(origin) || baseTrace?.traced.has(origin))) continue;
+    if (origins[0].renamed) unresolvedRenames++;
+    else if (evidence) noRemovalRoutes = true;
+    else untraced++;
+  }
   const partial = [...new Set([stagedDrift ? 'worktree differs from staged' : undefined,
     untraced ? `could not trace ${quantity(untraced, 'removal')} from base` : undefined, sizePartial,
+    unresolvedRenames ? `could not trace old-path coverage for ${quantity(unresolvedRenames, 'rename')}` : undefined,
+    unmappedDeletions ? `could not map old lines for ${quantity(unmappedDeletions, 'deletion hunk')}` : undefined,
     noRemovalRoutes ? 'no page or API routes traced for removals' : undefined,
     trace.partial, baseTrace?.partial, stops ? 'module-level importers not traced' : undefined,
     unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined].filter(Boolean))].join('; ') || undefined;

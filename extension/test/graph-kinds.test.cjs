@@ -268,7 +268,9 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'formatDate'), /# ambiguous impact/);
   assert.match(query('impact', 'lib/format-a.ts#formatDate'), /# complete/);
   assert.match(query('impact', 'components/chart.tsx#default'), /page \/items/);
-  assert.match(query('impact', 'components/chart.tsx#Chart'), /\bd1 dyn /);
+  const chart = query('impact', 'components/chart.tsx#Chart');
+  assert.match(chart, /^d1 dyn app\/\(main\)\/items\/page\.tsx:4 module$/m);
+  assert.doesNotMatch(chart, /^d1 use app\/\(main\)\/items\/page\.tsx:4 Chart\b/m);
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
   const targetAction = query('impact', 'submitItem');
@@ -630,7 +632,7 @@ test('changes returns a partial result outside Git and scopes a nested project',
 });
 
 test('changes traces removed imports from the comparison side and prefers current routes', { timeout: 65_000 }, async t => {
-  const { root, env, file, edit, git, changes } = gitFixture(t);
+  const { root, env, file, edit, git, run, changes } = gitFixture(t);
   fs.writeFileSync(file('lib/old.ts'), 'export function old() { return 1; }\nexport { old as retained };\n');
   fs.writeFileSync(file('lib/barrel.ts'), 'export { old as former } from "./old";\n');
   edit('app/(main)/other/page.tsx', text =>
@@ -655,9 +657,117 @@ test('changes traces removed imports from the comparison side and prefers curren
   assert.match(removed, /route page \/other .*\[base\].*lib\/old\.ts \[removed\]/);
   assert.match(removed, /deleted lib\/old\.ts/);
   assert.doesNotMatch(removed, /\[stale\]/);
+  const traceFile = file('.git/warm-trace.jsonl');
+  assert.equal(run(['query', 'changes', '--unstaged'], { GIT_TRACE2_EVENT: traceFile }), removed);
+  const readTreeBlobs = () => fs.readFileSync(traceFile, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter(event => event.event === 'start' && event.argv.includes('cat-file')).length;
+  assert.equal(readTreeBlobs(), 0);
   const bundle = path.join(__dirname, '../out/mcp.cjs');
   const mcp = await openMcp(t, root, { command: process.execPath, args: [bundle, '--root', root], cwd: root, env });
   assert.equal(await mcp.text('query', { kind: 'changes', scope: 'unstaged' }), removed.split('\n').slice(1).join('\n'));
+  git('add', 'app/(main)/other/page.tsx');
+  const newComparison = run(['query', 'changes', '--unstaged'], { GIT_TRACE2_EVENT: traceFile });
+  assert.equal(readTreeBlobs(), 1);
+  assert.doesNotMatch(newComparison, /^route page \/other /m);
+});
+
+test('changes traces a retained deletion beside an export removal and finds old-path importers after renames', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const shared = 'lib/review-shared.ts';
+  fs.writeFileSync(file(shared), [
+    'export function removed() { return 1; }',
+    '',
+    'export function retained() {',
+    '  const result = 2;',
+    '  console.info(result);',
+    '  return result;',
+    '}',
+    ''
+  ].join('\n'));
+  const route = suffix => 'app/api/review-' + suffix + '/route.ts';
+  for (const [suffix, name] of [['a', 'removed'], ['b', 'retained']]) {
+    fs.mkdirSync(path.dirname(file(route(suffix))), { recursive: true });
+    fs.writeFileSync(file(route(suffix)), [
+      'import { ' + name + ' } from "../../../lib/review-shared";',
+      'export function GET() { return Response.json(' + name + '()); }',
+      ''
+    ].join('\n'));
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Add separate review routes');
+  edit(shared, text => text.replace('export function removed', 'function removed').replace('  console.info(result);\n', ''));
+  const both = changes();
+  assert.match(both, /1 file, 1 symbol, 2 routes/);
+  assert.match(both, /^route api GET \/api\/review-a .* <- removed \[removed\] d1/m);
+  assert.match(both, /^route api GET \/api\/review-b .* <- retained d1/m);
+  assert.match(both, /^changed lib\/review-shared\.ts:3-6 retained \+0 -1$/m);
+  assert.match(both, /# complete:/);
+
+  git('restore', shared);
+  git('mv', shared, 'lib/review-moved.ts');
+  const moved = changes('--staged');
+  for (const suffix of ['a', 'b']) {
+    assert.match(moved, new RegExp('^route api GET /api/review-' + suffix + ' .*review-shared\\.ts \\[renamed\\]', 'm'));
+    assert.match(moved, new RegExp('^importer ' + route(suffix) + ':.* <- renamed lib/review-shared\\.ts \\[base\\]', 'm'));
+    edit(route(suffix), text => text.replace('review-shared', 'review-moved'));
+  }
+  assert.doesNotMatch(moved, /^removed /m);
+  git('add', '.');
+  assert.match(changes('--staged'), /3 files, 0 symbols, 2 routes/);
+});
+
+test('changes traces an unindexed binding from its importer and reports other uncovered removals', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  for (const [suffix, name] of [['unindexed', '검토'], ['indexed', 'known'], ['unreached', '누락']]) {
+    fs.writeFileSync(file('lib/' + suffix + '.ts'), 'export function ' + name + '() { return 1; }\n');
+    const folder = 'app/api/' + suffix;
+    if (suffix === 'unreached') {
+      fs.writeFileSync(file('lib/disconnected.ts'), 'import { 누락 } from "./unreached";\n누락();\n');
+    } else {
+      fs.mkdirSync(file(folder), { recursive: true });
+      fs.writeFileSync(file(folder + '/route.ts'), [
+        'import { ' + name + ' } from "../../../lib/' + suffix + '";',
+        'export function GET() { return Response.json(' + name + '()); }',
+        ''
+      ].join('\n'));
+    }
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Add indexed and unindexed bindings');
+  for (const suffix of ['unindexed', 'indexed', 'unreached']) {
+    edit('lib/' + suffix + '.ts', text => text.replace('export function', 'function'));
+  }
+  const output = changes();
+  assert.match(output, /^route api GET \/api\/unindexed .* <- 검토 \[removed\] d1/m);
+  assert.match(output, /^route api GET \/api\/indexed .* <- known \[removed\] d1/m);
+  assert.match(output, /^importer lib\/disconnected\.ts:1 <- removed 누락 \[base\]/m);
+  assert.match(output, /# partial: no page or API routes traced for removals$/);
+});
+
+test('changes includes middleware matches from both sides and reports unknown coverage', { timeout: 65_000 }, t => {
+  const { edit, git, changes } = gitFixture(t);
+  edit('middleware.ts', text => text.replace('/items/', '/other/'));
+  const narrower = changes();
+  assert.match(narrower, /1 file, 1 symbol, 2 routes/);
+  assert.match(narrower, /1 route no longer matched, 1 route newly matched/);
+  assert.match(narrower, /# complete:/);
+
+  edit('middleware.ts', text => text.replace("['/other/:path*']", "[{ source: '/other', has: [] }]"));
+  const unknownCurrent = changes();
+  assert.match(unknownCurrent, /1 file, 1 symbol, 1 route/);
+  assert.match(unknownCurrent, /# partial: middleware matcher coverage not enumerated$/);
+  git('add', 'middleware.ts');
+  edit('middleware.ts', text => text.replace("[{ source: '/other', has: [] }]", "['/other/:path*']"));
+  const unknownPrevious = changes('--unstaged');
+  assert.match(unknownPrevious, /1 file, 1 symbol, 1 route/);
+  assert.match(unknownPrevious, /# partial: middleware matcher coverage not enumerated$/);
+  git('restore', '--staged', '--worktree', 'middleware.ts');
+
+  edit('middleware.ts', text => text.replace(/^export const config.*\n/m, ''));
+  const defaultMatcher = changes();
+  assert.match(defaultMatcher, /previous matcher: '\/items\/:path\*', 0 routes no longer matched, [1-9]\d* routes? newly matched/);
+  assert.equal(defaultMatcher.split('\n').filter(line => line.startsWith('middleware middleware.ts ')).length, 1);
+  assert.match(defaultMatcher, /# complete:/);
 });
 
 test('changes handles top-level edits, reports module stops and can rerun deeper', { timeout: 65_000 }, t => {

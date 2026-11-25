@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
-  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type ExternalCall, type FetchEntry,
+  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION, isMiddlewareFile, isTestFile, type ExternalCall, type FetchEntry,
   type GraphReference, type ModuleImport, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
@@ -64,7 +64,7 @@ function receiver(expression: Node) {
 
 function dynamicExport(node: Node) {
   const parent = node.getParent();
-  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return 'default';
+  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return { name: 'default' };
   const call = parent.getParent();
   const callback = Node.isCallExpression(call) ? call.getArguments()[0] : undefined;
   if (!Node.isArrowFunction(callback) && !Node.isFunctionExpression(callback)) return;
@@ -74,7 +74,9 @@ function dynamicExport(node: Node) {
     ? statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined
     : body;
   if (Node.isPropertyAccessExpression(result) &&
-      result.getExpression().getText() === callback.getParameters()[0]?.getName()) return result.getName();
+      result.getExpression().getText() === callback.getParameters()[0]?.getName()) {
+    return { name: result.getName(), selector: result.getNameNode() };
+  }
 }
 
 export class QueryIndexBuilder {
@@ -174,12 +176,17 @@ export class QueryIndexBuilder {
       }
       byGraphId.set(`file:${relative}`, -(byGraphId.size + 1));
       index.fileSymbols!.push(byGraphId.get(`file:${relative}`)!);
-      if (/^(?:src\/)?(?:middleware|proxy)\.[cm]?[jt]sx?$/.test(relative)) {
-        const config = file.getVariableDeclaration('config')?.getInitializer();
-        const property = Node.isObjectLiteralExpression(config) ? config.getProperty('matcher') : undefined;
+      if (isMiddlewareFile(relative)) {
+        const declaration = file.getVariableDeclaration('config');
+        const config = declaration?.getInitializer();
+        const object = Node.isObjectLiteralExpression(config) ? config : undefined;
+        const property = object?.getProperty('matcher');
         const matcher = Node.isPropertyAssignment(property) ? property.getInitializer() : undefined;
         const values = Node.isArrayLiteralExpression(matcher) ? matcher.getElements() : matcher ? [matcher] : [];
-        const literals = values.every(Node.isStringLiteral) ? values : undefined;
+        const enumerable = object ? (!property || !!matcher) && object.getProperties().every(member =>
+          !Node.isSpreadAssignment(member) && !Node.isComputedPropertyName(member.getNameNode())) :
+          !declaration && !exports.get(file)?.has('config');
+        const literals = enumerable && values.every(Node.isStringLiteral) ? values : undefined;
         index.routeFiles![relative] = ['middleware', '/', literals?.map(value => value.getText()).join(', ') || undefined,
           undefined, literals?.map(value => value.getLiteralText())];
       } else if (/^(?:src\/)?pages\/_(?:app|document)\.[jt]sx?$/.test(relative)) {
@@ -330,6 +337,7 @@ export class QueryIndexBuilder {
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
+      const dynamicSelectors = new Set<Node>();
       const imports = file.getImportDeclarations();
       for (const entry of [...imports, ...file.getExportDeclarations()]) {
         const source = entry.getModuleSpecifierSourceFile();
@@ -497,8 +505,9 @@ export class QueryIndexBuilder {
       };
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
         if (!Node.isStringLiteral(specifier)) return;
-        const name = dynamicExport(node);
-        if (!name) return;
+        const targetExport = dynamicExport(node);
+        if (!targetExport) return;
+        const { name, selector } = targetExport;
         const resolved = declarationsOf(specifier).find(Node.isSourceFile) ?? fileByName.get(ts.resolveModuleName(
           specifier.getLiteralText(), file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
         ).resolvedModule?.resolvedFileName ?? '');
@@ -519,6 +528,7 @@ export class QueryIndexBuilder {
             // JSX sites already point to the imported component. Keep a
             // module-level import edge without inserting the local alias.
             if (owner === byNode.get(variable)) owner = undefined;
+            if (selector) dynamicSelectors.add(selector);
           }
         }
         for (const target of targets) {
@@ -628,7 +638,8 @@ export class QueryIndexBuilder {
           }
         } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
           const parent = node.getParent();
-          if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent)) return;
+          if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent) ||
+              dynamicSelectors.has(node)) return;
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }

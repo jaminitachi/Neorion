@@ -16,7 +16,7 @@ export type QueryResult = {
   notes?: QueryRow[]; limit?: number; partial?: string; scope?: string;
 };
 export type ChangeOrigin = { file: string; name: string; ids: NodeId[]; removed?: boolean; startsAt?: number;
-  externalOnly?: boolean; importFiles?: ReadonlySet<string> };
+  renamed?: boolean; externalOnly?: boolean; importFiles?: ReadonlySet<string> };
 export type Terminal = { kind: string; name: string; file: string; line?: number; route?: Route; pages?: Route[];
   handler?: number; matchedRoutes?: Route[] };
 type Reached = { terminal: Terminal; visit: Visit; node: NodeId; metadata: boolean };
@@ -35,6 +35,7 @@ function middlewareRoutes(routes: Route[], matchers: string[] | undefined) {
   if (!matchers) return;
   if (!matchers.length) return routes;
   const patterns = matchers.map(matcher => {
+    if (!matcher.startsWith('/')) return;
     const exclusion = /^\/\(\(\?!([^\n]{1,512})\)\.\*\)$/.exec(matcher)?.[1];
     // Accept the usual static-prefix and file-extension exclusions. Leave
     // arbitrary regex and conditional matchers to Next.js.
@@ -268,6 +269,10 @@ export class DependencyGraph {
     return [...this.moduleSeeds(file), ...(this.symbolsByFile.get(file) ?? []).filter(symbol => !symbol.typeOnly).map(symbol => symbol.id)];
   }
 
+  middleware(file: string) {
+    return this.routesByFile.get(file)?.find(terminal => terminal.kind === 'middleware');
+  }
+
   exports(file: string) {
     return this.index.exportSymbols![this.fileIds.get(file) ?? 0] ?? {};
   }
@@ -289,7 +294,6 @@ export class DependencyGraph {
     const ids = new Set(origin.ids);
     let uses = origin.ids.flatMap(id => this.predecessors(id)).filter(edge =>
       !ids.has(edge.from) && (!origin.externalOnly || edge.file !== origin.file));
-    const sideEffects: NodeId[] = [];
     type Site = { file: string; line: number };
     const sites = new Map<string, Site>();
     const add = (file: string, line: number) => {
@@ -298,12 +302,8 @@ export class DependencyGraph {
     const fileId = this.fileIds.get(origin.file) ?? 0;
     let importFiles: Set<string> | undefined;
     if (wholeFile) {
-      for (const [file, [to, line, kind]] of this.moduleImporters.get(fileId) ?? []) {
+      for (const [file, [, line]] of this.moduleImporters.get(fileId) ?? []) {
         add(file, line);
-        if (kind === 'effect') for (const id of this.fileSeeds(file)) {
-          uses.push({ from: id, to, file, line, label: 'use' });
-          sideEffects.push(id);
-        }
       }
     } else {
       importFiles = new Set();
@@ -328,7 +328,7 @@ export class DependencyGraph {
     for (const { file, line } of uses) add(file, line);
     const files = new Map<string, Site[]>();
     for (const site of sites.values()) append(files, site.file, site);
-    return { uses, files, importFiles, sideEffects,
+    return { uses, files, importFiles,
       terminal: origin.ids.some(id => this.terminals(id).some(terminal => terminal.kind !== 'action')) };
   }
 
@@ -669,7 +669,7 @@ export class DependencyGraph {
     };
     const remember = (terminal: Terminal, impact: Impact) => {
       if (terminal.kind === 'action') return;
-      traced.add(impact.origin);
+      if (terminal.kind === 'page' || terminal.kind === 'api' || terminal.matchedRoutes?.length) traced.add(impact.origin);
       const key = terminalKey(terminal);
       const result = routes.get(key);
       if (result) {

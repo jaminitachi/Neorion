@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 6;
+export const GRAPH_INDEX_REVISION = 7;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -8,6 +8,7 @@ export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
   /(?:^|\/)(?:__tests__|__mocks__|tests?|e2e|playwright)(?:\/|$)|\.(?:test|spec)\.[^/]+$/.test(file);
+export const isMiddlewareFile = (file: string) => /^(?:src\/)?(?:middleware|proxy)\.[cm]?[jt]sx?$/.test(file);
 
 export interface SymbolEntry {
   id: number;

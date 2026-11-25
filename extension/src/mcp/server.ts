@@ -155,7 +155,8 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
     const response = await (name === queryName && args.kind === 'changes' ? askChanges(args) : ask(name, args));
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
-    const text = response?.text ?? `# timeout ${legacyKind(name) ?? args.kind ?? 'query'} ${label} : 0 results (partial: timed out)`;
+    const kind = legacyKind(name) ?? args.kind ?? 'query';
+    const text = response?.text ?? `# timeout ${kind}${label ? ' ' + label : ''} : 0 results\n# partial: timed out`;
     return reply(autoBuild && !response?.isError ? projectText(project, text) : text, response?.isError);
   });
   process.stdin.once('end', () => {
