@@ -4,11 +4,14 @@ import * as path from 'node:path';
 import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
-  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, renderSiteKey, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type ExternalCall, type FetchEntry, type PageRenderCondition,
-  type GraphReference, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
+  isMiddlewareFile, isTestFile, renderSiteKey, type ExternalCall, type FetchEntry, type GraphReference,
+  type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
+import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
+import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
@@ -44,7 +47,10 @@ function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
 }
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
-  return remaining > 0 && Node.isCallExpression(node) && node.getArguments().some(argument =>
+  if (remaining <= 0 || !Node.isCallExpression(node)) return false;
+  const callee = node.getExpression();
+  if (Node.isPropertyAccessExpression(callee) && ['map', 'filter', 'reduce', 'forEach'].includes(callee.getName())) return false;
+  return node.getArguments().some(argument =>
     Node.isArrowFunction(argument) || Node.isFunctionExpression(argument) || wrappedFunction(argument, remaining - 1));
 }
 
@@ -64,7 +70,7 @@ function receiver(expression: Node) {
 
 function dynamicExport(node: Node) {
   const parent = node.getParent();
-  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return 'default';
+  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return { name: 'default' };
   const call = parent.getParent();
   const callback = Node.isCallExpression(call) ? call.getArguments()[0] : undefined;
   if (!Node.isArrowFunction(callback) && !Node.isFunctionExpression(callback)) return;
@@ -74,7 +80,9 @@ function dynamicExport(node: Node) {
     ? statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined
     : body;
   if (Node.isPropertyAccessExpression(result) &&
-      result.getExpression().getText() === callback.getParameters()[0]?.getName()) return result.getName();
+      result.getExpression().getText() === callback.getParameters()[0]?.getName()) {
+    return { name: result.getName(), selector: result.getNameNode() };
+  }
 }
 
 export class QueryIndexBuilder {
@@ -100,6 +108,7 @@ export class QueryIndexBuilder {
   }
 
   private fetches: PendingFetch[] = [];
+  private uncertainChatTransports: { file: string; node: Node; unbounded: boolean }[] = [];
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
@@ -140,6 +149,10 @@ export class QueryIndexBuilder {
     this.fetches.push(entry);
   }
 
+  uncertainChatTransport(file: string, node: Node, unbounded: boolean) {
+    this.uncertainChatTransports.push({ file, node, unbounded });
+  }
+
   action(id: string, name: string, file: string, line: number) {
     this.actions.set(id, { name, file, line, callers: [] });
   }
@@ -165,7 +178,8 @@ export class QueryIndexBuilder {
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null),
       graphRevision: GRAPH_INDEX_REVISION, graphReferences: {}, graphNames: [], externalCalls: [], externalModules: [],
       unresolvedCalls: {}, fileSymbols: [],
-      defaultSymbols: Object.create(null), routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
+      defaultSymbols: Object.create(null), exportSymbols: {}, runtimeExports: {}, moduleImports: {},
+      routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
     };
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
@@ -218,13 +232,9 @@ export class QueryIndexBuilder {
       }
       byGraphId.set(`file:${relative}`, -(byGraphId.size + 1));
       index.fileSymbols!.push(byGraphId.get(`file:${relative}`)!);
-      if (/^(?:src\/)?(?:middleware|proxy)\.[cm]?[jt]sx?$/.test(relative)) {
-        const config = file.getVariableDeclaration('config')?.getInitializer();
-        const property = Node.isObjectLiteralExpression(config) ? config.getProperty('matcher') : undefined;
-        const matcher = Node.isPropertyAssignment(property) ? property.getInitializer() : undefined;
-        const values = Node.isArrayLiteralExpression(matcher) ? matcher.getElements() : matcher ? [matcher] : [];
-        index.routeFiles![relative] = ['middleware', '/', values.length && values.every(Node.isStringLiteral)
-          ? values.map(value => value.getText()).join(', ') : undefined];
+      if (isMiddlewareFile(relative)) {
+        const matcher = middlewareMatcher(file.compilerNode);
+        index.routeFiles![relative] = ['middleware', '/', matcher?.label, undefined, matcher?.values];
       } else if (this.shells.has(relative)) {
         index.routeFiles![relative] = ['app-shell', '/'];
       }
@@ -308,9 +318,17 @@ export class QueryIndexBuilder {
       });
     }
     const filesByRelative = new Map(files.map(file => [relativePath(file), file]));
+    const runtimeExports = inspectRuntimeExports(files);
     for (const [relative, file] of filesByRelative) {
-      const id = exports.get(file)?.get('default')?.map(node => byNode.get(node)).find(value => value !== undefined);
-      if (id !== undefined) index.defaultSymbols![byGraphId.get(`file:${relative}`)!] = id;
+      const fileId = byGraphId.get(`file:${relative}`)!;
+      const runtime = runtimeExports.get(file)!;
+      if (Object.keys(runtime.names).length || runtime.unknownStar) index.runtimeExports![fileId] = runtime;
+      const entries = exports.get(file)!;
+      if (!entries.size) continue;
+      const ids = Object.fromEntries([...entries].map(([name, declarations]) =>
+        [name, [...new Set(declarations.flatMap(node => byNode.get(node) ?? []))]]));
+      index.exportSymbols![fileId] = ids;
+      if (ids.default?.length) index.defaultSymbols![fileId] = ids.default[0];
     }
     const routeIds = new Map(routes.map((route, i) => [route.id, i + 1]));
     for (const route of routes) {
@@ -426,6 +444,12 @@ export class QueryIndexBuilder {
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
         lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null });
     }
+    if (this.uncertainChatTransports.length) {
+      index.uncertainChatTransports = this.uncertainChatTransports.map(({ file, node, unbounded }) => {
+        const [owner, graphOwner] = owners(node);
+        return [file, graphOwner ?? owner ?? byGraphId.get(`file:${file}`)!, unbounded];
+      });
+    }
 
     const dynamicBindings = new Map<Node, number>();
     const externalModules = new Map<string, number>();
@@ -447,7 +471,48 @@ export class QueryIndexBuilder {
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
+      const dynamicSelectors = new Set<Node>();
       const imports = file.getImportDeclarations();
+      const namespaces = new Map<string, { declaration: Node; uses: NamespaceUse[] }>();
+      for (const entry of [...imports, ...file.getExportDeclarations()]) {
+        const source = entry.getModuleSpecifierSourceFile();
+        const target = source && byGraphId.get(`file:${relativePath(source)}`);
+        if (target === undefined) continue;
+        const edges = index.moduleImports![fileId] ??= [];
+        const line = startLine(entry);
+        if (entry.isTypeOnly()) {
+          edges.push([target, line, 'type']);
+          continue;
+        }
+        if (Node.isImportDeclaration(entry)) {
+          if (!entry.getImportClause()) edges.push([target, line, 'effect']);
+          else {
+            const named = entry.getNamedImports();
+            if (named.some(binding => binding.isTypeOnly())) edges.push([target, line, 'type']);
+            const names = named.filter(binding => !binding.isTypeOnly())
+              .map(({ compilerNode: binding }) => (binding.propertyName ?? binding.name).text);
+            if (entry.getDefaultImport()) names.push('default');
+            const namespace = entry.getNamespaceImport();
+            const uses: NamespaceUse[] = [];
+            if (namespace) {
+              names.push('*');
+              namespaces.set(namespace.getText(), { declaration: namespace.getParentOrThrow(), uses });
+              edges.push([target, line, 'import', names.map(name => [name]), uses]);
+            } else if (names.length) edges.push([target, line, 'import', names.map(name => [name])]);
+            else if (!named.length) edges.push([target, line, 'effect']);
+          }
+        } else {
+          const namespace = entry.getNamespaceExport();
+          const named = entry.getNamedExports();
+          if (named.some(binding => binding.isTypeOnly())) edges.push([target, line, 'type']);
+          const bindings: ModuleImport[3] = entry.compilerNode.exportClause && !namespace ?
+            named.filter(binding => !binding.isTypeOnly())
+              .map(({ compilerNode: binding }) => [(binding.propertyName ?? binding.name).text, binding.name.text]) :
+            [['*', namespace?.getName() ?? '*']];
+          if (bindings.length) edges.push([target, line, 'export', bindings]);
+          else if (!named.length) edges.push([target, line, 'effect']);
+        }
+      }
       const routeKind = index.routeFiles![relative]?.[0];
       if (routeKind === 'layout' || routeKind === 'template' || routeKind === 'app-shell') {
         for (const entry of imports) {
@@ -606,13 +671,16 @@ export class QueryIndexBuilder {
       };
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
         if (!Node.isStringLiteral(specifier)) return;
-        const name = dynamicExport(node);
-        if (!name) return;
+        const targetExport = dynamicExport(node);
+        if (!targetExport) return;
+        const { name, selector } = targetExport;
         const resolved = declarationsOf(specifier).find(Node.isSourceFile) ?? fileByName.get(ts.resolveModuleName(
           specifier.getLiteralText(), file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
         ).resolvedModule?.resolvedFileName ?? '');
         const targets = resolved && exports.get(resolved)?.get(name);
         if (!targets?.length) return;
+        const moduleId = byGraphId.get(`file:${relativePath(resolved!)}`);
+        if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
         const variable = node.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
         const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
         if (id !== undefined && variable && byNode.has(variable)) {
@@ -623,7 +691,10 @@ export class QueryIndexBuilder {
             (imported.name === 'lazy' || wrapper.members[0] === 'lazy')) &&
             wrapper.root.getSymbol()?.getDeclarations().includes(imported.binding)) {
             dynamicBindings.set(variable, id);
-            owner = byNode.get(variable);
+            // JSX sites already point to the imported component. Keep a
+            // module-level import edge without inserting the local alias.
+            if (owner === byNode.get(variable)) owner = undefined;
+            if (selector) dynamicSelectors.add(selector);
           }
         }
         for (const target of targets) {
@@ -648,8 +719,40 @@ export class QueryIndexBuilder {
         for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
         for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
       };
+      const recordNamespaceUse = (node: Node) => {
+        const namespace = namespaces.get(node.getText());
+        let parent = node.getParent();
+        if (!namespace || parent === namespace.declaration ||
+            node.getAncestors().some(Node.isTypeNode)) return;
+        const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
+        if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
+        let receiver = node;
+        while (Node.isParenthesizedExpression(parent) || Node.isNonNullExpression(parent) || Node.isAsExpression(parent)) {
+          if (parent.getExpression() !== receiver) break;
+          receiver = parent;
+          parent = parent.getParent();
+        }
+        const line = startLine(node);
+        const owner = owners(node)[1];
+        const pattern = Node.isVariableDeclaration(parent) && parent.getInitializer() === receiver ? parent.getNameNode() : undefined;
+        if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === receiver) {
+          namespace.uses.push([line, parent.getName(), owner]);
+        } else if (Node.isElementAccessExpression(parent) && parent.getExpression() === receiver) {
+          const key = parent.getArgumentExpression();
+          const member = Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key) ? key.getLiteralText() : undefined;
+          namespace.uses.push([line, member, owner]);
+        } else if (Node.isObjectBindingPattern(pattern)) {
+          for (const binding of pattern.getElements()) {
+            const key = binding.getPropertyNameNode() ?? binding.getNameNode();
+            const member = binding.getDotDotDotToken() ? undefined : Node.isIdentifier(key) ? key.getText() :
+              Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
+            namespace.uses.push([line, member, owner]);
+          }
+        } else namespace.uses.push([line, undefined, owner]);
+      };
       // Keep REFERENCE_KINDS in sync with the node kinds handled below, including tRPC calls and resolver owners.
       visitKinds(file, REFERENCE_KINDS, node => {
+        if (namespaces.size && Node.isIdentifier(node)) recordNamespaceUse(node);
         if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
@@ -734,7 +837,8 @@ export class QueryIndexBuilder {
           }
         } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
           const parent = node.getParent();
-          if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent)) return;
+          if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent) ||
+              dynamicSelectors.has(node)) return;
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }

@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
-import { compare, graphRow, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
-import type { QueryIndex, SymbolEntry } from './Index';
+import { compare, graphRow, moduleStops, quantity, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
+import { routeAsset, sourceFile, traceHistory, type Removal } from './ChangesHistory';
+import { isMiddlewareFile, type QueryIndex, type SymbolEntry } from './Index';
 
 export type ChangeScope = 'all' | 'staged' | 'unstaged';
 const maxFiles = 200;
@@ -10,12 +11,23 @@ const maxSeeds = 100;
 const maxBuffer = 8 * 1024 * 1024;
 export const validBase = (value: unknown): value is string =>
   typeof value === 'string' && /^(?!-)[A-Za-z0-9._/@{}~^-]{1,100}$/.test(value);
-type Hunk = { line: number; added: string[]; removed: string[] };
+type Hunk = { line: number; oldLine: number; added: string[]; removed: string[] };
 type DiffFile = { file: string; old?: string; status: string; hunks: Hunk[] };
 type Edit = { file: string; symbol?: SymbolEntry; line: number; added: number; removed: number; comment: boolean };
 const config = /^(?:(?:next\.config|tsconfig)(?:\.[^/]+)?\.(?:json|[cm]?[jt]s)|package\.json|\.env[^/]*)$/;
-const executable = /\.[cm]?[jt]sx?$/;
-const deletedExport = /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:function\*?|const|class)\s+([\w$]+)/;
+const identifier = /[$a-zA-Z_][\w$]*/.source;
+const argument = /(?:[$a-zA-Z_][\w$]*|\d+(?:\.\d+)?|"(?:[^"\\\r\n]|\\.)*"|'(?:[^'\\\r\n]|\\.)*'|\/(?:\\[a-zA-Z]|[a-zA-Z\d+^$. -])+\/[dgimsuvy]*)/.source;
+const call = '\\([ \\t]*(?:' + argument + '(?:[ \\t]*,[ \\t]*' + argument + ')*)?[ \\t]*\\)';
+const simpleReturn = new RegExp('^[ \\t]+return[ \\t]+' + identifier + '(?:' + call + ')?(?:\\.' + identifier + '(?:' + call + ')?)*;[ \\t]*\\r?$');
+
+function simpleBodyEdit({ added, removed, line }: Hunk, symbols: SymbolEntry[]) {
+  // Both lines must be self-contained return expressions. Leave syntax that
+  // could affect exports, comments or multiline tokens to the parser.
+  return added.length === 1 && removed.length === 1 &&
+    symbols.some(symbol => symbol.kind === 'function' && symbol.line < line && line < (symbol.end ?? line)) &&
+    [added[0], removed[0]].every(text => text.length < 1024 &&
+      !/[\x60{}<>\u2028\u2029]|\/[/*]|\*\//.test(text) && simpleReturn.test(text));
+}
 
 function parseDiff(diff: string): DiffFile[] {
   if (!diff) return [];
@@ -40,9 +52,9 @@ function parseDiff(diff: string): DiffFile[] {
       file++;
       hunk = undefined;
     } else if (line.startsWith('@@ ')) {
-      const range = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      const range = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
       if (!range || !files[file]) continue;
-      hunk = { line: Math.max(1, Number(range[1])), added: [], removed: [] };
+      hunk = { line: Number(range[2]), oldLine: Math.max(1, Number(range[1])), added: [], removed: [] };
       files[file].hunks.push(hunk);
     } else if (hunk && line.startsWith('+')) hunk.added.push(line.slice(1));
     else if (hunk && line.startsWith('-')) hunk.removed.push(line.slice(1));
@@ -51,35 +63,14 @@ function parseDiff(diff: string): DiffFile[] {
   return files;
 }
 
-function commentLines(lines: string[], inBlock: boolean) {
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line || !inBlock && line.startsWith('//')) continue;
-    if (!inBlock && !line.startsWith('/*')) return false;
-    const close = line.indexOf('*/', inBlock ? 0 : 2);
-    inBlock = close < 0;
-    if (!inBlock && !/^\s*(?:\/\/.*)?$/.test(line.slice(close + 2))) return false;
-  }
-  return true;
-}
-
-function withinBlock(lines: string[], line: number) {
-  for (let i = Math.min(line - 2, lines.length - 1); i >= 0; i--) {
-    const text = lines[i].trimStart();
-    if (text.includes('*/')) return false;
-    if (text.startsWith('/*')) return true;
-    if (text && !text.startsWith('*')) return false;
-  }
-  return false;
-}
-
 export function changes(root: string, index: QueryIndex, graph: DependencyGraph, scope: ChangeScope, base: string | undefined,
-  deadline: number, checkPath: (file: string) => string): QueryResult {
+  depth: number, deadline: number, checkPath: (file: string) => string): QueryResult {
   const expired = () => performance.now() >= deadline;
-  const git = (args: string[], input?: string) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
-    cwd: root, encoding: 'utf8', input, timeout: Math.max(1, Math.min(3000, Math.floor(deadline - performance.now()))),
-    maxBuffer, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, stdio: ['pipe', 'pipe', 'pipe']
+  const gitBytes = (args: string[], input?: Buffer, buffer = maxBuffer) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], {
+    cwd: root, input, timeout: Math.max(1, Math.min(3000, Math.floor(deadline - performance.now()))),
+    maxBuffer: buffer, env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' }, stdio: ['pipe', 'pipe', 'pipe']
   });
+  const git = (args: string[], input?: string) => gitBytes(args, input === undefined ? undefined : Buffer.from(input)).toString('utf8');
   const known = (ref: string) => {
     try {
       const result = git(['rev-parse', '--verify', '--quiet', '--end-of-options', ref + '^{commit}']).trim();
@@ -104,6 +95,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   }
 
   let files: DiffFile[];
+  let comparison: string | undefined;
   const localChanges = new Set<string>();
   try {
     let refs: string[] = [];
@@ -113,13 +105,16 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       try {
         const ancestor = git(['merge-base', commit, 'HEAD']).trim();
         if (!/^[a-f0-9]{40,64}$/.test(ancestor)) return empty('no merge base with HEAD');
-        refs = [ancestor];
+        comparison = ancestor;
+        refs = [comparison];
       } catch (error) {
         if ((error as { status?: number }).status === 1) return empty('no merge base with HEAD');
         throw error;
       }
-    } else if (scope === 'staged') refs = ['--cached'];
-    else if (scope === 'all') refs = [known('HEAD') ?? git(['hash-object', '-t', 'tree', '--stdin'], '').trim()];
+    } else if (scope !== 'unstaged') {
+      comparison = known('HEAD') ?? git(['hash-object', '-t', 'tree', '--stdin'], '').trim();
+      refs = scope === 'staged' ? ['--cached', comparison] : [comparison];
+    }
     const diff = git(['diff', '--raw', '-z', '-p', '-U0', '--inter-hunk-context=0', '-M', '--no-relative', '--no-ext-diff', '--no-textconv',
       '--no-color', '--submodule=short', ...refs, '--']);
     files = parseDiff(diff);
@@ -135,6 +130,14 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
         else files.push({ file, status: '?', hunks: [] });
       }
     }
+    if (!base && scope !== 'staged') {
+      const seen = new Set(files.map(entry => entry.file));
+      const ignored = git(['ls-files', '--others', '--ignored', '--exclude-standard', '--full-name', '-z', '--',
+        `:(top,glob)${prefix.replace(/([*?\[\]\\])/g, '\\$1')}.env*`]);
+      for (const file of ignored.split('\0')) if (file && !seen.has(file) && config.test(file.slice(prefix.length))) {
+        files.push({ file, status: '?', hunks: [] });
+      }
+    }
   } catch (error) {
     const code = (error as { code?: string }).code;
     if (expired() || code === 'ETIMEDOUT') return empty('timed out');
@@ -142,14 +145,18 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     return empty(error instanceof Error && error.message.startsWith('Git ') ? error.message : 'git diff failed');
   }
 
-  const outside = files.filter(({ file, old }) => !file.startsWith(prefix) && !old?.startsWith(prefix)).length;
+  const rootPackage = !!prefix && files.some(entry => entry.file === 'package.json' || entry.old === 'package.json');
+  const outside = files.filter(({ file, old }) => !file.startsWith(prefix) && !old?.startsWith(prefix) &&
+    file !== 'package.json' && old !== 'package.json').length;
   files = files.flatMap<DiffFile>(entry => {
     const file = entry.file.startsWith(prefix) ? entry.file.slice(prefix.length) : undefined;
     const old = entry.old?.startsWith(prefix) ? entry.old.slice(prefix.length) : undefined;
     if (!file) return old && entry.status === 'R' ? [{ file: old, status: 'D', hunks: [] }] : [];
     return [{ ...entry, file, old, status: entry.status === 'R' && !old ? 'A' : entry.status }];
   }).sort((a, b) => compare(a.file, b.file));
-  const totalFiles = files.length;
+  const totalFiles = files.length + Number(rootPackage);
+  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => config.test(file) ||
+    status !== 'M' && [file, old].some(path => path && /^(?:src\/)?(?:app|pages)\//.test(path)));
   const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(prefix + file) ||
     (old !== undefined && localChanges.has(prefix + old));
   const stagedDrift = files.some(worktreeDiffers);
@@ -168,10 +175,32 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const changes: QueryRow[] = [];
   const notes: QueryRow[] = [];
   const touched = new Set<string>();
-  let configFiles = 0;
+  let configFiles = Number(rootPackage);
   let actionCount = 0;
   let limited = false;
   let untrackedBytes = 0;
+  const removals: Removal[] = [];
+  const middlewareFiles = new Map<string, string>();
+  let missingSource = 0;
+  let unmappedDeletions = 0;
+  let unresolvedRenames = 0;
+  if (rootPackage) changes.push(graphRow('file package.json [repository config: all routes]'));
+  const readSource = (file: string) => {
+    try {
+      const absolute = checkPath(file);
+      const stat = lstatSync(absolute);
+      if (stat.isFile() && stat.size <= maxBuffer) return readFileSync(absolute, 'utf8');
+    } catch {
+      // A worktree file can disappear during the query.
+    }
+  };
+  const show = (ref: string | undefined, file: string) => {
+    try {
+      return git(['show', '--no-ext-diff', '--no-textconv', `${ref ?? ''}:${prefix}${file}`]);
+    } catch {
+      return undefined;
+    }
+  };
   const stats = (edit: Edit) => `+${edit.added} -${edit.removed}`;
   const useSeed = (file: string, name: string, ids: ChangeOrigin['ids'], symbol?: number) => {
     if (!ids.length) return;
@@ -197,11 +226,18 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       const isConfig = config.test(file);
       if (isConfig) configFiles++;
       changes.push(graphRow(`deleted ${file}${isConfig ? ' [config: all routes]' : ''}${worktree}`, file));
+      if (!isConfig && (sourceFile.test(file) || routeAsset.test(file))) {
+        if (show(comparison, file) === undefined) missingSource++;
+        else removals.push({ file });
+      } else if (!isConfig) missingSource++;
       continue;
     }
-    if (old && old !== file) changes.push(graphRow(`renamed ${old} -> ${file}${worktree}`, file));
+    if (old && old !== file) {
+      changes.push(graphRow(`renamed ${old} -> ${file}${worktree}`, file));
+      if (status === 'R' && (sourceFile.test(old) || routeAsset.test(old))) removals.push({ file: old, renamed: true });
+    }
 
-    if (status === '?' && (executable.test(file) || file.endsWith('.css'))) {
+    if (status === '?' && (sourceFile.test(file) || file.endsWith('.css'))) {
       try {
         const absolute = checkPath(file);
         const stat = lstatSync(absolute);
@@ -212,7 +248,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
             const contents = readFileSync(absolute, 'utf8');
             if (!contents.includes('\0')) {
               const added = contents.replace(/\r?\n$/, '').split(/\r?\n/);
-              entry.hunks.push({ line: 1, added, removed: [] });
+              entry.hunks.push({ line: 1, oldLine: 1, added, removed: [] });
             }
           }
         }
@@ -221,38 +257,77 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       }
     }
 
-    let sourceLines: string[] | undefined;
-    const commentOnly = (hunk: Hunk) => {
-      if (commentLines(hunk.added, false) && commentLines(hunk.removed, false)) return true;
-      if (![...hunk.added, ...hunk.removed].some(line => /^\s*\*(?:\s|\/|$)/.test(line))) return false;
-      if (!sourceLines) {
-        sourceLines = [];
-        try {
-          const absolute = checkPath(file);
-          const stat = lstatSync(absolute);
-          if (stat.isFile() && stat.size <= maxBuffer) sourceLines = readFileSync(absolute, 'utf8').split('\n');
-        } catch {
-          // A missing source file cannot confirm a block comment.
-        }
-      }
-      return withinBlock(sourceLines, hunk.line) && commentLines(hunk.added, true) && commentLines(hunk.removed, true);
+    const commentCandidate = (hunk: Hunk) => {
+      const lines = [...hunk.added, ...hunk.removed];
+      return lines.some(line => line.trim()) && lines.every(line => /^\s*(?:$|\/\/|\/\*|\*)/.test(line));
     };
+    const scanComments = entry.hunks.some(commentCandidate);
+    let previous: ReturnType<typeof import('../cli/graph').inspectChangeSource> | undefined;
+    const removedNames = new Set<string>();
+    const uncertainNames = new Set<string>();
+    const removedStars = new Set<string>();
+    let newCode: Set<number> | undefined;
+    const middleware = isMiddlewareFile(file);
+    const existing = status !== 'A' && status !== '?';
+    const needsSource = scanComments || existing && (middleware || !entry.hunks.every(hunk => simpleBodyEdit(hunk, indexes)));
+    let matcherChanged = true;
+    if (sourceFile.test(file) && needsSource) {
+      const { inspectChangeSource } = require('./graph.cjs') as typeof import('../cli/graph');
+      const before = existing ? show(comparison, old ?? file) : '';
+      const after = worktree ? show(undefined, file) : readSource(file);
+      if (before !== undefined && after !== undefined && !before.includes('\0') && !after.includes('\0')) {
+        previous = inspectChangeSource(old ?? file, before, scanComments, middleware);
+        const next = inspectChangeSource(file, after, scanComments, middleware);
+        newCode = next.code;
+        for (const name of previous.names) {
+          if (!next.names.has(name) && (!next.stars.size || name === 'default')) {
+            removedNames.add(name);
+            continue;
+          }
+          if (worktree) {
+            if (next.aliases.has(name) || !next.names.has(name)) uncertainNames.add(name);
+            continue;
+          }
+          const state = graph.runtimeExport(file, name);
+          if (state === 'type' || state === 'absent' && !next.names.has(name)) removedNames.add(name);
+          else if (state !== 'value') uncertainNames.add(name);
+        }
+        for (const star of previous.stars) if (!next.stars.has(star)) removedStars.add(star);
+        const beforeMatcher = previous.matcher;
+        const afterMatcher = next.matcher;
+        if (beforeMatcher && afterMatcher) {
+          matcherChanged = !beforeMatcher.every(value => afterMatcher.includes(value)) ||
+            !afterMatcher.every(value => beforeMatcher.includes(value));
+        }
+      } else if (existing && entry.hunks.length) missingSource++;
+    }
+    const commentOnly = (hunk: Hunk) => commentCandidate(hunk) && !!previous && !!newCode &&
+      hunk.added.every((_, i) => !newCode.has(hunk.line + i)) && hunk.removed.every((_, i) => !previous!.code.has(hunk.oldLine + i));
     const substantive: Hunk[] = [];
     const commentHunks: Hunk[] = [];
     for (const hunk of entry.hunks) (commentOnly(hunk) ? commentHunks : substantive).push(hunk);
-    const record = (line: number, comment: boolean, added: number, removed: number) => {
-      const symbol = indexes.find(symbol => symbol.line <= line && line <= (symbol.end ?? symbol.line));
+    const record = (line: number, comment: boolean, added: number, removed: number,
+      symbol = indexes.find(symbol => symbol.line <= line && line <= (symbol.end ?? symbol.line)) ?? null) => {
       const key = JSON.stringify([file, symbol?.id, comment]);
-      const edit = modified.get(key) ?? { file, symbol, line, added: 0, removed: 0, comment };
+      const edit = modified.get(key) ?? { file, symbol: symbol ?? undefined, line, added: 0, removed: 0, comment };
       edit.added += added;
       edit.removed += removed;
       edit.line = Math.min(edit.line, line);
       modified.set(key, edit);
     };
     for (const hunk of commentHunks) {
-      record(hunk.line, true, hunk.added.length, hunk.removed.length);
+      record(Math.max(1, hunk.line), true, hunk.added.length, hunk.removed.length);
     }
     if (!substantive.length && commentHunks.length && !old) continue;
+    if (removedNames.size || uncertainNames.size || removedStars.size) removals.push({
+      file: old ?? file, names: [...removedNames, ...uncertainNames], uncertainNames,
+      compareExports: removedStars.size > 0, currentFile: file, stagedDrift: !!worktree
+    });
+    if (middleware) {
+      useSeed(file, file, graph.moduleSeeds(file));
+      if (existing && isMiddlewareFile(old ?? file) &&
+          (matcherChanged || mayChangeRouteFiles || worktree || !graph.middleware(file))) middlewareFiles.set(file, old ?? file);
+    }
     if (config.test(file)) {
       configFiles++;
       changes.push(graphRow(`file ${file} [config: all routes]${worktree}`, file));
@@ -270,21 +345,58 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     }
     if (!registered(file) && !graph.moduleSeeds(file).length) {
       changes.push(graphRow(`file ${file} [not indexed]${worktree}`, file));
+      if (sourceFile.test(file)) {
+        unmappedDeletions += substantive.filter(hunk => !hunk.added.length && hunk.removed.some(line => line.trim())).length;
+      }
       continue;
     }
     if (!substantive.length && (old || !entry.hunks.length)) {
       useSeed(file, file, old ? graph.fileSeeds(file) : graph.moduleSeeds(file));
       if (!old) changes.push(graphRow(`file ${file}${worktree}`, file));
     }
+    let statementIndex = 0;
+    const statementsAt = (line: number) => {
+      const statements = previous?.statements;
+      if (!statements) return [];
+      while (statementIndex < statements.length && statements[statementIndex].end < line) statementIndex++;
+      let end = statementIndex;
+      while (end < statements.length && statements[end].start <= line) end++;
+      return statements.slice(statementIndex, end);
+    };
+    const removedStatement = ({ exports, star }: NonNullable<typeof previous>['statements'][number]) =>
+      star !== undefined ? removedStars.has(star) : exports.size > 0 && [...exports].every(name => removedNames.has(name));
     for (const hunk of substantive) {
       if (expired()) break;
-      const removed = new Set(hunk.removed.flatMap(line => deletedExport.exec(line)?.[1] ?? [])
-        .filter(name => !indexes.some(symbol => symbol.name === name)));
-      for (const name of removed) changes.push(graphRow(`removed ${file} ${name}${worktree}`, file));
-      for (let i = 0; i < hunk.added.length; i++) record(hunk.line + i, false, 1, 0);
-      if (!removed.size || hunk.added.length) {
-        for (let i = 0; i < hunk.removed.length; i++) record(hunk.line + Math.max(0, Math.min(i, hunk.added.length - 1)), false, 0, 1);
+      if (hunk.removed.length === 1 && hunk.added.length === 1 &&
+          hunk.removed[0].replace(/^(\s*)export(?:\s+default)?\s+/, '$1') === hunk.added[0]) {
+        const owners = statementsAt(hunk.oldLine);
+        if (owners.length && owners.every(removedStatement)) continue;
       }
+      for (let i = 0; i < hunk.added.length; i++) record(hunk.line + i, false, 1, 0);
+      if (hunk.added.length || !sourceFile.test(file)) {
+        for (let i = 0; i < hunk.removed.length; i++) {
+          record(Math.max(1, hunk.line + Math.max(0, Math.min(i, hunk.added.length - 1))), false, 0, 1);
+        }
+        continue;
+      }
+      // In a zero-context deletion Git's new line is the line before the
+      // gap. Match surviving lines of the old statement around that gap.
+      const last = hunk.oldLine + hunk.removed.length - 1;
+      let unmapped = false;
+      for (const [offset, text] of hunk.removed.entries()) {
+        const owners = statementsAt(hunk.oldLine + offset);
+        if (owners.length && owners.every(statement => removedStatement(statement) &&
+          (statement.start >= hunk.oldLine && statement.end <= last || /^\s*export(?:\s+default)?\s*$/.test(text)))) continue;
+        const anchors = owners.length === 1 ? [
+          ...(owners[0].start < hunk.oldLine ? [hunk.line] : []),
+          ...(owners[0].end > last ? [hunk.line + 1] : [])
+        ] : [];
+        const symbol = anchors.length ? indexes.find(symbol =>
+          anchors.every(line => symbol.line <= line && line <= (symbol.end ?? symbol.line))) : undefined;
+        if (!symbol && text.trim()) unmapped = true;
+        record(Math.max(1, anchors[0] ?? hunk.line), false, 0, 1, symbol ?? null);
+      }
+      if (unmapped) unmappedDeletions++;
     }
   }
 
@@ -294,7 +406,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     const { file, symbol, line } = edit;
     const worktree = localChanges.has(prefix + file) ? ' [worktree differs]' : '';
     if (edit.comment) {
-      changes.push(graphRow(`comment ${file}:${line} ${symbol?.name ?? ''} [comment only]${worktree}`, file));
+      changes.push(graphRow(`comment ${file}:${line}${symbol ? ' ' + symbol.name : ''} [comment only]${worktree}`, file));
       continue;
     }
     if (symbol) {
@@ -307,50 +419,132 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       useSeed(file, symbol.name, [symbol.id], symbol.id);
     } else {
       changes.push(graphRow(`file ${file}:${line} ${stats(edit)}${worktree}`, file));
-      useSeed(file, file, graph.moduleSeeds(file));
+      useSeed(file, file, graph.fileSeeds(file));
     }
   }
 
-  const trace = graph.changeRoutes([...seeds.values()], expired);
+  let history: ReturnType<typeof traceHistory> | undefined;
+  if ((removals.length || middlewareFiles.size) && !expired()) {
+    const renamed = new Map(files.flatMap(({ old, file, status }) => old && status === 'R' ? [[old, file]] : []));
+    try {
+      history = traceHistory(root, removals.slice(0, maxSeeds), middlewareFiles, graph, renamed, gitBytes,
+        comparison, prefix, depth, deadline);
+      changes.push(...history.rows);
+    } catch {
+      for (const { file, names, compareExports, renamed } of removals) {
+        if (renamed) unresolvedRenames++;
+        else missingSource++;
+        for (const name of names ?? []) changes.push(graphRow(`export ${file} ${name} [uncertain]`));
+        if (compareExports) changes.push(graphRow(`export ${file} * [uncertain]`));
+      }
+    }
+    if (removals.length > maxSeeds) limited = true;
+  }
+  const trace = graph.changeRoutes([...seeds.values(), ...history?.live ?? []], depth, expired);
+  const baseTrace = history?.trace;
+  const wrappers = new Map([...baseTrace?.wrappers ?? [], ...trace.wrappers].map(wrapper => [wrapper.name, wrapper]));
   const rows: QueryRow[] = [];
-  for (const wrapper of trace.wrappers) {
+  for (const wrapper of wrappers.values()) {
     const urls = [...new Set(wrapper.pages.map(page => page.url))].sort(compare);
-    rows.push(graphRow(`wraps ${wrapper.name} : ${wrapper.pages.length} routes` +
+    rows.push(graphRow(`wraps ${wrapper.name} : ${quantity(wrapper.pages.length, 'route')}` +
       (urls.length ? ` (${urls.slice(0, 3).join(', ')}${urls.length > 3 ? ', +' + (urls.length - 3) : ''})` : ''), wrapper.file));
   }
   const pageFiles = new Set<string>();
   const apiFiles = new Set<string>();
   const otherFiles = new Set<string>();
   const possibleFiles = new Set<string>();
-  for (const { terminal, origins } of trace.routes) {
+  let unknownMiddleware = [...middlewareFiles].some(([file]) => !history?.previousMiddleware.get(file) || !graph.middleware(file));
+  const currentRoutes = new Set(trace.routes.map(({ terminal }) => JSON.stringify([terminal.kind, terminal.file, terminal.name])));
+  const impacts = new Map(trace.routes.map(result => [JSON.stringify([result.terminal.kind, result.terminal.file, result.terminal.name]),
+    { terminal: result.terminal, origins: [...result.origins] }]));
+  const liveMiddleware = new Set(trace.routes.filter(({ terminal }) => terminal.kind === 'middleware').map(({ terminal }) => terminal.file));
+  for (const result of baseTrace?.routes ?? []) {
+    const { terminal, origins } = result;
+    if (terminal.kind === 'middleware' && middlewareFiles.has(terminal.file) && liveMiddleware.has(terminal.file)) continue;
+    const key = JSON.stringify([terminal.kind, terminal.file, terminal.name]);
+    const live = impacts.get(key);
+    if (!live) impacts.set(key, { terminal, origins: [...origins] });
+    else for (const impact of origins) {
+      if (!live.origins.some(({ origin }) => origin.removed === impact.origin.removed && origin.renamed === impact.origin.renamed &&
+        origin.file === impact.origin.file && origin.name === impact.origin.name)) {
+        live.origins.push(impact);
+      }
+    }
+  }
+  for (const [key, { terminal, origins }] of impacts) {
     const { kind, name, file } = terminal;
     if (kind === 'middleware') {
-      rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}`, file));
+      unknownMiddleware ||= !terminal.matchedRoutes;
+      const previous = history?.previousMiddleware.get(file);
+      if (previous && !previous.matchedRoutes) unknownMiddleware = true;
+      for (const route of [...terminal.matchedRoutes ?? [], ...previous?.matchedRoutes ?? []]) {
+        (route.kind === 'page' ? pageFiles : apiFiles).add(route.file);
+      }
+      const routeKey = (route: QueryIndex['routes'][number]) => JSON.stringify([route.kind, route.file, route.url]);
+      let coverage = '';
+      if (previous?.matchedRoutes && terminal.matchedRoutes) {
+        const before = new Set(previous.matchedRoutes.map(routeKey));
+        const after = new Set(terminal.matchedRoutes.map(routeKey));
+        const lost = [...before].filter(route => !after.has(route)).length;
+        const gained = [...after].filter(route => !before.has(route)).length;
+        if (lost || gained || previous.name !== name) {
+          coverage = ` (previous matcher: ${previous.name === '/' ? 'all routes' : previous.name}, ` +
+            `${quantity(lost, 'route')} no longer matched, ${quantity(gained, 'route')} newly matched)`;
+        }
+      }
+      rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}${coverage}`, file));
       continue;
     }
     if (kind === 'api') apiFiles.add(file);
     else if (kind === 'page') pageFiles.add(file);
     else otherFiles.add(file);
     if (origins.every(origin => origin.possible)) possibleFiles.add(file);
-    const labels = origins.slice(0, 3).map(({ origin, depth, fetch, possible }) =>
-      `${origin.name} d${depth}${fetch ? ` via fetch ${fetch}` : ''}${possible ? ' [possible]' : ''}`);
-    const chain = ` <- ${labels.join(', ')}${origins.length > 3 ? ', +' + (origins.length - 3) : ''}`;
-    rows.push(graphRow(`route ${kind} ${name}  ${file}${chain}`, file));
+    const labels = [...new Set(origins.map(({ origin, depth, fetch, possible }) =>
+      `${origin.name}${origin.removed ? ' [removed]' : origin.renamed ? ' [renamed]' : ''} d${depth}` +
+      (fetch ? ` via fetch ${fetch}` : '') + (possible ? ' [possible]' : '')))];
+    const chain = ` <- ${labels.slice(0, 3).join(', ')}${labels.length > 3 ? ', +' + (labels.length - 3) : ''}`;
+    const isCurrent = currentRoutes.has(key);
+    rows.push(graphRow(`route ${kind} ${name}  ${file}${isCurrent ? '' : ' [base]'}${chain}`, ...isCurrent ? [file] : []));
   }
   if (configFiles) for (const route of index.routes) (route.kind === 'page' ? pageFiles : apiFiles).add(route.file);
-  const routes = pageFiles.size + apiFiles.size + otherFiles.size;
-  const wrapperRoutes = new Set(trace.wrappers.flatMap(wrapper => wrapper.pages.map(page => page.file))).size;
-  if (outside) notes.push(graphRow(`# outside project: ${outside} files`));
+  const routes = pageFiles.size + apiFiles.size;
+  const wrapperRoutes = new Set([...wrappers.values()].flatMap(wrapper => wrapper.pages.map(page => page.file))).size;
+  if (outside) notes.push(graphRow(`# outside project: ${quantity(outside, 'file')}`));
   if (changes.length > 500) limited = true;
-  notes.push(graphRow(`# risk: ${changedSymbols.size} changed symbols (${actionCount} actions); ${routes} routes reached (${pageFiles.size} page, ${apiFiles.size} api${otherFiles.size ? `, ${otherFiles.size} special` : ''}); ` +
-    `${possibleFiles.size ? `${possibleFiles.size} possible; ` : ''}${wrapperRoutes} routes under touched wrappers; ${configFiles} config files`));
+  const stops = new Set([...trace.stops, ...baseTrace?.stops ?? []]).size;
+  if (stops) notes.push(graphRow('# ' + moduleStops(stops)));
+  if (history?.removed) notes.push(graphRow(`# removed: ${quantity(history.removed, 'export')} from base`));
+  const tracedSymbols = [...seeds.values()].filter(seed => seed.ids.length === 1 && changedSymbols.has(Number(seed.ids[0]))).length;
+  notes.push(graphRow(`# risk: ${quantity(changedSymbols.size, 'changed symbol')} (${quantity(actionCount, 'action')}` +
+    `${tracedSymbols < changedSymbols.size ? `, ${tracedSymbols} traced` : ''}); ${quantity(routes, 'route')} reached ` +
+    `(${quantity(pageFiles.size, 'page')}, ${quantity(apiFiles.size, 'API')}); ` +
+    (possibleFiles.size ? `${possibleFiles.size} possible; ` : '') +
+    `${quantity(wrapperRoutes, 'route')} under touched wrappers; ${quantity(configFiles, 'config file')}` +
+    (otherFiles.size ? `; ${quantity(otherFiles.size, 'special file')}` : '')));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';
-  const tracePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : trace.partial;
-  const partial = [stagedDrift ? 'worktree differs from staged' : undefined, tracePartial].filter(Boolean).join('; ') || undefined;
+  const sizePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : undefined;
+  let untraced = missingSource + (history?.skipped ?? 0);
+  let noRemovalRoutes = false;
+  for (const { origins, evidence, renamed, row } of history?.checks ?? []) {
+    if (origins.some(origin => trace.traced.has(origin) || baseTrace?.traced.has(origin))) continue;
+    if (row) row.text += ' [uncertain]';
+    if (renamed) unresolvedRenames++;
+    else if (evidence) noRemovalRoutes = true;
+    else untraced++;
+  }
+  const partial = [...new Set([stagedDrift ? 'worktree differs from staged' : undefined,
+    untraced ? `could not trace ${quantity(untraced, 'removal')} from base` : undefined, sizePartial,
+    unresolvedRenames ? `could not trace old-path coverage for ${quantity(unresolvedRenames, 'rename')}` : undefined,
+    unmappedDeletions ? `could not map old lines for ${quantity(unmappedDeletions, 'deletion hunk')}` : undefined,
+    noRemovalRoutes ? 'no page or API routes traced for removals' : undefined,
+    history?.unknownExports ? 'runtime export availability not resolved' : undefined,
+    history?.unknownNamespaces ? 'namespace import members not resolved' : undefined,
+    trace.partial, baseTrace?.partial, stops ? 'module-level importers not traced' : undefined,
+    unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined].filter(Boolean))].join('; ') || undefined;
   return {
     title, rows: [...rows, ...changes.slice(0, 500)], notes, targets: [...touched],
-    count: `${totalFiles} files, ${changedSymbols.size} symbols, ${routes} routes, ${trace.wrappers.length} wrappers`,
+    count: `${quantity(totalFiles, 'file')}, ${quantity(changedSymbols.size, 'symbol')}, ${quantity(routes, 'route')}, ${quantity(wrappers.size, 'wrapper')}`,
     partial,
-    scope: `git diff ${diffScope}, indexed edges, impact depth 3`
+    scope: `git diff ${diffScope}, indexed edges, impact depth ${depth} plus render closure`
   };
 }

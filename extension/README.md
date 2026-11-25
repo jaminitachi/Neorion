@@ -45,7 +45,7 @@ Call `neorion_query` with `kind` and, for queries that take a target, `target` (
 | `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
 | `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
 | `path` | What is the shortest directed chain from a page or symbol to a symbol or API route? Pass `target` and `to`. |
-| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits, or `base` for a merge-base comparison. |
+| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits. Pass `base` to compare against the merge base of `HEAD` and the ref, including uncommitted edits to tracked files and excluding untracked files. Set `depth` (default 3, maximum 6) to extend the trace. |
 
 The server returns project-relative `path:line` locations. Results have a
 6,000-byte cap and default to 40 rows (20 for search). `complete` describes the
@@ -98,7 +98,12 @@ renders take a separate turn. Ties among fetch facts favor page entry points.
 
 From this directory, run `npm ci` and `npx vsce package`. Run `npm run pack:cli` to build the standalone `neorion` tarball in this directory. In VS Code, use **Extensions: Install from VSIX...** and select the resulting file.
 
-Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.txt).
+`package.json` allows the locked esbuild and VSCE signing postinstall scripts.
+Use `npm install-scripts ls` to review scripts after changing dependencies.
+VSCE still brings in a deprecated Secretlint preset. The npm audit finding through
+`ts-morph` requires a `minimatch` release whose declared Node.js support excludes Node.js 18.
+
+Neorion is MIT licensed. See [LICENSE](LICENSE) and [third-party notices](https://github.com/jaminitachi/Neorion/blob/HEAD/extension/THIRD_PARTY_NOTICES.txt).
 
 ## Test locally
 

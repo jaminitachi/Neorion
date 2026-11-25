@@ -246,6 +246,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     return output;
   }
   const impact = await check('impact', 'normalize');
+  assert.match(impact, /# risk: .*3 pages, 1 API.*1 layout; .*1 test$/m);
   for (const evidence of [/api GET \/api\/items\/\[id\]/, /page \/b\/\[id\].*generateMetadata/,
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
@@ -256,7 +257,8 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'POST'), /# complete/);
   const typeUse = query('impact', 'exampleContext');
   assert.match(typeUse, /d1 module server\/router\.ts:9/);
-  assert.match(typeUse, /# complete/);
+  assert.match(typeUse, /# stopped at 1 module-level use \(importers not traced\)/);
+  assert.match(typeUse, /# partial: module-level importers not traced/);
   const constant = query('impact', 'DATA_SUFFIX');
   assert.match(constant, /d1 use server\/data\.ts:5 getData/);
   assert.match(constant, /page \/b\/\[id\]/);
@@ -267,23 +269,39 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'formatDate'), /# ambiguous impact/);
   assert.match(query('impact', 'lib/format-a.ts#formatDate'), /# complete/);
   assert.match(query('impact', 'components/chart.tsx#default'), /page \/items/);
-  assert.match(query('impact', 'components/chart.tsx#Chart'), /\bd1 dyn /);
+  const chart = query('impact', 'components/chart.tsx#Chart');
+  assert.match(chart, /^d1 dyn app\/\(main\)\/items\/page\.tsx:4 module$/m);
+  assert.doesNotMatch(chart, /^d1 use app\/\(main\)\/items\/page\.tsx:4 Chart\b/m);
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
-  assert.match(query('impact', 'submitItem'), /action createItem/);
+  const targetAction = query('impact', 'submitItem');
+  assert.match(targetAction, /depth 4 \(limit 3 \+ renders\)/);
+  assert.match(targetAction, /# target: server action createItem/);
+  assert.match(targetAction, /0 server actions/);
+  assert.doesNotMatch(targetAction, /^action createItem/m);
   const barrel = query('impact', 'CreateItem');
   assert.match(barrel, /page \/items/);
   assert.doesNotMatch(barrel, /components\/index\.ts/);
-  assert.match(query('impact', 'middleware.ts'), /matcher: '\/items\/:path\*'/);
+  const middleware = query('impact', 'middleware.ts');
+  assert.match(middleware, /: 1 route,/);
+  assert.match(middleware, /matcher: '\/items\/:path\*'/);
 
   const callees = await check('callees', 'createItem');
   assert.match(callees, /db\.\$transaction  server\/db\.ts#db/);
-  assert.match(callees, /ext next\/cache  revalidatePath/);
+  assert.match(callees, /^d1 ext next\/cache  revalidatePath:\d+(?: ×\d+)?$/m);
   assert.match(callees, /: 2 project calls/);
   assert.match(callees, /^d1 call :7,10,11 \+1  normalize/m);
+  assert.match(callees, /^# source: server\/actions\.ts \(unqualified first-hop sites\)$/m);
   assert.equal(callees.split('\n').filter(line => line.includes('  normalize  ')).length, 1);
-  assert.match(callees, /# unresolved: 1 calls/);
+  assert.match(callees, /^# partial: 1 unresolved call on local variables or parameters$/m);
   assert.doesNotMatch(callees, /anotherAction/);
+  const limited = query('callees', 'createItem', '--limit', '1');
+  assert.match(limited, /^# more: \d+ \(try .+neorion\.cjs'? query callees createItem --depth 1 --limit \d+ --root .+\)$/m);
+  const limitedMcp = await mcp.text('query', { kind: 'callees', target: 'createItem', limit: 1 });
+  assert.match(limitedMcp, /^# more: \d+ \(set limit=\d+ on the same request and keep the other arguments\)$/m);
+  for (const output of [limited, limitedMcp]) {
+    assert.match(output, /^# partial: output truncated; 1 unresolved call on local variables or parameters$/m);
+  }
   assert.match(query('callees', 'CreateItem'), /d1 action .*createItem/);
   assert.match(query('callees', 'useItems'), /fetch .*GET \/api\/items\/\[id\].*\(SWR key\)/);
   assert.doesNotMatch(query('callees', 'useItems'), /\bfetch .*mutate/);
@@ -299,7 +317,7 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   const indexFile = build();
   const impact = query('impact', 'cn');
   assert.match(impact, /hub collapsed/);
-  assert.match(impact, /200 callers in 1 files/);
+  assert.match(impact, /200 callers in 1 file\b/);
   const actionImpact = query('impact', 'normalize');
   assert.match(actionImpact, /^actions: 7 in 1 file \(top: createItem /m);
   assert.match(actionImpact, /^page \/items.* via CreateItem > createItem/m);
@@ -487,7 +505,7 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   edit('server/actions.ts', text => text.replace('  const label', '  // Preserve the item label.\n  const label'));
   const comments = changes();
   assert.match(comments, /comment server\/actions\.ts:7 createItem \[comment only\]/);
-  assert.match(comments, /1 files, 0 symbols, 0 routes/);
+  assert.match(comments, /1 file, 0 symbols, 0 routes/);
   assert.match(comments, /# complete: git diff HEAD/);
   git('restore', 'server/actions.ts');
 
@@ -507,6 +525,7 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   assert.match(wrappers, /wraps components\/providers\.tsx#Providers : 2 routes/);
   assert.match(wrappers, /wraps app\/\(main\)\/layout\.tsx : 2 routes/);
   assert.match(wrappers, /route page \/items .* <- MainLayout d0, Providers d0/);
+  assert.doesNotMatch(wrappers, /wraps app\/\(main\)\/layout\.tsx#/);
   git('restore', '.');
 
   edit('app/(main)/main.css', text => text.replace('black', 'white'));
@@ -526,6 +545,8 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   assert.match(config, /file prisma\/schema\.prisma \[schema\]/);
   const mcp = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
   assert.equal(await mcp.text('query', { kind: 'changes' }), config);
+  assert.equal(await mcp.text('query', { kind: 'changes', depth: 6 }), changes('--depth', '6'));
+  assert.equal((await mcp.call('query', { kind: 'changes', depth: 7 })).isError, true);
   assert.equal((await mcp.call('query', { kind: 'changes', scope: 'staged', base: 'main' })).isError, true);
   for (const base of ['--output=x', '-x', 'a b', '$(id)']) {
     assert.equal((await mcp.call('query', { kind: 'changes', base })).isError, true);
@@ -555,10 +576,12 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
   git('switch', '-qc', 'topic');
   git('add', 'lib/normalize.ts');
   git('commit', '-qm', 'Normalize casing');
+  fs.writeFileSync(file('lib/untracked.ts'), 'export const onlyUntracked = 1;\n');
   const base = changes('--base', 'main');
   assert.match(base, /# changes merge-base main/);
   assert.match(base, /changed lib\/normalize\.ts:1-3 normalize/);
   assert.match(base, /changed components\/providers\.tsx:1 Providers/);
+  assert.doesNotMatch(base, /untracked\.ts/);
   assert.match(changes('--base', 'missing-ref'), /# partial: invalid base ref missing-ref/);
   git('restore', '.');
 
@@ -570,6 +593,7 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
   const removed = changes();
   assert.match(removed, /removed lib\/format with space\.ts formatDate/);
   assert.match(removed, /deleted lib\/format-b\.ts/);
+  assert.match(removed, /# partial: could not trace 2 removals from base/);
   git('restore', '.');
 
   fs.writeFileSync(file('components/added.tsx'), 'export function Added() { return <p>New</p>; }\n');
@@ -597,13 +621,353 @@ test('changes returns a partial result outside Git and scopes a nested project',
   const { root, file, git, run } = gitFixture(t);
   fs.mkdirSync(file('nested'));
   git('mv', 'tsconfig.json', 'app', 'components', 'lib', 'hooks', 'server', 'nested');
+  fs.writeFileSync(file('package.json'), '{"private":true}\n');
+  fs.writeFileSync(file('.gitignore'), '.env*\n');
+  git('add', 'package.json', '.gitignore');
   git('commit', '-qm', 'Nest the project');
   fs.writeFileSync(file('outside.ts'), 'export const outside = true;\n');
   fs.appendFileSync(file('nested/lib/normalize.ts'), '\nexport const fresh = 1;\n');
   const nested = run(['query', 'changes', '--root', path.join(root, 'nested')]);
-  assert.match(nested, /# outside project: 1 files/);
+  assert.match(nested, /# outside project: 1 file/);
   assert.match(nested, /changed lib\/normalize\.ts:10 fresh/);
   assert.doesNotMatch(nested, /outside\.ts/);
+  fs.writeFileSync(file('package.json'), '{"private":false}\n');
+  fs.writeFileSync(file('nested/.env.local'), 'ENV_VALUE=never-print-this\n');
+  const config = run(['query', 'changes', '--root', path.join(root, 'nested')]);
+  assert.match(config, /file package\.json \[repository config: all routes\]/);
+  assert.match(config, /file \.env\.local \[config: all routes\]/);
+  assert.doesNotMatch(config, /never-print-this/);
+  assert.doesNotMatch(run(['query', 'changes', '--base', 'HEAD', '--root', path.join(root, 'nested')]), /\.env\.local/);
+});
+
+test('changes traces removed imports from the comparison side and prefers current routes', { timeout: 65_000 }, async t => {
+  const { root, env, file, edit, git, run, changes } = gitFixture(t);
+  fs.writeFileSync(file('lib/old.ts'), 'export function old() { return 1; }\nexport { old as retained };\n');
+  fs.writeFileSync(file('lib/barrel.ts'), 'export { old as former } from "./old";\n');
+  edit('app/(main)/other/page.tsx', text =>
+    'import { former } from "../../../lib/barrel";\n' + text.replace('<main />', '<main>{former()}</main>'));
+  edit('app/(main)/items/page.tsx', text =>
+    'import { retained } from "../../../lib/old";\n' + text.replace('<main>', '<main>{retained()}'));
+  git('add', '.');
+  git('commit', '-qm', 'Add a page dependency');
+
+  edit('lib/old.ts', text => text.replace('export function', 'function'));
+  const narrowed = changes('--base', 'HEAD');
+  assert.match(narrowed, /removed lib\/old\.ts old/);
+  assert.match(narrowed, /importer app\/\(main\)\/other\/page\.tsx:.*\[base\]/);
+  assert.match(narrowed, /importer lib\/barrel\.ts:1.*\[base\]/);
+  assert.match(narrowed, /route page \/other .* <- old \[removed\]/);
+  assert.doesNotMatch(narrowed, /route page \/items|removed lib\/old\.ts retained/);
+  git('restore', '.');
+
+  fs.unlinkSync(file('lib/old.ts'));
+  fs.unlinkSync(file('app/(main)/other/page.tsx'));
+  const removed = changes('--unstaged');
+  assert.match(removed, /route page \/other .*\[base\].*lib\/old\.ts \[removed\]/);
+  assert.match(removed, /deleted lib\/old\.ts/);
+  assert.doesNotMatch(removed, /\[stale\]/);
+  const traceFile = file('.git/warm-trace.jsonl');
+  assert.equal(run(['query', 'changes', '--unstaged'], { GIT_TRACE2_EVENT: traceFile }), removed);
+  const readTreeBlobs = () => fs.readFileSync(traceFile, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter(event => event.event === 'start' && event.argv.includes('cat-file')).length;
+  assert.equal(readTreeBlobs(), 0);
+  const bundle = path.join(__dirname, '../out/mcp.cjs');
+  const mcp = await openMcp(t, root, { command: process.execPath, args: [bundle, '--root', root], cwd: root, env });
+  assert.equal(await mcp.text('query', { kind: 'changes', scope: 'unstaged' }), removed.split('\n').slice(1).join('\n'));
+  git('add', 'app/(main)/other/page.tsx');
+  const newComparison = run(['query', 'changes', '--unstaged'], { GIT_TRACE2_EVENT: traceFile });
+  assert.equal(readTreeBlobs(), 1);
+  assert.doesNotMatch(newComparison, /^route page \/other /m);
+});
+
+test('changes traces a retained deletion beside an export removal and finds old-path importers after renames', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const shared = 'lib/review-shared.ts';
+  fs.writeFileSync(file(shared), [
+    'export function removed() { return 1; }',
+    '',
+    'export function retained() {',
+    '  const result = 2;',
+    '  console.info(result);',
+    '  return result;',
+    '}',
+    ''
+  ].join('\n'));
+  const route = suffix => 'app/api/review-' + suffix + '/route.ts';
+  for (const [suffix, name] of [['a', 'removed'], ['b', 'retained']]) {
+    fs.mkdirSync(path.dirname(file(route(suffix))), { recursive: true });
+    fs.writeFileSync(file(route(suffix)), [
+      'import { ' + name + ' } from "../../../lib/review-shared";',
+      'export function GET() { return Response.json(' + name + '()); }',
+      ''
+    ].join('\n'));
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Add separate review routes');
+  edit(shared, text => text.replace('export function removed', 'function removed').replace('  console.info(result);\n', ''));
+  const both = changes();
+  assert.match(both, /1 file, 1 symbol, 2 routes/);
+  assert.match(both, /^route api GET \/api\/review-a .* <- removed \[removed\] d1/m);
+  assert.match(both, /^route api GET \/api\/review-b .* <- retained d1/m);
+  assert.match(both, /^changed lib\/review-shared\.ts:3-6 retained \+0 -1$/m);
+  assert.match(both, /# complete:/);
+
+  git('restore', shared);
+  git('mv', shared, 'lib/review-moved.ts');
+  const moved = changes('--staged');
+  for (const suffix of ['a', 'b']) {
+    assert.match(moved, new RegExp('^route api GET /api/review-' + suffix + ' .*review-shared\\.ts \\[renamed\\]', 'm'));
+    assert.match(moved, new RegExp('^importer ' + route(suffix) + ':.* <- renamed lib/review-shared\\.ts \\[base\\]', 'm'));
+    edit(route(suffix), text => text.replace('review-shared', 'review-moved'));
+  }
+  assert.doesNotMatch(moved, /^removed /m);
+  git('add', '.');
+  assert.match(changes('--staged'), /3 files, 0 symbols, 2 routes/);
+});
+
+test('changes traces an unindexed binding from its importer and reports other uncovered removals', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  for (const [suffix, name] of [['unindexed', '검토'], ['indexed', 'known'], ['unreached', '누락']]) {
+    fs.writeFileSync(file('lib/' + suffix + '.ts'), 'export function ' + name + '() { return 1; }\n');
+    const folder = 'app/api/' + suffix;
+    if (suffix === 'unreached') {
+      fs.writeFileSync(file('lib/disconnected.ts'), 'import { 누락 } from "./unreached";\n누락();\n');
+    } else {
+      fs.mkdirSync(file(folder), { recursive: true });
+      fs.writeFileSync(file(folder + '/route.ts'), [
+        'import { ' + name + ' } from "../../../lib/' + suffix + '";',
+        'export function GET() { return Response.json(' + name + '()); }',
+        ''
+      ].join('\n'));
+    }
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Add indexed and unindexed bindings');
+  for (const suffix of ['unindexed', 'indexed', 'unreached']) {
+    edit('lib/' + suffix + '.ts', text => text.replace('export function', 'function'));
+  }
+  const output = changes();
+  assert.match(output, /^route api GET \/api\/unindexed .* <- 검토 \[removed\] d1/m);
+  assert.match(output, /^route api GET \/api\/indexed .* <- known \[removed\] d1/m);
+  assert.match(output, /^importer lib\/disconnected\.ts:1 <- removed 누락 \[base\]/m);
+  assert.match(output, /# partial: no page or API routes traced for removals$/);
+});
+
+test('changes traces value re-exports converted to type-only exports', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const barrel = 'lib/barrel.ts';
+  fs.writeFileSync(file('lib/leaf.ts'), 'export function leaf() { return 42; }\n');
+  fs.writeFileSync(file(barrel), 'export { leaf } from "./leaf";\n');
+  fs.mkdirSync(file('app/api/barrel'), { recursive: true });
+  fs.writeFileSync(file('app/api/barrel/route.ts'),
+    'import { leaf } from "../../../lib/barrel";\nexport function GET() { return Response.json(leaf()); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a runtime re-export and its route');
+
+  for (const declaration of ['export type { leaf }', 'export { type leaf }']) {
+    edit(barrel, () => declaration + ' from "./leaf";\n');
+    const output = changes();
+    assert.match(output, /^route api GET \/api\/barrel .* <- leaf \[removed\] d1/m);
+    assert.match(output, /^removed lib\/barrel\.ts leaf$/m);
+    assert.match(output, /^importer app\/api\/barrel\/route\.ts:1,2 <- removed leaf \[base\]$/m);
+    assert.match(output, /# complete:/);
+  }
+
+  edit(barrel, text => text.replace('export { type leaf }', 'export { leaf }').replace('./leaf', './missing'));
+  const partial = changes();
+  assert.doesNotMatch(partial, /^route api GET \/api\/barrel /m);
+  assert.match(partial, /^export lib\/barrel\.ts leaf \[uncertain\]$/m);
+  assert.match(partial, /^importer app\/api\/barrel\/route\.ts:1,2 <- possible removal of leaf \[base\] \[uncertain\]$/m);
+  assert.match(partial, /^# partial: .*runtime export availability not resolved$/m);
+
+  edit(barrel, () => 'export * from "./leaf";\n');
+  git('add', barrel);
+  git('commit', '-qm', 'Export the same value through a wildcard');
+  edit(barrel, text => text.replace('export *', 'export type *'));
+  const wildcard = changes();
+  assert.match(wildcard, /^route api GET \/api\/barrel .* <- leaf \[removed\] d1/m);
+  assert.match(wildcard, /# complete:/);
+});
+
+test('changes traces named and namespace importers of the same removed export', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const binding = 'lib/flags.ts';
+  fs.writeFileSync(file(binding), 'export function 검토() { return 1; }\n');
+  const imports = [
+    ['named', 'import { 검토 }', '검토()'],
+    ['namespace', 'import * as flags', 'flags.검토()'],
+    ['literal-member', 'import * as flags', '(flags)["검토"]()'],
+    ['destructured', 'import * as flags', '(() => { const { 검토: run } = flags; return run(); })()']
+  ];
+  for (const [name, declaration, use] of imports) {
+    const dir = 'app/api/' + name;
+    fs.mkdirSync(file(dir), { recursive: true });
+    fs.writeFileSync(file(dir + '/route.ts'), declaration + ' from "../../../lib/flags";\n' +
+      'export function GET() { return Response.json(' + use + '); }\n');
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Import one binding with named and namespace imports');
+  const remove = () => edit(binding, text => text.replace('export function', 'function'));
+  remove();
+  const output = changes();
+  for (const [name] of imports) {
+    assert.match(output, new RegExp('^route api GET /api/' + name + ' .* <- 검토 \\[removed\\] d1', 'm'));
+    assert.match(output, new RegExp('^importer app/api/' + name + '/route\\.ts:.* <- removed 검토 \\[base\\]$', 'm'));
+  }
+  assert.match(output, /# complete:/);
+
+  git('restore', binding);
+  fs.mkdirSync(file('app/api/dynamic'), { recursive: true });
+  fs.writeFileSync(file('app/api/dynamic/route.ts'), 'import * as flags from "../../../lib/flags";\n' +
+    'export function GET(request: Request) { return Response.json(flags[request.url]()); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a dynamically selected namespace member');
+  remove();
+  const partial = changes();
+  assert.match(partial, /^route api GET \/api\/named /m);
+  assert.doesNotMatch(partial, /^route api GET \/api\/dynamic /m);
+  assert.match(partial, /^importer app\/api\/dynamic\/route\.ts:1,2 <- removed 검토 \[base\] \[uncertain\]$/m);
+  assert.match(partial, /^# partial: .*namespace.*$/m);
+
+  git('restore', binding);
+  fs.writeFileSync(file('lib/dormant.ts'), 'import * as flags from "./flags";\n' +
+    'export function dormant() { return flags.검토(); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a namespace importer with no route');
+  remove();
+  const dormant = changes();
+  assert.match(dormant, /^route api GET \/api\/named /m);
+  assert.match(dormant, /^importer lib\/dormant\.ts:1,2 <- removed 검토 \[base\] \[uncertain\]$/m);
+  assert.match(dormant, /^# partial: .*no page or API routes traced for removals/m);
+});
+
+test('changes skips a historical graph when the middleware matcher stays the same', { timeout: 65_000 }, t => {
+  const { edit, git, run, file } = gitFixture(t);
+  edit('middleware.ts', text => text.replace('middleware() {}', 'middleware() {\n  const response = new Response();\n  return response;\n}'));
+  git('add', '.');
+  git('commit', '-qm', 'Add a middleware body with a static matcher');
+
+  const traceFile = file('.git/middleware-trace.jsonl');
+  const readTreeBlobs = () => fs.readFileSync(traceFile, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter(event => event.event === 'start' && event.argv.includes('cat-file')).length;
+  const changes = () => run(['query', 'changes'], { GIT_TRACE2_EVENT: traceFile });
+  edit('middleware.ts', text => text.replace('return response;', 'return NextResponse.next();'));
+  const body = changes();
+  assert.match(body, /1 file, 1 symbol, 1 route/);
+  assert.match(body, /matcher: '\/items\/:path\*'/);
+  assert.match(body, /# complete:/);
+  assert.equal(readTreeBlobs(), 0);
+
+  edit('middleware.ts', text => text.replace("'/items/:path*'", '"/items/:path*"'));
+  assert.match(changes(), /1 route, 0 wrappers/);
+  assert.equal(readTreeBlobs(), 0);
+
+  edit('middleware.ts', text => text.replace('/items/', '/other/'));
+  assert.match(changes(), /1 route no longer matched, 1 route newly matched/);
+  assert.equal(readTreeBlobs(), 1);
+});
+
+test('changes includes middleware matches from both sides and reports unknown coverage', { timeout: 65_000 }, t => {
+  const { edit, git, changes } = gitFixture(t);
+  edit('middleware.ts', text => text.replace('/items/', '/other/'));
+  const narrower = changes();
+  assert.match(narrower, /1 file, 1 symbol, 2 routes/);
+  assert.match(narrower, /1 route no longer matched, 1 route newly matched/);
+  assert.match(narrower, /# complete:/);
+
+  edit('middleware.ts', text => text.replace("['/other/:path*']", "[{ source: '/other', has: [] }]"));
+  const unknownCurrent = changes();
+  assert.match(unknownCurrent, /1 file, 1 symbol, 1 route/);
+  assert.match(unknownCurrent, /# partial: middleware matcher coverage not enumerated$/);
+  git('add', 'middleware.ts');
+  edit('middleware.ts', text => text.replace("[{ source: '/other', has: [] }]", "['/other/:path*']"));
+  const unknownPrevious = changes('--unstaged');
+  assert.match(unknownPrevious, /1 file, 1 symbol, 1 route/);
+  assert.match(unknownPrevious, /# partial: middleware matcher coverage not enumerated$/);
+  git('restore', '--staged', '--worktree', 'middleware.ts');
+
+  edit('middleware.ts', text => text.replace(/^export const config.*\n/m, ''));
+  const defaultMatcher = changes();
+  assert.match(defaultMatcher, /previous matcher: '\/items\/:path\*', 0 routes no longer matched, [1-9]\d* routes? newly matched/);
+  assert.equal(defaultMatcher.split('\n').filter(line => line.startsWith('middleware middleware.ts ')).length, 1);
+  assert.match(defaultMatcher, /# complete:/);
+});
+
+test('changes handles top-level edits, reports module stops and can rerun deeper', { timeout: 65_000 }, t => {
+  const { file, edit, git, query, changes } = gitFixture(t);
+  const filePath = 'lib/deep.ts';
+  fs.writeFileSync(file(filePath), [
+    'export function start() { return 1; }',
+    'export function one() { return start(); }',
+    'export function two() { return one(); }',
+    'export function three() { return two(); }',
+    'export function four() { return three(); }',
+    'export const stopped = { callback: () => start() };',
+    'export const text = `line',
+    '// looks like a comment',
+    'end`;',
+    ''
+  ].join('\n'));
+  const page = 'app/(main)/other/page.tsx';
+  edit(page, text => 'import { four } from "../../../lib/deep";\n' + text.replace('<main />', '<main>{four()}</main>'));
+  git('add', '.');
+  git('commit', '-qm', 'Add deeper callers');
+
+  edit(filePath, text => text.replace('return 1', 'return 2'));
+  const shallow = changes();
+  assert.match(shallow, /# partial: depth limit .*rerun --depth 5/);
+  assert.match(shallow, /# stopped at 1 module-level use \(importers not traced\)/);
+  assert.doesNotMatch(shallow, /route page \/other/);
+  assert.match(changes('--depth', '6'), /route page \/other .*start d5/);
+  const limited = changes('--depth', '6', '--unstaged', '--limit', '1');
+  assert.match(limited, /^# more: 1 \(try .+ query changes --depth 6 --unstaged --limit 2 --root .+, or narrow the diff\)$/m);
+  assert.match(limited, /^# partial: output truncated; module-level importers not traced$/m);
+  assert.match(query('impact', 'start'), /# stopped at 1 module-level use/);
+  git('restore', '.');
+
+  edit(page, text => text.replace('{ four }', '{ four as old, four }'));
+  assert.match(changes(), /route page \/other .*page\.tsx d0/);
+  git('restore', '.');
+  edit(filePath, text => text.replace('// looks like a comment', '// changes the string'));
+  assert.doesNotMatch(changes(), /\[comment only\]/);
+  edit(filePath, text => text.replace('// changes the string', '// looks like a comment').replace('export const text', '\nexport const text'));
+  assert.doesNotMatch(changes(), /\[comment only\]/);
+  git('restore', '.');
+  edit(filePath, text => '// project note\n' + text);
+  assert.match(changes(), /comment lib\/deep\.ts:1 \[comment only\]/);
+});
+
+test('packing and unpacking the graph preserves default-suite query output', { timeout: 35_000 }, t => {
+  const { query, build, root } = fixture(t);
+  const pagesApi = path.join(root, 'pages/api');
+  fs.mkdirSync(pagesApi, { recursive: true });
+  fs.writeFileSync(path.join(pagesApi, 'enforced.ts'), `export default function handler(req, res) {
+    if (req.method !== 'POST') return res.status(405).end();
+    return res.status(200).end();
+  }`);
+  const indexFile = build();
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  const { outputFiles } = buildSync({
+    entryPoints: [path.join(__dirname, '../src/mcp/GraphStorage.ts')],
+    bundle: true, platform: 'node', write: false
+  });
+  const compiled = { exports: {} };
+  new Function('module', 'require', outputFiles[0].text)(compiled, require);
+  const { packGraph, unpackGraph } = compiled.exports;
+  const queries = [['impact', 'normalize'], ['callees', 'createItem'], ['path', '/items', 'createItem'],
+    ['search', 'getData'], ['impact', 'feed.nested.deep.item'], ['api_consumers', '/api/enforced']];
+  const expected = queries.map(args => query(...args));
+  assert.match(expected.at(-1), /^# methods enforced: POST$/m);
+  const packed = packGraph(index, 0);
+  assert.equal(typeof packed.packedGraph, 'string');
+  assert.equal(packed.graphReferences, undefined);
+  const restored = unpackGraph(JSON.parse(JSON.stringify(packed)));
+  assert.deepEqual(restored.exportSymbols, index.exportSymbols);
+  assert.deepEqual(restored.moduleImports, index.moduleImports);
+  assert.deepEqual(restored.runtimeExports, index.runtimeExports);
+  assert.deepEqual(restored.trpcModuleUses, index.trpcModuleUses);
+  fs.writeFileSync(indexFile, JSON.stringify(packed));
+  assert.deepEqual(queries.map(args => query(...args)), expected);
 });
 
 test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {

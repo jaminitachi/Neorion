@@ -15,6 +15,7 @@ export { findProject } from './FindProject';
 
 interface GenerateOptions {
     markdown?: boolean;
+    index?: boolean;
     migrateLegacy?: boolean;
     onProgress?: (message: string) => void;
 }
@@ -46,7 +47,8 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
-    const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace).analyze(sourceFiles, routes, !!options.markdown);
+    const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index));
 
     if (analysis.index) analysis.index.projectSnapshot = snapshot;
 
