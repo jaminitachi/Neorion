@@ -102,9 +102,10 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
-`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
-`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+From your project root, run the CLI directly from the clone. Neorion uses the requested directory
+when it has a Next config or declares Next and has its own routes. Otherwise, it searches for nested
+Next apps before falling back to a TypeScript or JavaScript project config. When indexing JavaScript
+through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
 `vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 
@@ -124,6 +125,11 @@ node "$NEORION_DIR/neorion/dist/neorion.cjs" query callees ChatShell --depth 2 -
 node "$NEORION_DIR/neorion/dist/neorion.cjs" query wrappers '/blog/[slug]'
 ```
 
-Run a query from another directory with `--root /path/to/project`. Query suggestions keep the project and CLI invocation. Symbol suggestions show an accepted `path#Name` target and its declaration line.
+Run a query from another directory with `--root /path/to/project`. Neorion discovers apps when this
+points to a workspace outside the candidate list. To confirm a guessed root from that directory, use
+`--root .`. `NEORION_ROOT` follows the same rule. The `Project:` line shows the full path of the
+indexed directory. The Claude plugin uses `mcp --workspace <dir>` so guesses remain visible in its
+query results. Query suggestions keep the project and CLI invocation. Symbol suggestions show an
+accepted `path#Name` target and its declaration line.
 Add `--mcp-config` to `graph` to print an MCP launcher snippet.
 If setup registered absolute paths to Node.js and the CLI, rerun setup when either path changes. This applies to source and packaged builds that use absolute paths.

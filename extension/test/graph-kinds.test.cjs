@@ -46,7 +46,8 @@ function fixture(t, reverse = false, fixtureSource = source) {
   return { root, env, run, query, build };
 }
 
-const stable = output => output.replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
+const stable = output => output.replace(/^Project: [^\n]+\n/, '')
+  .replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
 
 function loadAnalyzer(name, compilerWalk) {
   const { outputFiles } = buildSync({
@@ -241,9 +242,12 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   });
   async function check(kind, target, options = {}, flags = []) {
     const output = query(kind, target, ...flags);
+    const reversedOutput = reversed.query(kind, target, ...flags);
+    assert.equal(output.split('\n')[0], `Project: ${root}`);
+    assert.equal(reversedOutput.split('\n')[0], `Project: ${reversed.root}`);
     assert.equal(query(kind, target, ...flags), output);
     assert.equal(await mcp.text('query', { kind, target, ...options }), output);
-    assert.equal(stable(reversed.query(kind, target, ...flags)), stable(output));
+    assert.equal(stable(reversedOutput), stable(output));
     assert.ok(Buffer.byteLength(output.split('\n').slice(1).join('\n')) <= 6000);
     return output;
   }

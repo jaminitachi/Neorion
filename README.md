@@ -217,9 +217,30 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
-`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
-`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+1. **App.** Neorion uses the requested directory if it has a `next.config.{js,mjs,ts,cjs}` file
+   or declares `next` and has its own routes under `app/`, `pages/`, `src/app/`, or `src/pages/`.
+   For example, a root with `next` and `pages/index.jsx` stays at the root.
+2. **Monorepo.** A bounded search looks for nested apps with a Next config, a Next dependency, or
+   routes and a Next dependency inherited within the checkout. It skips tooling and non-product
+   directories such as `test/`, `playgrounds/`, `docs/`, and `website/`. For example, a workspace
+   whose sole app is `apps/web` selects that app. With several candidates, Neorion prefers the
+   requested directory's TS/JS config, then a candidate's TS/JS config, then a Next dependency,
+   in breadth-first alphabetical order. Packages with only a development dependency on Next and
+   no routes or Next config are fallback candidates. When stronger candidates exist, the hint lists those.
+3. **Library.** With no Next candidate, Neorion uses the first `tsconfig.json` or `jsconfig.json`,
+   checking the requested directory first. For example, a library with a root `tsconfig.json`
+   and a Next app under `test/` selects the library root. A root that declares `next` and has no
+   routes or project config can still be used as a guess.
+
+The `Project:` line shows the full path of the indexed directory. A guess produces
+`# partial: project root guessed` and a hint with up to five candidates. VS Code also shows the guess
+in its status bar. To confirm a candidate, pass its directory as `--root <dir>` to `query` or `mcp`.
+If the selected directory is the current one, use `--root .`. Passing a workspace to `--root` still
+discovers its apps if the workspace itself is outside the candidate list. `NEORION_ROOT` follows
+the same rule. The Claude plugin and VS Code MCP connections from guessed roots use
+`mcp --workspace <dir>` to keep the guess visible in query results.
+
+When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
 `vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 

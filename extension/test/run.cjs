@@ -21,6 +21,7 @@ function register(root, entry = require.resolve('../out/extension.js'), configs 
       createWebviewPanel: () => ({ webview, onDidDispose() {} }),
       withProgress: (_options, run) => run({ report() {} }),
       showInformationMessage() {},
+      setStatusBarMessage() {},
       ...options.window,
       showTextDocument() {},
       showErrorMessage: message => { throw new Error(message); },
