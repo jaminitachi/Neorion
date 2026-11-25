@@ -4,6 +4,8 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
+const { buildSync } = require('esbuild');
+const { Project, SyntaxKind } = require('ts-morph');
 const { openMcp } = require('./mcp-helpers.cjs');
 const { indexFile: indexPath } = require('./workspace-cache.cjs');
 
@@ -43,6 +45,164 @@ function fixture(t, reverse = false) {
 }
 
 const stable = output => output.replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
+
+function loadAnalyzer(name, compilerWalk) {
+  const { outputFiles } = buildSync({
+    entryPoints: [path.join(__dirname, '../src/core/analyzers', name + '.ts')],
+    bundle: true, packages: 'external', platform: 'node', write: false,
+    external: compilerWalk ? ['./CompilerWalk'] : []
+  });
+  const compiled = { exports: {} };
+  new Function('module', 'require', outputFiles[0].text)(compiled, specifier =>
+    specifier === './CompilerWalk' ? compilerWalk : require(specifier));
+  return compiled.exports;
+}
+
+test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtrees on both paths', t => {
+  const { visitKinds } = loadAnalyzer('CompilerWalk');
+  const file = new Project({ useInMemoryFileSystem: true }).createSourceFile('mixed.tsx', `
+    /** Render a label.
+     * @param label The label to render.
+     * @returns A JSX element.
+     */
+    function Label({ label }: { label: string }) {
+      const choose = (value: string) => value.trim();
+      return <section><span>{choose(label)}</span><Icon /></section>;
+    }
+  `);
+  const kinds = new Set([SyntaxKind.JSDoc, SyntaxKind.JSDocParameterTag, SyntaxKind.FunctionDeclaration,
+    SyntaxKind.Identifier, SyntaxKind.ArrowFunction, SyntaxKind.CallExpression, SyntaxKind.JsxOpeningElement,
+    SyntaxKind.JsxSelfClosingElement, SyntaxKind.JsxClosingElement]);
+  const fn = file.getFunctionOrThrow('Label');
+  assert.equal(fn.getJsDocs()[0].getTags().length, 2);
+  const skipped = fn.getFirstDescendantByKindOrThrow(SyntaxKind.ArrowFunction).compilerNode;
+  const forEachDescendant = file.forEachDescendant.bind(file);
+  t.mock.method(file, 'forEachDescendant', () => assert.fail('the compiler path used the public walk'));
+  let publicWalks = 0;
+  // The pinned implementation's public walk still uses its own private wrapper factory.
+  const fallback = {
+    forEachDescendant(callback) {
+      publicWalks++;
+      return forEachDescendant(callback);
+    }
+  };
+
+  for (const skip of [undefined, new Set([skipped])]) {
+    const expected = [];
+    const expectedRaw = [];
+    forEachDescendant((node, traversal) => {
+      expectedRaw.push(node.compilerNode);
+      if (skip?.has(node.compilerNode)) traversal.skip();
+      else if (kinds.has(node.getKind())) expected.push(node);
+    });
+    assert.ok(expected.includes(fn));
+    assert.ok(expected.some(node => node.getKind() === SyntaxKind.JsxSelfClosingElement));
+
+    for (const root of [file, fallback]) {
+      const wrapped = [];
+      const raw = [];
+      visitKinds(root, kinds, node => wrapped.push(node), { skip, visitRaw: node => raw.push(node) });
+      assert.equal(wrapped.length, expected.length);
+      for (const [i, node] of expected.entries()) assert.equal(wrapped[i], node, `wrapper at ${i}`);
+      assert.equal(raw.length, expectedRaw.length);
+      for (const [i, node] of expectedRaw.entries()) assert.equal(raw[i], node, `compiler node at ${i}`);
+    }
+  }
+  assert.equal(publicWalks, 2);
+});
+
+test('graph callbacks give the same results with and without their kind filters', t => {
+  const { root } = fixture(t);
+  const { visitKinds } = loadAnalyzer('CompilerWalk');
+  const { RouteAnalyzer } = loadAnalyzer('RouteAnalyzer');
+  const kindSets = new Set();
+  let unfiltered;
+  const { ComponentAnalyzer } = loadAnalyzer('ComponentAnalyzer', {
+    visitKinds(node, kinds, callback, options = {}) {
+      kindSets.add(kinds);
+      if (!unfiltered?.has(kinds)) return visitKinds(node, kinds, callback, options);
+      node.forEachDescendant((child, traversal) => {
+        const raw = child.compilerNode;
+        options.visitRaw?.(raw);
+        if (options.skip?.has(raw)) traversal.skip();
+        else callback(child);
+      });
+    }
+  });
+  fs.writeFileSync(path.join(root, '__tests__/kind-walk.test.tsx'), `
+    import { html } from 'lit';
+    import * as UI from '../components/providers';
+    import * as helpers from '../lib/normalize';
+    import { normalize } from '../lib/normalize';
+
+    /** The normalize helper trims labels. */
+    vi.mock('../lib/normalize', () => ({ normalize }));
+    export async function InlineAction(label: string) {
+      'use server';
+      return normalize(label);
+    }
+    export const act = async (id: string) => {
+      'use server';
+      return fetch('/api/items/' + id);
+    };
+
+    // A standalone URL exercises the route-literal scan outside a fetch call.
+    export const sampleItemUrl = '/api/items/' + 'example';
+
+    function ActionButton({ actions }: { actions: { act: typeof act } }) {
+      return <button onClick={() => actions.act('test')}>Fetch item</button>;
+    }
+    export function InlineButton() {
+      const trim = helpers['normalize'];
+      return <UI.Providers>
+        <button onClick={() => InlineAction(trim('test'))}>Send</button>
+        <ActionButton actions={{ act }} />
+      </UI.Providers>;
+    }
+    export function renderPreview() {
+      return html\`<span>Preview</span>\`;
+    }
+  `);
+  const project = new Project({ tsConfigFilePath: path.join(root, 'tsconfig.json') });
+  const files = project.getSourceFiles().filter(file => !file.isDeclarationFile());
+  const analyze = (files) => {
+    const routes = new RouteAnalyzer(path.join(root, 'app'), path.join(root, 'pages'), root).analyze(files, []);
+    const result = new ComponentAnalyzer(root).analyze(files, routes, true);
+    delete result.index.generatedAt;
+    return result;
+  };
+
+  const filtered = analyze(files);
+  assert.equal(kindSets.size, 7);
+  assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
+  assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
+  assert.ok(filtered.index.fetches.length);
+  assert.ok(filtered.edges.some(edge => edge.type === 'renders'));
+  for (const kinds of kindSets) {
+    unfiltered = new Set([kinds]);
+    assert.deepEqual(analyze(files), filtered, [...kinds].map(kind => SyntaxKind[kind]).join(', '));
+  }
+
+  const withoutActions = files.filter(file => !file.getFullText().includes('use server'));
+  unfiltered = undefined;
+  const filteredWithoutActions = analyze(withoutActions);
+  assert.equal(filteredWithoutActions.index.serverActions.length, 0);
+  unfiltered = kindSets;
+  assert.deepEqual(analyze(withoutActions), filteredWithoutActions);
+});
+
+test('cached source lines match ts-morph at newline boundaries', () => {
+  const { lineAt, startLine, endLine } = loadAnalyzer('SourceLines');
+  const text = '/** docs */\r\nexport function foo() {\r\n  return 1;\r}\nconst bar = foo();\u2028bar;\u2029\n';
+  const file = new Project({ useInMemoryFileSystem: true }).createSourceFile('mixed.ts', text);
+  for (let offset = 0; offset <= text.length; offset++) {
+    assert.equal(lineAt(file, offset), file.getLineAndColumnAtPos(offset).line, `offset ${offset}`);
+  }
+  file.forEachDescendant(node => {
+    assert.equal(startLine(node), node.getStartLineNumber());
+    assert.equal(endLine(node), node.getEndLineNumber());
+  });
+});
 
 test('impact and callees trace indexed behavior consistently across CLI, MCP and file order', { timeout: 40_000 }, async t => {
   const { root, env, query, build } = fixture(t);
