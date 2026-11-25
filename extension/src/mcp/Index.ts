@@ -1,8 +1,8 @@
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 4;
-export const QUERY_INDEX_REVISION = 7;
-export const GRAPH_INDEX_REVISION = 10;
+export const QUERY_INDEX_REVISION = 8;
+export const GRAPH_INDEX_REVISION = 11;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -25,6 +25,7 @@ export interface SymbolEntry {
   aliasOf?: string | null;
   localUses?: number[];
   typeOnly?: boolean;
+  synthetic?: true;
 }
 
 export interface Wrapper {
@@ -42,6 +43,9 @@ export interface Wrapper {
   evidence?: string;
 }
 
+export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true };
+export type FlowCall = [from: number, to: number, file: string, line: number, detail: string, gates?: FlowGate[]];
+
 export interface FetchEntry {
   file: string;
   line: number;
@@ -56,12 +60,16 @@ export interface FetchEntry {
   lifecyclePossible?: true;
   partial?: boolean;
   dynamic?: boolean;
+  propUrlUnknown?: true;
+  binding?: { file: string; line: number; name: string; supplier?: number; site: string };
+  gates?: FlowGate[];
 }
 
 type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number, possible?: true];
 export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
-// A null path reuses the referenced symbol's defining file.
-export type IndexedReference = Reference | [symbol: number, file: null, ...site: ReferenceSite];
+// Null reuses the symbol's defining file. Packed indexes intern other paths
+// by their position in the ordered file table.
+export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
@@ -113,7 +121,7 @@ export interface QueryIndex {
     methodBasis?: 'enforced' | 'observed';
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
-  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true][];
+  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string][];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
@@ -130,6 +138,14 @@ export interface QueryIndex {
   graphNames?: string[];
   externalCalls?: ExternalCall[];
   externalModules?: string[];
+  flowCalls?: FlowCall[];
+  hasFlowCalls?: boolean;
+  callGates?: Record<string, FlowGate[]>;
+  flowIssues?: Record<number, { reason: string; gates: FlowGate[] }[]>;
+  callIssues?: Record<string, string>;
+  refEvidence?: Record<string, string>;
+  renderLabels?: Record<string, string>;
+  uncertainPropRequests?: { file: string; owner: number; method?: string; gates?: FlowGate[] }[];
   unresolvedCalls?: Record<number, number>;
   fileSymbols?: number[]; // In the same order as the keys of files.
   defaultSymbols?: Record<number, number>;
