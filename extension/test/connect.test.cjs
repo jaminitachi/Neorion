@@ -113,6 +113,7 @@ test('R3 preserves user edits and existing matching servers, and reverses bundle
   assert.match(env.read('.vscode/mcp.json'), /"command": "node"/);
 
   assert.deepEqual(fs.readFileSync(cachePath(env.file('.'), '.neorion/mcp/server.cjs')), fs.readFileSync(path.join(__dirname, '../out/mcp.cjs')));
+  assert.deepEqual(fs.readFileSync(cachePath(env.file('.'), '.neorion/mcp/graph.cjs')), fs.readFileSync(path.join(__dirname, '../out/graph.cjs')));
   await env.disconnect();
   assert.equal(env.read('.vscode/mcp.json'), jsonc);
   assert.ok(!fs.existsSync(cachePath(env.file('.'), '.neorion/mcp')));

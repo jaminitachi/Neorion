@@ -7,6 +7,7 @@ import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } fr
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { unpackGraph } from './GraphStorage';
 import { changes, validBase, type ChangeScope } from './Changes';
+import { historyBudgetMs } from './ChangesHistory';
 
 type Route = QueryIndex['routes'][number];
 type Edge = QueryIndex['renderEdges'][number];
@@ -59,7 +60,7 @@ function validate(name: string, value: unknown) {
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
     api_consumers: ['callers', 'includeTests'], search: [filterKey],
-    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base']
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base', 'depth']
   }[tool];
   for (const key of Object.keys(input)) {
     if (![...(tool === 'changes' ? [] : [targetKey]), 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
@@ -602,7 +603,7 @@ export class QueryEngine {
     if (!graph) return { result: { rows: [], partial: 'regenerate legacy index' } };
     if (tool === 'path') return this.pathQuery(target, args.to, graph, expired);
     if (tool === 'changes') return {
-      result: changes(this.root, this.index, graph, args.scope, args.base, deadline, file => this.checkPath(file))
+      result: changes(this.root, this.index, graph, args.scope, args.base, depth, deadline, file => this.checkPath(file))
     };
     if (tool === 'impact' && !this.names.has(target) && !target.includes('#') && (target.includes('/') || /\.[cm]?[jt]sx?$/.test(target))) {
       this.checkPath(target);
@@ -654,7 +655,8 @@ export class QueryEngine {
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
-    const deadline = performance.now() + (configured > 0 ? Math.min(1850, configured) : 1850);
+    const budget = tool === 'changes' ? historyBudgetMs : 1850;
+    const deadline = performance.now() + (configured > 0 ? Math.min(budget, configured) : budget);
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
@@ -769,7 +771,8 @@ export class QueryEngine {
       const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${result.title ?? target}` +
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
-        tool === 'search' ? 'narrow text or kind' : 'use a qualified target or adjust filters or limit'})` : '';
+        tool === 'search' ? 'narrow text or kind' : tool === 'changes' ? 'narrow the diff or raise the limit' :
+          'use a qualified target or adjust filters or limit'})` : '';
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : graphKind && result.partial ? result.partial :
         omitted || noteCount < (result.notes?.length ?? 0) || shortened ? 'output truncated' :

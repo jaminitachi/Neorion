@@ -5,7 +5,7 @@ import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION, isTestFile, type ExternalCall, type FetchEntry,
-  type GraphReference, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  type GraphReference, type ModuleImport, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
 import { visitKinds } from './CompilerWalk';
@@ -41,7 +41,10 @@ function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
 }
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
-  return remaining > 0 && Node.isCallExpression(node) && node.getArguments().some(argument =>
+  if (remaining <= 0 || !Node.isCallExpression(node)) return false;
+  const callee = node.getExpression();
+  if (Node.isPropertyAccessExpression(callee) && ['map', 'filter', 'reduce', 'forEach'].includes(callee.getName())) return false;
+  return node.getArguments().some(argument =>
     Node.isArrowFunction(argument) || Node.isFunctionExpression(argument) || wrappedFunction(argument, remaining - 1));
 }
 
@@ -117,7 +120,8 @@ export class QueryIndexBuilder {
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null),
       graphRevision: GRAPH_INDEX_REVISION, graphReferences: {}, graphNames: [], externalCalls: [], externalModules: [],
       unresolvedCalls: {}, fileSymbols: [],
-      defaultSymbols: Object.create(null), routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
+      defaultSymbols: Object.create(null), exportSymbols: {}, moduleImports: {},
+      routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
     };
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
@@ -175,8 +179,9 @@ export class QueryIndexBuilder {
         const property = Node.isObjectLiteralExpression(config) ? config.getProperty('matcher') : undefined;
         const matcher = Node.isPropertyAssignment(property) ? property.getInitializer() : undefined;
         const values = Node.isArrayLiteralExpression(matcher) ? matcher.getElements() : matcher ? [matcher] : [];
-        index.routeFiles![relative] = ['middleware', '/', values.length && values.every(Node.isStringLiteral)
-          ? values.map(value => value.getText()).join(', ') : undefined];
+        const literals = values.every(Node.isStringLiteral) ? values : undefined;
+        index.routeFiles![relative] = ['middleware', '/', literals?.map(value => value.getText()).join(', ') || undefined,
+          undefined, literals?.map(value => value.getLiteralText())];
       } else if (/^(?:src\/)?pages\/_(?:app|document)\.[jt]sx?$/.test(relative)) {
         index.routeFiles![relative] = ['app-shell', '/'];
       }
@@ -246,8 +251,13 @@ export class QueryIndexBuilder {
     }
     const filesByRelative = new Map(files.map(file => [relativePath(file), file]));
     for (const [relative, file] of filesByRelative) {
-      const id = exports.get(file)?.get('default')?.map(node => byNode.get(node)).find(value => value !== undefined);
-      if (id !== undefined) index.defaultSymbols![byGraphId.get(`file:${relative}`)!] = id;
+      const fileId = byGraphId.get(`file:${relative}`)!;
+      const entries = exports.get(file)!;
+      if (!entries.size) continue;
+      const ids = Object.fromEntries([...entries].map(([name, declarations]) =>
+        [name, [...new Set(declarations.flatMap(node => byNode.get(node) ?? []))]]));
+      index.exportSymbols![fileId] = ids;
+      if (ids.default?.length) index.defaultSymbols![fileId] = ids.default[0];
     }
     const routeIds = new Map(routes.map((route, i) => [route.id, i + 1]));
     for (const route of routes) {
@@ -321,6 +331,29 @@ export class QueryIndexBuilder {
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
       const imports = file.getImportDeclarations();
+      for (const entry of [...imports, ...file.getExportDeclarations()]) {
+        const source = entry.getModuleSpecifierSourceFile();
+        const target = source && byGraphId.get(`file:${relativePath(source)}`);
+        if (target === undefined) continue;
+        const edges = index.moduleImports![fileId] ??= [];
+        const line = startLine(entry);
+        if (Node.isImportDeclaration(entry)) {
+          if (!entry.getImportClause()) edges.push([target, line, 'effect']);
+          else {
+            const names = entry.getNamedImports().map(binding => binding.getName());
+            if (entry.getDefaultImport()) names.push('default');
+            if (entry.getNamespaceImport()) names.push('*');
+            edges.push([target, line, 'import', names.map(name => [name])]);
+          }
+        } else {
+          const named = entry.getNamedExports();
+          const namespace = entry.getNamespaceExport();
+          const bindings: ModuleImport[3] = named.length ?
+            named.map(binding => [binding.getName(), binding.getAliasNode()?.getText() ?? binding.getName()]) :
+            [['*', namespace?.getName() ?? '*']];
+          edges.push([target, line, 'export', bindings]);
+        }
+      }
       const routeKind = index.routeFiles![relative]?.[0];
       if (routeKind === 'layout' || routeKind === 'template' || routeKind === 'app-shell') {
         for (const entry of imports) {
@@ -471,6 +504,8 @@ export class QueryIndexBuilder {
         ).resolvedModule?.resolvedFileName ?? '');
         const targets = resolved && exports.get(resolved)?.get(name);
         if (!targets?.length) return;
+        const moduleId = byGraphId.get(`file:${relativePath(resolved!)}`);
+        if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
         const variable = node.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
         const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
         if (id !== undefined && variable && byNode.has(variable)) {
@@ -481,7 +516,9 @@ export class QueryIndexBuilder {
             (imported.name === 'lazy' || wrapper.members[0] === 'lazy')) &&
             wrapper.root.getSymbol()?.getDeclarations().includes(imported.binding)) {
             dynamicBindings.set(variable, id);
-            owner = byNode.get(variable);
+            // JSX sites already point to the imported component. Keep a
+            // module-level import edge without inserting the local alias.
+            if (owner === byNode.get(variable)) owner = undefined;
           }
         }
         for (const target of targets) {

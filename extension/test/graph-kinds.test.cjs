@@ -256,7 +256,8 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'POST'), /# complete/);
   const typeUse = query('impact', 'exampleContext');
   assert.match(typeUse, /d1 module server\/router\.ts:9/);
-  assert.match(typeUse, /# complete/);
+  assert.match(typeUse, /# stopped at 1 module-level use \(importers not traced\)/);
+  assert.match(typeUse, /# partial: module-level importers not traced/);
   const constant = query('impact', 'DATA_SUFFIX');
   assert.match(constant, /d1 use server\/data\.ts:5 getData/);
   assert.match(constant, /page \/b\/\[id\]/);
@@ -270,11 +271,17 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'components/chart.tsx#Chart'), /\bd1 dyn /);
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
-  assert.match(query('impact', 'submitItem'), /action createItem/);
+  const targetAction = query('impact', 'submitItem');
+  assert.match(targetAction, /depth 4 \(limit 3 \+ renders\)/);
+  assert.match(targetAction, /# target: server action createItem/);
+  assert.match(targetAction, /0 server actions/);
+  assert.doesNotMatch(targetAction, /^action createItem/m);
   const barrel = query('impact', 'CreateItem');
   assert.match(barrel, /page \/items/);
   assert.doesNotMatch(barrel, /components\/index\.ts/);
-  assert.match(query('impact', 'middleware.ts'), /matcher: '\/items\/:path\*'/);
+  const middleware = query('impact', 'middleware.ts');
+  assert.match(middleware, /: 1 route,/);
+  assert.match(middleware, /matcher: '\/items\/:path\*'/);
 
   const callees = await check('callees', 'createItem');
   assert.match(callees, /db\.\$transaction  server\/db\.ts#db/);
@@ -299,7 +306,7 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   const indexFile = build();
   const impact = query('impact', 'cn');
   assert.match(impact, /hub collapsed/);
-  assert.match(impact, /200 callers in 1 files/);
+  assert.match(impact, /200 callers in 1 file\b/);
   const actionImpact = query('impact', 'normalize');
   assert.match(actionImpact, /^actions: 7 in 1 file \(top: createItem /m);
   assert.match(actionImpact, /^page \/items.* via CreateItem > createItem/m);
@@ -487,7 +494,7 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   edit('server/actions.ts', text => text.replace('  const label', '  // Preserve the item label.\n  const label'));
   const comments = changes();
   assert.match(comments, /comment server\/actions\.ts:7 createItem \[comment only\]/);
-  assert.match(comments, /1 files, 0 symbols, 0 routes/);
+  assert.match(comments, /1 file, 0 symbols, 0 routes/);
   assert.match(comments, /# complete: git diff HEAD/);
   git('restore', 'server/actions.ts');
 
@@ -507,6 +514,7 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   assert.match(wrappers, /wraps components\/providers\.tsx#Providers : 2 routes/);
   assert.match(wrappers, /wraps app\/\(main\)\/layout\.tsx : 2 routes/);
   assert.match(wrappers, /route page \/items .* <- MainLayout d0, Providers d0/);
+  assert.doesNotMatch(wrappers, /wraps app\/\(main\)\/layout\.tsx#/);
   git('restore', '.');
 
   edit('app/(main)/main.css', text => text.replace('black', 'white'));
@@ -526,6 +534,8 @@ test('changes maps code hunks, wrapper components, CSS, and config to affected r
   assert.match(config, /file prisma\/schema\.prisma \[schema\]/);
   const mcp = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
   assert.equal(await mcp.text('query', { kind: 'changes' }), config);
+  assert.equal(await mcp.text('query', { kind: 'changes', depth: 6 }), changes('--depth', '6'));
+  assert.equal((await mcp.call('query', { kind: 'changes', depth: 7 })).isError, true);
   assert.equal((await mcp.call('query', { kind: 'changes', scope: 'staged', base: 'main' })).isError, true);
   for (const base of ['--output=x', '-x', 'a b', '$(id)']) {
     assert.equal((await mcp.call('query', { kind: 'changes', base })).isError, true);
@@ -555,10 +565,12 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
   git('switch', '-qc', 'topic');
   git('add', 'lib/normalize.ts');
   git('commit', '-qm', 'Normalize casing');
+  fs.writeFileSync(file('lib/untracked.ts'), 'export const onlyUntracked = 1;\n');
   const base = changes('--base', 'main');
   assert.match(base, /# changes merge-base main/);
   assert.match(base, /changed lib\/normalize\.ts:1-3 normalize/);
   assert.match(base, /changed components\/providers\.tsx:1 Providers/);
+  assert.doesNotMatch(base, /untracked\.ts/);
   assert.match(changes('--base', 'missing-ref'), /# partial: invalid base ref missing-ref/);
   git('restore', '.');
 
@@ -570,6 +582,7 @@ test('changes supports Git scopes, renames, removed exports, and untracked compo
   const removed = changes();
   assert.match(removed, /removed lib\/format with space\.ts formatDate/);
   assert.match(removed, /deleted lib\/format-b\.ts/);
+  assert.match(removed, /# partial: could not trace 2 removals from base/);
   git('restore', '.');
 
   fs.writeFileSync(file('components/added.tsx'), 'export function Added() { return <p>New</p>; }\n');
@@ -597,11 +610,118 @@ test('changes returns a partial result outside Git and scopes a nested project',
   const { root, file, git, run } = gitFixture(t);
   fs.mkdirSync(file('nested'));
   git('mv', 'tsconfig.json', 'app', 'components', 'lib', 'hooks', 'server', 'nested');
+  fs.writeFileSync(file('package.json'), '{"private":true}\n');
+  fs.writeFileSync(file('.gitignore'), '.env*\n');
+  git('add', 'package.json', '.gitignore');
   git('commit', '-qm', 'Nest the project');
   fs.writeFileSync(file('outside.ts'), 'export const outside = true;\n');
   fs.appendFileSync(file('nested/lib/normalize.ts'), '\nexport const fresh = 1;\n');
   const nested = run(['query', 'changes', '--root', path.join(root, 'nested')]);
-  assert.match(nested, /# outside project: 1 files/);
+  assert.match(nested, /# outside project: 1 file/);
   assert.match(nested, /changed lib\/normalize\.ts:10 fresh/);
   assert.doesNotMatch(nested, /outside\.ts/);
+  fs.writeFileSync(file('package.json'), '{"private":false}\n');
+  fs.writeFileSync(file('nested/.env.local'), 'ENV_VALUE=never-print-this\n');
+  const config = run(['query', 'changes', '--root', path.join(root, 'nested')]);
+  assert.match(config, /file package\.json \[repository config: all routes\]/);
+  assert.match(config, /file \.env\.local \[config: all routes\]/);
+  assert.doesNotMatch(config, /never-print-this/);
+  assert.doesNotMatch(run(['query', 'changes', '--base', 'HEAD', '--root', path.join(root, 'nested')]), /\.env\.local/);
+});
+
+test('changes traces removed imports from the comparison side and prefers current routes', { timeout: 65_000 }, async t => {
+  const { root, env, file, edit, git, changes } = gitFixture(t);
+  fs.writeFileSync(file('lib/old.ts'), 'export function old() { return 1; }\nexport { old as retained };\n');
+  fs.writeFileSync(file('lib/barrel.ts'), 'export { old as former } from "./old";\n');
+  edit('app/(main)/other/page.tsx', text =>
+    'import { former } from "../../../lib/barrel";\n' + text.replace('<main />', '<main>{former()}</main>'));
+  edit('app/(main)/items/page.tsx', text =>
+    'import { retained } from "../../../lib/old";\n' + text.replace('<main>', '<main>{retained()}'));
+  git('add', '.');
+  git('commit', '-qm', 'Add a page dependency');
+
+  edit('lib/old.ts', text => text.replace('export function', 'function'));
+  const narrowed = changes('--base', 'HEAD');
+  assert.match(narrowed, /removed lib\/old\.ts old/);
+  assert.match(narrowed, /importer app\/\(main\)\/other\/page\.tsx:.*\[base\]/);
+  assert.match(narrowed, /importer lib\/barrel\.ts:1.*\[base\]/);
+  assert.match(narrowed, /route page \/other .* <- old \[removed\]/);
+  assert.doesNotMatch(narrowed, /route page \/items|removed lib\/old\.ts retained/);
+  git('restore', '.');
+
+  fs.unlinkSync(file('lib/old.ts'));
+  fs.unlinkSync(file('app/(main)/other/page.tsx'));
+  const removed = changes('--unstaged');
+  assert.match(removed, /route page \/other .*\[base\].*lib\/old\.ts \[removed\]/);
+  assert.match(removed, /deleted lib\/old\.ts/);
+  assert.doesNotMatch(removed, /\[stale\]/);
+  const bundle = path.join(__dirname, '../out/mcp.cjs');
+  const mcp = await openMcp(t, root, { command: process.execPath, args: [bundle, '--root', root], cwd: root, env });
+  assert.equal(await mcp.text('query', { kind: 'changes', scope: 'unstaged' }), removed.split('\n').slice(1).join('\n'));
+});
+
+test('changes handles top-level edits, reports module stops and can rerun deeper', { timeout: 65_000 }, t => {
+  const { file, edit, git, query, changes } = gitFixture(t);
+  const filePath = 'lib/deep.ts';
+  fs.writeFileSync(file(filePath), [
+    'export function start() { return 1; }',
+    'export function one() { return start(); }',
+    'export function two() { return one(); }',
+    'export function three() { return two(); }',
+    'export function four() { return three(); }',
+    'export const stopped = { callback: () => start() };',
+    'export const text = `line',
+    '// looks like a comment',
+    'end`;',
+    ''
+  ].join('\n'));
+  const page = 'app/(main)/other/page.tsx';
+  edit(page, text => 'import { four } from "../../../lib/deep";\n' + text.replace('<main />', '<main>{four()}</main>'));
+  git('add', '.');
+  git('commit', '-qm', 'Add deeper callers');
+
+  edit(filePath, text => text.replace('return 1', 'return 2'));
+  const shallow = changes();
+  assert.match(shallow, /# partial: depth limit .*rerun --depth 5/);
+  assert.match(shallow, /# stopped at 1 module-level use \(importers not traced\)/);
+  assert.doesNotMatch(shallow, /route page \/other/);
+  assert.match(changes('--depth', '6'), /route page \/other .*start d5/);
+  assert.match(query('impact', 'start'), /# stopped at 1 module-level use/);
+  git('restore', '.');
+
+  edit(page, text => text.replace('{ four }', '{ four as old, four }'));
+  assert.match(changes(), /route page \/other .*page\.tsx d0/);
+  git('restore', '.');
+  edit(filePath, text => text.replace('// looks like a comment', '// changes the string'));
+  assert.doesNotMatch(changes(), /\[comment only\]/);
+  edit(filePath, text => text.replace('// changes the string', '// looks like a comment').replace('export const text', '\nexport const text'));
+  assert.doesNotMatch(changes(), /\[comment only\]/);
+  git('restore', '.');
+  edit(filePath, text => '// project note\n' + text);
+  assert.match(changes(), /comment lib\/deep\.ts:1 \[comment only\]/);
+});
+
+test('packing and unpacking the graph preserves default-suite query output', { timeout: 35_000 }, t => {
+  const { query, build } = fixture(t);
+  const indexFile = build();
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  const { outputFiles } = buildSync({
+    entryPoints: [path.join(__dirname, '../src/mcp/GraphStorage.ts')],
+    bundle: true, platform: 'node', write: false
+  });
+  const compiled = { exports: {} };
+  new Function('module', 'require', outputFiles[0].text)(compiled, require);
+  const { packGraph, unpackGraph } = compiled.exports;
+  const queries = [['impact', 'normalize'], ['callees', 'createItem'], ['path', '/items', 'createItem'],
+    ['search', 'getData'], ['impact', 'feed.nested.deep.item']];
+  const expected = queries.map(args => query(...args));
+  const packed = packGraph(index, 0);
+  assert.equal(typeof packed.packedGraph, 'string');
+  assert.equal(packed.graphReferences, undefined);
+  const restored = unpackGraph(JSON.parse(JSON.stringify(packed)));
+  assert.deepEqual(restored.exportSymbols, index.exportSymbols);
+  assert.deepEqual(restored.moduleImports, index.moduleImports);
+  assert.deepEqual(restored.trpcModuleUses, index.trpcModuleUses);
+  fs.writeFileSync(indexFile, JSON.stringify(packed));
+  assert.deepEqual(queries.map(args => query(...args)), expected);
 });

@@ -6,7 +6,7 @@ const options = {
 };
 const extensionBuilds = [
   { ...options, entryPoints: ['src/extension.ts'], target: 'node16', external: ['vscode'], outfile: 'out/extension.js' },
-  { ...options, entryPoints: ['src/mcp/main.ts'], target: 'node18', outfile: 'out/mcp.cjs' }
+  { ...options, entryPoints: ['src/mcp/main.ts'], target: 'node18', outfile: 'out/mcp.cjs', external: ['./graph.cjs'] }
 ];
 const cliBuilds = [
   { ...options, entryPoints: ['src/cli/main.ts'], target: 'node18', outfile: '../neorion/dist/neorion.cjs', external: ['./graph.cjs'] },
@@ -20,6 +20,9 @@ async function main() {
   const cliOnly = process.argv.includes('--cli');
   const builds = cliOnly ? cliBuilds : [...extensionBuilds, ...cliBuilds];
   const results = await Promise.all(builds.map(entry => build(entry)));
+  if (!cliOnly) {
+    for (const file of ['graph.cjs', 'graph.cjs.LEGAL.txt']) fs.copyFileSync('../neorion/dist/' + file, 'out/' + file);
+  }
   const outputs = Object.assign({}, ...results.map(result => result.metafile.outputs));
   fs.chmodSync('../neorion/dist/neorion.cjs', 0o755);
   for (const file of ['LICENSE', 'THIRD_PARTY_NOTICES.txt']) fs.copyFileSync(file, '../neorion/' + file);

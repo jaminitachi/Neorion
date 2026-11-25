@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 5;
+export const GRAPH_INDEX_REVISION = 6;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -55,6 +55,8 @@ export type ExternalCall = [owner: number, line: number, module: number, name: n
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
+export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export',
+  bindings?: [imported: string, exported?: string][]];
 
 export interface ServerAction {
   file: string;
@@ -98,7 +100,9 @@ export interface QueryIndex {
   unresolvedCalls?: Record<number, number>;
   fileSymbols?: number[]; // In the same order as the keys of files.
   defaultSymbols?: Record<number, number>;
-  routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number]>;
+  exportSymbols?: Record<number, Record<string, number[]>>;
+  moduleImports?: Record<number, ModuleImport[]>;
+  routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number, matchers?: string[]]>;
   layoutStyles?: Record<string, string[]>;
   trpcUses?: Record<number, TrpcUse[]>;
   trpcAliases?: Record<number, number[]>;

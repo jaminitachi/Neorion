@@ -19,7 +19,7 @@ const help = `Usage:
   neorion query impact <symbol|file> [--depth n] [--include-tests]
   neorion query callees <symbol> [--depth n] [--uses]
   neorion query path <from> <to>
-  neorion query changes [--base ref | --staged | --unstaged]
+  neorion query changes [--base ref | --staged | --unstaged] [--depth n]
   neorion mcp [--root dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint]
@@ -134,6 +134,9 @@ async function main([command, ...args]: string[]) {
   if (!query) return serve(root, { autoBuild: true });
   const [kind, target, to] = positionals;
   if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
+  if (kind !== 'changes') for (const flag of ['base', 'staged', 'unstaged'] as const) {
+    if (values[flag] !== undefined) throw new Error(`--${flag} requires the changes query.`);
+  }
   if (Number(!!values.staged) + Number(!!values.unstaged) + Number(values.base !== undefined) > 1) {
     throw new Error('Choose only one of --base, --staged, or --unstaged.');
   }

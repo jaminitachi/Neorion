@@ -20,7 +20,7 @@
         },
         "target": {
           "type": "string",
-          "description": "Name, path#Name, route URL/file, or search text"
+          "description": "Required for every kind except changes. Name, path#Name, route URL/file, or search text."
         },
         "limit": {
           "type": "integer",
@@ -60,7 +60,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 6,
-          "description": "Impact depth (default 3) or callees depth (default 1, maximum 3)."
+          "description": "Impact or changes depth (default 3) or callees depth (default 1, maximum 3)."
         },
         "uses": {
           "type": "boolean",
@@ -80,7 +80,7 @@
         },
         "base": {
           "type": "string",
-          "description": "For changes, compare with the merge base of HEAD and this ref."
+          "description": "For changes, compare with the merge base of HEAD and this ref. Includes staged and unstaged edits to tracked files."
         }
       },
       "required": [

@@ -45,7 +45,7 @@ Call `neorion_query` with `kind` and, for queries that take a target, `target` (
 | `impact` | Which routes, server actions, and upstream symbols depend on a symbol or file? |
 | `callees` | What does a symbol call, render, or fetch? Package calls are grouped by import specifier. |
 | `path` | What is the shortest directed chain from a page or symbol to a symbol or API route? Pass `target` and `to`. |
-| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits, or `base` for a merge-base comparison. |
+| `changes` | Which symbols, routes, and wrappers are affected by the Git diff? Pass `scope` for staged or unstaged edits. Pass `base` to compare against the merge base of `HEAD` and the ref, including uncommitted edits to tracked files and excluding untracked files. Set `depth` (default 3, maximum 6) to extend the trace. |
 
 The server returns project-relative `path:line` locations. Results have a
 6,000-byte cap and default to 40 rows (20 for search). `complete` describes the
