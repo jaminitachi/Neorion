@@ -4,7 +4,7 @@ import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { queryHint, updateAgentFiles } from '../core/AgentInstructions';
-import { findProject, missingProject } from '../core/FindProject';
+import { missingProject, selectProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
 import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
 import { VERSION } from '../mcp/Index';
@@ -149,8 +149,9 @@ async function main([command, ...args]: string[]) {
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
-  const project = findProject(root);
-  if (!project) throw new Error(missingProject(root));
+  const selection = selectProject(root);
+  if (!selection) throw new Error(missingProject(root));
+  const project = selection.directory;
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
@@ -168,7 +169,7 @@ async function main([command, ...args]: string[]) {
   };
   const installed = basename(process.argv[1]) === 'neorion' && !isTemporaryCliInstall(__filename) && runsCurrentEntry();
   const invocation = installed ? ['neorion'] : [process.execPath, __filename];
-  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
+  console.log(projectText(selection, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
 }
 
 if (isMainThread) {

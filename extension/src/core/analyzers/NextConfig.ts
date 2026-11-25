@@ -1,6 +1,5 @@
-import { existsSync } from 'node:fs';
-import * as path from 'node:path';
 import { Node, Project, SourceFile, SyntaxKind } from 'ts-morph';
+import { nextConfig } from '../FindProject';
 import type { NextUrlConfig } from './NextRouteMatch';
 import { functionNode, returns, valueNode } from './StaticBindings';
 
@@ -32,7 +31,7 @@ function strings(node: Node | undefined) {
 
 export function readNextConfig(root: string, files: SourceFile[]): NextConfig {
   const result: NextConfig = { url: {}, rules: [], issues: [] };
-  const file = ['js', 'mjs', 'ts', 'cjs'].map(ext => path.join(root, 'next.config.' + ext)).find(existsSync);
+  const file = nextConfig(root);
   if (!file) return result;
   const source = files.find(source => source.getFilePath() === file) ?? new Project().addSourceFileAtPath(file);
   const exported = source.getExportedDeclarations().get('default')?.[0] ??

@@ -164,9 +164,19 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion looks for a `tsconfig.json` or
-`jsconfig.json` first, then falls back to a `package.json` with `next` in `dependencies` or
-`devDependencies`. When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
+Neorion uses the requested directory as the project root when it contains a `next.config` file
+(`.js`, `.mjs`, `.ts`, or `.cjs`) or lists `next` in `dependencies` or `devDependencies`. This also
+selects the workspace root in an integrated Nx workspace that declares `next` there. Otherwise,
+Neorion looks for nested Next.js apps, skipping tooling and example directories. A sole Next.js
+candidate wins. For multiple candidates, it keeps the requested directory if it has a `tsconfig.json`
+or `jsconfig.json`. Otherwise it prefers a candidate with one of those configs, then a candidate that
+declares `next`, in breadth-first alphabetical order. With no Next.js candidates, it falls back to the
+first `tsconfig.json` or `jsconfig.json`, starting at the requested directory. Multiple Next.js
+candidates or a nested config fallback produce
+`# partial: project root guessed` and a hint. Run from the intended app or pass `--root <dir>` to
+`neorion query` or `neorion mcp` to select it.
+
+When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,
 `vendor`, `dist`, `build`, `out`, `coverage`, and `public` at the project root.
 

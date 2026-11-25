@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
+import type { ProjectSelection } from '../core/FindProject';
 import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
 import { projectSnapshot, workspaceInputsHash } from '../core/ProjectSnapshot';
 
@@ -84,7 +85,7 @@ async function build(root: string) {
 
 function runGenerator(root: string) {
   return new Promise<void>((resolve, reject) => {
-    const child = spawn(process.execPath, [join(__dirname, 'graph.cjs'), root], {
+    const child = spawn(process.execPath, [join(__dirname, 'graph.cjs'), '--build-project', root], {
       stdio: ['ignore', 'ignore', 'pipe']
     });
     let stderr = '';
@@ -127,6 +128,14 @@ export function projectLabel(root: string) {
   return basename(root).replace(/[\r\n]/g, ' ');
 }
 
-export function projectText(root: string, text: string) {
-  return `Project: ${projectLabel(root)}\n${text}`;
+export function projectRootNotice({ guessCandidates }: ProjectSelection) {
+  if (!guessCandidates) return '';
+  const candidates = guessCandidates.map(directory => JSON.stringify(directory)).join(', ');
+  return `\n# partial: project root guessed\n# hint: Candidates: ${candidates}. Run from the chosen directory or use --root <dir> with query or mcp.`;
+}
+
+export function projectText(selection: ProjectSelection, text: string) {
+  const notice = projectRootNotice(selection);
+  const result = notice ? text.replace(/\n# complete:[^\n]*$/, '') : text;
+  return `Project: ${projectLabel(selection.directory)}${notice}\n${result}`;
 }

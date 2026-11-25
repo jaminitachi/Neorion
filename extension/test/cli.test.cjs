@@ -229,7 +229,7 @@ test('CLI discovers configless Next.js projects and diagnoses missing projects',
   fs.renameSync(path.join(root, 'app/page.tsx'), path.join(root, 'app/page.jsx'));
   const missing = run(['graph']);
   assert.equal(missing.status, 1);
-  assert.match(missing.stderr, /no tsconfig\.json, jsconfig\.json, or package\.json with a next dependency/);
+  assert.match(missing.stderr, /no tsconfig\.json, jsconfig\.json, next\.config file, or package\.json with a next dependency/);
   fs.writeFileSync(path.join(root, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
   const dynamic = path.join(root, 'app', '[id]');
   fs.mkdirSync(dynamic);
@@ -244,25 +244,92 @@ test('CLI discovers configless Next.js projects and diagnoses missing projects',
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json']);
 });
 
-test('CLI and MCP prefer a configured Next.js app to a workspace root with hoisted Next.js', async t => {
-  const { root, env, run } = fixture(t);
-  const web = path.join(root, 'apps/web');
-  fs.mkdirSync(web, { recursive: true });
-  fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
-  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"devDependencies":{"next":"15.0.0"},"workspaces":["apps/*","packages/*"]}');
-  fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'packages/ui/a.js'), 'export const Shared = 1;');
+const nextDep = { dependencies: { next: '15.0.0' } };
+const projectMarkers = {
+  dep: ['package.json', JSON.stringify(nextDep)],
+  nx: ['package.json', JSON.stringify({ devDependencies: nextDep.dependencies, workspaces: ['apps/*'] })],
+  ts: ['tsconfig.json', '{}'],
+  js: ['jsconfig.json', '{}'],
+  ...Object.fromEntries(['js', 'mjs', 'ts', 'cjs'].map(ext => [`next.${ext}`, [`next.config.${ext}`, '']]))
+};
 
-  const graph = run(['graph']);
-  assert.equal(graph.status, 0, graph.stderr);
-  assert.match(graph.stdout, /web · app router · 1 source files/);
-  const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
-  const result = await client.text('query', { kind: 'who_renders', target: 'DashboardShell' });
-  assert.match(result, /^Project: web$/m);
-  assert.match(result, /^\/  app\/page\.tsx:2/m);
-  assert.equal(run(['query', 'who_renders', 'DashboardShell']).stdout.trimEnd(), result);
-});
+for (const { name, markers, selected, candidates, start = '.', pageRoot = selected, javascript, checkMcp } of [
+  { name: 'configless JavaScript root with Cypress', markers: { '.': ['dep'], cypress: ['ts'] }, selected: '.', javascript: true },
+  { name: 'root Next config with e2e and scripts configs', markers: { '.': ['next.cjs'], e2e: ['ts'], scripts: ['ts'] }, selected: '.' },
+  { name: 'Dub from repository root', markers: { 'apps/web': ['dep', 'ts'], 'packages/cli': ['ts'] }, selected: 'apps/web' },
+  { name: 'Dub with a second Next app', markers: { 'apps/admin': ['dep'], 'apps/web': ['dep', 'ts'], 'packages/cli': ['ts'] },
+    selected: 'apps/web', candidates: ['apps/admin', 'apps/web'], checkMcp: true },
+  { name: 'Rallly from repository root', markers: { 'apps/web': ['next.ts', 'ts'], 'apps/landing': ['next.ts', 'ts'] },
+    selected: 'apps/landing', candidates: ['apps/landing', 'apps/web'] },
+  { name: 'Formbricks from repository root', markers: { 'apps/deployment-check': ['ts'], 'apps/web': ['next.mjs', 'ts'] }, selected: 'apps/web' },
+  { name: 'integrated Nx with Next declared in the root', markers: { '.': ['nx'], 'apps/web': ['dep', 'ts'] }, selected: '.', pageRoot: 'apps/web' },
+  { name: 'library with Next examples and a root config', markers: { '.': ['ts'],
+    ...Object.fromEntries(['node_modules', 'cypress', 'e2e', 'playwright', 'tests', 'scripts',
+      'example', 'examples', 'demo', 'demos', 'samples', 'docs', 'playground'].map(dir => [`${dir}/web`, ['dep', 'ts']])) }, selected: '.' },
+  { name: 'library with a root config and several Next packages outside examples', markers: { '.': ['ts'],
+    'examples/web': ['dep', 'ts'], 'integrations/web': ['next.js', 'ts'], 'packages/next': ['dep', 'ts'] },
+    selected: '.', candidates: ['.', 'integrations/web', 'packages/next'] },
+  { name: 'sole nested Next app in a workspace with a root config', markers: { '.': ['ts'], 'apps/web': ['dep', 'ts'] }, selected: 'apps/web' },
+  { name: 'wrapper containing a clone', markers: { 'clone/apps/web': ['next.js'] }, selected: 'clone/apps/web' },
+  { name: 'saas-starter root', markers: { '.': ['dep', 'next.ts', 'ts'] }, selected: '.' },
+  { name: 'config-only fallback below the requested directory', markers: { scripts: ['ts'], 'scripts/other': ['dep'], tools: ['js'] },
+    selected: 'scripts', candidates: ['scripts', 'tools'] },
+  { name: 'config-only project selected explicitly', markers: { 'packages/lib': ['ts'] }, selected: 'packages/lib', start: 'packages/lib' }
+]) {
+  test(`CLI project root: ${name}`, async t => {
+    const { root, env, run } = fixture(t);
+    fs.unlinkSync(path.join(root, 'tsconfig.json'));
+    for (const [folder, keys] of Object.entries(markers)) {
+      const directory = path.join(root, folder);
+      fs.mkdirSync(directory, { recursive: true });
+      for (const key of keys) {
+        const [file, contents] = projectMarkers[key];
+        fs.writeFileSync(path.join(directory, file), contents);
+      }
+    }
+    const app = path.join(root, pageRoot, 'app');
+    if (pageRoot !== '.') fs.renameSync(path.join(root, 'app'), app);
+    if (javascript) fs.renameSync(path.join(app, 'page.tsx'), path.join(app, 'page.jsx'));
+
+    const cwd = path.join(root, start);
+    const label = path.basename(path.join(root, selected));
+    const search = ['query', 'search', 'DashboardShell'];
+    // Query first so auto-build must index the selected directory directly.
+    const query = run([...search, '--root', cwd]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.equal(query.stdout.split('\n')[0], `Project: ${label}`);
+    assert.ok(query.stdout.includes(`${pageRoot === selected ? '' : pageRoot + '/'}app/page.${javascript ? 'jsx' : 'tsx'}:1#DashboardShell`), query.stdout);
+    const graph = run(['graph', cwd]);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.ok(graph.stdout.split('\n')[0].includes(` · ${label} · ${pageRoot === selected ? 'app' : 'none'} router · `), graph.stdout);
+    if (candidates) {
+      for (const output of [graph.stdout, query.stdout]) {
+        assert.match(output, /^# partial: project root guessed$/m);
+        assert.doesNotMatch(output, /^# complete/m);
+        const hint = /^# hint: .*$/m.exec(output)?.[0];
+        assert.ok(hint?.includes(candidates.map(dir => JSON.stringify(path.join(root, dir))).join(', ')), output);
+        assert.match(hint, /Run from the chosen directory or use --root <dir>/);
+      }
+      const candidate = candidates.at(-1);
+      const explicit = run([...search, '--root', path.join(root, candidate)]);
+      assert.equal(explicit.status, 0, explicit.stderr);
+      assert.equal(explicit.stdout.split('\n')[0], `Project: ${path.basename(candidate)}`);
+      assert.match(explicit.stdout, /^# complete:/m);
+    } else {
+      assert.match(query.stdout, /^# complete:/m);
+      assert.doesNotMatch(graph.stdout + query.stdout, /project root guessed/);
+    }
+    if (checkMcp) {
+      const miss = run(['query', 'wrappers', '/missing']);
+      assert.equal(miss.status, 0, miss.stderr);
+      assert.match(miss.stdout, /^# partial: project root guessed$/m);
+      assert.match(miss.stdout, /^# partial: target unresolved$/m);
+      assert.doesNotMatch(miss.stdout, /^# complete/m);
+      const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+      assert.equal(await client.text('query', { kind: 'search', target: 'DashboardShell' }), query.stdout.trimEnd());
+    }
+  });
+}
 
 for (const withConfig of [true, false]) {
   test(`JavaScript ${withConfig ? 'jsconfig' : 'configless'} defaults exclude build outputs and public assets`, t => {
