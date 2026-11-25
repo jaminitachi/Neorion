@@ -42,8 +42,12 @@ export function agentMcp(agent: Agent, claudeHome: string, command: Command) {
     'neorion', '--', command.command, ...command.args];
   const removeArgs = ['mcp', 'remove', ...(claude ? ['--scope', 'user'] : []), 'neorion'];
   const shell = process.platform === 'win32' ? ' in PowerShell' : '';
-  const failure = (result: ReturnType<typeof run>, verb: string) => result.error ??
-    new Error(result.stderr.trim() || `Could not ${verb} the Neorion MCP server with ${agent}.`);
+  const failure = (result: ReturnType<typeof run>, verb: string) => {
+    const detail = result.error?.message || result.stderr?.trim() || `Could not ${verb} the Neorion MCP server with ${agent}.`;
+    return new Error(claude ? detail : detail +
+      `
+Check that CODEX_HOME points to a writable directory and that ${config} is valid, then rerun setup.`);
+  };
   let codexLookup: 'get' | 'json-list' | 'text-list' = 'get';
 
   function removeManually(): never {
