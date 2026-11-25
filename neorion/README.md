@@ -75,13 +75,15 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion keeps a Next.js app at the
-requested root even when it contains another app. It identifies a routed app by an `app`, `pages`,
-`src/app`, or `src/pages` directory and a `next` dependency. A package with a TypeScript or JavaScript
-config can rely on `next` declared in an ancestor package. Routed Next.js apps outside `cypress`,
-`e2e`, `playwright`, `scripts`, and `tests` take priority over standalone configs. Before an app has
-routes, a package outside those tooling directories that declares `next` takes priority over the
-first config if that config is inside one of those directories.
+From your project root, run the CLI directly from the clone. Neorion keeps a routed Next.js app at
+the requested root even when it contains another app. Discovery looks for `page`, `layout`, or
+`route` files under `app` or `src/app`, and page or API files under `pages` or `src/pages`. An app
+can declare `next` in its own manifest. An app with a TypeScript or JavaScript config can also use
+`next` from its nearest workspace manifest if that manifest lists the app as a member. Discovery
+stops at Git checkout boundaries. Routed Next.js apps outside `cypress`, `e2e`, `playwright`,
+`scripts`, and `tests` take priority over standalone configs. Before an app has routes, a package
+outside those tooling directories that declares `next` takes priority over the first config if
+that config is inside one of those directories.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package, Neorion uses
 `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`, `vendor`,

@@ -225,11 +225,12 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
   fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
   const manifest = path.join(root, 'package.json');
-  const workspaces = ['apps/*', 'packages/*'];
+  const workspaces = ['apps/*'];
   fs.writeFileSync(manifest, JSON.stringify({ workspaces }));
-  fs.mkdirSync(path.join(root, 'packages/ui/src/app'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'packages/ui/tsconfig.json'), '{"include":["src/**/*"]}');
-  fs.writeFileSync(path.join(root, 'packages/ui/src/app/index.ts'), 'export const Shared = 1;');
+  fs.mkdirSync(path.join(root, 'apps/aaa-utils/src/app'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'apps/aaa-utils/package.json'), '{"name":"aaa-utils"}');
+  fs.writeFileSync(path.join(root, 'apps/aaa-utils/tsconfig.json'), '{"include":["src/**/*"]}');
+  fs.writeFileSync(path.join(root, 'apps/aaa-utils/src/app/index.ts'), 'export const Shared = 1;');
   fs.mkdirSync(path.join(root, 'playwright/app'), { recursive: true });
   fs.writeFileSync(path.join(root, 'playwright/tsconfig.json'), '{}');
   fs.writeFileSync(path.join(root, 'playwright/app/fixture.ts'), 'export const fixture = true;');
@@ -254,6 +255,37 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   assert.equal(withBaseConfig.status, 0, withBaseConfig.stderr);
   assert.match(withBaseConfig.stdout, /web · app router · 1 source files/);
 });
+
+for (const separateCheckout of [false, true]) {
+  test(`CLI keeps an explicit root ${separateCheckout ? 'in a separate Git checkout' : 'outside the declared workspace members'}`, t => {
+    const { root, env, run } = fixture(t);
+    const checkout = path.join(root, 'checkouts/standalone-tools');
+    const utility = path.join(checkout, 'packages/utility');
+    const workspaces = separateCheckout ? ['checkouts/**'] : ['apps/*'];
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ workspaces, dependencies: { next: '15.0.0' } }));
+    fs.mkdirSync(path.join(checkout, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'package.json'), '{"name":"standalone-tools"}');
+    fs.writeFileSync(path.join(checkout, 'tsconfig.json'), '{"include":["src/**/*"]}');
+    fs.writeFileSync(path.join(checkout, 'src/root.ts'), 'export function RootMarker() { return true; }');
+    if (separateCheckout) {
+      const git = spawnSync('git', ['init', '-q', checkout], { env, encoding: 'utf8' });
+      assert.equal(git.status, 0, git.stderr || git.error?.message);
+    }
+    fs.mkdirSync(path.join(utility, 'src/app'), { recursive: true });
+    fs.writeFileSync(path.join(utility, 'package.json'), '{"name":"utility"}');
+    fs.writeFileSync(path.join(utility, 'tsconfig.json'), '{"include":["src/**/*"]}');
+    // Keep a route so the test exercises workspace boundaries independently of route detection.
+    fs.writeFileSync(path.join(utility, 'src/app/route.ts'), 'export function GET() { return new Response(); }');
+
+    const graph = run(['graph', checkout]);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /standalone-tools · none router · 1 source files/);
+    const query = run(['query', 'search', 'RootMarker', '--root', checkout]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /^Project: standalone-tools$/m);
+    assert.match(query.stdout, /src\/root\.ts:1/);
+  });
+}
 
 for (const configured of [true, false]) {
   test(`CLI keeps an explicit ${configured ? 'configured app with hoisted Next.js' : 'configless Next.js app'} over its nested example`, t => {

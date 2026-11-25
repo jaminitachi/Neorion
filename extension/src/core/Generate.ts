@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
-import { ignoredProjectDirectories, projectConfig } from './FindProject';
+import { ignoredProjectDirectories, projectConfig, routerDirectory } from './FindProject';
 import { projectSnapshot } from './ProjectSnapshot';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
@@ -19,12 +19,8 @@ interface GenerateOptions {
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
     const packageJsonPath = path.join(projectPath, 'package.json');
-    const routerDirectory = (name: string) => {
-        const root = path.join(projectPath, name);
-        return fs.existsSync(root) ? root : path.join(projectPath, 'src', name);
-    };
-    const appDir = routerDirectory('app');
-    const pagesDir = routerDirectory('pages');
+    const appDir = routerDirectory(projectPath, 'app');
+    const pagesDir = routerDirectory(projectPath, 'pages');
 
     options.onProgress?.("Analyzing project structure...");
 
