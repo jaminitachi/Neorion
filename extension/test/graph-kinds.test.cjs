@@ -1211,6 +1211,100 @@ test('component lookup maps resolve static keys and label unresolved choices', {
   index.graphRevision--;
   fs.writeFileSync(indexFile, JSON.stringify(index));
   assert.match(query('who_renders', 'Exact'), /^# partial: regenerate index for component lookup coverage$/m);
+  build();
+  assert.match(query('who_renders', 'Exact'), /^# complete:/m);
+});
+
+test('component choices trace array elements, helper returns and fallback branches', { timeout: 40_000 }, async t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const page = (name, source) => {
+    const directory = path.join(root, 'app', name);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'page.tsx'), source);
+  };
+  for (const [route, render] of [
+    ['nav-member', 'item => <item.icon/>'],
+    ['nav-alias', 'item => { const Icon = item.icon; return <Icon/>; }'],
+    ['nav-destructure', '({ href, icon: Icon }) => <a href={href}><Icon/></a>']
+  ]) {
+    page(route, `
+      function HomeIcon() { return <span/>; }
+      function LogIcon() { return <span/>; }
+      const NAV = [{ href: '/dashboard', icon: HomeIcon }, { href: '/workout-log', icon: LogIcon }] as const;
+      export default function Page() { return <nav>{NAV.map(${render})}</nav>; }
+    `);
+  }
+  const steps = `
+    function StepA() { return <span/>; }
+    function StepB() { return <span/>; }
+  `;
+  page('tuple-step', steps + `
+    const STEPS = [StepA, StepB] as const;
+    export default function Page({ i }: { i: number }) { const Step = STEPS[i]; return <Step/>; }
+  `);
+  page('list-step', steps + `
+    const STEPS = [StepA, StepB];
+    export default function Page({ i }: { i: number }) { const Step = STEPS[i]; return <Step/>; }
+  `);
+  page('fixed-step', steps + `
+    const STEPS = [StepA, StepB] as const;
+    const index = 1;
+    export default function Page() { const Step = STEPS[index]; return <Step/>; }
+  `);
+  const icons = `
+    function IconA() { return <span/>; }
+    function IconB() { return <span/>; }
+    const MAP = { a: IconA, b: IconB };
+  `;
+  page('helper-choice', icons + `
+    function pick(k: keyof typeof MAP) { return MAP[k]; }
+    export default function Page({ k }: { k: keyof typeof MAP }) { const Icon = pick(k); return <Icon/>; }
+  `);
+  page('ternary-choice', icons + `
+    export default function Page({ show }: { show: boolean }) { const Icon = show ? IconA : IconB; return <Icon/>; }
+  `);
+  for (const [route, expression] of [['nullish-choice', 'MAP[k] ?? Fallback'], ['or-choice', 'MAP[k] || Fallback']]) {
+    page(route, icons + `
+      import { createElement } from 'react';
+      function Fallback() { return <span/>; }
+      export default function Page({ k }: { k: keyof typeof MAP }) {
+        ${route === 'nullish-choice' ? `const Icon = ${expression}; return <Icon/>;` : `return createElement(${expression});`}
+      }
+    `);
+  }
+  build();
+  const renders = (route, component) => query('who_renders', `app/${route}/page.tsx#${component}`);
+  const possible = (route, component, condition = '') => {
+    const output = renders(route, component);
+    assert.match(output, new RegExp(`^/${route}\\s.*${condition}\\[possible\\]`, 'm'));
+    assert.match(output, /^# partial: component lookup key untraced/m);
+  };
+  for (const route of ['nav-member', 'nav-alias', 'nav-destructure', 'tuple-step', 'list-step', 'helper-choice']) {
+    const components = route.startsWith('nav-') ? ['HomeIcon', 'LogIcon'] :
+      route.endsWith('-step') ? ['StepA', 'StepB'] : ['IconA', 'IconB'];
+    for (const component of components) await t.test(`${route} renders ${component}`, () => possible(route, component));
+  }
+  await t.test('a fixed index resolves exactly one tuple element', () => {
+    assert.doesNotMatch(renders('fixed-step', 'StepA'), /^\/fixed-step\s/m);
+    const output = renders('fixed-step', 'StepB');
+    assert.match(output, /^\/fixed-step\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  for (const component of ['IconA', 'IconB']) await t.test(`the ternary conditionally renders ${component}`, () => {
+    const output = renders('ternary-choice', component);
+    assert.match(output, /^\/ternary-choice\s.*\[cond\]$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  for (const route of ['nullish-choice', 'or-choice']) {
+    for (const component of ['IconA', 'IconB']) {
+      await t.test(`${route} conditionally renders ${component}`, () => possible(route, component, '\\[cond\\] '));
+    }
+    await t.test(`${route} conditionally renders its fallback`, () => {
+      const output = renders(route, 'Fallback');
+      assert.match(output, new RegExp(`^/${route}\\s.*\\[cond\\]$`, 'm'));
+      assert.match(output, /^# complete:/m);
+    });
+  }
 });
 
 test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {

@@ -281,6 +281,10 @@ To recover a lost 3b record, restore `PKG`, `VERSION`, `REGISTRY`, `RELEASE_PR`,
 )
 ```
 
+## Next release notes
+
+After upgrading, run `neorion graph` from each project root to refresh component lookup coverage. CLI and MCP queries normally rebuild stale indexes automatically. If you disabled automatic rebuilds, `who_renders` reports `# partial: regenerate index for component lookup coverage` until you rebuild.
+
 ## User installation
 
 From a project directory, run graph and register the MCP server, then start a new Codex session.
