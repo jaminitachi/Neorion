@@ -1,6 +1,8 @@
 import { Node, SyntaxKind, type CallExpression, type SourceFile } from 'ts-morph';
 import { declarationsOf } from './ArchitectureFacts';
+import { visitKinds } from './CompilerWalk';
 
+const TRPC_DISCOVERY_KINDS = new Set([SyntaxKind.CallExpression]);
 const serverPackage = /^@trpc\/server(?:\/|$)/;
 const proxyPackage = /^@trpc\/(?:client|react-query|next|tanstack-react-query)(?:\/|$)/;
 const tanstackPackage = /^@trpc\/tanstack-react-query$/;
@@ -87,7 +89,7 @@ export class TrpcFacts {
         sources.has(entry.getModuleSpecifierSourceFile()!)));
       const client = clientFiles.has(file);
       if (!server && !client) continue;
-      file.forEachDescendant(node => {
+      visitKinds(file, TRPC_DISCOVERY_KINDS, node => {
         if (!Node.isCallExpression(node)) return;
         if (server && this.isRouterCall(node)) this.router(node);
         if (!client) return;

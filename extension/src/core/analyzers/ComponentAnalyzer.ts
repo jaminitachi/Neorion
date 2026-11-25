@@ -4,14 +4,22 @@ import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } f
 import {
   collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression
 } from './ArchitectureFacts';
+import { visitKinds } from './CompilerWalk';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { renderBindings } from './RenderBindings';
+import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
 
 type NodeWithBody = import('ts-morph').FunctionDeclaration | import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression;
 
 const HOOK = /^use[A-Z0-9]/;
+const ACTION_DECLARATION_KINDS = new Set([SyntaxKind.FunctionDeclaration, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression]);
+const RENDER_KINDS = new Set([SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.CallExpression]);
+const COMPONENT_BODY_KINDS = new Set([...RENDER_KINDS, SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression]);
+const ACTION_SCAN_KINDS = new Set([
+  ...COMPONENT_BODY_KINDS, SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.ShorthandPropertyAssignment
+]);
 
 function rootBinding(node: Node): Node {
   while (Node.isPropertyAccessExpression(node)) node = node.getExpression();
@@ -172,6 +180,7 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
     cached.set(symbol, id);
     return id;
   };
+  // ACTION_SCAN_KINDS includes the node kinds resolved by this callback.
   return (node: Node): string | undefined => {
     if (Node.isPropertyAccessExpression(node)) {
       const namespace = node.getExpression().getSymbol()?.compilerSymbol;
@@ -220,7 +229,7 @@ export class ComponentAnalyzer {
         let id = base;
         for (let suffix = 2; actions.has(id); suffix++) id = `${base}~${suffix}`;
         actions.add(id);
-        index?.action(id, name, relative, site.getStartLineNumber());
+        index?.action(id, name, relative, startLine(site));
         return id;
       };
       const addAction = (name: string, declaration: Node, action = declaration, site = declaration) => {
@@ -273,7 +282,8 @@ export class ComponentAnalyzer {
         }
       }
       if (file.getFullText().includes('use server')) {
-        file.forEachDescendant(node => {
+        // Keep ACTION_DECLARATION_KINDS in sync with the node kinds handled below.
+        visitKinds(file, ACTION_DECLARATION_KINDS, node => {
           if (!Node.isFunctionDeclaration(node) && !Node.isArrowFunction(node) && !Node.isFunctionExpression(node)) return;
           const body = node.getBody();
           if (!node.isAsync() || !Node.isBlock(body) || !hasDirective(body.getStatements(), 'use server')) return;
@@ -433,9 +443,10 @@ export class ComponentAnalyzer {
     }).flatMap(node => resolveComponent(node) ?? []);
     // Discover component-valued bindings before assigning JSX to its owning body.
     const renderTargets = new Map<Node, ComponentNode[]>();
-    const callbackBodies = new Set<Node>();
+    const callbackBodies = new Set<ts.Node>();
     for (const file of files) {
-      file.forEachDescendant(node => {
+      // Keep RENDER_KINDS in sync with the render sites handled here and in the file scan below.
+      visitKinds(file, RENDER_KINDS, node => {
         let tag: Node | undefined;
         if (Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) {
           tag = node.getTagNameNode();
@@ -472,7 +483,7 @@ export class ComponentAnalyzer {
           };
           components.set(binding, component);
           bodies.set(binding, body);
-          callbackBodies.add(body);
+          callbackBodies.add(body.compilerNode);
           resolved.push(component);
         }
       });
@@ -485,7 +496,7 @@ export class ComponentAnalyzer {
       }
       for (const target of new Set(targets)) {
         addEdge(from, target.id, 'renders');
-        if (index && from !== target.id) index.render(from, target.id, tag.getStartLineNumber(), conditionalAt(tag, body));
+        if (index && from !== target.id) index.render(from, target.id, startLine(tag), conditionalAt(tag, body));
       }
     };
     const componentTags = new Set<Node>();
@@ -497,6 +508,7 @@ export class ComponentAnalyzer {
       const imports = importsFor(file);
 
       const usedHooks = new Set<string>();
+      // Keep COMPONENT_BODY_KINDS in sync with the node kinds handled below.
       const inspect = (child: Node) => {
         if (Node.isJsxOpeningElement(child) || Node.isJsxSelfClosingElement(child)) {
           componentTags.add(child);
@@ -517,10 +529,7 @@ export class ComponentAnalyzer {
         if (hook) usedHooks.add(hook);
       };
       inspect(body);
-      body.forEachDescendant((child, traversal) => {
-        if (callbackBodies.has(child)) traversal.skip();
-        else inspect(child);
-      });
+      visitKinds(body, COMPONENT_BODY_KINDS, inspect, { skip: callbackBodies });
       component.hooks = [...usedHooks];
     }
 
@@ -532,7 +541,8 @@ export class ComponentAnalyzer {
       const usedHooks = new Set<string>();
       const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
-      file.forEachDescendant(node => {
+      // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
+      visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
         if (actionReference && !actionNames.has(node)) {
           const id = actionReference(node);
           if (id) {
@@ -540,7 +550,7 @@ export class ComponentAnalyzer {
             if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
               Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
               const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
-              const line = node.getStartLineNumber();
+              const line = startLine(node);
               addEdge(owner, id, 'uses-action');
               index?.useAction(id, relative, line, node);
             }
