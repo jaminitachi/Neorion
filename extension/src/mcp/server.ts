@@ -7,7 +7,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex } from './Index';
 import { QueryEngine } from './Query';
-import { findProject, missingProject } from '../core/FindProject';
+import { missingProject, selectProject } from '../core/FindProject';
 import { ensureFresh, projectText, waitForBuild } from './Build';
 import { historyBudgetMs } from './ChangesHistory';
 import { legacyKind, queryName, tools } from './Tools';
@@ -113,8 +113,10 @@ function queryWorker(project: string | undefined, autoBuild: boolean, budget: nu
   return { start, ask, stop, unref: () => worker?.unref() };
 }
 
-export async function serve(root: string, { autoBuild }: { autoBuild: boolean }) {
-  const project = autoBuild ? findProject(root) : root;
+export async function serve(root: string, { autoBuild, confirm, discover = autoBuild }:
+  { autoBuild: boolean; confirm?: boolean; discover?: boolean }) {
+  const selection = discover ? selectProject(root, confirm) : { directory: root };
+  const project = selection?.directory;
   const interactive = queryWorker(project, autoBuild, 2000);
   const history = queryWorker(project, autoBuild, historyBudgetMs + 1000);
   let changesQueue = Promise.resolve();
@@ -149,7 +151,8 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
   server.setRequestHandler(CallToolRequestSchema, async request => {
     const { name, arguments: args = {} } = request.params;
     if (name !== queryName && !legacyKind(name)) return reply('Unknown Neorion tool.', true);
-    if (!project) return reply(missingProject(root), true);
+    if (!selection) return reply(missingProject(root), true);
+    const project = selection.directory;
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);
@@ -159,7 +162,7 @@ export async function serve(root: string, { autoBuild }: { autoBuild: boolean })
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const kind = legacyKind(name) ?? args.kind ?? 'query';
     const text = response?.text ?? `# timeout ${kind}${label ? ' ' + label : ''} : 0 results\n# partial: timed out`;
-    return reply(autoBuild && !response?.isError ? projectText(project, text) : text, response?.isError);
+    return reply(discover && !response?.isError ? projectText(selection, root, text) : text, response?.isError);
   });
   process.stdin.once('end', () => {
     // Let a piped CLI request finish even after its input reaches EOF.

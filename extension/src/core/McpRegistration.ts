@@ -101,7 +101,7 @@ function insert(original: string, bom: number, node: Node, key: string, value: u
   return { written: original.slice(0, offset) + insertion + original.slice(offset), insertion };
 }
 
-const launchBundle = [
+const launchBundle = (flag: string) => [
   'const [workspace, project] = process.argv.slice(1);',
   'const { join, resolve } = require("node:path");',
   `const cache = (${workspaceCache.toString()})(workspace);`,
@@ -110,7 +110,7 @@ const launchBundle = [
   '  console.error("Neorion MCP bundle missing. Run Neorion: Connect AI tools in this workspace.");',
   '  process.exit(1);',
   '}',
-  'process.argv.splice(1, 2, server, "--root", resolve(workspace, project));',
+  `process.argv.splice(1, 2, server, ${JSON.stringify(flag)}, resolve(workspace, project));`,
   'process.execArgv = [];',
   'require(server);'
 ].join('\n');
@@ -131,8 +131,8 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
   const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
   const version = valid(releaseVersion ?? spec.split('@').at(-1) ?? '');
   const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
-  return !!version && (matches(mcpCommand({ ...options, platform: 'linux' })) ||
-    matches(mcpCommand({ ...options, platform: 'win32' })));
+  return !!version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
+    matches(mcpCommand({ ...options, discover, platform: 'win32' })));
 }
 
 function isExtensionCursorEntry(cache: string, entry: unknown) {
@@ -146,15 +146,15 @@ function isExtensionCursorEntry(cache: string, entry: unknown) {
   }
 }
 
-export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', project: string, bundleSource: string) {
-  const command: Command = { command: 'node', args: [bundleSource, '--root', project] };
+export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', root: string, bundleSource: string, discover: boolean) {
+  const command: Command = { command: 'node', args: [bundleSource, discover ? '--workspace' : '--root', root] };
   return tool === 'Codex CLI'
     ? `[mcp_servers.neorion]\ncommand = ${JSON.stringify(command.command)}\nargs = ${JSON.stringify(command.args)}\n`
     : json({ mcpServers: { neorion: command } });
 }
 
 export function planMcp(root: string, project: string, targets: McpTarget[], bundled: boolean, bundleSource: string,
-  connect: boolean, cursorSetup?: { legacyLocalEntry: string }) {
+  connect: boolean, { discover = false, cursorSetup }: { discover?: boolean; cursorSetup?: { legacyLocalEntry: string } } = {}) {
   const changes: Change[] = [];
   const directories = new Set<string>();
   const cache = workspaceCache(root);
@@ -171,7 +171,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     delete state.bundle;
   }
   const bundle = checked(cache, BUNDLE);
-  const relativeProject = path.relative(root, project).split(path.sep).join('/');
+  const relativeProject = discover ? '' : path.relative(root, project).split(path.sep).join('/');
   const projectArgument = relativeProject || '.';
   const updated = new Set<McpTarget>();
 
@@ -215,8 +215,9 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     }
     const scopedProject = variable ? '${workspaceFolder}' + (relativeProject ? '/' + relativeProject : '') : projectArgument;
     const entry: Command = bundled
-      ? { command: 'node', args: ['-e', launchBundle, '--', variable ? '${workspaceFolder}' : '.', projectArgument] }
-      : mcpCommand({ root: scopedProject, useRelease: !!cursorSetup });
+      ? { command: 'node', args: ['-e', launchBundle(discover ? '--workspace' : '--root'), '--',
+          variable ? '${workspaceFolder}' : '.', projectArgument] }
+      : mcpCommand({ root: scopedProject, discover, useRelease: !!cursorSetup });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
