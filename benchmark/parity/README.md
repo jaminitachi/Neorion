@@ -1,5 +1,7 @@
 # Parity benchmark: Neorion vs Graphify vs GitNexus
 
+See the [updated native scores](../../README.md#native-queries) for the later Neorion rerun on ShareTab. Neorion's totals rose after it gained tRPC tracing, and the ShareTab impact and path targets were used to verify that change. This page records the runs before tRPC support.
+
 Across three apps, **Neorion scored 25/30, Graphify 17.5/30, and GitNexus 14/30** after the impact and call path rerun. On the two held-out apps alone, Neorion scored 16/20, Graphify 11/20, and GitNexus 8.5/20. Neorion 0.5.2 scored 21/30 in the original run. All 90 question cells ran (2026-11-24).
 
 ## Method

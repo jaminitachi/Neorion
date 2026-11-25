@@ -59,20 +59,24 @@ Use it from the CLI, Claude Code, Codex, or the VS Code extension, which also dr
 
 ## How it compares
 
+The ShareTab tRPC support, index build optimizations, and Codú agent fixes landed after the 0.6.0 release. The sections below identify the measured revisions. [Build from source](#build-from-source) to try the merged changes.
+
 ### Native queries
 
-We scored answers to Next.js App Router questions using each tool's CLI directly. The totals combine the original scores and reruns. Slugy was used for development checks and appears only in the all-apps total. [Original benchmark method](benchmark/parity/README.md#method)
+We scored 30 Next.js App Router questions, 10 per app, across rep-deck, ShareTab, and slugy using each tool's CLI directly. Graphify 0.9.115 and GitNexus 1.6.12 kept their original scores. Only Neorion was rescored after the original 0.5.2 run. The totals use its impact and path scores from `a70c2a6` and the ShareTab tRPC rerun at `81cd24b`. The tRPC changes landed in [PR #18](https://github.com/jaminitachi/Neorion/pull/18). [Original benchmark method](benchmark/parity/README.md#method)
+
+Slugy was used for development checks. ShareTab's impact and path targets were used to verify tRPC support, so those questions were part of development for that change. Neorion scored 16/20 on rep-deck and ShareTab before the tRPC rerun.
 
 | Apps | Neorion | Graphify | GitNexus |
 | --- | ---: | ---: | ---: |
-| Held out (rep-deck, sharetab) | 18/20 | 11/20 | 8.5/20 |
+| rep-deck and ShareTab | 18/20 | 11/20 | 8.5/20 |
 | All three apps | 27/30 | 17.5/30 | 14/30 |
 
 ### Agent mode
 
-Claude Opus 5.5 answered the same questions within each app using the listed tools. One scorer graded each app's answers. Both apps ship a `CLAUDE.md`, and the Neorion + Read/Grep/Glob condition added Neorion's setup guidance. Input tokens include cache usage. Wall time sums the runs for each condition and excludes index setup. Codú ran on a loaded machine.
+Claude Opus 5.5 answered the same six questions per app under each condition. Both evaluations used Graphify 0.9.115 and GitNexus 1.6.12. One scorer graded each app's answers. Both apps ship a `CLAUDE.md`, and the Neorion + Read/Grep/Glob condition added Neorion's setup guidance. Input tokens include cache usage. Wall time sums the runs for each condition and excludes index setup. Codú ran on a loaded machine.
 
-**Daggerheart Brews (n=1 per cell).** These questions later became development data for [PR #23](https://github.com/jaminitachi/Neorion/pull/23).
+**Daggerheart Brews (n=1 per cell, Neorion build `a3fed7c`).** These questions later became development data for [PR #23](https://github.com/jaminitachi/Neorion/pull/23).
 
 | Condition | Score | Input tokens | Output tokens | Summed wall time |
 | --- | ---: | ---: | ---: | ---: |
@@ -92,11 +96,13 @@ Claude Opus 5.5 answered the same questions within each app using the listed too
 | Graphify only | 6 | 2,507,437 | 42,301 | 590.648 s |
 | GitNexus only | 8 | 2,886,567 | 60,790 | 1,530.491 s |
 
-Neorion-only scored below GitNexus-only on both apps. Neorion alongside Read/Grep/Glob tied the baseline for the highest score on Daggerheart Brews and scored highest on Codú.
+Neorion-only scored below GitNexus-only on both apps. Neorion alongside Read/Grep/Glob tied the baseline for the highest score on Daggerheart Brews, used fewer input and output tokens than the baseline, and had the longest summed wall time of any condition on that app. It scored highest on Codú.
 
 ### Index build time and memory
 
-Across six apps, Neorion's median build time fell by 17.2–43.6% and median peak RSS fell by 4.1–20.6% after the build changes. GNU Time measured fresh index builds on a shared host. Neorion columns show medians before and after the changes. Graphify used one AST-only run per app and different file-selection rules. On Dub, Neorion indexed `apps/web` and Graphify indexed the monorepo root.
+Across six apps, Neorion's median build time fell by 17.2–43.6% and median peak RSS fell by 4.1–20.6% from `a70c2a6` to `1726869`, the build with the optimizations that landed in [PR #16](https://github.com/jaminitachi/Neorion/pull/16). GNU Time measured fresh index builds on a shared host. The medians include a 55.07 s slugy run before the changes and a 105.90 s ShareTab run after the changes.
+
+Graphify 0.9.115 used one AST-only run per app and different file-selection rules. Its slugy run took 6.08 s in an earlier profile. On Dub, Neorion indexed `apps/web` and Graphify indexed the monorepo root.
 
 | App | Neorion wall (s), before → after | Graphify wall (s) | Neorion peak RSS (KiB), before → after | Graphify peak RSS (KiB) |
 | --- | ---: | ---: | ---: | ---: |
@@ -110,6 +116,8 @@ Across six apps, Neorion's median build time fell by 17.2–43.6% and median pea
 ## Install
 
 Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
+
+The [benchmark results](#how-it-compares) include source builds made after this release.
 
 ```sh
 npm install -g https://github.com/jaminitachi/Neorion/releases/download/v0.6.0/neorion-0.6.0.tgz
