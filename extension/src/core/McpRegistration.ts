@@ -7,7 +7,7 @@ import { mcpCommand } from './McpCommand';
 
 export const MCP_TARGETS = {
   'Claude Code': { file: '.mcp.json', key: 'mcpServers', type: true, variable: false },
-  Cursor: { file: '.cursor/mcp.json', key: 'mcpServers', type: false, variable: true },
+  Cursor: { file: '.cursor/mcp.json', key: 'mcpServers', type: true, variable: true },
   'VS Code (Copilot agent)': { file: '.vscode/mcp.json', key: 'servers', type: true, variable: true }
 } as const;
 export type McpTarget = keyof typeof MCP_TARGETS;
@@ -62,9 +62,10 @@ function read(file: string) {
 function config(original: string, target: McpTarget) {
   const errors: ParseError[] = [];
   const bom = original.startsWith('\uFEFF') ? 1 : 0;
+  const jsonc = target !== 'Claude Code';
   const tree = parseTree(original.slice(bom), errors, {
-    disallowComments: target !== 'VS Code (Copilot agent)',
-    allowTrailingComma: target === 'VS Code (Copilot agent)'
+    disallowComments: !jsonc,
+    allowTrailingComma: jsonc
   });
   const { key, file } = MCP_TARGETS[target];
   const group = tree && findNodeAtLocation(tree, [key]);
@@ -79,9 +80,16 @@ function config(original: string, target: McpTarget) {
   return { bom, tree, group, entry: group && findNodeAtLocation(group, ['neorion']) };
 }
 
-function insert(original: string, bom: number, node: Node, key: string, value: unknown) {
+const onOneLine = (original: string, bom: number, node: Node) =>
+  !/[\r\n]/.test(original.slice(bom + node.offset, bom + node.offset + node.length));
+
+function insert(original: string, bom: number, node: Node, key: string, value: unknown, inline: boolean) {
   const last = node.children?.[node.children.length - 1];
   const offset = bom + (last ? last.offset + last.length : node.offset + 1);
+  if (inline) {
+    const insertion = (last ? ', ' : '') + JSON.stringify(key) + ': ' + JSON.stringify(value);
+    return { written: original.slice(0, offset) + insertion + original.slice(offset), insertion };
+  }
   const newline = original.includes('\r\n') ? '\r\n' : '\n';
   const column = (position: number) => /^[\t ]*/.exec(original.slice(original.lastIndexOf('\n', position - 1) + 1))![0];
   const base = node.parent ? column(bom + node.parent.offset) : '';
@@ -179,7 +187,11 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
       : mcpCommand({ root: scopedProject, localEntry: cursorSetup?.localEntry });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
-    if (parsed.entry && !equal(getNodeValue(parsed.entry), entry)) {
+    const current = parsed.entry && getNodeValue(parsed.entry);
+    const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
+      equal(current, { command: entry.command, args: entry.args });
+    const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
+    if (parsed.entry && !equal(current, entry) && !implicitStdio) {
       if (!previous || previous.hadNeorion || !equal(getNodeValue(parsed.entry), previous.entry)) {
         throw new Error(`Neorion MCP server conflicts with an existing entry in ${configFile}`);
       }
@@ -188,7 +200,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
       const end = start + parsed.entry.length;
       const indent = /^[\t ]*/.exec(source.slice(source.lastIndexOf('\n', start - 1) + 1))![0];
       const newline = source.includes('\r\n') ? '\r\n' : '\n';
-      const replacement = json(entry).replace(/\n/g, newline + indent);
+      const replacement = inline ? JSON.stringify(entry) : json(entry).replace(/\n/g, newline + indent);
       const offset = previous.insertion ? source.indexOf(previous.insertion) : -1;
       const insertion = previous.insertion;
       const nextInsertion = insertion && offset >= 0 && start >= offset && end <= offset + insertion.length
@@ -200,9 +212,9 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     }
     if (parsed.entry && previous) continue;
     const edit = parsed.entry ? undefined : insert(original ?? '{}', parsed.bom,
-      parsed.group ?? parsed.tree, parsed.group ? 'neorion' : key, parsed.group ? entry : { neorion: entry });
+      parsed.group ?? parsed.tree, parsed.group ? 'neorion' : key, parsed.group ? entry : { neorion: entry }, inline);
     state.configs[target] = {
-      createdFile: previous?.createdFile ?? original === null, insertion: edit?.insertion, entry,
+      createdFile: previous?.createdFile ?? original === null, insertion: edit?.insertion, entry: implicitStdio ? current : entry,
       hadGroup: previous?.hadGroup ?? !!parsed.group, hadNeorion: !!parsed.entry,
       createdDirectory: previous?.createdDirectory ?? !exists(path.dirname(file))
     };

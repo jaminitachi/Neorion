@@ -3,8 +3,9 @@ import * as path from 'path';
 import { kinds, type QueryKind } from '../mcp/Tools';
 import { workspaceCache } from './WorkspaceCache';
 
-export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', '.cursor/rules/neorion.mdc'];
+export const CURSOR_EXTENSION_RULE = '.cursor/rules/neorion.mdc';
 export const CURSOR_SETUP_RULE = '.cursor/rules/neorion-query.mdc';
+export const AGENT_FILES = ['AGENTS.md', 'CLAUDE.md', CURSOR_EXTENSION_RULE];
 const queryArguments: Record<QueryKind, string> = {
   who_renders: ' <Component>',
   wrappers: ' <route>',
@@ -32,6 +33,19 @@ const END = '<!-- neorion:end -->';
 const STATE = /^<!-- neorion:state (\{.*\}|[\w+/=]+) -->\r?$/m;
 const FRONTMATTER = /^\uFEFF?---\r?\n(?:[\s\S]*?\r?\n)?---(?:\r?\n|$)/;
 const ALWAYS_APPLY = /^alwaysApply:[^\r\n]*/m;
+
+export function hasActiveCursorRule(root: string, target: string) {
+  const file = path.join(root, target);
+  for (let entry = file; entry !== root; entry = path.dirname(entry)) {
+    if (fs.lstatSync(entry, { throwIfNoEntry: false })?.isSymbolicLink()) return false;
+  }
+  if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) return false;
+  const source = fs.readFileSync(file, 'utf8');
+  const start = source.indexOf(START);
+  const frontmatter = FRONTMATTER.exec(source)?.[0] ?? '';
+  return start >= 0 && source.indexOf(END, start) >= 0 &&
+    /^alwaysApply:[ \t]*true(?:[ \t]+#.*)?[ \t]*$/.test(ALWAYS_APPLY.exec(frontmatter)?.[0] ?? '');
+}
 
 interface BlockState {
   created?: boolean;
