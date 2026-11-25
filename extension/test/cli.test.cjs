@@ -224,13 +224,21 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   fs.mkdirSync(web, { recursive: true });
   fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
   fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"devDependencies":{"next":"15.0.0"},"workspaces":["apps/*","packages/*"]}');
-  fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'packages/ui/a.js'), 'export const Shared = 1;');
+  const manifest = path.join(root, 'package.json');
+  const workspaces = ['apps/*', 'packages/*'];
+  fs.writeFileSync(manifest, JSON.stringify({ workspaces }));
+  fs.mkdirSync(path.join(root, 'packages/ui/src/app'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages/ui/tsconfig.json'), '{"include":["src/**/*"]}');
+  fs.writeFileSync(path.join(root, 'packages/ui/src/app/index.ts'), 'export const Shared = 1;');
   fs.mkdirSync(path.join(root, 'playwright/app'), { recursive: true });
   fs.writeFileSync(path.join(root, 'playwright/tsconfig.json'), '{}');
   fs.writeFileSync(path.join(root, 'playwright/app/fixture.ts'), 'export const fixture = true;');
 
+  const control = run(['graph']);
+  assert.equal(control.status, 0, control.stderr);
+  assert.match(control.stdout, /playwright · none router · 1 source files/);
+
+  fs.writeFileSync(manifest, JSON.stringify({ workspaces, devDependencies: { next: '15.0.0' } }));
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
   assert.match(graph.stdout, /web · app router · 1 source files/);
@@ -239,7 +247,67 @@ test('CLI and MCP prefer a configured Next.js app to a workspace root with hoist
   assert.match(result, /^Project: web$/m);
   assert.match(result, /^\/  app\/page\.tsx:2/m);
   assert.equal(run(['query', 'who_renders', 'DashboardShell']).stdout.trimEnd(), result);
+
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["bootstrap.ts"]}');
+  fs.writeFileSync(path.join(root, 'bootstrap.ts'), 'export const ready = true;');
+  const withBaseConfig = run(['graph']);
+  assert.equal(withBaseConfig.status, 0, withBaseConfig.stderr);
+  assert.match(withBaseConfig.stdout, /web · app router · 1 source files/);
 });
+
+for (const configured of [true, false]) {
+  test(`CLI keeps an explicit ${configured ? 'configured app with hoisted Next.js' : 'configless Next.js app'} over its nested example`, t => {
+    const { root, run } = fixture(t);
+    const web = path.join(root, 'apps/web');
+    const example = path.join(web, 'examples/admin');
+    const page = configured ? 'page.tsx' : 'page.jsx';
+    const next = { next: '15.0.0' };
+    fs.mkdirSync(path.join(web, 'src/app'), { recursive: true });
+    fs.renameSync(path.join(root, 'app/page.tsx'), path.join(web, 'src/app', page));
+    if (configured) {
+      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: next, workspaces: ['apps/*'] }));
+      fs.writeFileSync(path.join(web, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+    }
+    fs.writeFileSync(path.join(web, 'package.json'), JSON.stringify({ name: 'web', ...(configured ? {} : { dependencies: next }) }));
+    fs.mkdirSync(path.join(example, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(example, 'package.json'), JSON.stringify({ name: 'admin', dependencies: next }));
+    fs.renameSync(path.join(root, 'tsconfig.json'), path.join(example, 'tsconfig.json'));
+    fs.writeFileSync(path.join(example, 'app/page.tsx'), 'export default function Page() { return <aside />; }');
+
+    const graph = run(['graph', web]);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /web · app router/);
+    const query = run(['query', 'who_renders', 'DashboardShell', '--root', web]);
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /^Project: web$/m);
+    assert.ok(query.stdout.includes(`src/app/${page}:2`));
+  });
+}
+
+for (const configured of [false, true]) {
+  test(`CLI prefers a route-less ${configured ? 'configured workspace app' : 'configless Next.js root'} over tooling`, t => {
+    const { root, run } = fixture(t);
+    const web = configured ? path.join(root, 'apps/web') : root;
+    fs.rmSync(path.join(root, 'app'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'e2e'));
+    fs.unlinkSync(path.join(root, 'tsconfig.json'));
+    fs.writeFileSync(path.join(root, 'e2e/tsconfig.json'), '{"include":["*.ts"]}');
+    fs.writeFileSync(path.join(root, 'e2e/home.spec.ts'), 'export const home = () => "/";');
+    fs.mkdirSync(path.join(web, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web","dependencies":{"next":"15.0.0"}}');
+    fs.writeFileSync(path.join(web, configured ? 'lib/index.ts' : 'lib/index.js'), 'export const ready = true;');
+    if (configured) {
+      fs.writeFileSync(path.join(web, 'tsconfig.json'), '{"include":["lib/**/*"]}');
+      fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'packages/ui/tsconfig.json'), '{"include":["index.ts"]}');
+      fs.writeFileSync(path.join(root, 'packages/ui/index.ts'), 'export const Shared = true;');
+    }
+
+    const graph = run(['graph']);
+    assert.equal(graph.status, 0, graph.stderr);
+    assert.match(graph.stdout, /web · none router/);
+  });
+}
 
 test('CLI finds a Next.js app alongside a standalone config and a Next.js tooling fixture', t => {
   const { root, run } = fixture(t);
