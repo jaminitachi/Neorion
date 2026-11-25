@@ -513,7 +513,8 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   if (history?.removed) notes.push(graphRow(`# removed: ${quantity(history.removed, 'export')} from base`));
   const tracedSymbols = [...seeds.values()].filter(seed => seed.ids.length === 1 && changedSymbols.has(Number(seed.ids[0]))).length;
   notes.push(graphRow(`# risk: ${quantity(changedSymbols.size, 'changed symbol')} (${quantity(actionCount, 'action')}` +
-    `${tracedSymbols < changedSymbols.size ? `, ${tracedSymbols} traced` : ''}); ${quantity(routes, 'route')} reached (${pageFiles.size} page, ${apiFiles.size} api); ` +
+    `${tracedSymbols < changedSymbols.size ? `, ${tracedSymbols} traced` : ''}); ${quantity(routes, 'route')} reached ` +
+    `(${quantity(pageFiles.size, 'page')}, ${quantity(apiFiles.size, 'API')}); ` +
     `${quantity(wrapperRoutes, 'route')} under touched wrappers; ${quantity(configFiles, 'config file')}` +
     (otherFiles.size ? `; ${quantity(otherFiles.size, 'special file')}` : '')));
   const diffScope = base ? `merge-base(${base}, HEAD)` : scope === 'all' ? 'HEAD' : scope === 'staged' ? '--cached' : '(worktree)';

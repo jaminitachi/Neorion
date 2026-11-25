@@ -1,21 +1,29 @@
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { findProject, generateGraph } from '../core/Generate';
 export { inspectChangeSource } from '../core/analyzers/ChangeSource';
 import { missingProject } from '../core/FindProject';
 import { mcpCommand } from '../core/McpCommand';
+import { projectLabel } from '../mcp/Build';
 import { VERSION } from '../mcp/Index';
 
-export function run(root: string) {
+export function run(root: string, showMcpConfig = false) {
   const start = performance.now();
+  const onProgress = process.stderr.isTTY ? (message: string) => console.error(message) : undefined;
+  onProgress?.('Finding the Next.js project...');
   const project = findProject(root);
   if (!project) throw new Error(missingProject(root));
-  const { graph, outputPath } = generateGraph(project, { markdown: true });
+  const label = projectLabel(project);
+  const selected = relative(root, project).replace(/[\r\n]/g, ' ');
+  onProgress?.(`Project: ${label}${selected ? ` (${selected})` : ''}`);
+  const { graph, outputPath } = generateGraph(project, { markdown: true, onProgress });
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
-  console.log(`Neorion ${VERSION} · ${graph.metadata.name} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s`);
+  console.log(`Neorion ${VERSION} · ${label} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s`);
   console.log(`Overview: ${outputPath}`);
-  const mcp = mcpCommand({ localEntry: join(__dirname, 'neorion.cjs'), detectCache: true });
-  console.log(`MCP:      ${JSON.stringify(mcp)}`);
+  if (showMcpConfig) {
+    const mcp = mcpCommand({ localEntry: join(__dirname, 'neorion.cjs'), detectCache: true });
+    console.log(`MCP:      ${JSON.stringify(mcp)}`);
+  }
 }
 
 if (require.main === module) {

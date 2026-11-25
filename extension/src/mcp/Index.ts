@@ -1,9 +1,11 @@
 export const WRAPPER_INDEX_REVISION = 2;
-export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 8;
+export const QUERY_INDEX_REVISION = 6;
+export const GRAPH_INDEX_REVISION = 9;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
+export const AI_SDK_TRANSPORT = 'AI SDK transport';
+export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
@@ -93,6 +95,7 @@ export interface QueryIndex {
   branches?: Record<string, string[]>;
   references: IndexedReference[];
   fetches: FetchEntry[];
+  uncertainChatTransports?: [file: string, owner: number, unbounded?: boolean][];
   serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;
   graphRevision?: number;

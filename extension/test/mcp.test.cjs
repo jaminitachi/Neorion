@@ -154,7 +154,7 @@ test('U3–U10 deterministic queries, ambiguity, suggestions, freshness, aliases
   assert.ok(ambiguous.split('\n').slice(1, -1).every(line => /^fixture\/[abc].tsx:1#Triangle component$/.test(line)));
   const typo = await client.text('rename_impact', { symbol: 'writeDta' });
   assert.match(typo, /0 results/);
-  assert.match(typo, /^# did you mean: .*#writeData$/m);
+  assert.match(typo, /^# did you mean: .*#writeData \(declared at line \d+\)$/m);
   assert.ok(typo.split('\n').length <= 6);
 
   assert.match(outputs.who_renders, /^\/structure  app\/structure\/page.tsx:2  depth 1$/m);
@@ -304,8 +304,11 @@ test('helper-wrapped server actions appear in the graph and resolve to their run
   assert.match(await query('defAct'), /^# api_consumers app\/actions\.ts:22#default /m);
   assert.match(await query('submit'), /^# ambiguous api_consumers submit/m);
   assert.match(await query('inline'), /^# ambiguous api_consumers inline[^\n]*\napp\/panels\.tsx:2#ServerPanel\.inline server action\napp\/panels\.tsx:7#OtherPanel\.inline server action/m);
-  assert.match(await query('singOut'), /^# did you mean: app\/actions\.ts:10#signOut$/m);
-  assert.match(await query('app/panels.tsx#onlyInlne'), /^# did you mean: app\/panels\.tsx:8#OtherPanel\.onlyInline$/m);
+  assert.match(await query('singOut'), /^# did you mean: app\/actions\.ts#signOut \(declared at line 10\)$/m);
+  const actionMiss = await query('signO');
+  assert.match(actionMiss, /^# did you mean: app\/actions\.ts#signOut \(declared at line 10\)$/m);
+  assert.match(actionMiss, /^# try: call neorion_query with {"kind":"search","target":"signO"}$/m);
+  assert.match(await query('app/panels.tsx#onlyInlne'), /^# did you mean: app\/panels\.tsx#OtherPanel\.onlyInline \(declared at line 8\)$/m);
   assert.match(await query('literal'), /^# partial: target unresolved$/m);
 
   const files = ['app/actions.ts', 'lib/other-actions.ts', 'app/page.tsx', 'app/panels.tsx', 'lib/call.ts', 'lib/reex.ts'];
@@ -429,7 +432,7 @@ test('API consumers count and label SWR reads, mutates, fallback keys, and other
   ]);
   const limited = await query({ limit: 1 });
   assert.match(limited, / : 6 sites in 2 files: 3 reads, 1 mutate, 1 fallback key, 1 other mention, showing 1 /);
-  assert.match(await query(), /^send +unrelated\.test\.ts:1 \? route literal \[test\]$/m);
+  assert.match(await query(), /^send   unrelated\.test\.ts:1 \? route literal \[mention\] \[test\]$/m);
 });
 
 test('compact API queries cover route literals, SWR keys, wrappers, and uncertainty', async t => {
@@ -463,9 +466,9 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
   assert.match(widgets, /7 sites in 3 files: 1 read, 1 mutate, 3 other mentions, 2 callers/);
   assert.match(widgets, /^send +widget\.ts:2 update \? SWR mutate \[partial url\]$/m);
   assert.match(widgets, /^send +widget\.ts:3 useWidget GET SWR key$/m);
-  assert.match(widgets, /^send +widget\.ts:5 wrapped \? route literal \[partial url\]$/m);
-  assert.match(widgets, /^send +widget\.ts:6 \? route literal$/m);
-  assert.match(widgets, /^send +widget\.test\.ts:1 .*\[test\]$/m);
+  assert.match(widgets, /^send   widget\.ts:5 wrapped \? route literal \[mention\] \[partial url\]$/m);
+  assert.match(widgets, /^send   widget\.ts:6 \? route literal \[mention\]$/m);
+  assert.match(widgets, /^send   widget\.test\.ts:1 .*\[mention\] \[test\]$/m);
   assert.match(widgets, /^call1 +caller\.ts:1 wrapped$/m);
   assert.match(widgets, /^call1 +widget\.ts:8 wrapped$/m);
   assert.match(widgets, /^# partial: uncertain URL matches$/m);
@@ -473,6 +476,171 @@ test('compact API queries cover route literals, SWR keys, wrappers, and uncertai
   assert.match(await query('/api/ping'), /^# complete: indexed route literals/m);
   write(root, 'widget.ts', 'export const replacement = "/api/ping";');
   assert.match(await query('/api/ping'), /^# partial: stale index$/m);
+});
+
+test('API consumers recognize the imported AI SDK transport and keep literals separate', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'app/api/chat/route.ts', 'export function POST() {}');
+  write(root, 'app/api/chat/[id]/stream/route.ts', 'export function GET() {}');
+  write(root, 'app/api/history/route.ts', 'export function GET() {}');
+  write(root, 'chat.ts', [
+    "import { DefaultChatTransport as Transport } from 'ai';",
+    "import { forward } from './forward';",
+    'export function chat() {',
+    '  return new Transport({',
+    '    api: `${process.env.BASE ?? ""}/api/chat`, fetch: forward,',
+    '    prepareSendMessagesRequest(request) {',
+    '      const messages = request.messages.filter(message => { return message.role === "user"; });',
+    '      return { body: { ...request.body, messages } };',
+    '    },',
+    '  });',
+    '}',
+    'export const protection = { path: "/api/chat" };',
+    'class DefaultChatTransport { constructor(config: unknown) {} }',
+    'new DefaultChatTransport({ api: "/api/chat" });'
+  ].join('\n'));
+  write(root, 'forward.ts', [
+    'export async function forward(input: string, init: RequestInit) {',
+    '  try {',
+    '    const response = await fetch(input, init);',
+    '    if (!response.ok) throw new Error("Request failed");',
+    '    return response;',
+    '  } catch (error) { throw error; }',
+    '}'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  const consumers = await client.text('query', { kind: 'api_consumers', target: '/api/chat' });
+  assert.match(consumers, /3 sites in 1 file: 1 request, 2 other mentions/);
+  assert.match(consumers, /^send   chat\.ts:5 chat POST AI SDK transport \[partial url\]$/m);
+  assert.match(consumers, /^send   chat\.ts:12 \? route literal \[mention\]$/m);
+  assert.match(consumers, /^send   chat\.ts:14 \? route literal \[mention\]$/m);
+  assert.match(consumers, /^# similar routes not matched: \/api\/chat\/\[id\]\/stream$/m);
+  const callees = await client.text('query', { kind: 'callees', target: 'chat' });
+  assert.match(callees, /d1 fetch :5  POST \/api\/chat.*\(AI SDK transport\) \[partial url\]/);
+  assert.match(callees, /^# partial: .*possible AI SDK transport URL override/m);
+});
+
+test('static AI SDK overrides follow property and callback precedence with scoped partial evidence', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const name of ['chat', 'other', 'health']) {
+    write(root, `app/api/${name}/route.ts`, 'export function POST() {}');
+  }
+  write(root, 'pages/api/shared.ts', 'export default function handler() {}');
+  write(root, 'chat.ts', String.raw`
+    import { DefaultChatTransport, TextStreamChatTransport } from 'ai';
+    import { useChat } from '@ai-sdk/react';
+    export function customChat() {
+      return new DefaultChatTransport({
+        api: '/api/chat',
+        \u0070repareSendMessagesRequest() { return { \u0061pi: '/api/other', body: {} }; },
+      });
+    }
+    export function spreadChat() {
+      const options = { api: '/api/other' };
+      return new DefaultChatTransport({ api: '/api/chat', ...options });
+    }
+    export function sameUrl() {
+      return new TextStreamChatTransport({ api: '/api/chat', ...{ headers: {} } });
+    }
+    export function literalLast() {
+      return useChat({
+        ...{ transport: new DefaultChatTransport({ api: '/api/other' }) },
+        transport: new TextStreamChatTransport({
+          ...{ api: '/api/other' }, api: '/api/chat',
+          prepareReconnectToStreamRequest: () => ({ api: '/api/chat' }),
+        }),
+      });
+    }
+    export function sharedRoute() {
+      return new DefaultChatTransport({ api: '/api/shared', prepareReconnectToStreamRequest: () => ({ api: '/api/shared' }) });
+    }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = (kind, target, extra = {}) => client.text('query', { kind, target, ...extra });
+  const partial = /^# partial: possible AI SDK transport URL override$/m;
+  const chat = await query('api_consumers', '/api/chat');
+  assert.match(chat, /^send .* sameUrl POST AI SDK transport \[partial url\]$/m);
+  assert.match(chat, /^send .* literalLast POST AI SDK transport$/m);
+  assert.match(chat, /^send .* literalLast GET AI SDK transport$/m);
+  assert.doesNotMatch(chat, /customChat|spreadChat/);
+  const other = await query('api_consumers', '/api/other');
+  assert.match(other, /2 sites in 1 file: 2 requests/);
+  assert.match(other, partial);
+  assert.match(await query('api_consumers', '/api/health'), /^# complete:/m);
+
+  for (const name of ['customChat', 'spreadChat']) {
+    const path = await query('path', name, { to: '/api/other' });
+    assert.match(path, /1 hop/);
+    assert.match(path, /POST \/api\/other .* \[partial url\]/);
+    assert.match(path, partial);
+    const miss = await query('path', name, { to: '/api/chat' });
+    assert.match(miss, /no directed path/);
+    assert.match(miss, partial);
+  }
+  assert.match(await query('path', 'literalLast', { to: '/api/chat' }), /^# complete:/m);
+  const shared = await query('callees', 'sharedRoute');
+  assert.match(shared, /2 fetches/);
+  assert.match(shared, /^d1 fetch :\d+  GET \/api\/shared /m);
+  assert.match(shared, /^d1 fetch :\d+  POST \/api\/shared /m);
+});
+
+test('opaque AI SDK API, fetch and prepare options cannot create a complete path', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  for (const name of ['chat', 'other', 'health']) {
+    write(root, `app/api/${name}/route.ts`, 'export function POST() {}');
+  }
+  write(root, 'chat.ts', `
+    import * as ai from 'ai';
+    import { useChat } from 'ai/react';
+    import { useCompletion, experimental_useObject as useObject, useObject as object } from '@ai-sdk/react';
+    declare const options: Record<string, unknown>;
+    export function middlewareChat() {
+      return new ai.DefaultChatTransport({ api: '/api/chat', fetch: (_input, init) => fetch('/api/other', init) });
+    }
+    export function thenableChat() {
+      return new ai.DefaultChatTransport({
+        api: '/api/chat',
+        prepareSendMessagesRequest: () => {
+          const prepared = Promise.resolve({ api: '/api/other', body: {} });
+          return { then: prepared.then.bind(prepared) };
+        },
+      });
+    }
+    export function opaqueChat() { return new ai.DefaultChatTransport(options); }
+    export function hookWithSpread() { return useChat({ api: '/api/chat', ...options }); }
+    export function transportWithSpread() {
+      const transport = new ai.TextStreamChatTransport({ api: '/api/chat' });
+      return useChat({ transport, ...options });
+    }
+    export function completionWithFetch() { return useCompletion({ api: '/api/chat', fetch: (input, init) => fetch(input, { ...init, method: 'GET' }) }); }
+    export function objectWithDynamicApi(api: string) { return useObject({ api }); }
+    export function objectWithIndirectApi() { const api = '/api/chat'; return object({ api }); }
+    export function staticCompletion() { return useCompletion({ api: '/api/other' }); }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const query = (kind, target, extra = {}) => client.text('query', { kind, target, ...extra });
+  const partial = /^# partial: .*possible AI SDK transport URL override/m;
+  const consumers = await query('api_consumers', '/api/chat');
+  assert.match(consumers, /^send .* middlewareChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(consumers, /^send .* thenableChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(consumers, /^send .* objectWithIndirectApi \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(await query('api_consumers', '/api/health'), partial);
+  for (const name of ['middlewareChat', 'thenableChat', 'opaqueChat', 'hookWithSpread',
+    'transportWithSpread', 'completionWithFetch', 'objectWithDynamicApi', 'objectWithIndirectApi']) {
+    for (const route of ['/api/chat', '/api/other']) {
+      const path = await query('path', name, { to: route });
+      assert.match(path, / : no directed path /);
+      assert.match(path, partial);
+    }
+    assert.match(await query('callees', name), partial);
+  }
+  assert.match(await query('path', 'staticCompletion', { to: '/api/other' }), /^# complete:/m);
 });
 
 test('only static trailing-slash URLs match the list route', async t => {
@@ -500,7 +668,7 @@ test('only static trailing-slash URLs match the list route', async t => {
   for (const route of ['items/[id]', 'items/special']) {
     const output = await client.text('api_consumers', { route: '/api/' + route });
     assert.match(output, /^send +items\.ts:2 GET fetch \[partial url\]$/m);
-    assert.match(output, /^send +items\.ts:9 \? route literal \[partial url\]$/m);
+    assert.match(output, /^send   items\.ts:9 \? route literal \[mention\] \[partial url\]$/m);
     assert.match(output, /^# partial: uncertain URL matches$/m);
   }
   const list = await client.text('api_consumers', { route: '/api/items' });

@@ -246,6 +246,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     return output;
   }
   const impact = await check('impact', 'normalize');
+  assert.match(impact, /# risk: .*3 pages, 1 API.*1 layout; .*1 test$/m);
   for (const evidence of [/api GET \/api\/items\/\[id\]/, /page \/b\/\[id\].*generateMetadata/,
     /page \/items.*\[cond\]/, /meta sitemap \/sitemap\.xml/, /action createItem/,
     /layout app\/\(main\)\/layout\.tsx  wraps 2 routes \(\/items, \/other\)/, /# tests: 1 file/,
@@ -287,12 +288,20 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
 
   const callees = await check('callees', 'createItem');
   assert.match(callees, /db\.\$transaction  server\/db\.ts#db/);
-  assert.match(callees, /ext next\/cache  revalidatePath/);
+  assert.match(callees, /^d1 ext next\/cache  revalidatePath:\d+(?: ×\d+)?$/m);
   assert.match(callees, /: 2 project calls/);
   assert.match(callees, /^d1 call :7,10,11 \+1  normalize/m);
+  assert.match(callees, /^# source: server\/actions\.ts \(unqualified first-hop sites\)$/m);
   assert.equal(callees.split('\n').filter(line => line.includes('  normalize  ')).length, 1);
-  assert.match(callees, /# unresolved: 1 calls/);
+  assert.match(callees, /^# partial: 1 unresolved call on local variables or parameters$/m);
   assert.doesNotMatch(callees, /anotherAction/);
+  const limited = query('callees', 'createItem', '--limit', '1');
+  assert.match(limited, /^# more: \d+ \(try .+neorion\.cjs'? query callees createItem --depth 1 --limit \d+ --root .+\)$/m);
+  const limitedMcp = await mcp.text('query', { kind: 'callees', target: 'createItem', limit: 1 });
+  assert.match(limitedMcp, /^# more: \d+ \(set limit=\d+ on the same request and keep the other arguments\)$/m);
+  for (const output of [limited, limitedMcp]) {
+    assert.match(output, /^# partial: output truncated; 1 unresolved call on local variables or parameters$/m);
+  }
   assert.match(query('callees', 'CreateItem'), /d1 action .*createItem/);
   assert.match(query('callees', 'useItems'), /fetch .*GET \/api\/items\/\[id\].*\(SWR key\)/);
   assert.doesNotMatch(query('callees', 'useItems'), /\bfetch .*mutate/);
@@ -910,6 +919,9 @@ test('changes handles top-level edits, reports module stops and can rerun deeper
   assert.match(shallow, /# stopped at 1 module-level use \(importers not traced\)/);
   assert.doesNotMatch(shallow, /route page \/other/);
   assert.match(changes('--depth', '6'), /route page \/other .*start d5/);
+  const limited = changes('--depth', '6', '--unstaged', '--limit', '1');
+  assert.match(limited, /^# more: 1 \(try .+ query changes --depth 6 --unstaged --limit 2 --root .+, or narrow the diff\)$/m);
+  assert.match(limited, /^# partial: output truncated; module-level importers not traced$/m);
   assert.match(query('impact', 'start'), /# stopped at 1 module-level use/);
   git('restore', '.');
 

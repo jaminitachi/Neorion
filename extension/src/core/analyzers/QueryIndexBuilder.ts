@@ -85,6 +85,7 @@ export class QueryIndexBuilder {
   private edges: [string, string, number, number][] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
   private fetches: PendingFetch[] = [];
+  private uncertainChatTransports: { file: string; node: Node; unbounded: boolean }[] = [];
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
@@ -98,6 +99,10 @@ export class QueryIndexBuilder {
 
   fetch(entry: PendingFetch) {
     this.fetches.push(entry);
+  }
+
+  uncertainChatTransport(file: string, node: Node, unbounded: boolean) {
+    this.uncertainChatTransports.push({ file, node, unbounded });
   }
 
   action(id: string, name: string, file: string, line: number) {
@@ -310,6 +315,12 @@ export class QueryIndexBuilder {
       const [owner, graphOwner] = owners(node);
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
         fn: owner ? index.symbols[owner - 1].name : null });
+    }
+    if (this.uncertainChatTransports.length) {
+      index.uncertainChatTransports = this.uncertainChatTransports.map(({ file, node, unbounded }) => {
+        const [owner, graphOwner] = owners(node);
+        return [file, graphOwner ?? owner ?? byGraphId.get(`file:${file}`)!, unbounded];
+      });
     }
 
     const dynamicBindings = new Map<Node, number>();

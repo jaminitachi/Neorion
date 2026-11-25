@@ -1,5 +1,4 @@
 # wrappers / : 6 files, 1 page (index 2026-11-19T06:00Z, fresh)
-# not wrappers: rendered inside the page
 # providers (outermost first): ThemeProvider, NextThemesProvider (external: next-themes), SessionProvider (external: next-auth/react), TooltipProvider, DataStreamProvider, DataStreamContext.Provider, SidebarProvider, SidebarContext.Provider
 1 app/layout.tsx:51 RootLayout providers: SessionProvider (external: next-auth/react)
 2 components/theme-provider.tsx:6 ThemeProvider providers: NextThemesProvider (external: next-themes)
