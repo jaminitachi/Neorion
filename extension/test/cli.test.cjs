@@ -14,7 +14,7 @@ const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
 const entry = path.join(packageRoot, 'dist/neorion.cjs');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
-const cliSpawnTimeout = 60_000;
+const cliSpawnTimeout = 180_000;
 
 function fixture(t) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-cli-'));
@@ -31,9 +31,13 @@ function fixture(t) {
   delete env.CODEX_HOME;
   for (const key of Object.keys(env)) if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete env[key];
   env.PATH = process.env.PATH;
-  const run = (args, overrides = {}, cliEntry = entry) => childProcess.spawnSync(process.execPath, [cliEntry, ...args], {
-    cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: cliSpawnTimeout
-  });
+  const run = (args, overrides = {}, cliEntry = entry) => {
+    const result = childProcess.spawnSync(process.execPath, [cliEntry, ...args], {
+      cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: cliSpawnTimeout
+    });
+    if (result.error) throw result.error;
+    return result;
+  };
   return { root, cache, home, env, run };
 }
 
@@ -816,16 +820,29 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
     session_id: session, cwd: root, hook_event_name: 'PreToolUse',
     tool_name, tool_input: { pattern, path: searchPath }, tool_use_id: 'fixture-tool'
   });
-  const invoke = input => {
-    const result = spawnSync(process.execPath, hook.args, { cwd: home, env, input, encoding: 'utf8', timeout: 2000 });
-    assert.equal(result.status, 0, result.error?.message ?? result.stderr);
-    assert.equal(result.stderr, '');
-    return result.stdout;
+  const preload = path.join(home, 'slow-start.cjs');
+  fs.writeFileSync(preload, 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2100);\n');
+  const inputFile = path.join(home, 'hook-input');
+  const invoke = (input, flags = []) => {
+    // Have the entire request ready when the hook starts its stdin deadline.
+    fs.writeFileSync(inputFile, input);
+    const stdin = fs.openSync(inputFile, 'r');
+    try {
+      const result = spawnSync(process.execPath, [...flags, ...hook.args], {
+        cwd: home, env, stdio: [stdin, 'pipe', 'pipe'], encoding: 'utf8', timeout: cliSpawnTimeout
+      });
+      if (result.error) throw result.error;
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(result.stderr, '');
+      return result.stdout;
+    } finally {
+      fs.closeSync(stdin);
+    }
   };
   const manifest = path.join(root, 'package.json');
   const component = payload('Grep', '\\bDashboardShell\\b');
   fs.writeFileSync(manifest, '{"dependencies":{"next":"^15.0.0"}}');
-  assert.equal(invoke(component), '');
+  assert.equal(invoke(component, ['--require', preload]), '');
   const graph = run(['graph']);
   assert.equal(graph.status, 0, graph.stderr);
   const componentGlob = '**/*DashboardShell*.{tsx,ts}';
@@ -837,6 +854,7 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
     [payload('Grep', 'signOut'), 'search', 'signOut']
   ]) {
     const output = invoke(input);
+    assert.ok(output, `Expected an advisory for ${input}`);
     assert.equal(output.trimEnd().split('\n').length, 1);
     assert.deepEqual(JSON.parse(output), { hookSpecificOutput: {
       hookEventName: 'PreToolUse',

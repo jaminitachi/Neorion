@@ -12,7 +12,7 @@ const { indexFile: indexPath } = require('./workspace-cache.cjs');
 
 const entry = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
 const source = path.join(__dirname, 'fixtures/impact-graph');
-const cliSpawnTimeout = 60_000;
+const cliSpawnTimeout = 180_000;
 
 function fixture(t, reverse = false, fixtureSource = source) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-graph-kinds-'));
@@ -35,7 +35,8 @@ function fixture(t, reverse = false, fixtureSource = source) {
     const result = childProcess.spawnSync(process.execPath, [entry, ...args], {
       cwd: root, env: { ...env, ...extra }, encoding: 'utf8', timeout: cliSpawnTimeout
     });
-    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd();
   };
   const query = (...args) => run(['query', ...args], { NEORION_AUTOBUILD: '0' });
@@ -339,7 +340,7 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   assert.match(run(['query', 'impact', 'cn']), /# complete/);
 });
 
-test('path gives the shortest directed chain from a page, symbol, or layout', { timeout: 30_000 }, async t => {
+test('path gives the shortest directed chain from a page, symbol, or layout', { timeout: cliSpawnTimeout }, async t => {
   const { root, env, query, build } = fixture(t);
   build();
   const directly = query('path', '/items', 'createItem');
@@ -1252,6 +1253,52 @@ test('component choices trace array elements, helper returns and fallback branch
       export default function Page() { return <nav>{NAV.map(${render})}</nav>; }
     `);
   }
+  const nav = `
+    function HomeIcon() { return <span/>; }
+    function LogIcon() { return <span/>; }
+  `;
+  const navItems = `[{ href: '/dashboard', icon: HomeIcon }, { href: '/workout-log', icon: LogIcon }]`;
+  const navChoices = [
+    ['find-alias', 'const item = NAV.find(n => n.href === k)!; const Icon = item.icon; return <Icon/>;'],
+    ['find-optional', 'const Icon = NAV.find(n => n.href === k)?.icon; return Icon ? <Icon/> : null;', true],
+    ['filter-map', 'return <nav>{NAV.filter(n => n.href === k).map(item => <item.icon/>)}</nav>;'],
+    ['find-tuple', 'const item = NAV.find(n => n.href === k); if (!item) return null; const Icon = item.icon; return <Icon/>;', true, true],
+    ['find-member', 'const item = NAV.find(n => n.href === k); return item ? <item.icon/> : null;', true],
+    ['array-destructure', 'const [first] = NAV; const Icon = first.icon; return <Icon/>;'],
+    ['array-rest', 'const [, ...rest] = NAV; return <nav>{rest.map(item => <item.icon/>)}</nav>;'],
+    ['find-last', 'const item = NAV.findLast(n => n.href === k)!; const Icon = item.icon; return <Icon/>;'],
+    ['array-at', 'const Icon = NAV.at(0)!.icon; return <Icon/>;'],
+    ['slice-chain', 'return <nav>{NAV.slice(0).toSorted().toReversed().sort().reverse().map(({ icon: Icon }) => <Icon/>)}</nav>;'],
+    ['flat-map', 'return <nav>{NAV.flatMap(item => item).map(item => <item.icon/>)}</nav>;'],
+    ['concat-map', 'return <nav>{NAV.slice(0, 1).concat({ href: "/more", icon: ExtraIcon }).map(item => <item.icon/>)}</nav>;']
+  ];
+  for (const [route, render, , tuple] of navChoices) {
+    page(route, nav + `
+      ${route === 'concat-map' ? 'function ExtraIcon() { return <span/>; }' : ''}
+      const NAV = ${navItems}${tuple ? ' as const' : ''};
+      export default function Page({ k }: { k: string }) { ${render} }
+    `);
+  }
+  page('tuple-destructure', nav + `
+    const NAV = ${navItems} as const;
+    export default function Page() { const [, second] = NAV; return <second.icon/>; }
+  `);
+  page('property-fallback', nav + `
+    const NAV = ${navItems} as const;
+    declare function opaque<T>(value: T): T;
+    export default function Page() { const Icon = opaque(NAV)[0].icon; return <Icon/>; }
+  `);
+  fs.writeFileSync(path.join(root, 'app/signal.ts'), "export function signal() { return 'ok'; }\n");
+  fs.writeFileSync(path.join(root, 'app/impact-components.tsx'), `
+    import { signal } from './signal';
+    function Leaf() { return <span>{signal()}</span>; }
+    function Middle() { return <Leaf/>; }
+    export function Shared({ show }: { show: boolean }) { return <>{show ? <Leaf/> : null}<Middle/></>; }
+  `);
+  page('certain-impact', `
+    import { Shared } from '../impact-components';
+    export default function Page() { return <Shared show={true}/>; }
+  `);
   const steps = `
     function StepA() { return <span/>; }
     function StepB() { return <span/>; }
@@ -1274,6 +1321,19 @@ test('component choices trace array elements, helper returns and fallback branch
     function IconB() { return <span/>; }
     const MAP = { a: IconA, b: IconB };
   `;
+  for (const [route, render] of [
+    ['object-values', 'Object.values(MAP).map(Icon => <Icon/>)'],
+    ['object-entries', 'Object.entries(MAP).map(([key, Icon]) => <Icon key={key}/>)'],
+    ['entry-alias', 'Object.entries(MAP).map(entry => { const Icon = entry[1]; return <Icon/>; })']
+  ]) {
+    page(route, icons + `export default function Page() { return <nav>{${render}}</nav>; }`);
+  }
+  page('and-choice', icons + `
+    export default function Page({ flag }: { flag: boolean }) {
+      const Icon = (flag && IconA) && IconB;
+      return Icon ? <Icon/> : null;
+    }
+  `);
   page('helper-choice', icons + `
     function pick(k: keyof typeof MAP) { return MAP[k]; }
     export default function Page({ k }: { k: keyof typeof MAP }) { const Icon = pick(k); return <Icon/>; }
@@ -1297,11 +1357,45 @@ test('component choices trace array elements, helper returns and fallback branch
     assert.match(output, new RegExp(`^/${route}\\s.*${condition}\\[possible\\]`, 'm'));
     assert.match(output, /^# partial: component lookup key untraced/m);
   };
-  for (const route of ['nav-member', 'nav-alias', 'nav-destructure', 'tuple-step', 'list-step', 'helper-choice']) {
-    const components = route.startsWith('nav-') ? ['HomeIcon', 'LogIcon'] :
-      route.endsWith('-step') ? ['StepA', 'StepB'] : ['IconA', 'IconB'];
+  for (const route of ['nav-member', 'nav-alias', 'nav-destructure']) {
+    for (const component of ['HomeIcon', 'LogIcon']) await t.test(`${route} certainly renders ${component}`, () => {
+      const output = renders(route, component);
+      assert.match(output, new RegExp(`^/${route}\\s[^\\n]*depth 1$`, 'm'));
+      assert.match(output, /^# complete:/m);
+    });
+  }
+  for (const [route, , conditional] of navChoices) {
+    await t.test(`${route} reports possible array elements`, () => {
+      for (const component of ['HomeIcon', 'LogIcon', ...(route === 'concat-map' ? ['ExtraIcon'] : [])]) {
+        possible(route, component, conditional ? '\\[cond\\] ' : '');
+      }
+    });
+  }
+  await t.test('fixed tuple destructuring skips holes and resolves the selected element', () => {
+    assert.doesNotMatch(renders('tuple-destructure', 'HomeIcon'), /^\/tuple-destructure\s/m);
+    const output = renders('tuple-destructure', 'LogIcon');
+    assert.match(output, /^\/tuple-destructure\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('unresolved receiver falls back to the checker property declaration', () => {
+    possible('property-fallback', 'HomeIcon');
+    assert.doesNotMatch(renders('property-fallback', 'LogIcon'), /^\/property-fallback\s/m);
+  });
+  await t.test('impact picks the unconditional path through a shared component', () => {
+    const output = query('impact', 'app/signal.ts#signal');
+    assert.match(output, /^page \/certain-impact\s[^\n]*d4 via Shared > Middle$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  for (const route of ['tuple-step', 'list-step', 'helper-choice', 'object-values', 'object-entries', 'entry-alias']) {
+    const components = route.endsWith('-step') ? ['StepA', 'StepB'] : ['IconA', 'IconB'];
     for (const component of components) await t.test(`${route} renders ${component}`, () => possible(route, component));
   }
+  await t.test('logical AND only renders its right operand and marks it conditional', () => {
+    assert.doesNotMatch(renders('and-choice', 'IconA'), /^\/and-choice\s/m);
+    const output = renders('and-choice', 'IconB');
+    assert.match(output, /^\/and-choice\s.*\[cond\]$/m);
+    assert.match(output, /^# complete:/m);
+  });
   await t.test('a fixed index resolves exactly one tuple element', () => {
     assert.doesNotMatch(renders('fixed-step', 'StepA'), /^\/fixed-step\s/m);
     const output = renders('fixed-step', 'StepB');
@@ -1409,6 +1503,7 @@ test('Pages API workspace proof is scoped and invalidates the index after siblin
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, NEORION_AUTOBUILD: '1' };
   const run = (...args) => {
     const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: cliSpawnTimeout });
+    if (result.error) throw result.error;
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };

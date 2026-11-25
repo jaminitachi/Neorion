@@ -2,7 +2,7 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 6;
 export const QUERY_INDEX_REVISION = 9;
-export const GRAPH_INDEX_REVISION = 13;
+export const GRAPH_INDEX_REVISION = 14;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
