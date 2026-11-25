@@ -1,6 +1,8 @@
-import { name, version } from '../../../neorion/package.json';
+import { homepage, name, version } from '../../../neorion/package.json';
 
 export const packageSpec = `${name}@${version}`;
+export const releaseSpec = (release = version) =>
+  `${homepage.split('#')[0]}/releases/download/v${release}/${name}-${release}.tgz`;
 
 export function isTemporaryCliInstall(entry: string): boolean {
   const location = entry.replace(/\\/g, '/');
@@ -9,19 +11,22 @@ export function isTemporaryCliInstall(entry: string): boolean {
     || /(?:^|\/)(?:bunx-[^/]+(?:\/[^/]+)?|\.bunx-[^/]+\/(?:@[^/]+\/)?[^/]+)\/node_modules\//.test(location);
 }
 
-export function mcpCommand({ localEntry, detectCache = false, root, platform = process.platform, registryVersion = version }:
-  { localEntry?: string; detectCache?: boolean; root?: string; platform?: NodeJS.Platform; registryVersion?: string } = {}) {
-  const rootArgs = root === undefined ? [] : ['--root', root];
+export function mcpCommand({ localEntry, detectCache = false, root, discover = false, platform = process.platform,
+  registryVersion = version, useRelease = false }: { localEntry?: string; detectCache?: boolean; root?: string;
+    discover?: boolean; platform?: NodeJS.Platform; registryVersion?: string; useRelease?: boolean } = {}) {
+  const rootArgs = root === undefined ? [] : [discover ? '--workspace' : '--root', root];
   if (localEntry && (!detectCache || !isTemporaryCliInstall(localEntry))) {
     return { command: process.execPath, args: [localEntry, 'mcp', ...rootArgs] };
   }
 
-  const spec = `${name}@${registryVersion}`;
-  if (platform === 'win32') {
-    // The Windows npm shim needs a shell. Pass the project path as data, outside the shell command.
+  const spec = useRelease ? releaseSpec(registryVersion) : `${name}@${registryVersion}`;
+  if (platform === 'win32' || useRelease) {
+    // The Windows npm shim needs a shell. Use the same launcher for shared release-based settings
+    // on every platform and pass the project path outside the shell command.
+    const rootEnv = discover ? 'NEORION_ROOT: undefined, NEORION_WORKSPACE: process.argv[1]' : 'NEORION_ROOT: process.argv[1]';
     const launch = `const result = require('node:child_process').spawnSync('npx -y ${spec} mcp', {
       shell: true, stdio: 'inherit', env: process.argv.length > 1
-        ? { ...process.env, NEORION_ROOT: process.argv[1] } : process.env
+        ? { ...process.env, ${rootEnv} } : process.env
     });
     if (result.error) console.error(result.error.message);
     process.exitCode = result.status ?? 1;`;

@@ -3,10 +3,12 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
+import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
+import type { SourceEvidence } from '../core/analyzers/SourceEvidence';
+import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
 import { unpackGraph } from './GraphStorage';
 import { changes, validBase, type ChangeScope } from './Changes';
 import { historyBudgetMs } from './ChangesHistory';
@@ -127,13 +129,14 @@ function validate(name: string, value: unknown) {
     uses: !!uses, scope: scope as ChangeScope, base };
 }
 
-function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter') {
+function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter', suggestedFilter?: string) {
   const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
   const limit = Math.min(count, tool === 'search' ? 50 : 100);
   let narrow = '';
   if (tool === 'search') {
     narrow = 'narrow the text';
-    if (filter === 'any') narrow += cli ? ' or use --kind component' : ` or set ${mcpFilterKey}="component"`;
+    if (filter === 'any' && suggestedFilter) narrow += cli ?
+      ` or use --kind ${suggestedFilter}` : ` or set ${mcpFilterKey}=${JSON.stringify(suggestedFilter)}`;
   } else if (tool === 'changes') {
     narrow = 'narrow the diff';
   } else if (tool === 'callees' && depth > 1) {
@@ -202,6 +205,7 @@ export class QueryEngine {
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
+  private sourceEvidence?: SourceEvidence;
   private dependencyGraph?: DependencyGraph | null;
 
   constructor(root: string, private index: QueryIndex) {
@@ -235,6 +239,15 @@ export class QueryEngine {
       add(route.fileSymbol, false);
       for (const layout of route.layouts ?? []) add(layout, true);
     }
+  }
+
+  private get source() {
+    if (!this.index.sourceEvidence) return;
+    if (!this.sourceEvidence) {
+      const { SourceEvidence } = require('./graph.cjs') as typeof import('../cli/graph');
+      this.sourceEvidence = new SourceEvidence(this.root, this.index, file => this.checkPath(file));
+    }
+    return this.sourceEvidence;
   }
 
   private checkPath(file: string) {
@@ -323,7 +336,7 @@ export class QueryEngine {
 
   private search(text: string, kind: string, expired: () => boolean): Result {
     const needle = text.toLowerCase();
-    const hits: { row: Row; score: number; references: number; file: string; symbol?: SymbolEntry }[] = [];
+    const hits: { row: Row; score: number; references: number; file: string; kind: string; symbol?: SymbolEntry }[] = [];
     const match = (text: string) => {
       text = text.toLowerCase();
       return text === needle ? 0 : text.startsWith(needle) ? 1 : text.includes(needle) ? 2 : 3;
@@ -337,7 +350,7 @@ export class QueryEngine {
       const renders = new Set(this.incoming.get(symbol.id)?.map(edge => edge[0])).size;
       const references = this.references.get(symbol.id)?.length ?? 0;
       const label = `${symbol.kind} ${declaration(symbol)}`;
-      hits.push({ score, references, file: symbol.file, symbol, row: {
+      hits.push({ score, references, file: symbol.file, kind: symbol.kind, symbol, row: {
         ...row(label + (symbol.aliasOf ? ` alias of ${symbol.aliasOf}` : '') +
           (renders ? `  rendered by ${renders} components` : '') + flagTest(symbol.file), symbol.file),
         pathEnd: label.length
@@ -352,15 +365,17 @@ export class QueryEngine {
       const score = resolvedRoutes?.has(route.id) ? 0 : Math.min(match(route.url), match(route.file));
       if (score === 3) continue;
       const label = `${routeKind} ${location(route.file, route.line ?? 1)}`;
-      hits.push({ score, references: this.fetches.get(route.id)?.length ?? 0, file: route.file,
+      hits.push({ score, references: this.fetches.get(route.id)?.length ?? 0, file: route.file, kind: routeKind,
         row: { ...row(`${label} ${route.url}`, route.file), pathEnd: label.length } });
     }
     hits.sort((a, b) => a.score - b.score || b.references - a.references ||
       compare(a.file, b.file) || compare(a.row.text, b.row.text));
+    const kinds = [...group(hits, hit => hit.kind)].sort(([, a], [, b]) => b.length - a.length);
+    const suggestedFilter = kinds[0]?.[0];
     const single = hits.length === 1 ? hits[0].symbol : undefined;
     const neighbors = !expired() && single?.name.toLowerCase() === needle ? this.graph()?.neighbors(single.id, expired) : undefined;
     return {
-      title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row),
+      title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row), suggestedFilter,
       notes: neighbors ? [neighbors] : hits.length || expired() ? [] :
         this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired, undefined, kind !== 'any')
     };
@@ -390,12 +405,13 @@ export class QueryEngine {
           const decision = conditions?.[renderSiteKey(from, to, line)];
           if (decision === 'excluded') continue;
           const parent = this.symbols.get(from);
+          const render = this.source?.render(site);
           pending.push({
             id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
-            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
+            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional || !!(render?.conditions?.length || render?.lists?.length),
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
-            issue: entry.issue ?? (site ? this.index.renderEvidence?.[site]?.issue : undefined) ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
+            issue: entry.issue ?? render?.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
           });
         }
       }
@@ -420,27 +436,33 @@ export class QueryEngine {
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
-      const parents = new Map<string, { symbol: SymbolEntry; line: number; conditional: number; possible?: true;
-        render?: NonNullable<QueryIndex['renderEvidence']>[string] }>();
-      for (const [from, , line, conditional, , possible, detail, site] of this.incoming.get(symbol.id) ?? []) {
+      const parents = new Map<string, { name: string; file: string; line: number; conditional: number; possible?: true;
+        render?: RenderEvidence }>();
+      for (const [from, , line, conditional, , possible, detail, site, siteFile] of this.incoming.get(symbol.id) ?? []) {
         if (expired()) break;
         const parent = this.symbols.get(from);
-        if (possible && detail && parent) directIssue ??= `JSX prop render untraced (${location(parent.file, line)})`;
-        const render = site ? this.index.renderEvidence?.[site] : undefined;
+        const file = siteFile ?? parent?.file ?? this.pageRoots.get(from)?.[0]?.route.file;
+        if (!file) continue;
+        if (possible && detail) directIssue ??= `JSX prop render untraced (${location(file, line)})`;
+        const render = this.source?.render(site);
         directIssue ??= render?.issue;
-        const key = site ?? `${from}:${line}`;
-        if (parent && !parents.has(key)) parents.set(key, { symbol: parent, line, conditional, possible, render });
+        const key = render && site ? site : String(from);
+        if (line < (parents.get(key)?.line ?? Infinity)) parents.set(key, { name: parent?.name ?? symbol.name, file, line, conditional: conditional || Number(!!(render?.conditions?.length || render?.lists?.length)), possible, render });
       }
-      for (const { symbol, line, conditional, possible, render } of [...parents.values()].sort((a, b) => bySymbol(a.symbol, b.symbol) || a.line - b.line)) {
-        const label = `direct ${location(symbol.file, line)}#${symbol.name}`;
-        rows.push({ ...row(label + renderSuffix(render) + flagTest(symbol.file) + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : ''), symbol.file), pathEnd: label.length });
+      for (const { name, file, line, conditional, possible, render } of [...parents.values()].sort((a, b) => compare(a.file, b.file) || a.line - b.line)) {
+        const label = `direct ${location(file, line)}#${name}`;
+        rows.push({ ...row(label + renderSuffix(render) + flagTest(file) + (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : ''), file), pathEnd: label.length });
       }
     }
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
+    const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
+      issue === 'custom App page slot unresolved' || issue.startsWith('unresolved page property ') &&
+      !issue.endsWith(' in wrapper predicate'));
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
+        unresolvedAppSlot ??
         (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
   }
 
@@ -452,11 +474,15 @@ export class QueryEngine {
     if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
     const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
       item.provider ?? item.symbol.endsWith('Provider');
+    const guardNotes = new Map<string, { files: Set<string>; symbols: Set<string> }>();
     const rows = chains.flatMap((id, branch) => {
       if (expired()) return [];
       const sites = new Map(this.index.pagesWrapSites?.[route.id]?.[id]);
-      const items = (this.index.wrapChains[id] ?? []).map((item, index) =>
-        sites.has(index) ? { ...item, evidence: sites.get(index) } : item)
+      const items = (this.index.wrapChains[id] ?? []).map((item, index) => {
+        const guard = item.guardSite && this.source?.render(item.guardSite.join(':'));
+        return { ...item, evidence: sites.get(index) ?? item.evidence,
+          conditional: item.conditional || !!guard?.conditions?.length, guard };
+      })
         .filter(item => includeExternal || isProvider(item) || !item.external);
       const document = items.find(item => item.phase === 'document');
       const client = items.filter(item => item.phase !== 'document');
@@ -485,8 +511,14 @@ export class QueryEngine {
       }
       const entries: Row[] = [];
       for (const item of items) {
-        if (item.guardIssue) guardIssues.add(item.guardIssue);
-        if (item.guards?.length) notes.push(row(`# ${item.symbol}${renderSuffix({ conditions: item.guards })}`, item.file));
+        if (item.guard?.issue) guardIssues.add(item.guard.issue);
+        if (item.guard?.conditions?.length) {
+          const guard = renderSuffix({ conditions: item.guard.conditions });
+          const entry = guardNotes.get(guard) ?? { files: new Set<string>(), symbols: new Set<string>() };
+          entry.files.add(item.guardSite?.[0] ?? item.file);
+          entry.symbols.add(item.symbol);
+          guardNotes.set(guard, entry);
+        }
       }
       if (chains.length > 1) entries.push(row(branchLabel));
       if (document && branch === 0) {
@@ -513,6 +545,9 @@ export class QueryEngine {
       }
       return entries;
     });
+    for (const [guard, { files, symbols }] of guardNotes) {
+      notes.push(row(`# ${symbols.size === 1 ? [...symbols][0] : 'wrapper guard'}${guard}`, ...files));
+    }
     const page = this.symbols.get(route.component ?? 0);
     const label = `page ${location(route.file, route.line ?? 1)}`;
     const reexport = page && page.file !== route.file;
@@ -592,8 +627,12 @@ export class QueryEngine {
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
     let owners = new Set<number>();
-    let transportOverride = this.index.uncertainChatTransports?.some(([file, , unbounded]) => unbounded !== false && (includeTests || !testFile(file))) ?? false;
-    const fetches = (this.fetches.get(route.id) ?? []).filter(fetch => includeTests || !testFile(fetch.file))
+    const unboundedTransports = this.index.uncertainChatTransports?.filter(([file, , unbounded]) =>
+      unbounded !== false && (includeTests || !testFile(file))) ?? [];
+    let transportOverride = unboundedTransports.some(([, , , , override]) => override !== false);
+    let uncertainTransport = !!unboundedTransports.length;
+    const excluded = this.source?.excludedRequests();
+    const fetches = [...this.fetches.get(route.id) ?? [], ...excluded?.fetches.filter(fetch => fetch.route === route.id) ?? []].filter(fetch => includeTests || !testFile(fetch.file))
       .sort((a, b) => Number(generatedFile(a.file)) - Number(generatedFile(b.file)) ||
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
     for (const fetch of fetches) {
@@ -602,17 +641,21 @@ export class QueryEngine {
       const generated = generatedFile(fetch.file);
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
-      const override = via === AI_SDK_TRANSPORT && (fetch.method === '?' || this.index.queryRevision !== QUERY_INDEX_REVISION);
-      transportOverride ||= override || via === AI_SDK_TRANSPORT && !!fetch.partial;
-      const kind = (!override ? apiEvidence.get(via) : undefined) ?? 'other mention';
+      const legacyTransport = via === AI_SDK_TRANSPORT && this.index.queryRevision !== QUERY_INDEX_REVISION;
+      const method = legacyTransport ? '?' : fetch.method;
+      const override = via === AI_SDK_TRANSPORT && (fetch.transportOverride || legacyTransport);
+      transportOverride ||= override;
+      uncertainTransport ||= via === AI_SDK_TRANSPORT && !!fetch.partial;
+      const kind = (!(override && method === '?') ? apiEvidence.get(via) : undefined) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const mention = route.pages && (kind === 'other mention' || kind === 'fallback key');
       const label = `${mention ? 'mention ' : 'send   '}${location(fetch.file, fetch.line)}`;
       const binding = fetch.binding;
-      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${override ? '?' : fetch.method} ${via}` +
+      const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${method} ${via}` +
         (binding ? ` via prop ${binding.name} at ${location(binding.file, binding.line)}` : '') +
         (override ? ' [possible URL override]' : kind === 'other mention' && !mention ? ' [mention]' : '') +
         (fetch.partial || override ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '') +
+        (fetch.possibleReconnect ? ' [possible reconnect]' : '') +
         (fetch.evidence ? ` (${fetch.evidence})` : '');
       rows.push({ ...row(text, fetch.file, ...binding ? [binding.file] : []), pathEnd: label.length });
       if (binding && fetch.owner !== undefined) {
@@ -662,17 +705,28 @@ export class QueryEngine {
       (breakdown ? `: ${breakdown}` : '') +
       (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
     rows.push(...propEvidence.values());
+    // Preserve the more specific reason when it already describes the URL uncertainty.
+    const genericUrls = fetches.filter(fetch => !fetch.propUrlUnknown && (fetch.via !== AI_SDK_TRANSPORT || !fetch.partial));
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
-        ([this.index.pagesApiIssues?.[route.id]?.join('; '), transportOverride ? AI_SDK_URL_OVERRIDE : undefined]
-          .filter(Boolean).join('; ') || undefined) ??
-        (fetches.find(fetch => fetch.uncertainty)?.uncertainty ?? (fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' :
-          fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
-          fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
-          propIssue ?? (moreCallers ? 'caller depth limit' : undefined))),
+        [...new Set([
+          ...this.index.pagesApiIssues?.[route.id] ?? [],
+          this.index.trpcHttpIssues?.[route.id],
+          transportOverride || uncertainTransport ? transportIssue(transportOverride) : undefined,
+          ...fetches.map(fetch => fetch.uncertainty),
+          excluded?.issue,
+          fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' : undefined,
+          genericUrls.some(fetch => fetch.dynamic) ? 'dynamic URL' : undefined,
+          genericUrls.some(fetch => fetch.partial && !fetch.dynamic) ? 'uncertain URL matches' : undefined,
+          propIssue, moreCallers ? 'caller depth limit' : undefined
+        ].filter(Boolean))].join('; ') || undefined,
       notes: [
+        ...[...new Map(unboundedTransports.map(([file, , , line]) => {
+          const site = line === undefined ? file : location(file, line);
+          return [site, row(`# unbounded AI SDK transport: ${site}`, file)];
+        })).values()].slice(0, 5),
         ...(route.pages && route.methodBasis === 'enforced' && route.methods?.length
           ? [row(`# methods enforced: ${route.methods.join(', ')}`, route.file)] : []),
         ...(route.observedMethods?.length ? [row(`# methods observed: ${route.observedMethods.join(', ')} (accepted methods unknown)`, route.file)] : []),
@@ -736,7 +790,7 @@ export class QueryEngine {
     if (hasGraph(index)) {
       const symbols = index === this.index ? this.symbols : new Map(index.symbols.map(symbol => [symbol.id, symbol]));
       this.index = index;
-      this.dependencyGraph = new DependencyGraph(index, symbols);
+      this.dependencyGraph = new DependencyGraph(index, symbols, index.sourceEvidence ? () => this.source : undefined);
     } else this.dependencyGraph = null;
     return this.dependencyGraph;
   }
@@ -973,7 +1027,7 @@ export class QueryEngine {
       const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${result.title ?? target}` +
         ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
-        limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter')})` : '';
+        limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ?

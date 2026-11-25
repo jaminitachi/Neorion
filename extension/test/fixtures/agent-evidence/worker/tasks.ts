@@ -4,7 +4,7 @@ export async function runTasks() {
   const base = process.env.APP_ORIGIN;
   const url = `${base}/services/refresh`;
   await fetch(url, { method: 'POST' });
-  request('https://example.test/services/refresh', { method: 'POST' }).end();
+  request(url, { method: 'POST' }).end();
 }
 
 export function ignoreLiteral() {

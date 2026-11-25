@@ -6,7 +6,7 @@
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/dist/neorion.cjs",
         "mcp",
-        "--root",
+        "--workspace",
         "${CLAUDE_PROJECT_DIR}"
       ]
     }

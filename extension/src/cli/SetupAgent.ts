@@ -55,10 +55,19 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
     : join(homedir(), '.agents', 'skills', 'neorion');
   const skill = join(directory, 'SKILL.md');
   const stateFile = join(directory, '.neorion-setup.json');
-  fs.mkdirSync(directory, { recursive: true });
   const lock = join(directory, '.neorion-setup.lock');
-  try {
+  const acquire = () => {
+    fs.mkdirSync(directory, { recursive: true });
     fs.mkdirSync(lock);
+  };
+  try {
+    try {
+      acquire();
+    } catch (error) {
+      // A concurrent setup can remove the empty directory between these two mkdir calls.
+      if (errorCode(error) !== 'ENOENT') throw error;
+      acquire();
+    }
   } catch (error) {
     if (errorCode(error) !== 'EEXIST') throw error;
     throw new Error(`Neorion setup is locked. If no setup process is running, delete the lock directory and rerun setup: ${lock}`);
@@ -82,7 +91,7 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
       replace(stateFile, JSON.stringify(state) + '\n', 0o600);
     };
 
-    updateHint();
+    if (agent === 'claude' || remove) updateHint();
     const mcp = agentMcp(agent, claudeHome, command);
     if (state.mcp && state.mcp.config !== mcp.config) {
       throw new Error(`Neorion was registered in ${state.mcp.config}. Use that configuration to remove it first.`);
@@ -126,42 +135,53 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
     }
 
     const source = fs.readFileSync(join(dirname(entry), '../skills/neorion/SKILL.md'));
-    if (!existing || (ownsSkill && !installed?.equals(source))) {
-      if (existing) replace(skill, source, existing.mode & 0o777);
-      else fs.writeFileSync(skill, source, { flag: 'wx' });
-      state.skill = hash(source);
-      save();
-      console.log(`Skill installed: ${skill}`);
-    } else {
-      console.log(`${ownsSkill ? 'Skill unchanged' : 'Keeping existing skill (not installed by this setup)'}: ${skill}`);
-    }
-
-    if (isEntry(current) && ownsMcp) {
-      const launch = transport(current);
-      if (launch.command === command.command && isDeepStrictEqual(launch.args, command.args)) {
-        console.log(`MCP server unchanged: neorion (${mcp.config})`);
+    const installSkill = () => {
+      if (!existing || (ownsSkill && !installed?.equals(source))) {
+        if (existing) replace(skill, source, existing.mode & 0o777);
+        else fs.writeFileSync(skill, source, { flag: 'wx' });
+        state.skill = hash(source);
+        save();
+        console.log(`Skill installed: ${skill}`);
+      } else {
+        console.log(`${ownsSkill ? 'Skill unchanged' : 'Keeping existing skill (not installed by this setup)'}: ${skill}`);
+      }
+    };
+    const register = () => {
+      if (isEntry(current) && ownsMcp) {
+        const launch = transport(current);
+        if (launch.command === command.command && isDeepStrictEqual(launch.args, command.args)) {
+          console.log(`MCP server unchanged: neorion (${mcp.config})`);
+          return;
+        }
+        if (agent === 'claude') mcp.remove();
+      } else if (current !== undefined && current !== missingClient) {
+        console.log(`Keeping ${state.mcp ? 'modified MCP server' : 'existing MCP server (not registered by this setup)'}: neorion (${mcp.config})`);
         return;
       }
-      mcp.remove();
-    } else if (current !== undefined && current !== missingClient) {
-      console.log(`Keeping ${state.mcp ? 'modified MCP server' : 'existing MCP server (not registered by this setup)'}: neorion (${mcp.config})`);
-      return;
-    }
-    if (mcp.add()) {
-      const registered = mcp.current();
-      if (isEntry(registered)) {
-        state.mcp = { config: mcp.config, entry: registered };
-        save();
-      } else if (registered === uninspectableEntry) {
-        console.log('This version of Codex cannot verify the entry for automatic removal. Use codex mcp remove neorion.');
-      } else {
-        throw new Error(`Could not confirm the Neorion MCP server in ${mcp.config}.`);
+      if (mcp.add()) {
+        const registered = mcp.current();
+        if (isEntry(registered)) {
+          state.mcp = { config: mcp.config, entry: registered };
+          save();
+        } else if (registered === uninspectableEntry) {
+          console.log('This version of Codex cannot verify the entry for automatic removal. Use codex mcp remove neorion.');
+        } else {
+          throw new Error(`Could not confirm the Neorion MCP server in ${mcp.config}.`);
+        }
+        console.log(`MCP server registered: neorion (${mcp.config})`);
       }
-      console.log(`MCP server registered: neorion (${mcp.config})`);
+    };
+    if (agent === 'codex') {
+      register();
+      installSkill();
+      updateHint();
+    } else {
+      installSkill();
+      register();
     }
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
-    if (remove) {
+    if (remove || agent === 'codex') {
       try {
         fs.rmdirSync(directory);
       } catch (error) {

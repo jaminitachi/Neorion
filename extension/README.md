@@ -28,8 +28,10 @@ the project working directory, and Cursor and VS Code expand
 checkout or after moving a project. The optional pinned npm mode works once
 the matching CLI version is published on npm. Claude Code asks for
 approval before first using a project MCP server.
+If project discovery made a guess, the registration starts discovery at the workspace folder. MCP
+results include the indexed path and the guess notice while the selection is ambiguous.
 **Other tools: copy configuration snippet** uses absolute paths to the
-installed bundle and the project. Paste it into the global configuration for
+installed bundle and the folder used to start the server. Paste it into the global configuration for
 Codex CLI, Windsurf, or Gemini CLI. Copy a fresh snippet if the extension
 installation moves.
 

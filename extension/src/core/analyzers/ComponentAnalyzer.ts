@@ -11,7 +11,6 @@ import { packageMember } from './CallableFlow';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { jsxValue, PropFlow } from './PropFlow';
 import { renderBindings } from './RenderBindings';
-import { renderEvidence } from './RenderEvidence';
 import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
@@ -211,7 +210,7 @@ function lexicalName(node: Node): string | undefined {
 export class ComponentAnalyzer {
   constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
-  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, httpSources = new Set<SourceFile>(), appConfig?: NextConfig) {
+  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, historyOnly = false, appConfig?: NextConfig) {
     const components = new Map<Node, ComponentNode>();
     const index = includeFacts ? new QueryIndexBuilder() : undefined;
     const bodies = new Map<Node, Node>();
@@ -223,7 +222,12 @@ export class ComponentAnalyzer {
     const actionIds = new Map<Node, string>();
     const actionNames = new Set<Node>();
     const actionModules = new Map<ts.Symbol, Map<string, string>>();
-    const relativePath = (file: SourceFile) => path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
+    const paths = new WeakMap<SourceFile, string>();
+    const relativePath = (file: SourceFile) => {
+      let relative = paths.get(file);
+      if (relative === undefined) paths.set(file, relative = path.relative(this.root, file.getFilePath()).split(path.sep).join('/'));
+      return relative;
+    };
     const routesByFile = new Map(routes.map(route => [route.file, route]));
 
     for (const file of files) {
@@ -524,9 +528,7 @@ export class ComponentAnalyzer {
         if (index && from !== target.id) {
           const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
             ? site : undefined;
-          const evidence = renderEvidence(tag, body);
-          const conditional = Number(!!(evidence?.conditions?.length || evidence?.lists?.length || conditionalAt(tag, body)));
-          if (renderSite && evidence) index.renderEvidence(renderSite, evidence);
+          const conditional = conditionalAt(tag, body);
           if (!slot?.length) {
             index.render(from, target.id, startLine(tag), conditional, undefined, undefined, this.config && tag, undefined, renderSite);
           } else for (const transfer of slot) {
@@ -568,7 +570,7 @@ export class ComponentAnalyzer {
       const body = bodies.get(node)!;
       componentOwners.set(body, component.id);
       const file = body.getSourceFile();
-      const imports = importsFor(file);
+      const imports = historyOnly ? undefined : importsFor(file);
 
       const usedHooks = new Set<string>();
       // Keep COMPONENT_BODY_KINDS in sync with the node kinds handled below.
@@ -580,7 +582,7 @@ export class ComponentAnalyzer {
           componentAttributes.add(child);
           inspectAttribute(child, component.id, body);
         }
-        if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
+        if (imports && (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child))) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
           if (binding.getSymbol()?.getDeclarations().some(declaration => imports.has(declaration))) {
             for (const target of declarationsOf(child)) addEdge(component.id, resolveComponent(target)?.id, 'imports');
@@ -591,7 +593,7 @@ export class ComponentAnalyzer {
         const expression = child.getExpression();
         const [argument] = child.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id, body);
-        const hook = resolveHook(expression, imports);
+        const hook = imports && resolveHook(expression, imports);
         if (hook) usedHooks.add(hook);
       };
       inspect(body);
@@ -605,7 +607,7 @@ export class ComponentAnalyzer {
       const relative = relativePath(file);
       const from = `file:${relative}`;
       const usedHooks = new Set<string>();
-      const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
+      const aliasedHooks = historyOnly ? undefined : new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
       visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
@@ -630,6 +632,7 @@ export class ComponentAnalyzer {
         const expression = node.getExpression();
         const [argument] = node.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, from);
+        if (!aliasedHooks) return;
         const name = Node.isPropertyAccessExpression(expression) ? expression.getName() :
           Node.isIdentifier(expression) ? expression.getText() : '';
         if (!HOOK.test(name) && !aliasedHooks.has(name)) return;
@@ -651,10 +654,10 @@ export class ComponentAnalyzer {
         const body = targets.map(target => bodies.get(target)).find(Boolean);
         if (body) bodies.set(node, body);
       }
-      collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index, this.config, this.workspace);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace, flow, httpSources, appConfig);
+      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
+      collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace, flow, appConfig);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow, historyOnly), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

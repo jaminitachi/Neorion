@@ -1,5 +1,6 @@
 const { cachePath } = require('./workspace-cache.cjs');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -66,6 +67,20 @@ test('R1 and R6 opt-in is off, legacy instructions persist, and global configura
   assert.ok(!fs.existsSync(cachePath(env.file('.'), '.neorion/connect-state.json')));
 });
 
+test('VS Code reports the guessed directory and candidate paths after graph generation', async t => {
+  const { file, write } = setup(t);
+  write('apps/admin/next.config.js', '');
+  write('apps/web/next.config.js', '');
+  const messages = [];
+  const { commands } = register(file('.'), undefined, [], {
+    window: { setStatusBarMessage: message => messages.push(message) }
+  });
+  await commands.get('neo.generateGraph')();
+  const admin = JSON.stringify(path.join('apps', 'admin'));
+  const web = JSON.stringify(path.join('apps', 'web'));
+  assert.deepEqual(messages, [`Neorion guessed ${admin}. Candidates: ${admin}, ${web}.`]);
+});
+
 test('Connect AI tools reuses an active Cursor rule from CLI setup', async t => {
   const env = setup(t);
   const setupRule = '.cursor/rules/neorion-query.mdc';
@@ -77,6 +92,58 @@ test('Connect AI tools reuses an active Cursor rule from CLI setup', async t => 
   await env.disconnect();
   assert.ok(!fs.existsSync(env.file(extensionRule)));
   assert.equal(env.read(setupRule), rule);
+});
+
+test('Connect AI tools registers workspace discovery when the selected root is a guess', async t => {
+  const env = setup(t, 'apps/landing');
+  env.write('apps/landing/next.config.js', '');
+  env.write('apps/landing/tsconfig.json', '{}');
+  env.write('apps/landing/app/page.tsx', 'export default function LandingPage() { return <main />; }');
+  await generate(env.file('apps/landing'));
+  env.selections.targets = ['Claude Code'];
+  const readEntry = () => JSON.parse(env.read('.mcp.json')).mcpServers.neorion;
+  await env.connect();
+  assert.deepEqual(readEntry(), { ...mcpCommand({ root: 'apps/landing' }), type: 'stdio' });
+  env.write('apps/web/next.config.js', '');
+  await t.test('pinned npm registration and clipboard snippet', async () => {
+    env.selections.instructions = ['CLAUDE.md', REGISTER, COPY];
+    env.selections.format = 'Gemini CLI';
+    await env.connect();
+    assert.deepEqual(readEntry(), { ...mcpCommand({ root: '.', discover: true }), type: 'stdio' });
+    assert.deepEqual(JSON.parse(env.snippet()).mcpServers.neorion.args.slice(-2), ['--workspace', env.file('.')]);
+  });
+  await t.test('bundled registration keeps the guess on subsequent MCP requests', async subtest => {
+    env.selections.mode = bundledMode;
+    await env.connect();
+    const { command, args } = readEntry();
+    const client = await openMcp(subtest, env.file('.'), { command, args, cwd: env.file('.') });
+    for (const target of ['LandingPage', 'MissingPage']) {
+      const result = await client.text('query', { kind: 'search', target });
+      assert.equal(result.split('\n')[0], `Project: ${env.file('apps/landing')}`);
+      assert.match(result, /^# partial: project root guessed$/m);
+      assert.doesNotMatch(result, /^# complete:/m);
+      if (target === 'LandingPage') assert.match(result, /app\/page\.tsx:1#LandingPage/);
+    }
+  });
+  await env.disconnect();
+  assert.ok(!fs.existsSync(env.file('.mcp.json')));
+});
+
+test('Cursor CLI setup reuses the bundled extension server without taking ownership', async t => {
+  const env = setup(t);
+  env.selections.mode = bundledMode;
+  env.selections.targets = ['Cursor'];
+  await env.connect();
+  const file = files.Cursor;
+  const original = env.read(file);
+  const cli = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
+  for (const flags of [[], ['--remove']]) {
+    const result = spawnSync(process.execPath, [cli, 'setup', 'cursor', ...flags], { cwd: env.file('.'), encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(env.read(file), original);
+  }
+  await env.disconnect();
+  assert.ok(!fs.existsSync(env.file(file)));
 });
 
 test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and reverse registration', async t => {
@@ -154,7 +221,7 @@ test('R4 rejects conflicts, malformed files, JSONC for strict clients, and symli
   assert.ok(!fs.existsSync(env.file('CLAUDE.md')));
 });
 
-test('R5 bundled registration resolves the server and monorepo root for each client', async t => {
+test('R5 bundled registration discovers a nested config-only project from each client workspace', async t => {
   const env = setup(t, 'apps/web');
   env.write('apps/web/tsconfig.json', '{}');
   env.write('apps/web/example.ts', 'export const Example = 1;');
@@ -165,13 +232,16 @@ test('R5 bundled registration resolves the server and monorepo root for each cli
     const entry = JSON.parse(env.read(file))[key(target)].neorion;
     const workspace = target === 'Claude Code' ? '.' : '${workspaceFolder}';
     assert.equal(entry.command, 'node');
-    assert.deepEqual(entry.args.slice(2), ['--', workspace, 'apps/web']);
+    assert.deepEqual(entry.args.slice(2), ['--', workspace, '.']);
     assert.equal(entry.args[0], '-e');
     assert.ok(!env.read(file).includes(env.file('.')));
     assert.equal(entry.type, 'stdio');
     const args = entry.args.map(arg => arg === '${workspaceFolder}' ? env.file('.') : arg);
     const client = await openMcp(t, env.file('.'), { command: entry.command, args, cwd: env.file('.') });
-    assert.match(await client.text('search', { text: 'Example' }), /constant example\.ts:1#Example/);
+    const result = await client.text('search', { text: 'Example' });
+    assert.equal(result.split('\n')[0], `Project: ${env.file('apps/web')}`);
+    assert.match(result, /^# partial: project root guessed$/m);
+    assert.match(result, /constant example\.ts:1#Example/);
     assert.equal(client.stderr(), '');
     await client.close();
   }

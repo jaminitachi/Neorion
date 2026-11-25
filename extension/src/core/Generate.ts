@@ -40,24 +40,26 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
             !path.relative(projectPath, filePath).split(path.sep)
                 .some(part => part === 'node_modules' || part === '.next');
     });
-    const appConfig = fs.existsSync(appDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const pagesConfig = fs.existsSync(pagesDir) ? appConfig ?? readNextConfig(projectPath, sourceFiles) : undefined;
-    const workspace = pagesConfig ? new WorkspaceBindings(projectPath) : undefined;
+    const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
+    const workspace = new WorkspaceBindings(projectPath, project);
+    const appFiles = staticRouteFiles(appDir);
+    const appConfig = pagesConfig ?? (fs.existsSync(appDir) ? readNextConfig(projectPath, sourceFiles, true) : undefined);
     const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace, appConfig).analyze(sourceFiles, [
-        ...staticRouteFiles(appDir), ...(pagesConfig?.extensions?.some(ext => /^(?:md|mdx)$/.test(ext)) ? staticRouteFiles(pagesDir, true) : [])
+        ...appFiles, ...(pagesConfig?.extensions?.some(ext => /^(?:md|mdx)$/.test(ext)) ? staticRouteFiles(pagesDir, true) : [])
     ]);
-    const httpSources = options.markdown || options.index
-        ? addHttpSources(project, projectPath, sourceFiles, routes.some(route => route.type === 'api' && !route.pages))
-        : new Set<import('ts-morph').SourceFile>();
-    sourceFiles.push(...httpSources);
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
-        .analyze(sourceFiles, routes, !!(options.markdown || options.index), httpSources, appConfig);
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown, appConfig);
 
-    if (analysis.index) analysis.index.projectSnapshot = snapshot;
+    if (analysis.index) {
+        analysis.index.projectSnapshot = snapshot;
+        if (!pagesConfig && appConfig?.url && Object.values(appConfig.url).some(value => value !== undefined)) {
+            analysis.index.appUrlConfig = appConfig.url;
+        }
+    }
 
     const directories = new Map<string, DirectoryMetadata>();
     const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
@@ -128,24 +130,6 @@ function openProject(root: string): Project {
     for (const file of fileNames) project.addSourceFileAtPath(file);
     project.resolveSourceFileDependencies();
     return project;
-}
-
-// App tsconfigs often exclude independently deployed scripts and workers.
-function addHttpSources(project: Project, root: string, files: import('ts-morph').SourceFile[], hasEndpoints: boolean) {
-    const extra = new Set<import('ts-morph').SourceFile>();
-    if (!hasEndpoints) return extra;
-    const present = new Set<string>(files.map(file => file.getFilePath()));
-    const excluded = [...ignoredProjectDirectories, '.git', '.next', '.neorion'];
-    for (const file of ts.sys.readDirectory(root, ['.ts', '.mts', '.cts', '.js', '.mjs', '.cjs', '.tsx', '.jsx'], excluded)) {
-        if (present.has(file) || /\.d\.[cm]?ts$/.test(file)) continue;
-        const stat = fs.lstatSync(file, { throwIfNoEntry: false });
-        if (!stat?.isFile()) continue;
-        const text = ts.sys.readFile(file);
-        if (text && /\bfetch\s*\(|['"](?:axios|node-fetch|undici|(?:node:)?https?)['"]/.test(text)) {
-            extra.add(project.addSourceFileAtPath(file));
-        }
-    }
-    return extra;
 }
 
 function staticRouteFiles(directory: string, pages = false): string[] {

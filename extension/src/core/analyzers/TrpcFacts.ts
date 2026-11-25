@@ -29,7 +29,7 @@ type Proxy = { kind: 'react' | 'client' | 'caller' | 'cache' | 'hydration' | 'co
 type ProcedurePath = Procedure & { name: string; clientsKnown: boolean; unresolved?: Node };
 type HttpLink = { prefix: string; site: CallExpression; methodOverride?: string };
 type HttpHandler = { route: RouteNode; endpoint: string };
-type ProcedureUse = { transport?: { method: string; route: RouteNode; link: CallExpression }; transportIssue?: string; site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
+type ProcedureUse = { transport?: { method: string; route: RouteNode; links: CallExpression[] }; transportIssue?: string; transportRoutes?: RouteNode[]; site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
 
 function unwrap(node: Node | undefined): Node | undefined {
   while (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node) ||
@@ -45,19 +45,10 @@ function member(node: Node | undefined) {
   }
 }
 
-function localValue(node: Node) {
-  // A shorthand property has its own symbol; its value has the binding we want.
-  if (Node.isShorthandPropertyAssignment(node)) {
-    const symbol = node.getValueSymbol();
-    return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations()[0];
-  }
-  return declarationsOf(node)[0];
-}
-
-function initializer(node: Node | undefined) {
+function initializer(node: Node | undefined, localValue: (node: Node) => Node | undefined) {
   if (Node.isVariableDeclaration(node) || Node.isPropertyAssignment(node)) return node.getInitializer();
   if (Node.isExportAssignment(node)) return node.getExpression();
-  if (Node.isShorthandPropertyAssignment(node)) return initializer(localValue(node));
+  if (Node.isShorthandPropertyAssignment(node)) return initializer(localValue(node), localValue);
 }
 
 function imported(node: Node, modulePattern: RegExp, names: RegExp) {
@@ -79,11 +70,12 @@ export class TrpcFacts {
   private nested = new Set<Router>();
   private proxies = new Map<Node, Proxy | null>();
   private rootPaths = new Map<Router, Map<string, ProcedurePath>>();
-  private links = new Map<CallExpression, HttpLink[]>();
+  private links = new Map<CallExpression, HttpLink[] | null>();
   private handlers = new Map<Router, HttpHandler[]>();
   private allPaths = new Map<Router, Map<string, ProcedurePath[]>>();
 
-  constructor(files: SourceFile[], sources: Set<SourceFile>, apiRoutes: Map<SourceFile, RouteNode>) {
+  constructor(files: SourceFile[], sources: Set<SourceFile>, apiRoutes: Map<SourceFile, RouteNode>,
+    private resolveDeclarations = declarationsOf) {
     const clientFiles = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       !entry.isTypeOnly() && proxyPackage.test(entry.getModuleSpecifierValue()))));
     this.active = sources.size > 0 || clientFiles.size > 0;
@@ -184,15 +176,42 @@ export class TrpcFacts {
   }
 
   private addLinks(factory: CallExpression, options: Node | undefined) {
+    const previous = this.links.get(factory);
+    if (previous === null) return;
+    // All observed configurations must resolve for a unique dispatch.
+    this.links.set(factory, null);
     const links = valueNode(property(valueNode(options), 'links'));
     if (!Node.isArrayLiteralExpression(links)) return;
-    for (const link of links.getElements()) {
-      if (!Node.isCallExpression(link) || !imported(link.getExpression(), /^@trpc\/client$/, httpLinks)) continue;
+    const clientPackage = /^@trpc\/client$/;
+    const terminalLinks = (nodes: Node[], depth: number): CallExpression[] | undefined => {
+      if (depth > 6 || nodes.length > 16) return;
+      for (const node of nodes) {
+        const link = valueNode(node);
+        if (!Node.isCallExpression(link)) return;
+        const expression = link.getExpression();
+        if (imported(expression, clientPackage, /^loggerLink$/)) continue;
+        if (imported(expression, clientPackage, httpLinks)) return [link];
+        if (!imported(expression, clientPackage, /^splitLink$/)) return;
+        const branches = valueNode(link.getArguments()[0]);
+        const branch = (key: string) => {
+          const value = valueNode(property(branches, key));
+          return terminalLinks(Node.isArrayLiteralExpression(value) ? value.getElements() : value ? [value] : [], depth + 1);
+        };
+        const yes = branch('true');
+        const no = branch('false');
+        if (yes && no) return [...yes, ...no];
+        return;
+      }
+    };
+    const terminals = terminalLinks(links.getElements(), 0);
+    if (!terminals) return;
+    const entries: HttpLink[] = [];
+    for (const link of terminals) {
       const settings = valueNode(link.getArguments()[0]);
       const url = property(settings, 'url');
       const override = property(settings, 'methodOverride');
       const methodOverride = textValue(override);
-      if (!url || property(settings, 'fetch') || override && methodOverride !== 'POST') continue;
+      if (!url || property(settings, 'fetch') || override && methodOverride !== 'POST') return;
       const pathOf = (text: string) => text.replace(/^(?:https?:\/\/[^/?#]+|[\0\x01]+)(?=\/)/, '').replace(/\/$/, '');
       const seen = new Set<Node>();
       let remaining = 24;
@@ -209,35 +228,50 @@ export class TrpcFacts {
       });
       const urls = resolve(url);
       const paths = new Set(urls?.map(value => pathOf(value.text)));
-      if (paths.size !== 1) continue;
+      if (paths.size !== 1) return;
       const [prefix] = paths;
-      if (!/^\/(?!\/)[\w/.-]+$/.test(prefix)) continue;
-      const entries = this.links.get(factory) ?? [];
+      if (!/^\/(?!\/)[\w/.-]+$/.test(prefix)) return;
       entries.push({ prefix, site: link, methodOverride });
-      this.links.set(factory, entries);
     }
+    this.links.set(factory, [...previous ?? [], ...entries]);
   }
 
-  private httpDispatch(site: CallExpression, proxy: Proxy, name: string, operation: string): Pick<ProcedureUse, 'transport' | 'transportIssue'> {
+  private httpDispatch(site: CallExpression, proxy: Proxy, name: string, operation: string): Pick<ProcedureUse, 'transport' | 'transportIssue' | 'transportRoutes'> {
     const method = mutationCalls.test(operation) ? 'POST' :
       /^(?:query|useQuery|useSuspenseQuery|useInfiniteQuery|useSuspenseInfiniteQuery)$/.test(operation) ? 'GET' : undefined;
     if (operation.startsWith('use') && Node.isFalseLiteral(valueNode(property(valueNode(site.getArguments()[1]), 'enabled')))) return {};
     if (!method || !proxy.client || !proxy.router || proxy.kind !== 'react' && proxy.kind !== 'client') return {};
     const links = this.links.get(proxy.client) ?? [];
+    const handlers = this.handlers.get(proxy.router) ?? [];
     const candidates = links.flatMap(link => {
       const methodToSend = link.methodOverride === 'POST' ? 'POST' : method;
-      const handlers = (this.handlers.get(proxy.router!) ?? []).filter(handler =>
-        handler.endpoint === link.prefix && handler.route.methods?.includes(methodToSend));
-      const [match] = matchNextRoutes(link.prefix + '/' + name, handlers, handler => handler.route.path);
+      const matching = handlers.filter(handler => handler.endpoint === link.prefix && handler.route.methods?.includes(methodToSend));
+      const [match] = matchNextRoutes(link.prefix + '/' + name, matching, handler => handler.route.path);
       return match ? [{ method: methodToSend, route: match.route, link: link.site }] : [];
     });
-    if (links.length === 1 && candidates.length === 1) return { transport: candidates[0] };
-    return links.length || this.handlers.has(proxy.router) ? { transportIssue: 'tRPC HTTP handler or client dispatch unresolved' } : {};
+    const first = candidates[0];
+    if (first && links.length === candidates.length && candidates.every(candidate =>
+      candidate.method === first.method && candidate.route.id === first.route.id)) {
+      return { transport: { ...first, links: [...new Set(candidates.map(candidate => candidate.link))] } };
+    }
+    return this.links.has(proxy.client) || handlers.length ? {
+      transportIssue: 'tRPC HTTP handler or client dispatch unresolved',
+      transportRoutes: handlers.map(handler => handler.route)
+    } : {};
   }
 
   procedures() {
     return [...this.rootPaths.values()].flatMap(paths => [...paths.values()]);
   }
+
+  private localValue = (node: Node) => {
+    // Shorthand properties have a separate symbol for the value binding.
+    if (Node.isShorthandPropertyAssignment(node)) {
+      const symbol = node.getValueSymbol();
+      return (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations()[0];
+    }
+    return this.resolveDeclarations(node)[0];
+  };
 
   private isInit(node: Node | undefined, seen = new Set<Node>()): boolean {
     node = unwrap(node);
@@ -249,7 +283,7 @@ export class TrpcFacts {
       return !!called?.key && /^(?:create|context|meta)$/.test(called.key) && this.isInit(called.base, seen);
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
-      return this.isInit(initializer(localValue(node)), seen);
+      return this.isInit(initializer(this.localValue(node), this.localValue), seen);
     }
     return false;
   }
@@ -259,7 +293,7 @@ export class TrpcFacts {
     seen.add(node);
     const access = member(node);
     if (access?.key && /^(?:router|mergeRouters)$/.test(access.key) && this.isInit(access.base)) return access.key;
-    const value = initializer(localValue(node));
+    const value = initializer(this.localValue(node), this.localValue);
     if (value) return this.routerFactory(value, seen);
   }
 
@@ -294,7 +328,7 @@ export class TrpcFacts {
       return result;
     }
     if (Node.isIdentifier(node) || member(node) || Node.isShorthandPropertyAssignment(node)) {
-      return this.router(initializer(localValue(node)), seen);
+      return this.router(initializer(this.localValue(node), this.localValue), seen);
     }
   }
 
@@ -306,7 +340,7 @@ export class TrpcFacts {
     }
     const branch = new Set(seen).add(node);
     if (!Node.isObjectLiteralExpression(node)) {
-      this.readObject(initializer(localValue(node)), result, branch, site);
+      this.readObject(initializer(this.localValue(node), this.localValue), result, branch, site);
       return;
     }
     for (const property of node.getProperties()) {
@@ -324,7 +358,7 @@ export class TrpcFacts {
         continue;
       }
       const name = Node.isIdentifier(key) ? key.getText() : String(key.getLiteralValue());
-      const value = unwrap(Node.isPropertyAssignment(property) ? property.getInitializer() : initializer(localValue(property)));
+      const value = unwrap(Node.isPropertyAssignment(property) ? property.getInitializer() : initializer(this.localValue(property), this.localValue));
       const procedure = this.procedure(value);
       if (procedure) result.entries.set(name, { ...procedure, property });
       else {
@@ -346,7 +380,7 @@ export class TrpcFacts {
     if (!node || !this.files.has(node.getSourceFile()) || seen.has(node)) return;
     seen.add(node);
     if (!Node.isCallExpression(node)) {
-      if (Node.isIdentifier(node) || member(node)) return this.procedure(initializer(localValue(node)), seen);
+      if (Node.isIdentifier(node) || member(node)) return this.procedure(initializer(this.localValue(node), this.localValue), seen);
       return;
     }
     const operation = member(node.getExpression());
@@ -361,7 +395,7 @@ export class TrpcFacts {
     seen.add(node);
     if (Node.isTypeQuery(node)) return this.router(node.getExprName());
     if (Node.isTypeReference(node)) {
-      const binding = localValue(node.getTypeName());
+      const binding = this.localValue(node.getTypeName());
       if (Node.isTypeAliasDeclaration(binding)) return this.typeRouter(binding.getTypeNode(), seen);
     }
   }
@@ -372,7 +406,7 @@ export class TrpcFacts {
     if (imported(node, serverPackage, /^createCallerFactory$/)) return true;
     const access = member(node);
     if (access?.key === 'createCallerFactory' && this.isInit(access.base)) return true;
-    const value = initializer(localValue(node));
+    const value = initializer(this.localValue(node), this.localValue);
     return !!value && this.callerFactory(value, seen);
   }
 
@@ -383,7 +417,7 @@ export class TrpcFacts {
     if (access?.key === 'createCaller') return this.router(access.base);
     if (Node.isCallExpression(node) && this.callerFactory(node.getExpression())) return this.router(node.getArguments()[0]);
     if (Node.isIdentifier(node) || access) {
-      const value = unwrap(initializer(localValue(node)));
+      const value = unwrap(initializer(this.localValue(node), this.localValue));
       if (value) return this.callerRouter(value, seen);
     }
   }
@@ -419,13 +453,13 @@ export class TrpcFacts {
       return;
     }
     if (!Node.isIdentifier(node) && !member(node)) return;
-    const declaration = localValue(node);
-    const value = initializer(declaration);
+    const declaration = this.localValue(node);
+    const value = initializer(declaration, this.localValue);
     if (value) return this.proxy(value, seen);
     if (Node.isBindingElement(declaration) && Node.isObjectBindingPattern(declaration.getParent())) {
       const key = declaration.getPropertyNameNode() ?? declaration.getNameNode();
       const name = Node.isIdentifier(key) ? key.getText() : Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
-      const init = unwrap(initializer(declaration.getParent().getParent()));
+      const init = unwrap(initializer(declaration.getParent().getParent(), this.localValue));
       const base = this.proxy(init, seen);
       if (base && !declaration.getDotDotDotToken()) return { ...base, prefix: [...base.prefix, name] };
       // createHydrationHelpers exposes the server-side proxy as its `trpc` property.
@@ -447,7 +481,7 @@ export class TrpcFacts {
     const expression = unwrap(call.getExpression());
     if (!member(expression) && !Node.isIdentifier(expression)) return;
     if (Node.isIdentifier(expression)) {
-      const binding = localValue(expression);
+      const binding = this.localValue(expression);
       if (!Node.isBindingElement(binding) && !Node.isVariableDeclaration(binding)) return;
     }
     const proxy = this.proxy(expression);
@@ -503,7 +537,7 @@ export class TrpcFacts {
         path.unshift(access.key);
         base = unwrap(access.base);
       }
-      if (path.length && base && localValue(base) === parameter) {
+      if (path.length && base && this.localValue(base) === parameter) {
         uses.push(this.pathUse(query, proxy, path, operation, false));
       }
     }

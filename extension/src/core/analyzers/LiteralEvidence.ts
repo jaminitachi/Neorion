@@ -4,16 +4,17 @@ import { valueNode } from './StaticBindings';
 
 const sensitive = /secret|password|token|authorization|credential|private.?key|api.?key/i;
 
-function literal(node: Node | undefined, depth: number): string | undefined {
+function literal(node: Node | undefined, depth: number, named = false): string | undefined {
   if (!node || depth > 2) return;
   const inner = wrappedExpression(node);
-  if (inner) return literal(inner, depth);
+  if (inner) return literal(inner, depth, named);
   if (Node.isTrueLiteral(node) || Node.isFalseLiteral(node) || Node.isNullLiteral(node) || Node.isNumericLiteral(node)) {
     return node.getText();
   }
   if (Node.isPrefixUnaryExpression(node) && node.getOperatorToken() === SyntaxKind.MinusToken &&
       Node.isNumericLiteral(node.getOperand())) return node.getText();
   if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
+    if (!named) return '[redacted string]';
     const value = node.getLiteralText();
     if (value.length <= 64 && !/[\x00-\x1f\x7f]/.test(value)) return JSON.stringify(value);
     return;
@@ -22,14 +23,14 @@ function literal(node: Node | undefined, depth: number): string | undefined {
     const value = valueNode(node);
     // Only follow primitive const bindings. A referenced object can be mutated.
     if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value) || Node.isNumericLiteral(value) ||
-        Node.isTrueLiteral(value) || Node.isFalseLiteral(value) || Node.isNullLiteral(value)) return literal(value, depth);
+        Node.isTrueLiteral(value) || Node.isFalseLiteral(value) || Node.isNullLiteral(value)) return literal(value, depth, named);
     return;
   }
   if (Node.isConditionalExpression(node)) {
     const condition = node.getCondition().getText().replace(/\s+/g, ' ');
-    const yes = literal(node.getWhenTrue(), depth + 1);
-    const no = literal(node.getWhenFalse(), depth + 1);
-    if (yes && no && condition.length <= 48) return `${condition} ? ${yes} : ${no}`;
+    const yes = literal(node.getWhenTrue(), depth + 1, named);
+    const no = literal(node.getWhenFalse(), depth + 1, named);
+    if (yes && no && /^!?[$\w.]{1,48}$/.test(condition) && !sensitive.test(condition)) return `${condition} ? ${yes} : ${no}`;
     return;
   }
   if (Node.isArrayLiteralExpression(node)) {
@@ -54,7 +55,7 @@ function literal(node: Node | undefined, depth: number): string | undefined {
       parameters.unshift(key + ' (parameter)');
       continue;
     }
-    const value = !sensitive.test(key) && Node.isPropertyAssignment(field) ? literal(field.getInitializer(), depth + 1) : undefined;
+    const value = !sensitive.test(key) && Node.isPropertyAssignment(field) ? literal(field.getInitializer(), depth + 1, true) : undefined;
     if (!value || !/^[$\w-]{1,40}$/.test(key) || fields.length >= 4) {
       incomplete = true;
       continue;

@@ -1,6 +1,6 @@
-import { existsSync } from 'node:fs';
-import * as path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { Node, Project, SourceFile, SyntaxKind } from 'ts-morph';
+import { nextConfig } from '../FindProject';
 import type { NextUrlConfig } from './NextRouteMatch';
 import { functionNode, returns, valueNode } from './StaticBindings';
 
@@ -30,11 +30,18 @@ function strings(node: Node | undefined) {
   if (elements.every((value): value is string => value !== undefined)) return elements;
 }
 
-export function readNextConfig(root: string, files: SourceFile[]): NextConfig {
+export function readNextConfig(root: string, files: SourceFile[], appOnly = false): NextConfig {
   const result: NextConfig = { url: {}, rules: [], issues: [] };
-  const file = ['js', 'mjs', 'ts', 'cjs'].map(ext => path.join(root, 'next.config.' + ext)).find(existsSync);
+  const file = nextConfig(root);
   if (!file) return result;
-  const source = files.find(source => source.getFilePath() === file) ?? new Project({ compilerOptions: { allowJs: true } }).addSourceFileAtPath(file);
+  const text = appOnly ? readFileSync(file, 'utf8').replace(/^\uFEFF/, '') : undefined;
+  // Only App Router page extensions and URL settings are needed in the isolated parse.
+  if (text !== undefined && !/\b(?:pageExtensions|basePath|i18n|trailingSlash)\b|\\[ux]/.test(text)) return result;
+  const source = text !== undefined ? new Project({
+    useInMemoryFileSystem: true, compilerOptions: { allowJs: true, noResolve: true, noLib: true }
+  }).createSourceFile(file, text) :
+    files.find(source => source.getFilePath() === file) ??
+      new Project({ compilerOptions: { allowJs: true } }).addSourceFileAtPath(file);
   const exported = source.getExportedDeclarations().get('default')?.[0] ??
     source.getStatements().flatMap(statement => {
       const expression = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;
@@ -71,6 +78,7 @@ export function readNextConfig(root: string, files: SourceFile[]): NextConfig {
   if (basePath && result.url.basePath === undefined) result.issues.push('dynamic next.config basePath');
   if (i18n && !result.url.locales) result.issues.push('dynamic next.config locales');
   if (trailingSlash && result.url.trailingSlash === undefined) result.issues.push('dynamic next.config trailingSlash');
+  if (appOnly) return result;
   for (const kind of ['redirect', 'rewrite'] as const) {
     const member = valueNode(property(config, kind + 's'));
     if (!member) continue;

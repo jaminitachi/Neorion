@@ -5,9 +5,9 @@ import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
 import { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } from '../core/AgentInstructions';
-import { findProject, missingProject } from '../core/FindProject';
+import { missingProject, selectProject } from '../core/FindProject';
 import { ensureFresh, projectText } from '../mcp/Build';
-import { isTemporaryCliInstall, mcpCommand, packageSpec } from '../core/McpCommand';
+import { isTemporaryCliInstall, mcpCommand, packageSpec, releaseSpec } from '../core/McpCommand';
 import { MCP_TARGETS, planMcp } from '../core/McpRegistration';
 import { VERSION } from '../mcp/Index';
 import { indexReader, runQueries, serve } from '../mcp/server';
@@ -25,12 +25,12 @@ const help = `Usage:
   neorion query callees <symbol> [--depth n] [--uses]
   neorion query path <from> <to>
   neorion query changes [--base ref | --staged | --unstaged] [--depth n]
-  neorion mcp [--root dir]
+  neorion mcp [--root dir | --workspace dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint] [--no-hook]
   neorion setup <codex|claude> --remove [--no-hint]
   neorion setup cursor [--remove]
-  neorion --version | --help
+  neorion --version | --help | -h
 
 Query kinds: ${kinds.join(', ')}
 
@@ -47,6 +47,8 @@ function isProjectDirectory(root: string) {
   return ['tsconfig.json', 'jsconfig.json', 'package.json'].some(name => existsSync(join(root, name)));
 }
 
+const missingProjectMarker = 'the current directory has no tsconfig.json, jsconfig.json, or package.json.';
+
 function isHomeDirectory(root: string) {
   const home = homedir();
   return root === home || (existsSync(home) && root === realpathSync(home));
@@ -55,7 +57,7 @@ function isHomeDirectory(root: string) {
 function writeHint(file: string, instruction: string) {
   const root = process.cwd();
   if (!isProjectDirectory(root)) {
-    console.log(`Skipping ${file} hint: the current directory has no tsconfig.json, jsconfig.json, or package.json.`);
+    console.log(`Skipping ${file} hint: ${missingProjectMarker}`);
     return false;
   }
   const changed = updateAgentFiles(root, root, [file], true, false, instruction);
@@ -94,12 +96,20 @@ function hintCommand(temporary: boolean, onPath: boolean) {
 }
 
 async function main([command, ...args]: string[]) {
-  if ((!command || command === '--help') && !args.length) return console.log(help);
+  const helpFlag = (arg: string | undefined) => arg === '--help' || arg === '-h';
+  if ((!command || helpFlag(command)) && !args.length) return console.log(help);
   if (command === '--version' && !args.length) return console.log(VERSION);
+  const separator = args.indexOf('--');
+  if (command && ['graph', 'query', 'mcp', 'setup'].includes(command) &&
+      args.slice(0, separator === -1 ? args.length : separator).some(helpFlag)) return console.log(help);
   if (command === 'graph') {
-    const { values, positionals } = parseArgs({
-      args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true
-    });
+    let parsed;
+    try {
+      parsed = parseArgs({ args, options: { 'mcp-config': { type: 'boolean' } }, allowPositionals: true });
+    } catch (error) {
+      throw new Error(`${(error as Error).message}\n\n${help}`);
+    }
+    const { values, positionals } = parsed;
     if (positionals.length > 1) throw new Error(help);
     const { run } = require('./graph.cjs') as typeof import('./graph');
     return run(resolve(positionals[0] ?? '.'), values['mcp-config']);
@@ -116,16 +126,13 @@ async function main([command, ...args]: string[]) {
         remove: { type: 'boolean' }
       }
     });
-    const temporary = !values.local && isTemporaryCliInstall(__filename);
-    const onPath = !values.local && !temporary && runsCurrentEntry();
-    const localEntry = temporary ? undefined : __filename;
     const root = process.cwd();
     const remove = !!values.remove;
     if (agent === 'cursor') {
-      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { localEntry });
+      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { cursorSetup: { legacyLocalEntry: __filename } });
       mcp.commit(() => {
         const writeRule = !remove && !hasActiveCursorRule(root, CURSOR_EXTENSION_RULE);
-        if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(hintCommand(temporary, onPath)))) {
+        if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(`npx -y ${releaseSpec()}`))) {
           console.log(`${join(root, CURSOR_SETUP_RULE)} (${writeRule ? 'written' : 'Neorion block removed'})`);
         }
       });
@@ -133,6 +140,9 @@ async function main([command, ...args]: string[]) {
       if (mcp.count) console.log(`${config} (Neorion MCP setup ${remove ? 'removed' : 'configured'})`);
       return;
     }
+    const temporary = !values.local && isTemporaryCliInstall(__filename);
+    const onPath = !values.local && !temporary && runsCurrentEntry();
+    const localEntry = temporary ? undefined : __filename;
     const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     let skippedHint = false;
     setupAgent(agent, __filename, mcpCommand({ localEntry }), remove, () => {
@@ -145,9 +155,9 @@ async function main([command, ...args]: string[]) {
       }
       if (agent === 'claude') {
         if (remove || values['no-hook']) updateClaudeHook(root, false);
-        else if (isProjectDirectory(root) && !isHomeDirectory(root)) {
-          updateClaudeHook(root, true);
-        }
+        else if (isHomeDirectory(root)) console.warn('Skipping Neorion Claude hook: the current directory is your home directory.');
+        else if (!isProjectDirectory(root)) console.warn(`Skipping Neorion Claude hook: ${missingProjectMarker}`);
+        else updateClaudeHook(root, true);
       }
     });
     if (codex && !values.remove) {
@@ -160,7 +170,7 @@ async function main([command, ...args]: string[]) {
   const query = command === 'query';
   const { values, positionals } = parseArgs({
     args,
-    options: { root: { type: 'string' }, ...(query ? {
+    options: { root: { type: 'string' }, workspace: { type: 'string' }, ...(query ? {
       limit: { type: 'string' as const },
       kind: { type: 'string' as const },
       depth: { type: 'string' as const },
@@ -175,8 +185,13 @@ async function main([command, ...args]: string[]) {
     } : {}) },
     allowPositionals: query
   });
-  const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
-  if (!query) return serve(root, { autoBuild: true });
+  if (query && values.workspace !== undefined) throw new Error('--workspace requires the mcp command.');
+  if (values.root !== undefined && values.workspace !== undefined) throw new Error('Choose either --root or --workspace.');
+  const configuredRoot = values.root ?? (values.workspace === undefined ? process.env.NEORION_ROOT : undefined);
+  const workspace = values.workspace ?? (configuredRoot === undefined ? process.env.NEORION_WORKSPACE : undefined);
+  const root = resolve(workspace ?? configuredRoot ?? '.');
+  const confirm = workspace === undefined && configuredRoot !== undefined;
+  if (!query) return serve(root, { autoBuild: true, confirm });
   const [kind, target, to] = positionals;
   if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
   if (values.kind !== undefined && kind !== 'search') throw new Error('--kind requires the search query.');
@@ -190,8 +205,9 @@ async function main([command, ...args]: string[]) {
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
-  const project = findProject(root);
-  if (!project) throw new Error(missingProject(root));
+  const selection = selectProject(root, confirm);
+  if (!selection) throw new Error(missingProject(root));
+  const project = selection.directory;
   const build = await ensureFresh(project);
   if (build.error) throw new Error(build.error);
   const engine = indexReader(project)();
@@ -210,7 +226,7 @@ async function main([command, ...args]: string[]) {
   };
   const installed = basename(process.argv[1]) === 'neorion' && !isTemporaryCliInstall(__filename) && runsCurrentEntry();
   const invocation = installed ? ['neorion'] : [process.execPath, __filename];
-  console.log(projectText(project, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
+  console.log(projectText(selection, root, engine.query(queryName, { kind, limit, ...externalOption, ...options }, { invocation, root: project })));
 }
 
 if (isMainThread) {

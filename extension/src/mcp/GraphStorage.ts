@@ -3,8 +3,9 @@ import type { IndexedReference, QueryIndex } from './Index';
 
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
+  'pagesEdges' | 'pagesIssues' | 'pagesObservedCalls' | 'pagesOwnerIssues' |
   'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues' |
-  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callLiterals' | 'literalReturns' | 'unresolvedCallLiterals'> & {
+  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callSites' | 'returnSites' | 'unresolvedCallSites'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -18,12 +19,12 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, literalReturns, unresolvedCallLiterals, ...rest } = index;
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callSites, returnSites, unresolvedCallSites, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, literalReturns, unresolvedCallLiterals
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callSites, returnSites, unresolvedCallSites
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 
@@ -66,8 +67,13 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   facts.renderSites = [];
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
-    if (!site || index.renderEvidence?.[site]) return edge;
+    if (!site || index.sourceEvidence) return edge;
     facts.renderSites!.push([offset, site]);
+    if (edge[8]) {
+      const packed: typeof edge = [...edge];
+      packed[7] = undefined;
+      return packed;
+    }
     return edge.slice(0, edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4) as typeof edge;
   });
   return {

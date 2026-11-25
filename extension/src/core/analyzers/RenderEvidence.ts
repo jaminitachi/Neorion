@@ -3,13 +3,8 @@ import { importBinding } from './StaticBindings';
 
 export type RenderEvidence = { conditions?: string[]; lists?: string[]; issue?: string };
 
-function exits(node: Node): boolean {
+function directExit(node: Node) {
   if (Node.isReturnStatement(node) || Node.isThrowStatement(node)) return true;
-  if (Node.isBlock(node)) return node.getStatements().some(exits);
-  if (Node.isIfStatement(node)) {
-    const otherwise = node.getElseStatement();
-    return !!otherwise && exits(node.getThenStatement()) && exits(otherwise);
-  }
   if (!Node.isExpressionStatement(node)) return false;
   const expression = node.getExpression();
   if (!Node.isCallExpression(expression)) return false;
@@ -18,7 +13,36 @@ function exits(node: Node): boolean {
     ['redirect', 'permanentRedirect', 'notFound', 'forbidden', 'unauthorized'].includes(origin.name);
 }
 
-export function renderEvidence(site: Node, boundary?: Node): RenderEvidence | undefined {
+function exits(node: Node): boolean {
+  if (Node.isBlock(node)) return node.getStatements().some(exits);
+  if (Node.isIfStatement(node)) {
+    const otherwise = node.getElseStatement();
+    return !!otherwise && exits(node.getThenStatement()) && exits(otherwise);
+  }
+  return directExit(node);
+}
+
+function hasNestedExit(node: Node): boolean {
+  let found = false;
+  node.forEachDescendant((child, traversal) => {
+    if (Node.isFunctionLikeDeclaration(child)) traversal.skip();
+    else if (directExit(child)) {
+      found = true;
+      traversal.stop();
+    }
+  });
+  return found;
+}
+
+function listReceiver(node: Node): string {
+  if (Node.isCallExpression(node)) return listReceiver(node.getExpression()) + '(...)';
+  if (Node.isPropertyAccessExpression(node)) return listReceiver(node.getExpression()) + '.' + node.getName();
+  if (Node.isIdentifier(node) || Node.isThisExpression(node)) return node.getText();
+  if (Node.isParenthesizedExpression(node)) return '(' + listReceiver(node.getExpression()) + ')';
+  return '…';
+}
+
+export function renderEvidence(site: Node): RenderEvidence | undefined {
   const conditions: string[] = [];
   const lists: string[] = [];
   let issue: string | undefined;
@@ -40,7 +64,27 @@ export function renderEvidence(site: Node, boundary?: Node): RenderEvidence | un
     const value = text(node);
     conditions.unshift(sense === 'truthy' ? value : sense === 'falsy' ? `!(${value})` : `(${value}) is nullish`);
   };
-  for (let child = site, parent = child.getParent(); parent && child !== boundary; child = parent, parent = child.getParent()) {
+  const preceding = (statement: Node) => {
+    if (exits(statement)) {
+      issue ??= 'render after an unconditional exit';
+    } else if (Node.isIfStatement(statement)) {
+      const yes = statement.getThenStatement();
+      const no = statement.getElseStatement();
+      if (exits(yes)) {
+        if (no) preceding(no);
+        when(statement.getExpression(), 'falsy');
+      } else if (no && exits(no)) {
+        when(statement.getExpression());
+        if (hasNestedExit(yes)) issue ??= 'nested early exits in render guards untraced';
+      } else if (hasNestedExit(statement)) {
+        issue ??= 'nested early exits in render guards untraced';
+      }
+    } else if ((Node.isSwitchStatement(statement) || Node.isIterationStatement(statement) || Node.isTryStatement(statement) ||
+        Node.isBlock(statement) || Node.isLabeledStatement(statement)) && hasNestedExit(statement)) {
+      issue ??= 'preceding switch, exception or loop exits untraced';
+    }
+  };
+  for (let child = site, parent = child.getParent(); parent; child = parent, parent = child.getParent()) {
     if (Node.isIfStatement(parent) && child !== parent.getExpression()) {
       when(parent.getExpression(), child === parent.getThenStatement() ? 'truthy' : 'falsy');
     } else if (Node.isConditionalExpression(parent) && child !== parent.getCondition()) {
@@ -53,25 +97,14 @@ export function renderEvidence(site: Node, boundary?: Node): RenderEvidence | un
     } else if (Node.isBlock(parent)) {
       for (const statement of [...parent.getStatements()].reverse()) {
         if (statement.getPos() >= child.getPos()) continue;
-        if (!Node.isIfStatement(statement)) {
-          if (exits(statement)) issue ??= 'render after an unconditional exit';
-          continue;
-        }
-        const yes = exits(statement.getThenStatement());
-        const otherwise = statement.getElseStatement();
-        const no = !!otherwise && exits(otherwise);
-        if (yes && no) issue ??= 'render after an unconditional exit';
-        else if (yes || no) when(statement.getExpression(), yes ? 'falsy' : 'truthy');
-        else if (statement.getDescendantsOfKind(SyntaxKind.ReturnStatement).some(ret =>
-          ret.getFirstAncestor(Node.isFunctionLikeDeclaration) === parent.getFirstAncestor(Node.isFunctionLikeDeclaration))) {
-          issue ??= 'nested early returns in render guards untraced';
-        }
+        preceding(statement);
       }
     } else if (Node.isArrowFunction(parent) || Node.isFunctionExpression(parent)) {
       const call = parent.getParent();
       const callee = Node.isCallExpression(call) && call.getArguments()[0] === parent ? call.getExpression() : undefined;
       if (Node.isPropertyAccessExpression(callee) && ['map', 'flatMap'].includes(callee.getName())) {
-        lists.unshift(text(callee.getExpression()) + '.' + callee.getName() + '(...)');
+        const receiver = listReceiver(callee.getExpression());
+        lists.unshift((receiver.length > 64 ? receiver.slice(0, 63) + '…' : receiver) + '.' + callee.getName() + '(...)');
       } else if (Node.isCallExpression(call)) issue ??= 'render callback invocation untraced';
       else break;
     } else if (Node.isFunctionLikeDeclaration(parent)) break;
