@@ -2,7 +2,7 @@ import { Node, SourceFile, SyntaxKind } from 'ts-morph';
 import type { RouteNode } from '../types/GraphTypes';
 import type { PagesEdge } from '../../mcp/Index';
 import { declarationsOf, urlTexts } from './ArchitectureFacts';
-import { matchNextRoutes, middlewareMatcher, normalizeNextUrl, segmentRank } from './NextRouteMatch';
+import { compileMiddlewareMatcher, matchNextRoutes, normalizeNextUrl, segmentRank } from './NextRouteMatch';
 import { property, textValue, type NextConfig } from './NextConfig';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { visitKinds } from './CompilerWalk';
@@ -125,7 +125,10 @@ function callbackInvocation(factory: NonNullable<ReturnType<typeof functionNode>
         }
       }
     };
-    const { calls, returned: values } = executionSites(node);
+    // Once the wrapper's handler is selected, short-circuit exits are
+    // normal request outcomes. Branch-local and opaque forwarding still
+    // need runtime evidence to establish the callback target.
+    const { calls, returned: values } = executionSites(node, !returned);
     if (returned) {
       const handler = (value: Node | undefined, possible: boolean, depth = 0) => {
         if (!value || depth >= 12) return;
@@ -359,6 +362,11 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
         for (const handler of handlers) report(ownerIssues, handler.target, 'dynamic middleware config');
         for (const route of pages) report(issues, route.id, 'dynamic middleware config');
       }
+      const matchers = values.map(value => {
+        const pattern = textValue(value) ?? textValue(property(value, 'source'));
+        return { value, pattern, matchRoute: pattern && compileMiddlewareMatcher(pattern),
+          conditional: !!(property(value, 'has') || property(value, 'missing')) };
+      });
       for (const route of pages) {
         if (!match) {
           const dynamic = !!config && !Node.isObjectLiteralExpression(object);
@@ -366,22 +374,22 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
             site: config ?? entry, detail: dynamic ? 'unresolved matcher' : 'default matcher', possible: dynamic || handler.possible });
           continue;
         }
-        const matched = values.flatMap(value => {
-          const pattern = textValue(value) ?? textValue(property(value, 'source'));
-          const member = pattern && middlewareMatcher(pattern, route.path);
+        const matched = matchers.flatMap(({ value, pattern, matchRoute, conditional }) => {
+          const member = matchRoute ? matchRoute(route.path) : undefined;
           if (!member) {
             report(issues, route.id, 'unsupported middleware matcher');
             for (const handler of handlers) report(ownerIssues, handler.target, 'unsupported middleware matcher');
           }
           if (member === 'no') return [];
-          const conditional = !member || !!(property(value, 'has') || property(value, 'missing'));
-          return [{ value, pattern, conditional, possible: member !== 'yes' || conditional }];
+          return [{ value, pattern, conditional: !member || conditional, possible: member !== 'yes' || conditional,
+            overlap: member === 'possible' }];
         });
         for (const entry of matched) for (const handler of handlers) dependencies.push({
           route: route.id, target: handler.target, kind: 'middleware', site: entry.value,
           detail: entry.pattern ?? 'unresolved matcher', possible: entry.possible || handler.possible,
           matcher: entry.pattern === undefined ? undefined : {
-            source: entry.pattern, conditional: (entry.conditional || handler.possible) || undefined
+            source: entry.pattern, conditional: (entry.conditional || handler.possible) || undefined,
+            overlap: entry.overlap || undefined
           }
         });
       }
@@ -401,8 +409,10 @@ export function collectPagesFacts(files: SourceFile[], routes: RouteNode[], conf
   for (const rule of config.rules) {
     const matched = matchNextRoutes(rule.destination, routes, route => route.path, config.url)?.filter(route => route.pages);
     if (!matched.length) continue;
+    const matchRoute = compileMiddlewareMatcher(rule.source);
+    if (!matchRoute) continue;
     for (const route of pages) {
-      const membership = middlewareMatcher(rule.source, route.path);
+      const membership = matchRoute(route.path);
       if (membership !== 'yes' && membership !== 'possible') continue;
       for (const destination of matched) dependencies.push({ route: route.id, destination: destination.id, kind: rule.kind,
         site: rule.site, possible: membership === 'possible' || rule.conditional, detail: rule.source + ' → ' + rule.destination });

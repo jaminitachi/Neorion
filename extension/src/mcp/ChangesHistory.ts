@@ -11,13 +11,23 @@ export const sourceFile = /\.[cm]?[jt]sx?$/;
 export const routeAsset = /(?:\.css|(?:^|\/)(?:robots\.txt|sitemap\.xml|opengraph-image\.(?:png|jpe?g|gif)))$/;
 export const historyBudgetMs = 20_000;
 type Git = (args: string[], input?: Buffer, maxBuffer?: number) => Buffer;
+export type ImportEdit = { before: ReadonlyMap<number, string>; after: ReadonlyMap<number, string> };
 export type Removal = { file: string; names?: string[]; uncertainNames?: ReadonlySet<string>; currentFile?: string;
   compareExports?: boolean; stagedDrift?: boolean; renamed?: true };
 
-function historicalIndex(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number): QueryIndex {
+// Keep only the latest comparison graph in each query worker. The staged or
+// committed tree signature is rechecked for every request.
+let warmHistory: { root: string; key: string; index: QueryIndex; graph: DependencyGraph } | undefined;
+
+function historicalGraph(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number) {
   const stagedTree = ref ? undefined : git(['ls-files', '--stage', '--full-name', '-z', '--', ':/']);
   const treeId = stagedTree ? createHash('sha256').update(stagedTree).digest('hex') :
     git(['rev-parse', '--verify', ref! + '^{tree}']).toString('utf8').trim();
+  const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
+  if (warmHistory?.root === root && warmHistory.key === key) return warmHistory;
+  const remember = (index: QueryIndex) => warmHistory = {
+    root, key, index, graph: new DependencyGraph(index, new Map(index.symbols.map(symbol => [symbol.id, symbol])))
+  };
   let directory: string | undefined;
   let cached: string | undefined;
   try {
@@ -29,11 +39,10 @@ function historicalIndex(root: string, git: Git, ref: string | undefined, prefix
       if (!lstatSync(path).isDirectory()) throw new Error('Invalid comparison cache directory');
     }
     directory = history;
-    const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
     cached = join(history, key + '.json');
     if (lstatSync(cached).isFile()) {
       const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
-      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return index;
+      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return remember(index);
     }
   } catch {
     // A missing, invalid or unwritable cache is recoverable from Git.
@@ -97,17 +106,44 @@ function historicalIndex(root: string, git: Git, ref: string | undefined, prefix
         // Cache publication is optional. The newly built index is usable.
       }
     }
-    return index;
+    return remember(index);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
   }
 }
 
+function updatedImport(base: DependencyGraph, current: DependencyGraph, importer: string, liveImporter: string,
+  oldTarget: string, liveTarget: string, edit: ImportEdit, name?: string) {
+  const before = base.importsFrom(importer, oldTarget);
+  const after = current.importsFrom(liveImporter, liveTarget);
+  if (!before.length || !after.length) return false;
+  // Require real import declarations. Unresolved imports and dynamic loads
+  // cannot be proved updated by the presence of a different resolved import.
+  const complete = before.every(([, line]) => edit.before.has(line)) && after.every(([, line]) => edit.after.has(line));
+  if (!complete) return false;
+  const valid = after.every(([, , kind, bindings, members]) => kind === 'type' ||
+    (bindings ?? []).every(([binding]) => binding === '*' || current.runtimeExport(liveTarget, binding) === 'value') &&
+    (members ?? []).every(([, member]) => member != null && current.runtimeExport(liveTarget, member) === 'value'));
+  if (!valid) return false;
+  if (name !== undefined) {
+    const importsName = ([, , kind, bindings, members]: (typeof after)[number]) => kind !== 'type' &&
+      (bindings?.some(([binding]) => binding === name || binding === '*' && kind === 'export') ||
+        members?.some(([, member]) => member === name || member == null));
+    return before.some(importsName) && !after.some(importsName);
+  }
+  const oldSpecifiers = new Set(before.map(([, line]) => edit.before.get(line)));
+  if ([...edit.after.values()].some(specifier => oldSpecifiers.has(specifier))) return false;
+  // Compare multiplicities so one corrected statement cannot hide another.
+  const bindings = (entries: typeof before) => entries.map(([, , kind, names]) => JSON.stringify([kind, names?.slice().sort()])).sort();
+  const oldBindings = bindings(before);
+  const newBindings = bindings(after);
+  return oldBindings.length === newBindings.length && oldBindings.every((binding, i) => binding === newBindings[i]);
+}
+
 export function traceHistory(root: string, removals: Removal[], middleware: ReadonlyMap<string, string>,
-  current: DependencyGraph, renamed: ReadonlyMap<string, string>,
+  current: DependencyGraph, renamed: ReadonlyMap<string, string>, importEdit: (file: string) => ImportEdit | undefined,
   git: Git, ref: string | undefined, prefix: string, depth: number, deadline: number) {
-  const historical = historicalIndex(root, git, ref, prefix, deadline);
-  const base = new DependencyGraph(historical, new Map(historical.symbols.map(symbol => [symbol.id, symbol])));
+  const { index: historical, graph: base } = historicalGraph(root, git, ref, prefix, deadline);
   const origins: ChangeOrigin[] = [];
   const live: ChangeOrigin[] = [];
   const rows: QueryRow[] = [];
@@ -117,6 +153,9 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
   let examined = 0;
   let unknownExports = false;
   let unknownNamespaces = false;
+  let updatedOnly = false;
+  let hasUnverifiedOrigin = false;
+  const unverifiedMoves = new Set<string>();
   const traceOrigin = (file: string, name: string, ids: ChangeOrigin['ids'], wholeFile: boolean, moved = false,
     uncertainExport = false) => {
     if (examined++ >= 100) {
@@ -127,7 +166,14 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
       current.matchingNode(base, id, renamed.get(file) ?? file).length > 0);
     const origin: ChangeOrigin = { file, name, ids, renamed: moved, removed: !moved, externalOnly };
     const { uses, files, importFiles, direct, uncertain, terminal } = base.removalSites(origin, wholeFile);
-    origin.importFiles = importFiles;
+    const updated = new Set<string>();
+    if (!uncertainExport && (!wholeFile || moved)) for (const importer of files.keys()) {
+      const currentImporter = renamed.get(importer) ?? importer;
+      const edit = importEdit(currentImporter);
+      if (edit && updatedImport(base, current, importer, currentImporter, file, renamed.get(file) ?? file, edit,
+        wholeFile ? undefined : name)) updated.add(importer);
+    }
+    origin.importFiles = updated.size ? new Set([...(importFiles ?? files.keys())].filter(file => !updated.has(file))) : importFiles;
     const seedImporters = (target: ChangeOrigin[], ids: ChangeOrigin['ids'], checked: ChangeOrigin[]) => {
       if (!ids.length) return;
       const seed = { ...origin, ids: [...new Set(ids)], startsAt: 1, externalOnly: false };
@@ -140,11 +186,18 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
       ids.push(edge.from);
       used.set(edge.file, ids);
     }
-    if (!uncertainExport) origins.push(origin);
+    const allUpdated = updated.size > 0 && updated.size === files.size;
+    updatedOnly ||= allUpdated;
+    hasUnverifiedOrigin ||= !allUpdated || terminal || uncertainExport;
+    if (!uncertainExport && (!allUpdated || terminal)) origins.push(origin);
     const checked = [origin];
     // An indexed import may have no reference edge for its binding. Use the
     // importing file as evidence on both sides, including deleted importers.
     for (const [importer, sites] of [...files].sort(([a], [b]) => compare(a, b))) {
+      if (updated.has(importer)) continue;
+      if (moved && base.importsFrom(importer, file).length && current.moduleSeeds(renamed.get(importer) ?? importer).length) {
+        unverifiedMoves.add(importer);
+      }
       const lines = [...new Set(sites.map(site => site.line))].sort((a, b) => a - b);
       const opaque = uncertain.has(importer);
       const relation = uncertainExport ? 'possible removal of' : moved ? 'renamed' : 'removed';
@@ -167,7 +220,7 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
       const internal = used.get(file) ?? [];
       seedImporters(live, internal.flatMap(id => current.matchingNode(base, id, renamed.get(file))), checked);
     }
-    if (!uncertainExport && (wholeFile || !direct.size && !uncertain.size)) {
+    if (!uncertainExport && !allUpdated && (wholeFile || !direct.size && !uncertain.size)) {
       checks.push({ evidence: files.size > 0 || terminal && !externalOnly, origins: checked, renamed: moved });
     }
   };
@@ -204,5 +257,6 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
   }
   const trace = base.changeRoutes(origins, depth, () => performance.now() >= deadline);
   const previousMiddleware = new Map([...middleware].map(([file, old]) => [file, base.middleware(old)]));
-  return { live, trace, rows, removed, checks, skipped, previousMiddleware, unknownExports, unknownNamespaces };
+  return { live, trace, rows, removed, checks, skipped, previousMiddleware, unknownExports, unknownNamespaces, unverifiedMoves: unverifiedMoves.size,
+    cleanRefactor: updatedOnly && !hasUnverifiedOrigin && !unknownExports && !skipped };
 }

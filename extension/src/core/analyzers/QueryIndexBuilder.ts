@@ -91,7 +91,7 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
-  private edges: [string, string, number, number, true?, true?, string?, RenderSite?][] = [];
+  private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
@@ -114,15 +114,16 @@ export class QueryIndexBuilder {
   }
 
   private fetches: PendingFetch[] = [];
-  private uncertainChatTransports: { file: string; node: Node; unbounded: boolean }[] = [];
+  private uncertainChatTransports: { file: string; node: Node; unbounded: boolean; override: boolean }[] = [];
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: RenderSite) {
+  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: RenderSite, file?: string) {
     const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
       layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
     if (detail) edge[6] = detail;
     if (site) edge[7] = site;
+    if (file) edge[8] = file;
     this.edges.push(edge);
     if (tag) {
       const entries = this.renderSites.get(tag) ?? [];
@@ -161,8 +162,8 @@ export class QueryIndexBuilder {
     this.fetches.push(entry);
   }
 
-  uncertainChatTransport(file: string, node: Node, unbounded: boolean) {
-    this.uncertainChatTransports.push({ file, node, unbounded });
+  uncertainChatTransport(file: string, node: Node, unbounded: boolean, override: boolean) {
+    this.uncertainChatTransports.push({ file, node, unbounded, override });
   }
 
   action(id: string, name: string, file: string, line: number) {
@@ -181,7 +182,7 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false): QueryIndex {
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -227,8 +228,11 @@ export class QueryIndexBuilder {
     }
     for (const file of files) {
       const relative = relativePath(file);
-      const { size, mtimeMs } = statSync(file.getFilePath());
-      index.files[relative] = { size, mtimeMs, sha1: createHash('sha1').update(readFileSync(file.getFilePath())).digest('hex') };
+      if (historyOnly) index.files[relative] = { size: 0, mtimeMs: 0, sha1: '' };
+      else {
+        const { size, mtimeMs } = statSync(file.getFilePath());
+        index.files[relative] = { size, mtimeMs, sha1: createHash('sha1').update(readFileSync(file.getFilePath())).digest('hex') };
+      }
       for (const node of [...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getInterfaces(), ...file.getTypeAliases(), ...file.getEnums()]) {
         const name = node.getName() ?? 'default';
@@ -629,7 +633,6 @@ export class QueryIndexBuilder {
         return id === undefined ? [] : [[id, [...reasons]]];
       }));
       index.pagesUrlConfig = config.url;
-      index.pagesWorkspaceInputs = workspace?.snapshot();
       index.pagesIssues = issues(pages.issues);
       index.pagesWrapperIssues = issues(this.wrapperProblems);
       if (this.pageConditions.size) {
@@ -673,11 +676,12 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
-    for (const [from, to, line, conditional, layout, possible, detail, site] of this.edges) {
+    for (const [from, to, line, conditional, layout, possible, detail, site, file] of this.edges) {
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
-      index.renderEdges.push(site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
+      index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
+        site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
     }
@@ -704,9 +708,9 @@ export class QueryIndexBuilder {
       return [{ file, owner: owners(node)[1] ?? fileIdOf(node), method, gates: gatesOf([...flow.gates(node), ...gates]) }];
     });
     if (this.uncertainChatTransports.length) {
-      index.uncertainChatTransports = this.uncertainChatTransports.map(({ file, node, unbounded }) => {
+      index.uncertainChatTransports = this.uncertainChatTransports.map(({ file, node, unbounded, override }) => {
         const [owner, graphOwner] = owners(node);
-        return [file, graphOwner ?? owner ?? byGraphId.get(`file:${file}`)!, unbounded];
+        return [file, graphOwner ?? owner ?? byGraphId.get(`file:${file}`)!, unbounded, startLine(node), override];
       });
     }
 
@@ -726,7 +730,7 @@ export class QueryIndexBuilder {
     for (const relative of orderedFiles) {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
-      const content = file.getFullText();
+      const content = historyOnly ? '' : file.getFullText();
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -870,15 +874,17 @@ export class QueryIndexBuilder {
             }
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
+            const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
-              recordGraph(id, line, GraphReferenceKind.Use, referenceOwner);
+              recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);
             }
-            moduleUse = !jsx && !signature && referenceOwner === undefined;
+            moduleUse = !typeUse && !jsx && !signature && referenceOwner === undefined;
             referenceCaller = sameFile ? undefined : referenceOwner;
             if (sameFile) referenceOwner = undefined;
             else if (callbackUse) referenceKind = 'callback-argument';
             else if (jsx) referenceKind = 'jsx-use';
+            if (typeUse && !sameFile && referenceKind === 'use') referenceKind = 'type-use';
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
@@ -1084,7 +1090,7 @@ export class QueryIndexBuilder {
           const specifier = Node.isStringLiteral(module) ? module :
             Node.isCallExpression(module) && module.getExpression().getKind() === SyntaxKind.ImportKeyword
               ? module.getArguments()[0] : undefined;
-          if (!/^(vi|jest)\.(mock|doMock)$/.test(expression.getText()) || !Node.isStringLiteral(specifier) || !factory) return;
+          if (historyOnly || !/^(vi|jest)\.(mock|doMock)$/.test(expression.getText()) || !Node.isStringLiteral(specifier) || !factory) return;
           const moduleName = specifier.getLiteralText();
           const imported = file.getImportDeclarations().find(entry => entry.getModuleSpecifierValue() === moduleName);
           const resolved = imported?.getModuleSpecifierSourceFile() ?? fileByName.get(ts.resolveModuleName(
@@ -1119,15 +1125,16 @@ export class QueryIndexBuilder {
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
-      }, { visitRaw: scanNodeComments });
+      }, { visitRaw: historyOnly ? undefined : scanNodeComments });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {
         const symbol = index.symbols[id - 1];
         const sameFile = symbol.file === relative;
         for (const [line, entries] of lines) {
-          if (sameFile && entries.some(entry => entry[3] === 'use')) (symbol.localUses ??= []).push(line);
+          if (!historyOnly && sameFile && entries.some(entry => entry[3] === 'use')) (symbol.localUses ??= []).push(line);
           for (const entry of entries) {
+            if (historyOnly && entry[3] !== 'call' && entry[3] !== 'use' && entry[3] !== 'type-use') continue;
             if (!sameFile) index.references.push(entry);
             else if (entry[3] !== 'use') {
               const [, , ...site] = entry;
@@ -1137,7 +1144,7 @@ export class QueryIndexBuilder {
         }
       }
       const graphEntries = [...graphReferences.values()].filter(([id, line, kind, owner]) =>
-        kind !== GraphReferenceKind.Use || !references.get(id)?.get(line)?.some(reference =>
+        kind !== GraphReferenceKind.Use && kind !== GraphReferenceKind.TypeUse || !references.get(id)?.get(line)?.some(reference =>
           reference[3] === 'call' && (reference[6] ?? reference[5]) === owner));
       if (graphEntries.length) index.graphReferences![fileId] = graphEntries;
       if (trpcModuleUses.size) (index.trpcModuleUses ??= {})[fileId] = [...trpcModuleUses.values()];
@@ -1173,8 +1180,12 @@ export class QueryIndexBuilder {
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
+      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) {
+        if (edge[8]) edge[7] = undefined;
+        else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
+      }
     }
+    index.pagesWorkspaceInputs = workspace?.snapshot();
     return index;
   }
 }

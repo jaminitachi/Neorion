@@ -1,7 +1,7 @@
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 4;
-export const QUERY_INDEX_REVISION = 8;
+export const WRAPPER_INDEX_REVISION = 6;
+export const QUERY_INDEX_REVISION = 9;
 export const GRAPH_INDEX_REVISION = 13;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -10,6 +10,11 @@ export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
 export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE : 'JSX prop render untraced';
+export const AI_SDK_URL_UNCERTAIN = 'uncertain AI SDK URL matches';
+
+export function transportIssue(override?: boolean) {
+  return override ? AI_SDK_URL_OVERRIDE : AI_SDK_URL_UNCERTAIN;
+}
 export { version as VERSION } from '../../../neorion/package.json';
 
 export const isTestFile = (file: string) =>
@@ -60,6 +65,8 @@ export interface FetchEntry {
   owner?: number;
   graphOwner?: number;
   lifecyclePossible?: true;
+  transportOverride?: boolean;
+  possibleReconnect?: true;
   partial?: boolean;
   dynamic?: boolean;
   propUrlUnknown?: true;
@@ -73,7 +80,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 // by their position in the ordered file table.
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
-export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
+export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
@@ -103,7 +110,7 @@ export interface PagesEdge {
   line: number;
   detail?: string;
   possible?: boolean;
-  matcher?: { source: string; conditional?: boolean };
+  matcher?: { source: string; conditional?: boolean; overlap?: boolean };
 }
 
 export interface QueryIndex {
@@ -123,7 +130,7 @@ export interface QueryIndex {
     methodBasis?: 'enforced' | 'observed';
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
-  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string][];
+  renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
@@ -131,7 +138,7 @@ export interface QueryIndex {
   branches?: Record<string, string[]>;
   references: IndexedReference[];
   fetches: FetchEntry[];
-  uncertainChatTransports?: [file: string, owner: number, unbounded?: boolean][];
+  uncertainChatTransports?: [file: string, owner: number, unbounded?: boolean, line?: number, override?: boolean][];
   serverActions?: ServerAction[];
   mentions?: Record<string, [file: string, line: number][]>;
   graphRevision?: number;
@@ -162,6 +169,7 @@ export interface QueryIndex {
   trpcUnbound?: number[];
   trpcIssues?: Record<number, [file: number, line: number][]>;
   trpcFiles?: string[];
+  // External workspace files used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
   pagesUrlConfig?: NextUrlConfig;
   pagesEdges?: PagesEdge[];

@@ -1,18 +1,20 @@
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const childProcess = require('node:child_process');
+const { spawnSync } = childProcess;
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { test } = require('node:test');
 const { parse } = require('jsonc-parser');
 const { openMcp } = require('./mcp-helpers.cjs');
-const { mcpCommand } = require('./mcp-command.cjs');
+const { mcpCommand, releaseSpec } = require('./mcp-command.cjs');
 const { cachePath, indexFile } = require('./workspace-cache.cjs');
 
 const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
 const entry = path.join(packageRoot, 'dist/neorion.cjs');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
+const cliSpawnTimeout = 60_000;
 
 function fixture(t) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-cli-'));
@@ -29,8 +31,8 @@ function fixture(t) {
   delete env.CODEX_HOME;
   for (const key of Object.keys(env)) if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete env[key];
   env.PATH = process.env.PATH;
-  const run = (args, overrides = {}, cliEntry = entry) => spawnSync(process.execPath, [cliEntry, ...args], {
-    cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
+  const run = (args, overrides = {}, cliEntry = entry) => childProcess.spawnSync(process.execPath, [cliEntry, ...args], {
+    cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: cliSpawnTimeout
   });
   return { root, cache, home, env, run };
 }
@@ -68,6 +70,10 @@ if (action === 'get') {
     console.log(JSON.stringify(Object.entries(data.mcpServers).map(([name, entry]) => ({ name, ...entry }))));
   }
 } else if (action === 'add') {
+  if (process.env.FAKE_ADD_FAILURE) {
+    console.error('Cannot load Codex configuration');
+    process.exit(1);
+  }
   if (${JSON.stringify(agent)} === 'claude' && data.mcpServers.neorion) {
     console.error('Server already exists');
     process.exit(1);
@@ -181,11 +187,11 @@ test('CLI hints replay a source query from outside its explicitly selected proje
   fs.renameSync(root, project);
   env.PATH = home;
   const first = spawnSync(process.execPath, [direct, 'query', 'search', 'app', '--kind', 'component',
-    '--limit', '1', '--root', project], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+    '--limit', '1', '--root', project], { cwd: home, env, encoding: 'utf8', timeout: cliSpawnTimeout });
   assert.equal(first.status, 0, first.stderr);
   const command = /^# more: \d+ \(try (.*), or narrow the text\)$/m.exec(first.stdout)?.[1];
   assert.ok(command?.includes(process.execPath), first.stdout);
-  const second = spawnSync('/bin/sh', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
+  const second = spawnSync('/bin/sh', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: cliSpawnTimeout });
   assert.equal(second.status, 0, second.stderr);
   assert.match(second.stdout, /^Project: selected project$/m);
   assert.match(second.stdout, /^# search "app" kind=component : 2 results /m);
@@ -385,7 +391,7 @@ test('CLI and MCP index a literal reconnect override as a GET request', async t 
   `);
   const override = await query('api_consumers', '/api/other');
   assert.match(override, /1 site in 1 file: 1 request/);
-  assert.match(override, /^send .* reconnectChat GET AI SDK transport$/m);
+  assert.match(override, /^send .* reconnectChat GET AI SDK transport \[possible reconnect\]$/m);
   assert.match(override, /^# complete:/m);
   const configured = await query('api_consumers', '/api/chat');
   assert.match(configured, /^send .* reconnectChat POST AI SDK transport$/m);
@@ -443,6 +449,25 @@ test('CLI query refreshes an older same-version index missing same-file use site
   assert.equal(readJson(file).queryRevision, revision);
 });
 
+test('CLI rejects same-version graph caches from both sides of the render-edge merge', t => {
+  const { run } = fixture(t);
+  const graph = run(['graph']);
+  assert.equal(graph.status, 0, graph.stderr);
+  const indexPath = path.join(path.dirname(/^Overview: (.+)$/m.exec(graph.stdout)[1]), indexFile);
+  const index = readJson(indexPath);
+  assert.ok(index.wrapperRevision > 5 && index.queryRevision > 8 && index.graphRevision > 11);
+  for (const [wrapperRevision, trailingSlots] of [[5, ['lib/view.tsx']], [4, ['prop body', 'app/page.tsx:2:1']]]) {
+    const renderEdges = index.renderEdges.map(edge => [...edge.slice(0, 4), null, null, ...trailingSlots]);
+    fs.writeFileSync(indexPath, JSON.stringify({ ...index, wrapperRevision, queryRevision: 8, graphRevision: 11, renderEdges }));
+    const query = run(['query', 'who_renders', 'DashboardShell'], { NEORION_AUTOBUILD: '1' });
+    assert.equal(query.status, 0, query.stderr);
+    assert.match(query.stdout, /^\/  app\/page\.tsx/m);
+    const refreshed = readJson(indexPath);
+    assert.deepEqual(refreshed.renderEdges, index.renderEdges);
+    assert.equal(refreshed.graphRevision, index.graphRevision);
+  }
+});
+
 test('Codex setup installs the skill and prints config when Codex is unavailable', t => {
   const { home, root, run } = fixture(t);
   const setup = run(['setup', 'codex'], { PATH: home, Path: home });
@@ -484,14 +509,15 @@ test('Codex setup uses bare neorion only when PATH resolves to this entry', { sk
   assert.ok(hint().includes('run `node '));
 });
 
-test('Codex setup writes the hint before failed registration', { skip: process.platform === 'win32' }, t => {
+test('Codex inspection failure leaves the hint and skill absent', { skip: process.platform === 'win32' }, t => {
   const { home, root, run } = fixture(t);
   fs.writeFileSync(path.join(home, 'codex'),
-    '#!/bin/sh\n[ -f AGENTS.md ] || exit 2\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
+    '#!/bin/sh\necho "registration failed" >&2\nexit 1\n', { mode: 0o755 });
   const setup = run(['setup', 'codex'], { PATH: home });
   assert.equal(setup.status, 1);
-  assert.match(setup.stderr, /registration failed/);
-  assert.ok(fs.existsSync(path.join(root, 'AGENTS.md')));
+  assert.match(setup.stderr, /registration failed[\s\S]*CODEX_HOME/);
+  assert.equal(fs.existsSync(path.join(root, 'AGENTS.md')), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion/SKILL.md')), false);
 });
 
 test('Codex setup chooses a temporary npm command or a quoted local entry', t => {
@@ -592,6 +618,18 @@ test('Claude setup merges the advisory and removes only its own hook', t => {
   }
 });
 
+test('Claude setup allows a CLI launch to take longer than the old spawn timeout', t => {
+  const { home, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const spawn = t.mock.method(childProcess, 'spawnSync', (command, args, options) => {
+    assert.ok(options.timeout > 15_000 && Number.isFinite(options.timeout));
+    return spawnSync(command, args, options);
+  });
+  const result = run(['setup', 'claude', '--no-hook'], { PATH: home });
+  assert.equal(result.status, 0, result.error?.message ?? result.stderr);
+  assert.equal(spawn.mock.callCount(), 1);
+});
+
 test('Claude --no-hook leaves project settings alone or disables an installed advisory', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
@@ -677,16 +715,23 @@ test('Claude installs the hook only in projects and skips the user settings dire
   const result = run(['setup', 'claude'], { PATH: home });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Skipping CLAUDE\.md hint/);
+  assert.match(result.stderr, /^Skipping Neorion Claude hook: the current directory has no tsconfig\.json, jsconfig\.json, or package\.json\.$/m);
   assert.ok(!fs.existsSync(path.join(root, '.claude')));
   assert.ok(readJson(config).mcpServers.neorion);
-  const atHome = () => spawnSync(process.execPath, [entry, 'setup', 'claude', '--no-hint'], {
+  const atHome = (...flags) => spawnSync(process.execPath, [entry, 'setup', 'claude', '--no-hint', ...flags], {
     cwd: home, env: { ...env, PATH: home }, encoding: 'utf8'
   });
   for (const project of [false, true]) {
     if (project) fs.writeFileSync(path.join(home, 'package.json'), '{}');
     const installed = atHome();
     assert.equal(installed.status, 0, installed.stderr);
+    assert.match(installed.stderr, /^Skipping Neorion Claude hook: the current directory is your home directory\.$/m);
     assert.ok(!fs.existsSync(path.join(home, '.claude/settings.json')));
+  }
+  for (const flag of ['--no-hook', '--remove']) {
+    const result = atHome(flag);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stderr, '');
   }
 });
 
@@ -701,8 +746,23 @@ test('Claude cleans up created settings and prunes empty containers in legacy se
     assert.equal(result.stderr, '');
   };
   setup();
+  setup();
+  setup('--remove');
+  assert.ok(!fs.existsSync(path.dirname(file)));
+
+  fs.mkdirSync(path.dirname(file));
+  setup();
+  setup('--no-hook');
+  assert.ok(!fs.existsSync(file));
+  assert.ok(fs.existsSync(path.dirname(file)));
+  fs.rmdirSync(path.dirname(file));
+
+  setup();
+  const sibling = path.join(path.dirname(file), 'settings.local.json');
+  fs.writeFileSync(sibling, '{}');
   setup('--remove');
   assert.ok(!fs.existsSync(file));
+  assert.equal(fs.readFileSync(sibling, 'utf8'), '{}');
 
   setup();
   const settings = readJson(file);
@@ -720,6 +780,28 @@ test('Claude cleans up created settings and prunes empty containers in legacy se
   setup();
   setup('--remove');
   assert.deepEqual(readJson(file), {});
+});
+
+test('Claude hook setup preserves compact user groups and adjacent JSONC comments', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const file = path.join(root, '.claude/settings.json');
+  fs.mkdirSync(path.dirname(file));
+  const group = '{ "matcher":"Grep|Glob", "hooks":[{"type":"command","command":"user-search"}] }';
+  for (const [suffix, installedSuffix] of [[',', ','], [', // User search hook', ', // User search hook'],
+    [' // User search hook', ', // User search hook'], ['', ',']]) {
+    const userLine = `\t\t\t${group}${suffix}\r\n`;
+    const original = '\uFEFF{\r\n\t"hooks": {\r\n\t\t"PreToolUse": [\r\n' + userLine + '\t\t]\r\n\t}\r\n}\r\n';
+    fs.writeFileSync(file, original);
+    const added = run(['setup', 'claude', '--no-hint'], { PATH: home });
+    assert.equal(added.status, 0, added.stderr);
+    const installed = fs.readFileSync(file, 'utf8');
+    assert.ok(installed.includes(`\t\t\t${group}${installedSuffix}\r\n`));
+    assert.equal(neorionHooks(parse(installed.slice(1))).length, 1);
+    const removed = run(['setup', 'claude', '--remove', '--no-hint'], { PATH: home });
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(fs.readFileSync(file, 'utf8'), original);
+  }
 });
 
 test('Installed Claude hook suggests queries and exits silently when out of scope', t => {
@@ -763,10 +845,12 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   }
   for (const input of ['{', ' '.repeat(17_000), component, payload('Glob', componentGlob, 'app'),
     payload('Bash', 'DashboardShell'), payload('Glob', '**/*.{tsx,ts}'),
-    ...['Dashboard.*|Shell', 'Error', 'Promise', 'React', 'Props', '^export', '^import', 'useState', 'useCurrentUser']
+    ...['Dashboard.*|Shell', 'Error', 'Promise', 'React', 'Props', '^export', '^import', 'useState', 'useCurrentUser',
+      'className', '\\bonClick\\b', 'getServerSideProps', 'generateMetadata', 'dangerouslySetInnerHTML',
+      'NextResponse', 'Metadata', 'ButtonProps', 'ButtonType']
       .map(pattern => payload('Grep', pattern))
   ]) {
-    assert.equal(invoke(input), '');
+    assert.equal(invoke(input), '', input);
   }
   fs.writeFileSync(manifest, '{"dependencies":{"react":"^19.0.0"}}');
   assert.equal(invoke(payload('Grep', 'DashboardShell', undefined, 'non-next-project')), '');
@@ -788,14 +872,17 @@ test('Cursor setup merges MCP and shares the Claude hint, with idempotent projec
   assert.equal(added.status, 0, added.stderr);
   assert.deepEqual(readJson(config), {
     mcpServers: { ...JSON.parse(original).mcpServers, neorion: {
-      ...mcpCommand({ localEntry: entry, root: '${workspaceFolder}' }), type: 'stdio'
+      ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio'
     } }
   });
   const hint = fs.readFileSync(rule, 'utf8');
   assert.match(hint, /^---\ndescription: .+\nalwaysApply: true\n---\n/);
   assertQueryHint(hint);
   const claude = fs.readFileSync(path.join(root, 'CLAUDE.md'), 'utf8');
-  const guidance = text => text.split('<!-- neorion:start -->\n')[1].split('<!-- neorion:state ')[0];
+  assert.ok(hint.includes(`npx -y ${releaseSpec()}`));
+  assert.ok(!hint.includes(entry));
+  const guidance = text => text.split('<!-- neorion:start -->\n')[1].split('<!-- neorion:state ')[0]
+    .split('\nIf MCP is unavailable, run ')[0];
   assert.equal(guidance(hint), guidance(claude));
   const merged = fs.readFileSync(config, 'utf8');
   const repeated = run(['setup', 'cursor'], env);
@@ -854,7 +941,7 @@ test('Cursor preserves compact JSONC and a pre-existing extension rule through s
   assert.equal(fs.readFileSync(extensionRule, 'utf8'), extension);
 });
 
-test('Cursor upgrades an owned implicit stdio entry and leaves a matching user entry intact', t => {
+test('Cursor migrates an owned local entry to a release archive and leaves a matching user entry intact', t => {
   const { root, cache, run } = fixture(t);
   const config = path.join(root, '.cursor/mcp.json');
   const state = path.join(cache, 'neorion', path.basename(cachePath(root)), '.neorion/cursor-setup-state.json');
@@ -874,13 +961,44 @@ test('Cursor upgrades an owned implicit stdio entry and leaves a matching user e
     assert.equal(result.status, 0, result.stderr);
   };
   setup();
-  assert.deepEqual(readJson(config).mcpServers.neorion, { ...implicit, type: 'stdio' });
+  assert.deepEqual(readJson(config).mcpServers.neorion, { ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio' });
   setup('--remove');
   assert.equal(fs.readFileSync(config, 'utf8'), original);
   fs.writeFileSync(config, withServer);
   setup();
   setup('--remove');
   assert.equal(fs.readFileSync(config, 'utf8'), withServer);
+});
+
+test('Cursor reuses extension registry entries and gives guidance for conflicting servers', t => {
+  const { root, run } = fixture(t);
+  const config = path.join(root, '.cursor/mcp.json');
+  const rule = path.join(root, '.cursor/rules/neorion-query.mdc');
+  fs.mkdirSync(path.dirname(config));
+  for (const options of [{ root: '${workspaceFolder}' }, { root: '${workspaceFolder}/apps/web', registryVersion: '0.5.2' },
+    { root: '${workspaceFolder}', registryVersion: '0.5.2', platform: 'win32' },
+    { root: '${workspaceFolder}', registryVersion: '0.5.2', useRelease: true }]) {
+    const original = JSON.stringify({ mcpServers: { neorion: {
+      ...mcpCommand(options), type: 'stdio'
+    } } });
+    fs.writeFileSync(config, original);
+    const added = run(['setup', 'cursor']);
+    assert.equal(added.status, 0, added.stderr);
+    assert.ok(fs.existsSync(rule));
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    const removed = run(['setup', 'cursor', '--remove']);
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.ok(!fs.existsSync(rule));
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+  }
+
+  const conflict = '{"mcpServers":{"neorion":{"command":"another-server"}}}';
+  fs.writeFileSync(config, conflict);
+  const failed = run(['setup', 'cursor']);
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /Keep the existing entry or remove it.*before rerunning setup/);
+  assert.equal(fs.readFileSync(config, 'utf8'), conflict);
+  assert.ok(!fs.existsSync(rule));
 });
 
 test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked legacy registration', async t => {
@@ -920,7 +1038,7 @@ test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked le
       assert.equal(fs.readFileSync(hintFile, 'utf8'), projectInstructions);
       assert.deepEqual(readJson(config).mcpServers, customized ? { neorion: server } : {});
       assert.deepEqual(calls().filter(([, action]) => action !== 'get').map(([, action]) => action),
-        customized ? [] : mode === 'upgrade' ? ['remove', 'add', 'remove'] : ['remove']);
+        customized ? [] : mode === 'upgrade' ? ['add', 'remove'] : ['remove']);
     });
   }
 });
@@ -1227,4 +1345,109 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
   assert.equal(query.status, 0, query.stderr);
   assert.match(query.stdout, /^Project: workspace\n/);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
+});
+
+test('subcommand help succeeds and invalid graph flags include usage', t => {
+  const { run } = fixture(t);
+  for (const args of [[], ['graph'], ['query'], ['mcp'], ['setup'], ['setup', 'codex'], ['setup', 'claude'], ['setup', 'cursor']]) {
+    for (const flag of ['-h', '--help']) {
+      const result = run([...args, flag], { PATH: '' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /^Usage:/m);
+    }
+  }
+  assert.match(run(['query', 'search', '--', '-h']).stdout, /# search "-h"/);
+  const invalid = run(['graph', '--unknown']);
+  assert.equal(invalid.status, 1);
+  assert.match(invalid.stderr, /Unknown option '--unknown'[\s\S]*Usage:/);
+});
+
+test('CLI and MCP suggest the dominant search kind beyond the visible rows', async t => {
+  const { root, env, run } = fixture(t);
+  for (const name of ['a', 'b', 'c']) {
+    const directory = path.join(root, 'app', 'api', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() {}');
+  }
+  const args = { kind: 'search', target: 'api', limit: 1 };
+  assert.match(run(['query', 'search', 'api', '--limit', '1']).stdout, /^# more: .*--kind api\)/m);
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.match(await server.text('query', args), /^# more: .*filter="api"\)/m);
+});
+
+test('root installation README scopes AI SDK evidence labels to source builds', () => {
+  const readme = fs.readFileSync(path.join(packageRoot, '../README.md'), 'utf8');
+  assert.match(readme, /In source builds,[^\n]*`\[mention\]`[^\n]*`\[possible URL override\]`/);
+});
+
+test('failed Codex MCP registration leaves the project hint and skill untouched', t => {
+  const { root, home, run } = fixture(t);
+  const mock = fakeAgent(home, 'codex');
+  const env = { PATH: home + path.delimiter + process.env.PATH, FAKE_ADD_FAILURE: '1' };
+  const hint = path.join(root, 'AGENTS.md');
+  fs.writeFileSync(hint, '# Project instructions\n');
+  const result = run(['setup', 'codex'], env);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cannot load Codex configuration[\s\S]*Check that CODEX_HOME/);
+  assert.equal(fs.readFileSync(hint, 'utf8'), '# Project instructions\n');
+  assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion')), false);
+  assert.equal(fs.existsSync(mock.config), false);
+  assert.ok(mock.calls().some(([, action]) => action === 'add'));
+});
+
+test('declared React SDK ranges select the hook endpoint without installed types', t => {
+  const { root, run } = fixture(t);
+  for (const route of ['chat', 'custom']) {
+    const directory = path.join(root, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function POST() {}');
+  }
+  fs.writeFileSync(path.join(root, 'app/chat.ts'), `
+    import { useChat } from '@ai-sdk/react';
+    export function useCustomChat() { return useChat({ api: '/api/custom' }); }
+  `);
+  const file = path.join(root, 'package.json');
+  const query = route => run(['query', 'api_consumers', '/api/' + route]).stdout;
+  for (const [range, send, other] of [['^1.2.0', 'custom', 'chat'], ['^2.0.0', 'chat', 'custom']]) {
+    fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': range } }));
+    assert.match(query(send), /useCustomChat POST AI SDK transport/);
+    assert.doesNotMatch(query(other), /useCustomChat POST AI SDK transport/);
+  }
+  fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': '^1.2.0 || ^2.0.0' } }));
+  for (const route of ['custom', 'chat']) assert.match(query(route), /useCustomChat POST AI SDK transport \[partial url\]/);
+});
+
+test('an app inherits the workspace SDK declaration and refreshes when it changes', t => {
+  const { root, run } = fixture(t);
+  const workspace = path.join(root, 'workspace');
+  const app = path.join(workspace, 'apps', 'web');
+  fs.mkdirSync(app, { recursive: true });
+  for (const name of ['app', 'tsconfig.json']) fs.renameSync(path.join(root, name), path.join(app, name));
+  for (const route of ['chat', 'custom']) {
+    const directory = path.join(app, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function POST() {}');
+  }
+  fs.writeFileSync(path.join(app, 'app', 'chat.ts'), `
+    import { useChat } from '@ai-sdk/react';
+    export function useCustomChat() { return useChat({ api: '/api/custom' }); }
+  `);
+  const manifest = (dir, range, fields = {}) => fs.writeFileSync(path.join(dir, 'package.json'),
+    JSON.stringify({ ...fields, dependencies: range ? { '@ai-sdk/react': range } : {} }));
+  manifest(app, undefined, { name: 'web' });
+  const consumer = /useCustomChat POST AI SDK transport/;
+  const query = route => {
+    const result = run(['query', 'api_consumers', '/api/' + route, '--root', app]);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  manifest(workspace, '^2.0.0', { workspaces: ['apps/*'] });
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
+  manifest(workspace, '^1.0.0', { workspaces: ['apps/*'] });
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  manifest(app, '^2.0.0', { name: 'web' });
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
 });
