@@ -155,6 +155,8 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     return [{ ...entry, file, old, status: entry.status === 'R' && !old ? 'A' : entry.status }];
   }).sort((a, b) => compare(a.file, b.file));
   const totalFiles = files.length + Number(rootPackage);
+  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => config.test(file) ||
+    status !== 'M' && [file, old].some(path => path && /^(?:src\/)?(?:app|pages)\//.test(path)));
   const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(prefix + file) ||
     (old !== undefined && localChanges.has(prefix + old));
   const stagedDrift = files.some(worktreeDiffers);
@@ -259,28 +261,45 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       const lines = [...hunk.added, ...hunk.removed];
       return lines.some(line => line.trim()) && lines.every(line => /^\s*(?:$|\/\/|\/\*|\*)/.test(line));
     };
-    const hasRemovals = entry.hunks.some(hunk => hunk.removed.length);
     const scanComments = entry.hunks.some(commentCandidate);
     let previous: ReturnType<typeof import('../cli/graph').inspectChangeSource> | undefined;
     const removedNames = new Set<string>();
+    const uncertainNames = new Set<string>();
     const removedStars = new Set<string>();
     let newCode: Set<number> | undefined;
-    const needsSource = scanComments || hasRemovals && !entry.hunks.every(hunk => simpleBodyEdit(hunk, indexes));
+    const middleware = isMiddlewareFile(file);
+    const existing = status !== 'A' && status !== '?';
+    const needsSource = scanComments || existing && (middleware || !entry.hunks.every(hunk => simpleBodyEdit(hunk, indexes)));
+    let matcherChanged = true;
     if (sourceFile.test(file) && needsSource) {
       const { inspectChangeSource } = require('./graph.cjs') as typeof import('../cli/graph');
-      const before = hasRemovals ? show(comparison, old ?? file) : '';
+      const before = existing ? show(comparison, old ?? file) : '';
       const after = worktree ? show(undefined, file) : readSource(file);
       if (before !== undefined && after !== undefined && !before.includes('\0') && !after.includes('\0')) {
-        previous = inspectChangeSource(old ?? file, before, scanComments);
-        const next = inspectChangeSource(file, after, scanComments);
+        previous = inspectChangeSource(old ?? file, before, scanComments, middleware);
+        const next = inspectChangeSource(file, after, scanComments, middleware);
         newCode = next.code;
-        const current = graph.exports(file);
-        for (const name of previous.names) if (!next.names.has(name) &&
-          (worktree || !Object.prototype.hasOwnProperty.call(current, name))) removedNames.add(name);
+        for (const name of previous.names) {
+          if (!next.names.has(name) && (!next.stars.size || name === 'default')) {
+            removedNames.add(name);
+            continue;
+          }
+          if (worktree) {
+            if (next.aliases.has(name) || !next.names.has(name)) uncertainNames.add(name);
+            continue;
+          }
+          const state = graph.runtimeExport(file, name);
+          if (state === 'type' || state === 'absent' && !next.names.has(name)) removedNames.add(name);
+          else if (state !== 'value') uncertainNames.add(name);
+        }
         for (const star of previous.stars) if (!next.stars.has(star)) removedStars.add(star);
-        if (removedNames.size || removedStars.size) removals.push({ file: old ?? file, names: [...removedNames],
-          compareExports: removedStars.size > 0, currentFile: file });
-      } else if (hasRemovals) missingSource++;
+        const beforeMatcher = previous.matcher;
+        const afterMatcher = next.matcher;
+        if (beforeMatcher && afterMatcher) {
+          matcherChanged = !beforeMatcher.every(value => afterMatcher.includes(value)) ||
+            !afterMatcher.every(value => beforeMatcher.includes(value));
+        }
+      } else if (existing && entry.hunks.length) missingSource++;
     }
     const commentOnly = (hunk: Hunk) => commentCandidate(hunk) && !!previous && !!newCode &&
       hunk.added.every((_, i) => !newCode.has(hunk.line + i)) && hunk.removed.every((_, i) => !previous!.code.has(hunk.oldLine + i));
@@ -300,9 +319,14 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       record(Math.max(1, hunk.line), true, hunk.added.length, hunk.removed.length);
     }
     if (!substantive.length && commentHunks.length && !old) continue;
-    if (isMiddlewareFile(file)) {
+    if (removedNames.size || uncertainNames.size || removedStars.size) removals.push({
+      file: old ?? file, names: [...removedNames, ...uncertainNames], uncertainNames,
+      compareExports: removedStars.size > 0, currentFile: file, stagedDrift: !!worktree
+    });
+    if (middleware) {
       useSeed(file, file, graph.moduleSeeds(file));
-      if (status !== 'A' && status !== '?' && isMiddlewareFile(old ?? file)) middlewareFiles.set(file, old ?? file);
+      if (existing && isMiddlewareFile(old ?? file) &&
+          (matcherChanged || mayChangeRouteFiles || worktree || !graph.middleware(file))) middlewareFiles.set(file, old ?? file);
     }
     if (config.test(file)) {
       configFiles++;
@@ -407,10 +431,11 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
         comparison, prefix, depth, deadline);
       changes.push(...history.rows);
     } catch {
-      for (const { file, names, renamed } of removals) {
+      for (const { file, names, compareExports, renamed } of removals) {
         if (renamed) unresolvedRenames++;
         else missingSource++;
-        for (const name of names ?? []) changes.push(graphRow(`removed ${file} ${name}`));
+        for (const name of names ?? []) changes.push(graphRow(`export ${file} ${name} [uncertain]`));
+        if (compareExports) changes.push(graphRow(`export ${file} * [uncertain]`));
       }
     }
     if (removals.length > maxSeeds) limited = true;
@@ -495,9 +520,10 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const sizePartial = totalFiles > maxFiles || limited ? `diff too large (up to ${maxFiles} files and ${maxSeeds} impact origins)` : undefined;
   let untraced = missingSource + (history?.skipped ?? 0);
   let noRemovalRoutes = false;
-  for (const { origins, evidence } of history?.checks ?? []) {
+  for (const { origins, evidence, renamed, row } of history?.checks ?? []) {
     if (origins.some(origin => trace.traced.has(origin) || baseTrace?.traced.has(origin))) continue;
-    if (origins[0].renamed) unresolvedRenames++;
+    if (row) row.text += ' [uncertain]';
+    if (renamed) unresolvedRenames++;
     else if (evidence) noRemovalRoutes = true;
     else untraced++;
   }
@@ -506,6 +532,8 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     unresolvedRenames ? `could not trace old-path coverage for ${quantity(unresolvedRenames, 'rename')}` : undefined,
     unmappedDeletions ? `could not map old lines for ${quantity(unmappedDeletions, 'deletion hunk')}` : undefined,
     noRemovalRoutes ? 'no page or API routes traced for removals' : undefined,
+    history?.unknownExports ? 'runtime export availability not resolved' : undefined,
+    history?.unknownNamespaces ? 'namespace import members not resolved' : undefined,
     trace.partial, baseTrace?.partial, stops ? 'module-level importers not traced' : undefined,
     unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined].filter(Boolean))].join('; ') || undefined;
   return {

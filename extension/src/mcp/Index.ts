@@ -1,6 +1,6 @@
 export const WRAPPER_INDEX_REVISION = 2;
 export const QUERY_INDEX_REVISION = 2;
-export const GRAPH_INDEX_REVISION = 7;
+export const GRAPH_INDEX_REVISION = 8;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -56,8 +56,11 @@ export type ExternalCall = [owner: number, line: number, module: number, name: n
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
-export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export',
-  bindings?: [imported: string, exported?: string][]];
+export type NamespaceUse = [line: number, member?: string, owner?: number];
+export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export' | 'type',
+  bindings?: [imported: string, exported?: string][], namespaceUses?: NamespaceUse[]];
+export type RuntimeExportState = 'value' | 'type' | 'unknown';
+export type RuntimeExports = { names: Record<string, RuntimeExportState>; unknownStar?: true };
 
 export interface ServerAction {
   file: string;
@@ -102,6 +105,7 @@ export interface QueryIndex {
   fileSymbols?: number[]; // In the same order as the keys of files.
   defaultSymbols?: Record<number, number>;
   exportSymbols?: Record<number, Record<string, number[]>>;
+  runtimeExports?: Record<number, RuntimeExports>;
   moduleImports?: Record<number, ModuleImport[]>;
   routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number, matchers?: string[]]>;
   layoutStyles?: Record<string, string[]>;

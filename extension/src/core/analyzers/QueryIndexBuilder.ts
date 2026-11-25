@@ -5,10 +5,12 @@ import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION, isMiddlewareFile, isTestFile, type ExternalCall, type FetchEntry,
-  type GraphReference, type ModuleImport, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  type GraphReference, type ModuleImport, type NamespaceUse, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier } from './ArchitectureFacts';
+import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
+import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { TrpcFacts } from './TrpcFacts';
 
@@ -122,7 +124,7 @@ export class QueryIndexBuilder {
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null),
       graphRevision: GRAPH_INDEX_REVISION, graphReferences: {}, graphNames: [], externalCalls: [], externalModules: [],
       unresolvedCalls: {}, fileSymbols: [],
-      defaultSymbols: Object.create(null), exportSymbols: {}, moduleImports: {},
+      defaultSymbols: Object.create(null), exportSymbols: {}, runtimeExports: {}, moduleImports: {},
       routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
     };
     const byNode = new Map<Node, number>();
@@ -177,18 +179,8 @@ export class QueryIndexBuilder {
       byGraphId.set(`file:${relative}`, -(byGraphId.size + 1));
       index.fileSymbols!.push(byGraphId.get(`file:${relative}`)!);
       if (isMiddlewareFile(relative)) {
-        const declaration = file.getVariableDeclaration('config');
-        const config = declaration?.getInitializer();
-        const object = Node.isObjectLiteralExpression(config) ? config : undefined;
-        const property = object?.getProperty('matcher');
-        const matcher = Node.isPropertyAssignment(property) ? property.getInitializer() : undefined;
-        const values = Node.isArrayLiteralExpression(matcher) ? matcher.getElements() : matcher ? [matcher] : [];
-        const enumerable = object ? (!property || !!matcher) && object.getProperties().every(member =>
-          !Node.isSpreadAssignment(member) && !Node.isComputedPropertyName(member.getNameNode())) :
-          !declaration && !exports.get(file)?.has('config');
-        const literals = enumerable && values.every(Node.isStringLiteral) ? values : undefined;
-        index.routeFiles![relative] = ['middleware', '/', literals?.map(value => value.getText()).join(', ') || undefined,
-          undefined, literals?.map(value => value.getLiteralText())];
+        const matcher = middlewareMatcher(file.compilerNode);
+        index.routeFiles![relative] = ['middleware', '/', matcher?.label, undefined, matcher?.values];
       } else if (/^(?:src\/)?pages\/_(?:app|document)\.[jt]sx?$/.test(relative)) {
         index.routeFiles![relative] = ['app-shell', '/'];
       }
@@ -257,8 +249,11 @@ export class QueryIndexBuilder {
       });
     }
     const filesByRelative = new Map(files.map(file => [relativePath(file), file]));
+    const runtimeExports = inspectRuntimeExports(files);
     for (const [relative, file] of filesByRelative) {
       const fileId = byGraphId.get(`file:${relative}`)!;
+      const runtime = runtimeExports.get(file)!;
+      if (Object.keys(runtime.names).length || runtime.unknownStar) index.runtimeExports![fileId] = runtime;
       const entries = exports.get(file)!;
       if (!entries.size) continue;
       const ids = Object.fromEntries([...entries].map(([name, declarations]) =>
@@ -339,27 +334,44 @@ export class QueryIndexBuilder {
       const references = new Map<number, Map<number, Reference[]>>();
       const dynamicSelectors = new Set<Node>();
       const imports = file.getImportDeclarations();
+      const namespaces = new Map<string, { declaration: Node; uses: NamespaceUse[] }>();
       for (const entry of [...imports, ...file.getExportDeclarations()]) {
         const source = entry.getModuleSpecifierSourceFile();
         const target = source && byGraphId.get(`file:${relativePath(source)}`);
         if (target === undefined) continue;
         const edges = index.moduleImports![fileId] ??= [];
         const line = startLine(entry);
+        if (entry.isTypeOnly()) {
+          edges.push([target, line, 'type']);
+          continue;
+        }
         if (Node.isImportDeclaration(entry)) {
           if (!entry.getImportClause()) edges.push([target, line, 'effect']);
           else {
-            const names = entry.getNamedImports().map(binding => binding.getName());
+            const named = entry.getNamedImports();
+            if (named.some(binding => binding.isTypeOnly())) edges.push([target, line, 'type']);
+            const names = named.filter(binding => !binding.isTypeOnly())
+              .map(({ compilerNode: binding }) => (binding.propertyName ?? binding.name).text);
             if (entry.getDefaultImport()) names.push('default');
-            if (entry.getNamespaceImport()) names.push('*');
-            edges.push([target, line, 'import', names.map(name => [name])]);
+            const namespace = entry.getNamespaceImport();
+            const uses: NamespaceUse[] = [];
+            if (namespace) {
+              names.push('*');
+              namespaces.set(namespace.getText(), { declaration: namespace.getParentOrThrow(), uses });
+              edges.push([target, line, 'import', names.map(name => [name]), uses]);
+            } else if (names.length) edges.push([target, line, 'import', names.map(name => [name])]);
+            else if (!named.length) edges.push([target, line, 'effect']);
           }
         } else {
-          const named = entry.getNamedExports();
           const namespace = entry.getNamespaceExport();
-          const bindings: ModuleImport[3] = named.length ?
-            named.map(binding => [binding.getName(), binding.getAliasNode()?.getText() ?? binding.getName()]) :
+          const named = entry.getNamedExports();
+          if (named.some(binding => binding.isTypeOnly())) edges.push([target, line, 'type']);
+          const bindings: ModuleImport[3] = entry.compilerNode.exportClause && !namespace ?
+            named.filter(binding => !binding.isTypeOnly())
+              .map(({ compilerNode: binding }) => [(binding.propertyName ?? binding.name).text, binding.name.text]) :
             [['*', namespace?.getName() ?? '*']];
-          edges.push([target, line, 'export', bindings]);
+          if (bindings.length) edges.push([target, line, 'export', bindings]);
+          else if (!named.length) edges.push([target, line, 'effect']);
         }
       }
       const routeKind = index.routeFiles![relative]?.[0];
@@ -553,8 +565,40 @@ export class QueryIndexBuilder {
         for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
         for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
       };
+      const recordNamespaceUse = (node: Node) => {
+        const namespace = namespaces.get(node.getText());
+        let parent = node.getParent();
+        if (!namespace || parent === namespace.declaration ||
+            node.getAncestors().some(Node.isTypeNode)) return;
+        const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
+        if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
+        let receiver = node;
+        while (Node.isParenthesizedExpression(parent) || Node.isNonNullExpression(parent) || Node.isAsExpression(parent)) {
+          if (parent.getExpression() !== receiver) break;
+          receiver = parent;
+          parent = parent.getParent();
+        }
+        const line = startLine(node);
+        const owner = owners(node)[1];
+        const pattern = Node.isVariableDeclaration(parent) && parent.getInitializer() === receiver ? parent.getNameNode() : undefined;
+        if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === receiver) {
+          namespace.uses.push([line, parent.getName(), owner]);
+        } else if (Node.isElementAccessExpression(parent) && parent.getExpression() === receiver) {
+          const key = parent.getArgumentExpression();
+          const member = Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key) ? key.getLiteralText() : undefined;
+          namespace.uses.push([line, member, owner]);
+        } else if (Node.isObjectBindingPattern(pattern)) {
+          for (const binding of pattern.getElements()) {
+            const key = binding.getPropertyNameNode() ?? binding.getNameNode();
+            const member = binding.getDotDotDotToken() ? undefined : Node.isIdentifier(key) ? key.getText() :
+              Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
+            namespace.uses.push([line, member, owner]);
+          }
+        } else namespace.uses.push([line, undefined, owner]);
+      };
       // Keep REFERENCE_KINDS in sync with the node kinds handled below, including tRPC calls and resolver owners.
       visitKinds(file, REFERENCE_KINDS, node => {
+        if (namespaces.size && Node.isIdentifier(node)) recordNamespaceUse(node);
         if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);

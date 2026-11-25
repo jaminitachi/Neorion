@@ -4,14 +4,15 @@ import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, wr
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { workspaceCache } from '../core/WorkspaceCache';
-import { compare, DependencyGraph, graphRow, hasGraph, type ChangeOrigin } from './Graph';
+import { compare, DependencyGraph, graphRow, hasGraph, type ChangeOrigin, type QueryRow } from './Graph';
 import { GRAPH_INDEX_REVISION, INDEX_SCHEMA, isTestFile, VERSION, type QueryIndex } from './Index';
 
 export const sourceFile = /\.[cm]?[jt]sx?$/;
 export const routeAsset = /(?:\.css|(?:^|\/)(?:robots\.txt|sitemap\.xml|opengraph-image\.(?:png|jpe?g|gif)))$/;
 export const historyBudgetMs = 20_000;
 type Git = (args: string[], input?: Buffer, maxBuffer?: number) => Buffer;
-export type Removal = { file: string; names?: string[]; currentFile?: string; compareExports?: boolean; renamed?: true };
+export type Removal = { file: string; names?: string[]; uncertainNames?: ReadonlySet<string>; currentFile?: string;
+  compareExports?: boolean; stagedDrift?: boolean; renamed?: true };
 
 function historicalIndex(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number): QueryIndex {
   const stagedTree = ref ? undefined : git(['ls-files', '--stage', '--full-name', '-z', '--', ':/']);
@@ -109,63 +110,99 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
   const base = new DependencyGraph(historical, new Map(historical.symbols.map(symbol => [symbol.id, symbol])));
   const origins: ChangeOrigin[] = [];
   const live: ChangeOrigin[] = [];
-  const rows = [];
-  const checks: { evidence: boolean; origins: ChangeOrigin[] }[] = [];
+  const rows: QueryRow[] = [];
+  const checks: { evidence: boolean; origins: ChangeOrigin[]; renamed?: boolean; row?: QueryRow }[] = [];
   let skipped = 0;
   let removed = 0;
-  const traceOrigin = (file: string, name: string, ids: ChangeOrigin['ids'], wholeFile: boolean, moved = false) => {
-    if (checks.length >= 100) {
+  let examined = 0;
+  let unknownExports = false;
+  let unknownNamespaces = false;
+  const traceOrigin = (file: string, name: string, ids: ChangeOrigin['ids'], wholeFile: boolean, moved = false,
+    uncertainExport = false) => {
+    if (examined++ >= 100) {
       skipped++;
       return;
     }
     const externalOnly = !wholeFile && ids.some(id => base.file(id) !== file ||
       current.matchingNode(base, id, renamed.get(file) ?? file).length > 0);
     const origin: ChangeOrigin = { file, name, ids, renamed: moved, removed: !moved, externalOnly };
-    const { uses, files, importFiles, terminal } = base.removalSites(origin, wholeFile);
+    const { uses, files, importFiles, direct, uncertain, terminal } = base.removalSites(origin, wholeFile);
     origin.importFiles = importFiles;
-    origins.push(origin);
-    const check = { evidence: files.size > 0 || terminal && !externalOnly, origins: [origin] };
-    checks.push(check);
-    const used = new Set(uses.map(edge => edge.file));
-    const fallback: string[] = [];
-    for (const [importer, sites] of [...files].sort(([a], [b]) => compare(a, b))) {
-      const lines = [...new Set(sites.map(site => site.line))].sort((a, b) => a - b);
-      rows.push(graphRow(`importer ${importer}:${lines.slice(0, 4).join(',')}` +
-        `${lines.length > 4 ? ' +' + (lines.length - 4) : ''} <- ${moved ? 'renamed' : 'removed'} ${name} [base]`));
-      if (!used.has(importer) && !isTestFile(importer)) fallback.push(importer);
-    }
-    const seedImporters = (target: ChangeOrigin[], ids: ChangeOrigin['ids']) => {
+    const seedImporters = (target: ChangeOrigin[], ids: ChangeOrigin['ids'], checked: ChangeOrigin[]) => {
       if (!ids.length) return;
       const seed = { ...origin, ids: [...new Set(ids)], startsAt: 1, externalOnly: false };
       target.push(seed);
-      check.origins.push(seed);
+      checked.push(seed);
     };
+    const used = new Map<string, ChangeOrigin['ids']>();
+    for (const edge of uses) {
+      const ids = used.get(edge.file) ?? [];
+      ids.push(edge.from);
+      used.set(edge.file, ids);
+    }
+    if (!uncertainExport) origins.push(origin);
+    const checked = [origin];
     // An indexed import may have no reference edge for its binding. Use the
     // importing file as evidence on both sides, including deleted importers.
-    seedImporters(origins, fallback.flatMap(importer => base.fileSeeds(importer)));
-    seedImporters(live, [
-      ...uses.flatMap(edge => current.matchingNode(base, edge.from, renamed.get(base.file(edge.from)))),
-      ...fallback.flatMap(importer => current.fileSeeds(renamed.get(importer) ?? importer))
-    ]);
+    for (const [importer, sites] of [...files].sort(([a], [b]) => compare(a, b))) {
+      const lines = [...new Set(sites.map(site => site.line))].sort((a, b) => a - b);
+      const opaque = uncertain.has(importer);
+      const relation = uncertainExport ? 'possible removal of' : moved ? 'renamed' : 'removed';
+      const row = graphRow(`importer ${importer}:${lines.slice(0, 4).join(',')}` +
+        `${lines.length > 4 ? ' +' + (lines.length - 4) : ''} <- ${relation} ${name} [base]` +
+        (opaque || uncertainExport ? ' [uncertain]' : ''));
+      rows.push(row);
+      if (isTestFile(importer) || uncertainExport) continue;
+      unknownNamespaces ||= opaque;
+      if (!wholeFile && !direct.has(importer)) continue;
+      const importerChecks: ChangeOrigin[] = wholeFile ? checked : [];
+      const importerIds = used.get(importer);
+      const currentFile = renamed.get(importer) ?? importer;
+      seedImporters(origins, importerIds ?? base.fileSeeds(importer), importerChecks);
+      seedImporters(live, importerIds?.flatMap(id => current.matchingNode(base, id, currentFile)) ??
+        current.fileSeeds(currentFile), importerChecks);
+      if (!wholeFile) checks.push({ evidence: true, origins: importerChecks, row: opaque ? undefined : row });
+    }
+    if (wholeFile) {
+      const internal = used.get(file) ?? [];
+      seedImporters(live, internal.flatMap(id => current.matchingNode(base, id, renamed.get(file))), checked);
+    }
+    if (!uncertainExport && (wholeFile || !direct.size && !uncertain.size)) {
+      checks.push({ evidence: files.size > 0 || terminal && !externalOnly, origins: checked, renamed: moved });
+    }
   };
-  for (const { file, names, currentFile, compareExports, renamed: moved } of removals) {
+  for (const { file, names, uncertainNames, currentFile, compareExports, stagedDrift, renamed: moved } of removals) {
     const exports = base.exports(file);
-    const currentExports = current.exports(currentFile ?? file);
-    const keys = moved ? [] : compareExports ? [...new Set([...names ?? [],
-      ...Object.keys(exports).filter(key => !Object.prototype.hasOwnProperty.call(currentExports, key))])] :
+    const runtime = base.runtimeExports(file);
+    const explicit = new Set(names);
+    const keys = moved ? [] : compareExports ? [...new Set([...explicit, ...Object.keys(runtime?.names ?? {})])] :
       names ?? Object.keys(exports).sort(compare);
-    removed += keys.length;
+    if (compareExports && (runtime?.unknownStar || !base.moduleSeeds(file).length)) {
+      unknownExports = true;
+      rows.push(graphRow(`export ${file} * [uncertain]`));
+    }
     if (!names) {
       const layouts = Object.prototype.hasOwnProperty.call(historical.layoutStyles, file) ? historical.layoutStyles![file] : [];
       traceOrigin(file, file, [...base.fileSeeds(file), ...layouts.flatMap(layout => base.moduleSeeds(layout))], true, moved);
     }
     for (const key of keys) {
-      rows.push(graphRow(`removed ${file} ${key}`));
+      const before = names ? base.runtimeExport(file, key) : 'value';
+      const after = explicit.has(key) ? uncertainNames?.has(key) ? 'unknown' : 'type' :
+        stagedDrift ? 'unknown' : current.runtimeExport(currentFile ?? file, key);
+      if (names && (before === 'type' || after === 'value')) continue;
       const ids = Object.prototype.hasOwnProperty.call(exports, key) ? exports[key] : [];
+      if (before !== 'value' || names && after === 'unknown') {
+        unknownExports = true;
+        rows.push(graphRow(`export ${file} ${key} [uncertain]`));
+        traceOrigin(file, key, ids, false, false, true);
+        continue;
+      }
+      removed++;
+      rows.push(graphRow(`removed ${file} ${key}`));
       if (names || ids.some(id => base.file(id) !== file)) traceOrigin(file, key, ids, false);
     }
   }
   const trace = base.changeRoutes(origins, depth, () => performance.now() >= deadline);
   const previousMiddleware = new Map([...middleware].map(([file, old]) => [file, base.middleware(old)]));
-  return { live, trace, rows, removed, checks, skipped, previousMiddleware };
+  return { live, trace, rows, removed, checks, skipped, previousMiddleware, unknownExports, unknownNamespaces };
 }

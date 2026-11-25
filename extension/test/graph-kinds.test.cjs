@@ -744,6 +744,120 @@ test('changes traces an unindexed binding from its importer and reports other un
   assert.match(output, /# partial: no page or API routes traced for removals$/);
 });
 
+test('changes traces value re-exports converted to type-only exports', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const barrel = 'lib/barrel.ts';
+  fs.writeFileSync(file('lib/leaf.ts'), 'export function leaf() { return 42; }\n');
+  fs.writeFileSync(file(barrel), 'export { leaf } from "./leaf";\n');
+  fs.mkdirSync(file('app/api/barrel'), { recursive: true });
+  fs.writeFileSync(file('app/api/barrel/route.ts'),
+    'import { leaf } from "../../../lib/barrel";\nexport function GET() { return Response.json(leaf()); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a runtime re-export and its route');
+
+  for (const declaration of ['export type { leaf }', 'export { type leaf }']) {
+    edit(barrel, () => declaration + ' from "./leaf";\n');
+    const output = changes();
+    assert.match(output, /^route api GET \/api\/barrel .* <- leaf \[removed\] d1/m);
+    assert.match(output, /^removed lib\/barrel\.ts leaf$/m);
+    assert.match(output, /^importer app\/api\/barrel\/route\.ts:1,2 <- removed leaf \[base\]$/m);
+    assert.match(output, /# complete:/);
+  }
+
+  edit(barrel, text => text.replace('export { type leaf }', 'export { leaf }').replace('./leaf', './missing'));
+  const partial = changes();
+  assert.doesNotMatch(partial, /^route api GET \/api\/barrel /m);
+  assert.match(partial, /^export lib\/barrel\.ts leaf \[uncertain\]$/m);
+  assert.match(partial, /^importer app\/api\/barrel\/route\.ts:1,2 <- possible removal of leaf \[base\] \[uncertain\]$/m);
+  assert.match(partial, /^# partial: .*runtime export availability not resolved$/m);
+
+  edit(barrel, () => 'export * from "./leaf";\n');
+  git('add', barrel);
+  git('commit', '-qm', 'Export the same value through a wildcard');
+  edit(barrel, text => text.replace('export *', 'export type *'));
+  const wildcard = changes();
+  assert.match(wildcard, /^route api GET \/api\/barrel .* <- leaf \[removed\] d1/m);
+  assert.match(wildcard, /# complete:/);
+});
+
+test('changes traces named and namespace importers of the same removed export', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  const binding = 'lib/flags.ts';
+  fs.writeFileSync(file(binding), 'export function 검토() { return 1; }\n');
+  const imports = [
+    ['named', 'import { 검토 }', '검토()'],
+    ['namespace', 'import * as flags', 'flags.검토()'],
+    ['literal-member', 'import * as flags', '(flags)["검토"]()'],
+    ['destructured', 'import * as flags', '(() => { const { 검토: run } = flags; return run(); })()']
+  ];
+  for (const [name, declaration, use] of imports) {
+    const dir = 'app/api/' + name;
+    fs.mkdirSync(file(dir), { recursive: true });
+    fs.writeFileSync(file(dir + '/route.ts'), declaration + ' from "../../../lib/flags";\n' +
+      'export function GET() { return Response.json(' + use + '); }\n');
+  }
+  git('add', '.');
+  git('commit', '-qm', 'Import one binding with named and namespace imports');
+  const remove = () => edit(binding, text => text.replace('export function', 'function'));
+  remove();
+  const output = changes();
+  for (const [name] of imports) {
+    assert.match(output, new RegExp('^route api GET /api/' + name + ' .* <- 검토 \\[removed\\] d1', 'm'));
+    assert.match(output, new RegExp('^importer app/api/' + name + '/route\\.ts:.* <- removed 검토 \\[base\\]$', 'm'));
+  }
+  assert.match(output, /# complete:/);
+
+  git('restore', binding);
+  fs.mkdirSync(file('app/api/dynamic'), { recursive: true });
+  fs.writeFileSync(file('app/api/dynamic/route.ts'), 'import * as flags from "../../../lib/flags";\n' +
+    'export function GET(request: Request) { return Response.json(flags[request.url]()); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a dynamically selected namespace member');
+  remove();
+  const partial = changes();
+  assert.match(partial, /^route api GET \/api\/named /m);
+  assert.doesNotMatch(partial, /^route api GET \/api\/dynamic /m);
+  assert.match(partial, /^importer app\/api\/dynamic\/route\.ts:1,2 <- removed 검토 \[base\] \[uncertain\]$/m);
+  assert.match(partial, /^# partial: .*namespace.*$/m);
+
+  git('restore', binding);
+  fs.writeFileSync(file('lib/dormant.ts'), 'import * as flags from "./flags";\n' +
+    'export function dormant() { return flags.검토(); }\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add a namespace importer with no route');
+  remove();
+  const dormant = changes();
+  assert.match(dormant, /^route api GET \/api\/named /m);
+  assert.match(dormant, /^importer lib\/dormant\.ts:1,2 <- removed 검토 \[base\] \[uncertain\]$/m);
+  assert.match(dormant, /^# partial: .*no page or API routes traced for removals/m);
+});
+
+test('changes skips a historical graph when the middleware matcher stays the same', { timeout: 65_000 }, t => {
+  const { edit, git, run, file } = gitFixture(t);
+  edit('middleware.ts', text => text.replace('middleware() {}', 'middleware() {\n  const response = new Response();\n  return response;\n}'));
+  git('add', '.');
+  git('commit', '-qm', 'Add a middleware body with a static matcher');
+
+  const traceFile = file('.git/middleware-trace.jsonl');
+  const readTreeBlobs = () => fs.readFileSync(traceFile, 'utf8').trim().split('\n').map(JSON.parse)
+    .filter(event => event.event === 'start' && event.argv.includes('cat-file')).length;
+  const changes = () => run(['query', 'changes'], { GIT_TRACE2_EVENT: traceFile });
+  edit('middleware.ts', text => text.replace('return response;', 'return NextResponse.next();'));
+  const body = changes();
+  assert.match(body, /1 file, 1 symbol, 1 route/);
+  assert.match(body, /matcher: '\/items\/:path\*'/);
+  assert.match(body, /# complete:/);
+  assert.equal(readTreeBlobs(), 0);
+
+  edit('middleware.ts', text => text.replace("'/items/:path*'", '"/items/:path*"'));
+  assert.match(changes(), /1 route, 0 wrappers/);
+  assert.equal(readTreeBlobs(), 0);
+
+  edit('middleware.ts', text => text.replace('/items/', '/other/'));
+  assert.match(changes(), /1 route no longer matched, 1 route newly matched/);
+  assert.equal(readTreeBlobs(), 1);
+});
+
 test('changes includes middleware matches from both sides and reports unknown coverage', { timeout: 65_000 }, t => {
   const { edit, git, changes } = gitFixture(t);
   edit('middleware.ts', text => text.replace('/items/', '/other/'));
@@ -831,6 +945,7 @@ test('packing and unpacking the graph preserves default-suite query output', { t
   const restored = unpackGraph(JSON.parse(JSON.stringify(packed)));
   assert.deepEqual(restored.exportSymbols, index.exportSymbols);
   assert.deepEqual(restored.moduleImports, index.moduleImports);
+  assert.deepEqual(restored.runtimeExports, index.runtimeExports);
   assert.deepEqual(restored.trpcModuleUses, index.trpcModuleUses);
   fs.writeFileSync(indexFile, JSON.stringify(packed));
   assert.deepEqual(queries.map(args => query(...args)), expected);

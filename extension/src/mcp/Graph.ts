@@ -1,5 +1,5 @@
 import { GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, type ExternalCall, type ModuleImport, type QueryIndex,
-  type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
+  type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
 type Route = QueryIndex['routes'][number];
 type NodeId = number | string;
@@ -80,7 +80,7 @@ export function hasGraph(index: QueryIndex) {
   return index.graphRevision === GRAPH_INDEX_REVISION && Array.isArray(index.externalCalls) &&
     Array.isArray(index.externalModules) && Array.isArray(index.graphNames) && Array.isArray(index.fileSymbols) &&
     Array.isArray(index.trpcFiles) && Array.isArray(index.serverActions) &&
-    !!(index.routeFiles && index.defaultSymbols && index.exportSymbols && index.moduleImports &&
+    !!(index.routeFiles && index.defaultSymbols && index.exportSymbols && index.runtimeExports && index.moduleImports &&
       index.unresolvedCalls && index.graphReferences && index.layoutStyles);
 }
 
@@ -277,6 +277,16 @@ export class DependencyGraph {
     return this.index.exportSymbols![this.fileIds.get(file) ?? 0] ?? {};
   }
 
+  runtimeExports(file: string) {
+    return this.index.runtimeExports![this.fileIds.get(file) ?? 0];
+  }
+
+  runtimeExport(file: string, name: string): RuntimeExportState | 'absent' {
+    const exports = this.runtimeExports(file);
+    if (Object.prototype.hasOwnProperty.call(exports?.names ?? {}, name)) return exports!.names[name];
+    return !this.fileIds.has(file) || exports?.unknownStar && name !== 'default' ? 'unknown' : 'absent';
+  }
+
   matchingNode(previous: DependencyGraph, id: NodeId, file = previous.file(id)): NodeId[] {
     const symbol = typeof id === 'number' ? previous.symbols.get(id) : undefined;
     if (!symbol) return this.moduleSeeds(file);
@@ -300,6 +310,8 @@ export class DependencyGraph {
       if (file !== origin.file) sites.set(JSON.stringify([file, line]), { file, line });
     };
     const fileId = this.fileIds.get(origin.file) ?? 0;
+    const direct = new Set<string>();
+    const uncertain = new Set<string>();
     let importFiles: Set<string> | undefined;
     if (wholeFile) {
       for (const [file, [, line]] of this.moduleImporters.get(fileId) ?? []) {
@@ -309,26 +321,46 @@ export class DependencyGraph {
       importFiles = new Set();
       const pending: [number, string][] = [[fileId, origin.name]];
       const seen = new Set<string>();
+      const memberUses: Edge[] = [];
       for (const [module, name] of pending) {
         const key = JSON.stringify([module, name]);
         if (seen.has(key)) continue;
         seen.add(key);
-        for (const [file, [, line, kind, bindings]] of this.moduleImporters.get(module) ?? []) {
+        for (const [file, [target, line, kind, bindings, namespaceUses]] of this.moduleImporters.get(module) ?? []) {
           for (const [imported, exported] of bindings ?? []) {
-            if (imported !== name && (imported !== '*' || kind === 'export' && name === 'default')) continue;
-            if (kind === 'import' && imported === '*' && !uses.some(edge => edge.file === file)) continue;
+            if (imported === '*' && kind === 'import') {
+              for (const [useLine, member, owner] of namespaceUses ?? []) {
+                if (member != null && member !== name) continue;
+                add(file, line);
+                add(file, useLine);
+                if (member == null) uncertain.add(file);
+                else {
+                  importFiles.add(file);
+                  direct.add(file);
+                  memberUses.push({ from: owner ?? this.fileNode(file), to: target, label: 'use', file, line: useLine });
+                }
+              }
+              continue;
+            }
+            if (imported !== name && (imported !== '*' || exported === '*' && name === 'default')) continue;
             add(file, line);
-            importFiles.add(file);
-            if (kind === 'export' && exported) pending.push([this.fileIds.get(file) ?? 0, exported === '*' ? name : exported]);
+            if (kind === 'import') {
+              importFiles.add(file);
+              direct.add(file);
+            } else if (imported === '*' && exported !== '*') {
+              // The namespace can escape through another export. A member
+              // reference to it is not represented by this binding edge.
+              uncertain.add(file);
+            } else if (exported) pending.push([this.fileIds.get(file) ?? 0, exported === '*' ? name : exported]);
           }
         }
       }
-      uses = uses.filter(edge => edge.file === origin.file || importFiles!.has(edge.file));
+      uses = [...uses.filter(edge => edge.file === origin.file || importFiles!.has(edge.file)), ...memberUses];
     }
     for (const { file, line } of uses) add(file, line);
     const files = new Map<string, Site[]>();
     for (const site of sites.values()) append(files, site.file, site);
-    return { uses, files, importFiles,
+    return { uses, files, importFiles, direct, uncertain,
       terminal: origin.ids.some(id => this.terminals(id).some(terminal => terminal.kind !== 'action')) };
   }
 
