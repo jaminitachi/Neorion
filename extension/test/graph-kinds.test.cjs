@@ -1425,7 +1425,8 @@ test('excluded JS requests are isolated, bounded by source directories, and scop
   assert.match(refresh, /scripts\/check\.mjs:4 check POST Node HTTP request/);
   assert.doesNotMatch(refresh, /generated\.ts|foreign\.mjs/);
   const dispatch = query('api_consumers', '/api/dispatch/[procedure]');
-  assert.match(dispatch, /# partial: .*deployment trigger untraced.*uncertain URL matches/);
+  assert.match(dispatch, /^# partial: .*deployment trigger untraced/m);
+  assert.match(dispatch, /^# partial: .*uncertain URL matches/m);
   for (const route of ['/[code]', '/feed.xml']) {
     assert.doesNotMatch(query('api_consumers', route), /scripts\/foreign\.mjs/);
   }

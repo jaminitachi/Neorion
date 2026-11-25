@@ -705,23 +705,22 @@ export class QueryEngine {
       (breakdown ? `: ${breakdown}` : '') +
       (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
     rows.push(...propEvidence.values());
-    // Preserve the more specific reason when it already describes the URL uncertainty.
-    const genericUrls = fetches.filter(fetch => !fetch.propUrlUnknown && (fetch.via !== AI_SDK_TRANSPORT || !fetch.partial));
+    const reasons = [...this.index.pagesApiIssues?.[route.id] ?? []];
+    if (transportOverride || uncertainTransport) reasons.push(transportIssue(transportOverride));
+    if (!reasons.length) {
+      const urlIssue = fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' :
+        fetches.some(fetch => fetch.dynamic) ? 'dynamic URL' :
+        fetches.some(fetch => fetch.partial) ? 'uncertain URL matches' :
+        propIssue ?? (moreCallers ? 'caller depth limit' : undefined);
+      if (urlIssue) reasons.push(urlIssue);
+    }
+    for (const reason of [this.index.trpcHttpIssues?.[route.id], ...fetches.map(fetch => fetch.uncertainty), excluded?.issue]) {
+      if (reason) reasons.push(reason);
+    }
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       count: rows.length ? count : undefined,
-      partial: this.index.coverage !== 2 ? 'regenerate legacy index' :
-        [...new Set([
-          ...this.index.pagesApiIssues?.[route.id] ?? [],
-          this.index.trpcHttpIssues?.[route.id],
-          transportOverride || uncertainTransport ? transportIssue(transportOverride) : undefined,
-          ...fetches.map(fetch => fetch.uncertainty),
-          excluded?.issue,
-          fetches.some(fetch => fetch.propUrlUnknown) ? 'request URL from JSX prop untraced' : undefined,
-          genericUrls.some(fetch => fetch.dynamic) ? 'dynamic URL' : undefined,
-          genericUrls.some(fetch => fetch.partial && !fetch.dynamic) ? 'uncertain URL matches' : undefined,
-          propIssue, moreCallers ? 'caller depth limit' : undefined
-        ].filter(Boolean))].join('; ') || undefined,
+      partial: this.index.coverage !== 2 ? 'regenerate legacy index' : [...new Set(reasons)].join('; ') || undefined,
       notes: [
         ...[...new Map(unboundedTransports.map(([file, , , line]) => {
           const site = line === undefined ? file : location(file, line);
