@@ -1,15 +1,16 @@
 // Project selection follows this order.
 // 1. Keep the requested directory if it has routes and declares Next.js or inherits it
-//    from an ancestor in the same Git checkout. Also keep a standalone root that declares Next.js.
+//    from an ancestor in the same Git checkout.
 //    Routes include page, layout, route, and metadata files in app or src/app, and page and
 //    API files in pages or src/pages.
-// 2. At a workspace root, look for routed Next.js apps outside tooling with valid member
+// 2. At a workspace root, look for routed apps outside tooling and examples with valid member
 //    manifests. pnpm's glob rules normalize paths and apply exclusions regardless of order.
+//    Without a workspace, look for standalone descendant apps from an unconfigured directory
+//    and for routed descendants that inherit Next.js from a root that declares it.
 //    Prefer configured apps with their own Next.js dependency, then other direct dependencies,
 //    then inherited ones.
-// 3. Keep a root that declares Next.js or has its own config if no routed member was found.
-//    For an unconfigured directory without a workspace, also discover standalone Next.js
-//    descendants. With Next.js candidates, prefer non-tooling configs, then Next.js packages,
+// 3. Fall back to the root's config or Next.js dependency, or search descendants for configs and
+//    Next.js packages. With Next.js candidates, prefer non-tooling configs, then Next.js packages,
 //    then tooling configs. Otherwise, use the first config in breadth-first order.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -23,7 +24,9 @@ const { globSync } = require('tinyglobby') as typeof import('tinyglobby');
 
 export const ignoredProjectDirectories = ['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage', 'public'] as const;
 const excluded = new Set<string>(ignoredProjectDirectories);
-const toolingDirectories = new Set(['cypress', 'e2e', 'playwright', 'scripts', 'tests']);
+const toolingDirectories = new Set([
+  'cypress', 'e2e', 'integrations', 'playwright', 'scripts', 'tests', 'example', 'examples', 'demo', 'demos', 'samples',
+]);
 const unavailable = new Set(['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR']);
 const maxDepth = 4;
 
@@ -164,10 +167,10 @@ function* descendants(root: string): Generator<Candidate> {
       try {
         for (const entry of readdirSync(directory, { withFileTypes: true })) {
           if (entry.isDirectory() && !entry.name.startsWith('.') && !excluded.has(entry.name)) {
-            const child = join(directory, entry.name);
-            if (!existsSync(join(child, '.git'))) {
-              children.push({ directory: child, inTooling: inTooling || toolingDirectories.has(entry.name) });
-            }
+            children.push({
+              directory: join(directory, entry.name),
+              inTooling: inTooling || toolingDirectories.has(entry.name),
+            });
           }
         }
       } catch (error) {
@@ -186,9 +189,8 @@ export function findProject(root: string): string | undefined {
   if (hasProjectRoutes(start) && (hasOwnNext || inheritsNext(start))) return start;
 
   const patterns = workspacePatterns(start, manifest);
-  if (!patterns && hasOwnNext) return start;
   const rootConfig = projectConfig(start);
-  if (!patterns && rootConfig) return start;
+  if (!patterns && rootConfig && !hasOwnNext) return start;
 
   const candidates = patterns ? workspaceMembers(start, patterns) : [...descendants(start)];
   let routedWithNext: string | undefined;
@@ -197,14 +199,14 @@ export function findProject(root: string): string | undefined {
   let toolingNextPackage: string | undefined;
   for (const { directory, inTooling } of candidates) {
     const pkg = readManifest(directory);
-    if (!pkg) continue;
+    if (patterns && !pkg) continue;
     const hasNext = hasNextDependency(pkg);
     if (inTooling) {
       if (hasNext) toolingNextPackage ??= directory;
       continue;
     }
     if (hasNext) nextPackage ??= directory;
-    if ((!hasNext && !patterns) || !hasProjectRoutes(directory)) continue;
+    if ((!hasNext && !patterns && !hasOwnNext) || !hasProjectRoutes(directory)) continue;
     if (hasNext) {
       if (projectConfig(directory)) return directory;
       routedWithNext ??= directory;
@@ -217,12 +219,19 @@ export function findProject(root: string): string | undefined {
 
   const hasNextCandidate = Boolean(nextPackage || toolingNextPackage);
   let toolingConfig: string | undefined;
-  for (const { directory, inTooling } of patterns ? descendants(start) : candidates) {
-    if (!projectConfig(directory)) continue;
-    if (!hasNextCandidate || !inTooling) return directory;
-    toolingConfig ??= directory;
+  // An independent checkout can have its own Next.js manifest and no config.
+  let descendantNext: Candidate | undefined;
+  for (const candidate of patterns ? descendants(start) : candidates) {
+    const { directory, inTooling } = candidate;
+    if (projectConfig(directory)) {
+      if (!hasNextCandidate || !inTooling) return directory;
+      toolingConfig ??= directory;
+    } else if (patterns && !hasNextCandidate && (!descendantNext || (descendantNext.inTooling && !inTooling)) &&
+      hasNextDependency(readManifest(directory))) {
+      descendantNext = candidate;
+    }
   }
-  return nextPackage ?? toolingNextPackage ?? toolingConfig;
+  return nextPackage ?? toolingNextPackage ?? toolingConfig ?? descendantNext?.directory;
 }
 
 export function missingProject(root: string) {

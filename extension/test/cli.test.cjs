@@ -339,7 +339,9 @@ test('project selection follows the precedence rule for all PR #19 review probes
         f.app('apps/web', 'web', { ownNext: false, route: 'src/app/page' });
         f.app('apps/web/examples/admin', 'admin');
       },
-      requests: [{ from: 'apps/web', expected: 'apps/web', query: ['Page', /src\/app\/page\.tsx:1/] }, { expected: '.' }],
+      requests: ['apps/web', '.'].map(from => ({
+        from, expected: 'apps/web', query: ['Page', /src\/app\/page\.tsx:1/],
+      })),
     },
     {
       name: 'configless-root-with-nested-next',
@@ -403,6 +405,88 @@ test('project selection follows the precedence rule for all PR #19 review probes
         f.app('examples/web', 'example');
       },
       requests: [{ expected: '.', query: ['ready', /index\.ts:1/] }],
+    },
+    ...['examples', 'example', 'demo', 'demos', 'samples', 'integrations'].map(directory => ({
+      name: `configured library workspace keeps its root ahead of ${directory}`,
+      build(f) {
+        const fixtures = ['examples', 'integrations'].includes(directory) ? `${directory}/react` : directory;
+        const patterns = ['packages/*', `${fixtures}/*`];
+        const pnpm = ['examples', 'samples', 'integrations'].includes(directory);
+        f.pkg('.', 'library', pnpm ? {} : { workspaces: patterns });
+        if (pnpm) f.pnpm('.', patterns);
+        if (directory === 'samples') {
+          f.put('.', 'jsconfig.json', { include: ['packages/core/src/index.js'] });
+          f.put('.', 'packages/core/src/index.js', 'export const LibraryMarker = true;');
+        } else {
+          f.library('.', 'packages/core/src/index.ts', 'LibraryMarker');
+        }
+        f.pkg('packages/core', '@library/core');
+        f.app(`${fixtures}/next-app`, 'next-fixture', { marker: 'FixtureMarker' });
+      },
+      requests: [{ expected: '.', query: ['LibraryMarker', /packages\/core\/src\/index\.[jt]s:1/] }],
+    })),
+    {
+      name: 'a configured workspace prefers a routed app to a separately configured example',
+      build(f) {
+        f.pkg('.', 'workspace', { dependencies: f.next, workspaces: ['examples/*', 'apps/*'] });
+        f.library('.', 'bootstrap.ts');
+        f.app('examples/next-app', 'next-example');
+        f.app('apps/web', 'web', { ownNext: false, marker: 'WebMarker' });
+      },
+      requests: [{ expected: 'apps/web', query: ['WebMarker', /app\/page\.tsx:1/] }],
+    },
+    {
+      name: 'Nx integrated layout discovers the routed app without a member manifest',
+      build(f) {
+        f.pkg('.', '@org/source', { dependencies: f.next, devDependencies: { nx: '21.0.0', '@nx/next': '21.0.0' } });
+        f.put('.', 'nx.json', { plugins: [{ plugin: '@nx/next/plugin' }] });
+        f.put('.', 'tsconfig.base.json', { compilerOptions: { jsx: 'preserve' } });
+        f.put('apps/web', 'project.json', { name: 'web', sourceRoot: 'apps/web', projectType: 'application' });
+        f.put('apps/web', 'tsconfig.json', { extends: '../../tsconfig.base.json', include: ['app/**/*'] });
+        f.put('apps/web', 'app/page.tsx', "export default async function WebPage() { return fetch('/api/hello'); }");
+        f.put('apps/web', 'app/api/hello/route.ts', 'export function GET() { return new Response("hello"); }');
+        f.library('apps/web-e2e', 'src/e2e/app.cy.ts', 'visitHome');
+        f.library('libs/ui', 'src/index.ts', 'UiMarker');
+      },
+      requests: [{ expected: 'apps/web',
+        query: ['/api/hello', /send +app\/page\.tsx:1 WebPage GET fetch[\s\S]*# complete:/, 'api_consumers'] }],
+    },
+    {
+      name: 'a standalone root manifest with Next.js discovers its routed frontend',
+      build(f) {
+        f.pkg('.', 'project', { dependencies: f.next, scripts: { dev: 'next dev frontend' } });
+        f.config('frontend', 'app/**/*');
+        f.page('frontend', 'app/page.tsx', 'FrontMarker');
+      },
+      requests: [{ expected: 'frontend', query: ['FrontMarker', /app\/page\.tsx:1/] }],
+    },
+    {
+      name: 'a wrapper folder discovers a cloned Next.js project',
+      build(f) {
+        f.app('myapp', 'myapp', { marker: 'CloneMarker' });
+        f.gitInit('myapp');
+      },
+      requests: [{ expected: 'myapp', query: ['CloneMarker', /app\/page\.tsx:1/] }],
+    },
+    ...[true, false].map(configured => ({
+      name: `a superrepo discovers its ${configured ? 'configured' : 'configless'} Next.js submodule`,
+      build(f) {
+        if (!configured) f.pkg('.', 'superrepo', { workspaces: ['apps/*'] });
+        f.app('apps/web', 'web', { configured, marker: 'SubmoduleMarker' });
+        f.gitInit('.');
+        f.put('apps/web', '.git', 'gitdir: ../../.git/modules/web\n');
+      },
+      requests: [{ expected: 'apps/web', query: ['SubmoduleMarker', /app\/page\.[jt]sx:1/] }],
+    })),
+    {
+      name: 'descendant search keeps hoisted Next.js inside its own checkout',
+      build(f) {
+        f.pkg('.', 'outer', { dependencies: f.next });
+        f.library('.', 'src/root.ts', 'RootMarker');
+        f.app('apps/web', 'web', { ownNext: false, marker: 'WebMarker' });
+        f.gitInit('apps/web');
+      },
+      requests: [{ expected: '.', query: ['RootMarker', /src\/root\.ts:1/] }],
     },
     {
       name: 'turbo-mixed-config',
@@ -500,28 +584,29 @@ test('project selection follows the precedence rule for all PR #19 review probes
     }))),
     ...[
       ['pnpm-dot-explicit', ['apps/./*', 'apps/*/examples/*']],
-      ['pnpm-dot-segment', ['apps/./*', '!apps/web/examples/**', 'examples/*'], 'examples/alternate'],
-      ['pnpm-exclusion-first', ['!apps/web/examples/**', 'apps/**'], 'apps/web'],
-    ].map(([name, patterns, workspaceExpected]) => ({
+      ['pnpm-dot-segment', ['apps/./*', '!apps/web/examples/**', 'examples/*'], true],
+      ['pnpm-exclusion-first', ['!apps/web/examples/**', '!apps/ignored', 'apps/**'], true],
+    ].map(([name, patterns, checkWorkspace]) => ({
       name,
       build(f) {
         f.pkg('.', 'workspace', { dependencies: f.next });
         f.pnpm('.', patterns);
         f.app('apps/web', 'web', { route: 'src/app/page', ownNext: false, marker: 'WebMarker' });
         markedExample(f, 'apps/web');
-        if (workspaceExpected) {
+        if (name === 'pnpm-exclusion-first') f.app('apps/ignored', 'ignored');
+        if (checkWorkspace) {
           f.app('examples/alternate', 'alternate', { route: 'src/app/page', marker: 'AlternateMarker' });
           f.library('.', 'src/root.ts', 'RootMarker', 'src/*.ts');
         }
       },
       requests: [{ from: 'apps/web', expected: 'apps/web', query: ['WebMarker', /src\/app\/page\.tsx:1/] },
-        ...(workspaceExpected ? [{ expected: workspaceExpected,
-          query: [workspaceExpected === 'apps/web' ? 'WebMarker' : 'AlternateMarker', /src\/app\/page\.tsx:1/] }] : [])],
+        ...(checkWorkspace ? [{ expected: 'apps/web',
+          query: ['WebMarker', /src\/app\/page\.tsx:1/] }] : [])],
     })),
     ...[
       ['normalized pnpm include', ['./apps//unused/.././*/', 'apps/*/examples/*'], true],
-      ['pnpm exclusion before include', ['!./apps/web/examples/**', 'apps/**'], false],
-      ['pnpm exclusion after include', ['apps/**', '!apps/web/examples/**'], false],
+      ['pnpm exclusion before include', ['!./apps/web/examples/**', '!./apps/ignored', 'apps/**'], false],
+      ['pnpm exclusion after include', ['apps/**', '!apps/ignored', '!apps/web/examples/**'], false],
     ].map(([name, patterns, ownNext]) => ({
       name,
       build(f) {
@@ -531,6 +616,7 @@ test('project selection follows the precedence rule for all PR #19 review probes
         f.library('workspace', 'bootstrap.ts');
         f.app('workspace/apps/web', 'web', { ownNext, route: 'src/app/page', marker: 'WebMarker' });
         markedExample(f, 'workspace/apps/web');
+        if (!ownNext) f.app('workspace/apps/ignored', 'ignored');
       },
       requests: [{ from: 'workspace', expected: 'workspace/apps/web', query: ['WebMarker', /src\/app\/page\.tsx:1/] }],
     })),
