@@ -519,7 +519,9 @@ test('API consumers recognize the imported AI SDK transport and keep literals se
   assert.match(consumers, /^# similar routes not matched: \/api\/chat\/\[id\]\/stream$/m);
   const callees = await client.text('query', { kind: 'callees', target: 'chat' });
   assert.match(callees, /d1 fetch :5  POST \/api\/chat.*\(AI SDK transport\) \[partial url\]/);
-  assert.match(callees, /^# partial: .*possible AI SDK transport URL override/m);
+  assert.match(callees, /^# partial: .*uncertain AI SDK URL matches$/m);
+  assert.match(consumers, /^# partial: uncertain AI SDK URL matches$/m);
+  assert.doesNotMatch(consumers, /\[possible URL override\]/);
 });
 
 test('static AI SDK overrides follow property and callback precedence with scoped partial evidence', async t => {
@@ -573,13 +575,14 @@ test('static AI SDK overrides follow property and callback precedence with scope
   assert.match(await query('api_consumers', '/api/health'), /^# complete:/m);
 
   for (const name of ['customChat', 'spreadChat']) {
+    const reason = name === 'customChat' ? partial : /^# partial: uncertain AI SDK URL matches$/m;
     const path = await query('path', name, { to: '/api/other' });
     assert.match(path, /1 hop/);
     assert.match(path, /POST \/api\/other .* \[partial url\]/);
-    assert.match(path, partial);
+    assert.match(path, reason);
     const miss = await query('path', name, { to: '/api/chat' });
     assert.match(miss, /no directed path/);
-    assert.match(miss, partial);
+    assert.match(miss, reason);
   }
   assert.match(await query('path', 'literalLast', { to: '/api/chat' }), /^# complete:/m);
   const shared = await query('callees', 'sharedRoute');
@@ -629,10 +632,10 @@ test('opaque AI SDK API, fetch and prepare options cannot create a complete path
   const consumers = await query('api_consumers', '/api/chat');
   assert.match(consumers, /^send .* middlewareChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
   assert.match(consumers, /^send .* thenableChat \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
-  assert.match(consumers, /^send .* objectWithIndirectApi \? AI SDK transport \[possible URL override\] \[partial url\]$/m);
+  assert.match(consumers, /^send .* objectWithIndirectApi POST AI SDK transport \[partial url\]$/m);
   assert.match(await query('api_consumers', '/api/health'), partial);
   for (const name of ['middlewareChat', 'thenableChat', 'opaqueChat', 'hookWithSpread',
-    'transportWithSpread', 'completionWithFetch', 'objectWithDynamicApi', 'objectWithIndirectApi']) {
+    'transportWithSpread', 'completionWithFetch']) {
     for (const route of ['/api/chat', '/api/other']) {
       const path = await query('path', name, { to: route });
       assert.match(path, / : no directed path /);
@@ -640,6 +643,8 @@ test('opaque AI SDK API, fetch and prepare options cannot create a complete path
     }
     assert.match(await query('callees', name), partial);
   }
+  assert.match(await query('path', 'objectWithDynamicApi', { to: '/api/other' }), /^# partial: uncertain AI SDK URL matches$/m);
+  assert.match(await query('path', 'objectWithIndirectApi', { to: '/api/chat' }), /POST \/api\/chat .*\[partial url\]/);
   assert.match(await query('path', 'staticCompletion', { to: '/api/other' }), /^# complete:/m);
 });
 
@@ -862,4 +867,49 @@ test('empty conditional URL fragments preserve routes with and without optional 
       assert.match(result, new RegExp(`^send +calls\\.ts:${line} GET fetch \\[partial url\\]$`, 'm'));
     }
   }
+});
+
+test('known AI SDK transports can reconnect to the default stream route', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'app/api/custom/route.ts', 'export function POST() {}');
+  write(root, 'app/api/custom/[id]/stream/route.ts', 'export function GET() {}');
+  write(root, 'app/api/custom/[id]/other/route.ts', 'export function GET() {}');
+  write(root, 'chat.ts', `
+    import { DefaultChatTransport } from 'ai';
+    export function connect() {
+      return new DefaultChatTransport({ api: '/api/custom',
+        prepareReconnectToStreamRequest: () => ({ headers: {} }) });
+    }
+  `);
+  await generate(root);
+  const mcp = await openMcp(t, root);
+  const target = '/api/custom/[id]/stream';
+  const get = await mcp.text('query', { kind: 'api_consumers', target });
+  assert.match(get, /connect GET AI SDK transport \[partial url\]/);
+  assert.match(get, /^# partial: uncertain AI SDK URL matches$/m);
+  const path = await mcp.text('query', { kind: 'path', target: 'connect', to: target });
+  assert.match(path, /1 fetch .* GET .* \[partial url\]/);
+  assert.match(path, /^# partial: uncertain AI SDK URL matches$/m);
+  const unrelated = await mcp.text('query', { kind: 'api_consumers', target: '/api/custom/[id]/other' });
+  assert.doesNotMatch(unrelated, /AI SDK transport/);
+  assert.match(unrelated, /^# complete:/m);
+});
+
+test('unbounded AI SDK URLs cite their source on unrelated API answers', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{}');
+  write(root, 'app/api/health/route.ts', 'export function GET() {}');
+  write(root, 'components/prop.tsx', [
+    "import { DefaultChatTransport } from 'ai';",
+    'export function Chat({ endpoint }: { endpoint: string }) {',
+    '  return new DefaultChatTransport({ api: endpoint });',
+    '}'
+  ].join('\n'));
+  await generate(root);
+  const mcp = await openMcp(t, root);
+  const result = await mcp.text('query', { kind: 'api_consumers', target: '/api/health' });
+  assert.match(result, /^# unbounded AI SDK transport: components\/prop\.tsx:3$/m);
+  assert.match(result, /^# partial: uncertain AI SDK URL matches$/m);
+  assert.doesNotMatch(result, /possible AI SDK transport URL override/);
 });

@@ -2,6 +2,8 @@ import type { QueryIndexBuilder } from './QueryIndexBuilder';
 import { AI_SDK_TRANSPORT, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
 import { type CallExpression, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import * as path from 'path';
+import { readFileSync } from 'node:fs';
+import { intersects, validRange } from 'semver';
 import { UI_TARGET } from '../types/GraphPaths';
 import type { ComponentEdge, ComponentNode, DetailFacts, RouteNode } from '../types/GraphTypes';
 import { visitKinds } from './CompilerWalk';
@@ -118,6 +120,7 @@ interface WrapperChain {
 }
 
 type PageProperties = {
+  definition?: Node;
   assignments: Map<string, { value: Node; site: Node }>;
   unknown: Set<string>;
   opaque: boolean;
@@ -128,6 +131,7 @@ type PagesWrapperScope = {
   issues?: string[];
   parameter?: string;
   forwarded?: Node;
+  propertyRead?: (name: string, value: StaticValue) => void;
   renderCondition?: (tag: Node, decision: PageRenderCondition) => void;
 };
 
@@ -191,7 +195,7 @@ const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|Error
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
   bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), scope?: PagesWrapperScope): WrapperChain[] {
   if (seen.has(body) || seen.size >= 12) return [];
-  const { page, parameter: pageParameter, forwarded, issues, renderCondition } = scope ?? {};
+  const { page, parameter: pageParameter, forwarded, issues, renderCondition, propertyRead } = scope ?? {};
   const pagesScope = !!scope;
   seen = new Set(seen).add(body);
   const chains = new Map<string, WrapperChain>();
@@ -231,13 +235,21 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       node.getSourceFile() === value.getSourceFile() && value.getStart() >= node.getStart()) return false;
     return isSlot(value);
   };
-  const propertySlot = (node: Node | undefined) => {
+  const propertySlot = (node: Node | undefined, depth = 0): string | undefined => {
+    if (depth >= 12) return;
+    const inner = node && wrappedExpression(node);
+    if (inner) return propertySlot(inner, depth + 1);
     if (Node.isPropertyAccessExpression(node) && isSlot(node.getExpression())) return node.getName();
     if (Node.isElementAccessExpression(node) && isSlot(node.getExpression())) return textValue(node.getArgumentExpression());
     const element = Node.isIdentifier(node) ? bindingOf(node) : undefined;
-    if (Node.isBindingElement(element)) {
+    if (Node.isVariableDeclaration(element) &&
+      element.getVariableStatement()?.getDeclarationKind() === 'const' && element.getEnd() < node!.getStart()) {
+      return propertySlot(element.getInitializer(), depth + 1);
+    }
+    if (Node.isBindingElement(element) && !element.getInitializer()) {
       const declaration = element.getParent().getParent();
-      if (Node.isVariableDeclaration(declaration) && isSlot(declaration.getInitializer())) {
+      if (Node.isVariableDeclaration(declaration) && declaration.getVariableStatement()?.getDeclarationKind() === 'const' &&
+        isSlot(declaration.getInitializer())) {
         return (element.getPropertyNameNode() ?? element.getNameNode()).getText();
       }
     }
@@ -252,9 +264,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const key = propertySlot(expression);
       if (key !== undefined && page) {
         properties.add(key);
-        const assignment = page.assignments.get(key);
-        const value = page.unknown.has(key) ? unknownValue : assignment ? staticValue(assignment.value) :
-          page.opaque ? unknownValue : undefined;
+        const value = pagePropertyValue(page, key);
+        propertyRead?.(key, value);
         return value;
       }
       if (Node.isElementAccessExpression(expression) && page && isSlot(expression.getExpression())) {
@@ -394,7 +405,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
       const namedProvider = names.some(providerName) || (!!external && names.some(externalProviderName));
       const label = definition ? `${relativePath(definition.getSourceFile())}#${exportedName}` :
         module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
-      const nestedScope = scope && { page, issues, renderCondition };
+      const nestedScope = scope && { page, issues, renderCondition, propertyRead };
       const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope) : [];
       const primitive = names.some(layoutPrimitive);
       chain = chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
@@ -468,7 +479,45 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
   return [...chains.values()];
 }
 
-function pageProperties(source: SourceFile | undefined): PageProperties {
+function pagePropertyValue(page: PageProperties, key: string): StaticValue {
+  if (page.unknown.has(key)) return unknownValue;
+  const assignment = page.assignments.get(key);
+  return assignment ? staticValue(assignment.value) : page.opaque ? unknownValue : undefined;
+}
+
+function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, files: Set<SourceFile>) {
+  type Cached = { properties: Map<string, StaticValue>; chains: WrapperChain[]; issues: string[];
+    conditions: [Node, PageRenderCondition][] };
+  const cache = new Map<Node, Map<string, Cached[]>>();
+  return (body: Node, pagesApp: boolean, scope: PagesWrapperScope) => {
+    const page = scope.page;
+    if (!page) return wrappedChains(body, pagesApp, relativePath, bodies, files, new Set(), scope);
+    const mode = pagesApp ? 'app' : 'layout:' + scope.parameter;
+    const modes = cache.get(body) ?? new Map<string, Cached[]>();
+    cache.set(body, modes);
+    const entries = modes.get(mode) ?? [];
+    modes.set(mode, entries);
+    // A branch can only change when one of the property reads that led to
+    // it changes. Replay JSX decisions and issues for each affected route.
+    let result = entries.find(entry => [...entry.properties].every(([key, value]) => Object.is(pagePropertyValue(page, key), value)));
+    if (!result) {
+      const properties = new Map<string, StaticValue>();
+      const issues: string[] = [];
+      const conditions: Cached['conditions'] = [];
+      const chains = wrappedChains(body, pagesApp, relativePath, bodies, files, new Set(), {
+        ...scope, issues, propertyRead: (key, value) => properties.set(key, value),
+        renderCondition: (tag, decision) => conditions.push([tag, decision])
+      });
+      result = { properties, chains, issues, conditions };
+      if (entries.length < 16) entries.push(result);
+    }
+    scope.issues?.push(...result.issues);
+    for (const [tag, decision] of result.conditions) scope.renderCondition?.(tag, decision);
+    return result.chains;
+  };
+}
+
+function pageProperties(source: SourceFile | undefined, workspace?: WorkspaceBindings): PageProperties {
   const assignments = new Map<string, { value: Node; site: Node }>();
   const unknown = new Set<string>();
   const exported = new Set(source?.getExportedDeclarations().get('default')?.map(node => valueNode(node)));
@@ -479,11 +528,15 @@ function pageProperties(source: SourceFile | undefined): PageProperties {
     for (const member of page.getStaticMembers()) {
       const name = member.getName();
       const value = Node.isPropertyDeclaration(member) ? member.getInitializer() : Node.isMethodDeclaration(member) ? member : undefined;
-      if (value) assignments.set(name, { value, site: member });
+      if (value) assignments.set(name, { value: workspace?.resolve(valueNode(value)) ?? value, site: member });
       else if (!Node.isPropertyDeclaration(member)) unknown.add(name);
     }
   }
   if (!source || !page) return { assignments, unknown, opaque };
+  const assign = (name: string, value: Node, site: Node) => {
+    assignments.set(name, { value: workspace?.resolve(valueNode(value)) ?? value, site });
+    unknown.delete(name);
+  };
   const invalidate = () => {
     opaque = true;
     for (const key of assignments.keys()) unknown.add(key);
@@ -506,8 +559,7 @@ function pageProperties(source: SourceFile | undefined): PageProperties {
           if (!name) invalidate();
           else if (Node.isExpressionStatement(statement) && statement.getExpression() === node &&
             node.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
-            assignments.set(name, { value: node.getRight(), site: left });
-            unknown.delete(name);
+            assign(name, node.getRight(), left);
           } else unknown.add(name);
         } else if (Node.isCallExpression(node) && node.getArguments().some(argument => valueNode(argument) === page)) {
           invalidate();
@@ -524,7 +576,7 @@ function pageProperties(source: SourceFile | undefined): PageProperties {
       statement.forEachDescendant(inspect);
     }
   }
-  return { assignments, unknown, opaque };
+  return { assignments, unknown, opaque, definition: page };
 }
 
 function andThen(outer: WrapperChain, inner: WrapperChain): WrapperChain {
@@ -533,7 +585,7 @@ function andThen(outer: WrapperChain, inner: WrapperChain): WrapperChain {
 }
 
 function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies: Map<Node, Node>,
-  files: Set<SourceFile>, workspace?: WorkspaceBindings) {
+  files: Set<SourceFile>, pageChains: ReturnType<typeof cachePageChains>, workspace?: WorkspaceBindings) {
   let application = [emptyChain];
   const issues: string[] = [];
   const locations = (node: Node, symbol: string, evidence?: string): Wrapper => ({
@@ -582,7 +634,7 @@ function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies
   const app = locations(fn, name);
   const body = fn.getBody();
   const paths = (scope: PagesWrapperScope) => {
-    const paths = body ? wrappedChains(body, true, relativePath, bodies, files, new Set(), scope) : [];
+    const paths = body ? pageChains(body, true, scope) : [];
     if (!paths.length) scope.issues?.push('custom App page slot unresolved');
     return application.flatMap(outer => (paths.length ? paths : [emptyChain]).map(path => ({
       ...path,
@@ -611,11 +663,11 @@ function pagesDocument(source: SourceFile, relativePath: RelativePath): Wrapper 
 
 export function collectRenderFacts(
   routes: RouteNode[], components: ComponentNode[], edges: ComponentEdge[],
-  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings
+  files: SourceFile[], bodies: Map<Node, Node>, relativePath: RelativePath, facts: DetailFacts | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings
 ) {
   const outgoing = new Map<string, string[]>();
   for (const edge of edges) {
-    if (edge.type !== 'renders') continue;
+    if (!facts || edge.type !== 'renders') continue;
     const targets = outgoing.get(edge.from) ?? [];
     targets.push(edge.to);
     outgoing.set(edge.from, targets);
@@ -638,6 +690,7 @@ export function collectRenderFacts(
     const id = `cmp:${relativePath(node.getSourceFile())}#${suffix}`;
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
+  const pageChains = cachePageChains(relativePath, bodies, projectFiles);
   const apps = new Map<string, ReturnType<typeof pagesApplication>>();
   const documents = new Map<string, Wrapper>();
   const wrapperLocations = new Map<string, Wrapper>();
@@ -690,9 +743,9 @@ export function collectRenderFacts(
       })));
     }
     if (app) {
-      if (!apps.has(app)) apps.set(app, pagesApplication(filesByPath.get(app)!, relativePath, bodies, projectFiles, workspace));
+      if (!apps.has(app)) apps.set(app, pagesApplication(filesByPath.get(app)!, relativePath, bodies, projectFiles, pageChains, workspace));
       const application = apps.get(app)!;
-      const page = pageProperties(filesByPath.get(route.file));
+      const page = pageProperties(filesByPath.get(route.file), workspace);
       const assignments = page.assignments;
       const scope: PagesWrapperScope = {
         page, issues,
@@ -725,7 +778,7 @@ export function collectRenderFacts(
           const wrapper: Wrapper = { file: relativePath(fn.getSourceFile()), symbol: name, line: startLine(definition),
             conditional: false, evidence: `${dispatch} assigned at ${relativePath(assigned.site.getSourceFile())}:${startLine(assigned.site)}`,
             site: { file: relativePath(assigned.site.getSourceFile()), line: startLine(assigned.site) } };
-          const paths = wrappedChains(body, true, relativePath, bodies, projectFiles, new Set(), scope);
+          const paths = pageChains(body, true, scope);
           if (!paths.length) issues.push(`page slot unresolved in ${dispatch}`);
           branches = (paths.length ? paths : [emptyChain]).map(path => ({
             ...andThen(andThen(chain, { path: [wrapper.file + '#' + name], locations: [wrapper] }), path),
@@ -747,7 +800,7 @@ export function collectRenderFacts(
             issues.push('getLayout binding unresolved');
             return [branch];
           }
-          const paths = wrappedChains(body, false, relativePath, bodies, projectFiles, new Set(), { ...scope, parameter: parameter.getText() });
+          const paths = pageChains(body, false, { ...scope, parameter: parameter.getText() });
           if (!paths.length) {
             if (!returns(body).every(node => bindingOf(node) === fn?.getParameters()[0])) issues.push('getLayout page slot unresolved');
             return [branch];
@@ -769,10 +822,12 @@ export function collectRenderFacts(
         if (wrapper.phase || wrapper.external) continue;
         const id = `cmp:${wrapper.definitionFile ?? wrapper.file}#${wrapper.symbol}`;
         if (componentsById.has(id)) {
-          index?.render(`file:${route.file}`, id,
-            wrapper.site?.file === route.file ? wrapper.site.line : route.file === wrapper.file ? wrapper.line :
-              startLine(filesByPath.get(route.file)!.getExportedDeclarations().get('default')?.[0] ?? filesByPath.get(route.file)!),
-            Number(wrapper.conditional || !!chain.conditional), true, chain.possible ? true : undefined);
+          const site = wrapper.site ?? (route.file === wrapper.file ? wrapper :
+            page.definition ? { file: relativePath(page.definition.getSourceFile()), line: startLine(page.definition) } :
+              { file: route.file, line: 1 });
+          index?.render(`file:${route.file}`, id, site.line,
+            Number(wrapper.conditional || !!chain.conditional), true, chain.possible ? true : undefined,
+            undefined, site.file === route.file ? undefined : site.file);
           layoutSeeds.push(id);
           pageWrapperSeeds.set(id, Math.min(pageWrapperSeeds.get(id) ?? Infinity, position + 1));
         }
@@ -789,6 +844,7 @@ export function collectRenderFacts(
       chains = [...unique.values()];
     }
     index?.page(route.id, app ? [] : layoutSeeds, chains.map(chain => chain.locations));
+    if (!facts) continue;
     for (const { path, conditional } of chains) {
       if (path.length) addFact(facts, route.file, `wrap ${route.file} <- ${path.join(' > ')}${conditional ? ' (conditional)' : ''}`, path.length);
     }
@@ -815,6 +871,7 @@ export function collectRenderFacts(
     traverse([route.componentId, `file:${route.file}`], false);
     traverse(layoutSeeds, true);
   }
+  if (!facts) return;
   // Keep layout-only reachability distinct from rendering by the page.
   for (const [id, pages] of reached) {
     const component = componentsById.get(id)!;
@@ -990,11 +1047,33 @@ const sdkTransports = new Set(['DefaultChatTransport', 'TextStreamChatTransport'
 const sdkHooks = new Set(['useChat', 'useCompletion', 'useObject', 'experimental_useObject']);
 const sdkModules = new Set(['ai', '@ai-sdk/react', 'ai/react']);
 
-type SdkRequest = { method: 'POST' | 'GET'; urls: Set<Node | string>; partial: boolean; unbounded: boolean };
+type SdkRequest = { method: 'POST' | 'GET'; urls: Set<Node | string>; partial: boolean; unbounded: boolean;
+  override?: boolean; reconnectBase?: Node | string };
+
+function declaredChatVersion(directory: string, cache: Map<string, 'legacy' | 'transport' | undefined>): 'legacy' | 'transport' | undefined {
+  if (cache.has(directory)) return cache.get(directory);
+  let spec: unknown;
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(directory, 'package.json'), 'utf8'));
+    spec = pkg.dependencies?.['@ai-sdk/react'] ?? pkg.devDependencies?.['@ai-sdk/react'] ??
+      pkg.optionalDependencies?.['@ai-sdk/react'] ?? pkg.peerDependencies?.['@ai-sdk/react'];
+  } catch {
+    // A source checkout can lack a manifest at this directory.
+  }
+  const parent = path.dirname(directory);
+  const range = typeof spec === 'string' ? validRange(spec) : null;
+  const legacy = range && intersects(range, '<2.0.0-0');
+  const transport = range && intersects(range, '>=2.0.0-0');
+  const version = legacy && !transport ? 'legacy' : transport && !legacy ? 'transport' :
+    spec === undefined && parent !== directory ? declaredChatVersion(parent, cache) : undefined;
+  cache.set(directory, version);
+  return version;
+}
 
 function aiSdkRequests(
   node: Node, argument: Node | undefined, name: string, module: string | undefined,
-  classify: (url: Node) => void, handledTransports: Set<Node>
+  classify: (url: Node) => void, handledTransports: Set<Node>,
+  versions: Map<string, 'legacy' | 'transport' | undefined>
 ): SdkRequest[] {
   const observe = (key: string, value: Node) => {
     if (key === 'api' && value.getSourceFile() === node.getSourceFile()) classify(value);
@@ -1045,10 +1124,22 @@ function aiSdkRequests(
   const send: SdkRequest = { method: 'POST', urls: new Set(), partial: !!api?.indirect, unbounded: false };
   const reconnect: SdkRequest = { method: 'GET', urls: new Set(), partial: false, unbounded: false };
   let fallsBack = true;
+  let reconnectFallsBack = true;
+  let version: 'legacy' | 'transport' | undefined;
+  if (name === 'useChat' && module === '@ai-sdk/react' && !delegated) {
+    const parameters = node.asKindOrThrow(SyntaxKind.CallExpression).getExpression().getType().getCallSignatures()[0]?.getParameters();
+    const type = parameters?.[0]?.getTypeAtLocation(node);
+    const variants = type?.isUnion() ? type.getUnionTypes() : type ? [type] : [];
+    version = variants.some(variant => variant.getProperty('transport')) ? 'transport' :
+      variants.some(variant => variant.getProperty('api')) ? 'legacy' :
+      declaredChatVersion(node.getSourceFile().getDirectoryPath(), versions);
+  }
+  const knownTransport = delegated || sdkTransports.has(name);
+  const mayReconnect = knownTransport || name === 'useChat' && module === '@ai-sdk/react' && version !== 'legacy';
   for (const [key, request] of [
     ['prepareSendMessagesRequest', send], ['prepareReconnectToStreamRequest', reconnect]
   ] as const) {
-    if (request === reconnect && !delegated && !sdkTransports.has(name)) continue;
+    if (request === reconnect && !knownTransport) continue;
     const option = properties.get(key);
     if (!option || isNullish(unwrap(option.value))) continue;
     const callback = sdkCallback(option.value);
@@ -1097,21 +1188,17 @@ function aiSdkRequests(
       if (body && !option.overwritten) fallsBack = withoutApi;
     } else {
       reconnect.partial ||= reconnect.urls.size > 0 && (withoutApi || reconnect.urls.size > 1);
+      if (body && !option.overwritten) reconnectFallsBack = withoutApi;
     }
+    request.override = request.unbounded || request.urls.size > 0 && request.partial;
   }
   let usesDefault = !api || isNullish(unwrap(api.value)) || !!api.overwritten;
   if (fallsBack && api && !isNullish(unwrap(api.value))) {
     send.urls.add(api.value);
     // React's transport-based useChat does not use a top-level api from older versions.
     if (name === 'useChat' && module === '@ai-sdk/react' && !delegated) {
-      const parameters = node.asKindOrThrow(SyntaxKind.CallExpression).getExpression().getType().getCallSignatures()[0]?.getParameters();
-      const type = parameters?.[0]?.getTypeAtLocation(node);
-      const variants = type?.isUnion() ? type.getUnionTypes() : type ? [type] : [];
-      if (variants.some(variant => variant.getProperty('transport'))) {
-        send.urls.delete(api.value);
-        usesDefault = true;
-      }
-      usesDefault ||= !variants.some(variant => variant.getProperty('api'));
+      if (version === 'transport') send.urls.delete(api.value);
+      usesDefault ||= version !== 'legacy';
     }
   }
   if (fallsBack && usesDefault) {
@@ -1120,9 +1207,14 @@ function aiSdkRequests(
       send.partial = true;
     } else send.unbounded = true;
   }
-  // The default reconnect URL includes the chat ID. Only explicit reconnect overrides are indexed here.
-  const requests = reconnect.urls.size || reconnect.unbounded ? [send, reconnect] : [send];
+  if (mayReconnect && reconnectFallsBack) {
+    // The chat ID is supplied at runtime. A supported transport may never resume,
+    // or its ID may resolve to a more specific handler than the template.
+    reconnect.reconnectBase = knownTransport && api && !isNullish(unwrap(api.value)) ? api.value : defaultUrl;
+  }
+  const requests = mayReconnect || reconnect.urls.size || reconnect.unbounded ? [send, reconnect] : [send];
   for (const request of requests) {
+    request.override ||= unbounded;
     request.unbounded ||= unbounded;
     for (const url of request.urls) {
       if (typeof url === 'string' || literalUrl(url) !== undefined) continue;
@@ -1430,7 +1522,7 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
+  actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: routeSegments(route.path)
@@ -1512,6 +1604,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
   type Endpoint = { route: RouteNode; kind: string };
   const endpointsByCall = new Map<Node, Endpoint[]>();
   const projectFiles = new Set(files);
+  const chatVersions = new Map<string, 'legacy' | 'transport' | undefined>();
   for (const file of files) {
     if (!/\/api|\\(?:x|u|\/)/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
     const literals: Node[] = [];
@@ -1568,7 +1661,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
           for (const { route, partial, dynamic, markdown } of matches.values()) {
             index?.fetch({ file: source, line: startLine(node), node, route: route.id, method: request.method, url: route.path,
               via: request.via, partial: partial || undefined, dynamic, evidence: request.evidence });
-            if (markdown) addFact(facts, source, `fetch ${source} -> ${route.file} ${route.path} (${request.via})`);
+            if (facts && markdown) addFact(facts, source, `fetch ${source} -> ${route.file} ${route.path} (${request.via})`);
           }
         }
         return;
@@ -1576,9 +1669,10 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
-      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports) : undefined;
+      const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions) : undefined;
       if (sdkRequests?.some(request => request.partial)) {
-        index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded));
+        index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded),
+          sdkRequests.some(request => request.override));
       }
       const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
       const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
@@ -1591,29 +1685,39 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
       const subject = action ? action.slice('action:'.length) : source;
       const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
       const kind = via === 'fetch' ? '' : ` (${via})`;
-      const requests = sdkRequests ?? [{
+      const requests: (Omit<SdkRequest, 'urls' | 'method'> & {
+        urls: Iterable<Node | string | undefined>; method?: string;
+      })[] = sdkRequests ?? [{
         urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : axiosMethod,
         partial: false, unbounded: false
       }];
       for (const request of requests) {
-        const method = request.unbounded ? undefined : request.method;
-        for (const url of request.urls) {
+        const method = request.unbounded && request.override ? undefined : request.method;
+        const reconnectBase = request.reconnectBase;
+        for (const [url, defaultReconnect] of [
+          ...[...request.urls].map(url => [url, false] as const),
+          ...(reconnectBase === undefined ? [] : [[reconnectBase, true] as const])
+        ]) {
           if (url === undefined) continue;
-          const matches = matchesFor(url);
+          const matches = defaultReconnect ?
+            matchValues((typeof url === 'string' ? [{ text: url }] : urlTexts(url) ?? []).map(value => ({
+              ...value, text: value.text + '/' + slot + '/stream', partial: true
+            }))) : matchesFor(url);
           if (!matches) continue;
           if (typeof url !== 'string' && url.getSourceFile() === file) classify(url);
           const line = startLine(sdkRequests && typeof url !== 'string' && url.getSourceFile() === file ? url : node);
           for (const { route, partial, markdown, dynamic } of matches.values()) {
             const matchesMethod = !method || !route.methods?.length || route.methods.some(value =>
               value === method || value === 'ALL' || (method === 'HEAD' && value === 'GET'));
-            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial;
-            if (mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+            const mapFact = markdown && matchesMethod && origin?.name !== 'mutate' && !request.partial && !defaultReconnect;
+            if (facts && mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
             index?.fetch({
               file: source, line, node, route: route.id,
               method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
-              partial: partial || request.partial || undefined, dynamic
+              partial: partial || request.partial || undefined, dynamic,
+              transportOverride: request.override || undefined
             });
-            if (isSwr || !mapFact) continue;
+            if (!facts || isSwr || !mapFact) continue;
             const targets = endpointsByCall.get(node) ?? [];
             targets.push({ route, kind });
             endpointsByCall.set(node, targets);
@@ -1646,7 +1750,7 @@ export function collectApiFacts(files: SourceFile[], routes: RouteNode[], relati
     }
   }
 
-  if (!endpointsByCall.size) return;
+  if (!facts || !endpointsByCall.size) return;
   const callsByBody = new Map<Node, { direct: Set<Endpoint>; callees: Set<Node> }>();
   const inspect = (root: Node) => {
     const cached = callsByBody.get(root);

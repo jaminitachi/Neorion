@@ -1255,9 +1255,157 @@ test('changes verifies a symbol rename against live imports and retains a stale 
   assert.match(fullRename, /^# complete:/m);
 });
 
+test('historical indexes keep route, import and fetch evidence while skipping overview metadata', { timeout: 65_000 }, t => {
+  const { file, root, build } = gitFixture(t);
+  fs.writeFileSync(file('lib/retired.ts'), 'export function retired() { return 1; }\n');
+  const route = file('app/api/retired/route.ts');
+  fs.mkdirSync(path.dirname(route), { recursive: true });
+  fs.writeFileSync(route, 'import { retired } from "../../../lib/retired";\n' +
+    '// retired used to live in a different module\nexport function GET() { return Response.json(retired()); }\n');
+  fs.writeFileSync(file('app/(main)/other/request.ts'), 'export const request = () => fetch("/api/retired");\n');
+  const current = JSON.parse(fs.readFileSync(build(), 'utf8'));
+  const history = file('.git/history.json');
+  execFileSync(process.execPath, [path.join(path.dirname(entry), 'graph.cjs'), '--history-index', root, history]);
+  const historical = JSON.parse(fs.readFileSync(history, 'utf8'));
+  assert.ok(current.mentions.retired?.length);
+  assert.deepEqual(historical.mentions, {});
+  assert.deepEqual(historical.routes, current.routes);
+  assert.deepEqual(historical.moduleImports, current.moduleImports);
+  assert.deepEqual(historical.fetches, current.fetches);
+  assert.deepEqual(historical.references, current.references.filter(reference => ['call', 'use', 'type-use'].includes(reference[3])));
+});
+
 test('invalid changes base explains shallow and single-commit history', { timeout: 65_000 }, t => {
   const { file, git, changes } = gitFixture(t);
   assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; only one commit is available/m);
   fs.writeFileSync(file('.git/shallow'), git('rev-parse', 'HEAD').trim() + '\n');
   assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; shallow repository history; run git fetch --unshallow or use a reachable ref$/m);
+});
+
+const wrapperDispatch = `
+  export function LicenseRequired({ children }) { return <section>{children}</section>; }
+  export function PageWrapper({ Component, pageProps }) {
+    return Component.requiresLicense ?
+      <LicenseRequired><Component {...pageProps}/></LicenseRequired> : <Component {...pageProps}/>;
+  }`;
+
+test('Pages resolves a wrapper imported through the app package name', t => {
+  const query = pagesReviewFixture(t, {
+    'package.json': '{"name":"@fixture/web"}',
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component } = props;
+        return Component.PageWrapper ? <Component.PageWrapper {...props}/> : <Component/>;
+      }`,
+    'lib/wrapper.tsx': wrapperDispatch,
+    'pages/self.page.tsx': `
+      import { PageWrapper } from '@fixture/web/lib/wrapper';
+      export default function Self() { return <main/>; }
+      Self.PageWrapper = PageWrapper;
+      Self.requiresLicense = true;`
+  });
+  const wrappers = query('wrappers', '/self');
+  assert.match(wrappers, /PageWrapper assigned at pages\/self\.page\.tsx/);
+  assert.match(wrappers, /LicenseRequired/);
+  assert.match(wrappers, /^# complete:/m);
+});
+
+test('Pages resolves a const alias of the custom App page slot', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component } = props;
+        const Wrapper = Component.PageWrapper;
+        const Alias = Wrapper;
+        const content = Wrapper ? <Alias {...props}/> : <Component/>;
+        return content;
+      }`,
+    'lib/wrapper.tsx': wrapperDispatch,
+    'pages/alias.page.tsx': `
+      import { PageWrapper } from '../lib/wrapper';
+      export default function AliasPage() { return <main/>; }
+      AliasPage.PageWrapper = PageWrapper;
+      AliasPage.requiresLicense = true;`,
+    'middleware.ts': 'export function middleware() {}'
+  });
+  const wrappers = query('wrappers', '/alias');
+  assert.match(wrappers, /PageWrapper.*assigned at/);
+  assert.match(wrappers, /LicenseRequired/);
+  assert.match(wrappers, /^# complete:/m);
+  assert.doesNotMatch(query('impact', 'middleware'), /custom App page slot unresolved/);
+});
+
+test('Pages callbacks after an early return and in a try block are checker-resolved', t => {
+  const config = {
+    guard: 'if (!ctx.session) return { redirect: { destination: "/" } }; return callback(ctx);',
+    caught: 'try { return await callback(ctx); } catch { return { notFound: true }; }',
+    branch: 'if (ctx.session) return callback(ctx); return { notFound: true };',
+    dead: 'try { return { props: {} }; } finally {} return callback(ctx);'
+  };
+  const query = pagesReviewFixture(t, Object.fromEntries(Object.entries(config).map(([name, body]) => [
+    `pages/${name}.page.tsx`,
+    `export default function Page() { return <main />; }
+     function wrap(callback) { return async ctx => { ${body} }; }
+     function load_${name}() { return { props: {} }; }
+     export const getServerSideProps = wrap(() => load_${name}());`
+  ])));
+  for (const name of ['guard', 'caught']) {
+    const result = query('path', '/' + name, 'load_' + name);
+    assert.match(result, /2 call .*load_/);
+    assert.doesNotMatch(result, /\[possible\]/);
+    assert.match(result, /^# complete:/m);
+  }
+  assert.match(query('path', '/branch', 'load_branch'), /\[possible\][\s\S]*# partial:/);
+  assert.match(query('path', '/dead', 'load_dead'), /# complete: no directed path/);
+});
+
+test('Pages wrapper evidence uses the defining module when a page re-exports its default', t => {
+  const query = pagesReviewFixture(t, {
+    'pages/_app.page.tsx': `
+      export default function App(props) {
+        const { Component } = props;
+        return Component.PageWrapper ? <Component.PageWrapper {...props}/> : <Component/>;
+      }`,
+    'lib/wrapper.tsx': wrapperDispatch,
+    'lib/view.tsx': [
+      "import { PageWrapper } from './wrapper';",
+      'export default function View() { return <main/>; }',
+      'View.PageWrapper = PageWrapper;',
+      'View.requiresLicense = true;'
+    ].join('\n'),
+    'pages/reexport.page.tsx': "export { default } from '../lib/view';"
+  });
+  const result = query('impact', 'PageWrapper');
+  assert.match(result, /^d1 module lib\/view\.tsx:3 /m);
+  assert.doesNotMatch(result, /^d1 .*pages\/reexport\.page\.tsx:[2-9]/m);
+  assert.match(query('path', '/reexport', 'PageWrapper'), /^1 render lib\/view\.tsx:3 /m);
+});
+
+test('packed Pages dependencies preserve method, lifecycle and matcher evidence', t => {
+  const { root, build, query } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
+  // Cross the packing threshold without adding routes or changing the Pages adapter.
+  fs.writeFileSync(path.join(root, 'large.ts'), Array.from({ length: 4_000 }, (_, i) =>
+    `export const entry${i} = ${i};`).join('\n'));
+  const index = JSON.parse(fs.readFileSync(build(), 'utf8'));
+  const { inflateRawSync } = require('node:zlib');
+  const packed = JSON.parse(inflateRawSync(Buffer.from(index.packedGraph, 'base64')).toString('utf8'));
+  assert.ok(packed.pagesEdges.some(edge => edge.kind === 'middleware'));
+  assert.ok(packed.pagesEdges.some(edge => edge.kind === 'data'));
+  assert.equal(index.pagesEdges, undefined);
+  assert.match(query('path', '/api/auth/csrf/embed', 'middleware'), /1 middleware/);
+  assert.match(query('api_consumers', '/api/auth/signup'), /# methods enforced: POST/);
+});
+
+test('Pages middleware impact explains template overlap and dynamic Next configuration', t => {
+  const query = pagesReviewFixture(t, {
+    'next.config.js': 'module.exports = () => ({ pageExtensions: ["page.tsx", "page.ts"] });',
+    'middleware.ts': `
+      export function middleware() {}
+      export const config = { matcher: '/:path*/embed' };`
+  });
+  const impact = query('impact', 'middleware', '--limit', '80');
+  assert.match(impact, /0 exact, [1-9]\d* possible Pages routes/);
+  assert.match(impact, /^# partial: .*middleware matcher "\/:path\*\/embed" may overlap dynamic route templates; dynamic next\.config can change URL matching/m);
+  assert.match(impact, /^# partial:/m);
+  assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
 });

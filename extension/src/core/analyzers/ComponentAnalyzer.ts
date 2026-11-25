@@ -208,7 +208,7 @@ function lexicalName(node: Node): string | undefined {
 export class ComponentAnalyzer {
   constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
-  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean) {
+  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, historyOnly = false) {
     const components = new Map<Node, ComponentNode>();
     const index = includeFacts ? new QueryIndexBuilder() : undefined;
     const bodies = new Map<Node, Node>();
@@ -507,7 +507,7 @@ export class ComponentAnalyzer {
       const body = bodies.get(node)!;
       componentOwners.set(body, component.id);
       const file = body.getSourceFile();
-      const imports = importsFor(file);
+      const imports = historyOnly ? undefined : importsFor(file);
 
       const usedHooks = new Set<string>();
       // Keep COMPONENT_BODY_KINDS in sync with the node kinds handled below.
@@ -516,7 +516,7 @@ export class ComponentAnalyzer {
           componentTags.add(child);
           render(child.getTagNameNode(), component.id, body);
         }
-        if (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child)) {
+        if (imports && (Node.isIdentifier(child) || Node.isPropertyAccessExpression(child))) {
           const binding = Node.isPropertyAccessExpression(child) ? child.getExpression() : child;
           if (binding.getSymbol()?.getDeclarations().some(declaration => imports.has(declaration))) {
             for (const target of declarationsOf(child)) addEdge(component.id, resolveComponent(target)?.id, 'imports');
@@ -527,7 +527,7 @@ export class ComponentAnalyzer {
         const expression = child.getExpression();
         const [argument] = child.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id, body);
-        const hook = resolveHook(expression, imports);
+        const hook = imports && resolveHook(expression, imports);
         if (hook) usedHooks.add(hook);
       };
       inspect(body);
@@ -541,7 +541,7 @@ export class ComponentAnalyzer {
       const relative = relativePath(file);
       const from = `file:${relative}`;
       const usedHooks = new Set<string>();
-      const aliasedHooks = new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
+      const aliasedHooks = historyOnly ? undefined : new Set(file.getImportDeclarations().flatMap(declaration => declaration.getNamedImports())
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
       visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
@@ -565,6 +565,7 @@ export class ComponentAnalyzer {
         const expression = node.getExpression();
         const [argument] = node.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, from);
+        if (!aliasedHooks) return;
         const name = Node.isPropertyAccessExpression(expression) ? expression.getName() :
           Node.isIdentifier(expression) ? expression.getText() : '';
         if (!HOOK.test(name) && !aliasedHooks.has(name)) return;
@@ -586,10 +587,10 @@ export class ComponentAnalyzer {
         const body = targets.map(target => bodies.get(target)).find(Boolean);
         if (body) bodies.set(node, body);
       }
-      collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, facts, index, this.config, this.workspace);
-      collectApiFacts(files, routes, relativePath, actionIds, facts, callable, index, this.config, this.workspace);
+      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts);
+      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
+      collectApiFacts(files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, historyOnly), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

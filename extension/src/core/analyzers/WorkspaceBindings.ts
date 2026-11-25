@@ -15,8 +15,9 @@ export class WorkspaceBindings {
   private project?: Project;
   private readonly dependencies: Set<string>;
 
-  constructor(private readonly root: string) {
+  constructor(private readonly root: string, private readonly appProject?: Project) {
     const manifest = json(path.join(root, 'package.json'));
+    if (typeof manifest?.name === 'string') this.packages.set(manifest.name, root);
     this.dependencies = new Set(Object.keys({ ...manifest?.dependencies, ...manifest?.devDependencies,
       ...manifest?.peerDependencies, ...manifest?.optionalDependencies }));
     for (let directory = root; directory !== path.dirname(directory); directory = path.dirname(directory)) {
@@ -48,15 +49,18 @@ export class WorkspaceBindings {
   }
 
   has(module: string) {
-    return this.packages.has(this.packageName(module));
+    const target = this.packages.get(this.packageName(module));
+    return target !== undefined && target !== this.root;
   }
 
-  resolve(expression: Node) {
+  resolve(expression: Node | undefined) {
     const binding = importBinding(expression);
     if (!binding) return;
     const name = this.packageName(binding.module);
     const root = this.packages.get(name);
     if (!root) return;
+    const resolved = binding.declaration.getModuleSpecifierSourceFile();
+    if (root === this.root && resolved && this.appProject?.getSourceFile(resolved.getFilePath())) return;
     const subpath = binding.module.slice(name.length);
     const manifestPath = path.join(root, 'package.json');
     this.inputs.add(manifestPath);
@@ -102,12 +106,13 @@ export class WorkspaceBindings {
     const file = candidates.find(candidate => candidate.startsWith(boundary + path.sep) &&
       /\.[jt]sx?$/.test(candidate) && !candidate.endsWith('.d.ts') && statSync(candidate, { throwIfNoEntry: false })?.isFile());
     if (!file || !realpathSync(file).startsWith(boundary + path.sep)) return;
+    if (root === this.root && !withinWorkspace) return this.appProject?.getSourceFile(file);
     this.inputs.add(file);
     return (this.project ??= new Project({ skipFileDependencyResolution: true })).addSourceFileAtPathIfExists(file);
   }
 
   private exportAt(root: string, base: string, name: string, seen: Set<string>): Node | undefined {
-    if (!base.startsWith(root + path.sep) || seen.size >= 12 || (this.project?.getSourceFiles().length ?? 0) >= 150) return;
+    if (!base.startsWith(root + path.sep) || seen.size >= 12 || root !== this.root && (this.project?.getSourceFiles().length ?? 0) >= 150) return;
     const source = this.sourceAt(root, base);
     const file = source?.getFilePath();
     const key = file + '#' + name;

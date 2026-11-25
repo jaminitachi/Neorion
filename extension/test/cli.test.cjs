@@ -915,6 +915,19 @@ test('subcommand help succeeds and invalid graph flags include usage', t => {
   assert.match(invalid.stderr, /Unknown option '--unknown'[\s\S]*Usage:/);
 });
 
+test('CLI and MCP suggest the dominant search kind beyond the visible rows', async t => {
+  const { root, env, run } = fixture(t);
+  for (const name of ['a', 'b', 'c']) {
+    const directory = path.join(root, 'app', 'api', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() {}');
+  }
+  const args = { kind: 'search', target: 'api', limit: 1 };
+  assert.match(run(['query', 'search', 'api', '--limit', '1']).stdout, /^# more: .*--kind api\)/m);
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.match(await server.text('query', args), /^# more: .*filter="api"\)/m);
+});
+
 test('root installation README scopes AI SDK evidence labels to source builds', () => {
   const readme = fs.readFileSync(path.join(packageRoot, '../README.md'), 'utf8');
   assert.match(readme, /In source builds,[^\n]*`\[mention\]`[^\n]*`\[possible URL override\]`/);
@@ -933,4 +946,26 @@ test('failed Codex MCP registration leaves the project hint and skill untouched'
   assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion/SKILL.md')), false);
   assert.equal(fs.existsSync(mock.config), false);
   assert.ok(mock.calls().some(([, action]) => action === 'add'));
+});
+
+test('declared React SDK ranges select the hook endpoint without installed types', t => {
+  const { root, run } = fixture(t);
+  for (const route of ['chat', 'custom']) {
+    const directory = path.join(root, 'app', 'api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function POST() {}');
+  }
+  fs.writeFileSync(path.join(root, 'app/chat.ts'), `
+    import { useChat } from '@ai-sdk/react';
+    export function useCustomChat() { return useChat({ api: '/api/custom' }); }
+  `);
+  const file = path.join(root, 'package.json');
+  const query = route => run(['query', 'api_consumers', '/api/' + route]).stdout;
+  for (const [range, send, other] of [['^1.2.0', 'custom', 'chat'], ['^2.0.0', 'chat', 'custom']]) {
+    fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': range } }));
+    assert.match(query(send), /useCustomChat POST AI SDK transport/);
+    assert.doesNotMatch(query(other), /useCustomChat POST AI SDK transport/);
+  }
+  fs.writeFileSync(file, JSON.stringify({ dependencies: { '@ai-sdk/react': '^1.2.0 || ^2.0.0' } }));
+  for (const route of ['custom', 'chat']) assert.match(query(route), /useCustomChat POST AI SDK transport \[partial url\]/);
 });

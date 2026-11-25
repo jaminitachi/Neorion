@@ -3,7 +3,7 @@ import type { IndexedReference, QueryIndex } from './Index';
 
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
-  'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues'> & {
+  'pagesEdges' | 'pagesIssues' | 'pagesObservedCalls' | 'pagesOwnerIssues' | 'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -15,11 +15,11 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 // the base index fields without inflating the graph data.
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
-    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues, ...rest } = index;
+    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues, pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
-    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues
+    routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues, pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 

@@ -483,7 +483,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     }
     if (removals.length > maxSeeds) limited = true;
   }
-  const trace = graph.changeRoutes([...seeds.values(), ...history?.live ?? []], depth, expired);
+  const trace = graph.changeRoutes([...seeds.values(), ...history?.live ?? []], depth, expired, history?.cleanRefactor);
   const baseTrace = history?.trace;
   const wrappers = new Map([...baseTrace?.wrappers ?? [], ...trace.wrappers].map(wrapper => [wrapper.name, wrapper]));
   const rows: QueryRow[] = [];

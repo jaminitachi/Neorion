@@ -146,6 +146,8 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
   let examined = 0;
   let unknownExports = false;
   let unknownNamespaces = false;
+  let updatedOnly = false;
+  let hasUnverifiedOrigin = false;
   const unverifiedMoves = new Set<string>();
   const traceOrigin = (file: string, name: string, ids: ChangeOrigin['ids'], wholeFile: boolean, moved = false,
     uncertainExport = false) => {
@@ -178,6 +180,8 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
       used.set(edge.file, ids);
     }
     const allUpdated = updated.size > 0 && updated.size === files.size;
+    updatedOnly ||= allUpdated;
+    hasUnverifiedOrigin ||= !allUpdated || terminal || uncertainExport;
     if (!uncertainExport && (!allUpdated || terminal)) origins.push(origin);
     const checked = [origin];
     // An indexed import may have no reference edge for its binding. Use the
@@ -246,5 +250,6 @@ export function traceHistory(root: string, removals: Removal[], middleware: Read
   }
   const trace = base.changeRoutes(origins, depth, () => performance.now() >= deadline);
   const previousMiddleware = new Map([...middleware].map(([file, old]) => [file, base.middleware(old)]));
-  return { live, trace, rows, removed, checks, skipped, previousMiddleware, unknownExports, unknownNamespaces, unverifiedMoves: unverifiedMoves.size };
+  return { live, trace, rows, removed, checks, skipped, previousMiddleware, unknownExports, unknownNamespaces, unverifiedMoves: unverifiedMoves.size,
+    cleanRefactor: updatedOnly && !hasUnverifiedOrigin && !unknownExports && !skipped };
 }
