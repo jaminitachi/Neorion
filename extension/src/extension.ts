@@ -24,7 +24,7 @@ export function activate(context: vscode.ExtensionContext) {
             const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (!root) return vscode.window.showErrorMessage('No workspace folder open');
             const selection = connect ? selectProject(root) : undefined;
-            await configureAgents(root, selection?.directory ?? root, connect, context);
+            await configureAgents(root, selection, connect, context);
             if (selection) showProjectGuess(root, selection);
         }));
     }
@@ -59,8 +59,10 @@ function showProjectGuess(root: string, { directory, guessCandidates, searchLimi
     vscode.window.setStatusBarMessage(`Neorion guessed ${JSON.stringify(local(directory))}. Candidates: ${candidates}.${limitNote}`, 15_000);
 }
 
-async function configureAgents(root: string, project: string, connect: boolean, context: vscode.ExtensionContext) {
+async function configureAgents(root: string, selection: ProjectSelection | undefined, connect: boolean, context: vscode.ExtensionContext) {
     try {
+        const project = selection?.directory ?? root;
+        const discover = !!selection?.guessCandidates;
         const choices = connect ? await vscode.window.showQuickPick([
             ...AGENT_FILES.map(label => ({ label, picked: fs.existsSync(path.join(root, label)) })),
             { label: REGISTER_MCP, picked: false },
@@ -89,7 +91,8 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         if (selected.includes(COPY_MCP)) {
             const formats = ['Codex CLI', 'Windsurf', 'Gemini CLI'] as const;
             const format = await vscode.window.showQuickPick([...formats], { placeHolder: 'Choose a global MCP config format' });
-            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number], project, bundleSource));
+            if (format) await vscode.env.clipboard.writeText(mcpSnippet(format as typeof formats[number],
+                discover ? root : project, bundleSource, discover));
         }
         const instructions = selected.filter(label => AGENT_FILES.includes(label) &&
             (!connect || label !== CURSOR_EXTENSION_RULE || !hasActiveCursorRule(root, CURSOR_SETUP_RULE)));
@@ -98,8 +101,7 @@ async function configureAgents(root: string, project: string, connect: boolean, 
         const selectedPaths = new Set([...instructions, ...configFiles].map(file => path.join(root, file)));
         const dirty = vscode.workspace.textDocuments?.find(doc => doc.isDirty && selectedPaths.has(doc.uri.fsPath));
         if (dirty) throw new Error(`Save ${vscode.workspace.asRelativePath(dirty.uri)} before updating AI tools`);
-        const mcp = planMcp(root, project, mcpTargets, bundled,
-            bundleSource, connect);
+        const mcp = planMcp(root, project, mcpTargets, bundled, bundleSource, connect, { discover });
         const count = updateAgentFiles(root, project, instructions, connect, mcp.configured);
         mcp.commit();
         const approval = mcpTargets.includes('Claude Code') ?
@@ -144,7 +146,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
                     void Promise.resolve(saved).then(async () => {
                         const answer = await vscode.window.showInformationMessage(
                             'Connect AI tools to the Neorion architecture map?', 'Yes');
-                        if (answer === 'Yes') await configureAgents(workspaceRoot, projectPath, true, context);
+                        if (answer === 'Yes') await configureAgents(workspaceRoot, selection, true, context);
                     }).catch(error => console.error(error));
                 }
 

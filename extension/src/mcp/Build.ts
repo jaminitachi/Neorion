@@ -128,15 +128,18 @@ export function projectLabel(root: string) {
   return basename(root).replace(/[\r\n]/g, ' ');
 }
 
-export function projectRootNotice({ directory, guessCandidates, searchLimited }: ProjectSelection) {
+export function projectRootNotice({ directory, guessCandidates, searchLimited }: ProjectSelection, requested: string) {
   if (!guessCandidates) return '';
   const candidates = formatProjectCandidates(guessCandidates);
   const limitNote = searchLimited ? ' The directory scan reached its limit.' : '';
-  return `\n# partial: project root guessed\n# hint: Selected ${JSON.stringify(directory)}. Candidates: ${candidates}.${limitNote} Run from the chosen directory or use --root <dir> with query or mcp.`;
+  const confirmation = directory === requested
+    ? 'Use --root . from the selected directory with query or mcp to confirm it.'
+    : 'Run from the chosen directory or use --root <dir> with query or mcp.';
+  return `\n# partial: project root guessed\n# hint: Selected ${JSON.stringify(directory)}. Candidates: ${candidates}.${limitNote} ${confirmation}`;
 }
 
-export function projectText(selection: ProjectSelection, text: string) {
-  const notice = projectRootNotice(selection);
+export function projectText(selection: ProjectSelection, requested: string, text: string) {
+  const notice = projectRootNotice(selection, requested);
   const result = notice ? text.replace(/\n# complete:[^\n]*$/, '') : text;
-  return `Project: ${projectLabel(selection.directory)}${notice}\n${result}`;
+  return `Project: ${selection.directory.replace(/[\r\n]/g, ' ')}${notice}\n${result}`;
 }

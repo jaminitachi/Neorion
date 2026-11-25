@@ -66,8 +66,9 @@ export function runQueries(root: string) {
   });
 }
 
-export async function serve(root: string, { autoBuild, explicit }: { autoBuild: boolean; explicit?: boolean }) {
-  const selection = autoBuild ? selectProject(root, explicit) : { directory: root };
+export async function serve(root: string, { autoBuild, confirm, discover = autoBuild }:
+  { autoBuild: boolean; confirm?: boolean; discover?: boolean }) {
+  const selection = discover ? selectProject(root, confirm) : { directory: root };
   const project = selection?.directory;
   let worker: Worker | undefined;
   let nextId = 0;
@@ -159,7 +160,7 @@ export async function serve(root: string, { autoBuild, explicit }: { autoBuild: 
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const kind = legacyKind(name) ?? args.kind ?? 'query';
     const text = response?.text ?? `# timeout ${kind}${label ? ' ' + label : ''} : 0 results\n# partial: timed out`;
-    return reply(autoBuild && !response?.isError ? projectText(selection, text) : text, response?.isError);
+    return reply(discover && !response?.isError ? projectText(selection, root, text) : text, response?.isError);
   });
   process.stdin.once('end', () => {
     // Let a piped CLI request finish even after its input reaches EOF.

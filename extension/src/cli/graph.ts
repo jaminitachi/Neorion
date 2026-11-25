@@ -1,4 +1,4 @@
-import { join, relative, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { generateGraph } from '../core/Generate';
 export { inspectChangeSource } from '../core/analyzers/ChangeSource';
@@ -15,11 +15,10 @@ export function run(root: string, showMcpConfig = false) {
   if (!selection) throw new Error(missingProject(root));
   const project = selection.directory;
   const label = projectLabel(project);
-  const selected = relative(root, project).replace(/[\r\n]/g, ' ');
-  onProgress?.(`Project: ${label}${selected ? ` (${selected})` : ''}`);
+  onProgress?.(`Project: ${project.replace(/[\r\n]/g, ' ')}`);
   const { graph, outputPath } = generateGraph(project, { markdown: true, onProgress });
   const seconds = ((performance.now() - start) / 1000).toFixed(1);
-  console.log(`Neorion ${VERSION} · ${label} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s${projectRootNotice(selection)}`);
+  console.log(`Neorion ${VERSION} · ${label} · ${graph.metadata.router} router · ${graph.sourceFileCount} source files · ${seconds}s${projectRootNotice(selection, root)}`);
   console.log(`Overview: ${outputPath}`);
   if (showMcpConfig) {
     const mcp = mcpCommand({ localEntry: join(__dirname, 'neorion.cjs'), detectCache: true });

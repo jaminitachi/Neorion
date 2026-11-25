@@ -135,7 +135,7 @@ test('CLI graph and query use the workspace cache', t => {
   assert.ok(fs.existsSync(overview));
   const query = run(['query', 'who_renders', 'DashboardShell', '--limit', '1']);
   assert.equal(query.status, 0, query.stderr);
-  assert.match(query.stdout, /^Project: workspace$/m);
+  assert.equal(query.stdout.split('\n')[0], `Project: ${root}`);
   assert.match(query.stdout, /app\/page\.tsx:2/);
   const miss = run(['query', 'who_renders', 'Dashboard']);
   assert.match(miss.stdout, /^# did you mean: app\/page\.tsx#DashboardShell \(declared at line 1\)$/m);
@@ -187,7 +187,7 @@ test('CLI hints replay a source query from outside its explicitly selected proje
   assert.ok(command?.includes(process.execPath), first.stdout);
   const second = spawnSync('/bin/sh', ['-c', command], { cwd: home, env, encoding: 'utf8', timeout: 15_000 });
   assert.equal(second.status, 0, second.stderr);
-  assert.match(second.stdout, /^Project: selected project$/m);
+  assert.equal(second.stdout.split('\n')[0], `Project: ${project}`);
   assert.match(second.stdout, /^# search "app" kind=component : 2 results /m);
   assert.doesNotMatch(second.stdout, /^# more:/m);
 });
@@ -256,6 +256,113 @@ const projectMarkers = {
   ...Object.fromEntries(['js', 'mjs', 'ts', 'cjs'].map(ext => [`next.${ext}`, [`next.config.${ext}`, '']]))
 };
 
+function moveIntoApp(root, folder, config = true) {
+  const project = path.join(root, folder);
+  fs.mkdirSync(project, { recursive: true });
+  fs.renameSync(path.join(root, 'app'), path.join(project, 'app'));
+  if (config) fs.writeFileSync(path.join(project, 'next.config.js'), '');
+  return project;
+}
+
+test('CLI --root discovers the sole Next app in a workspace from outside it', t => {
+  const { home, root, run } = fixture(t);
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(nextDep));
+  moveIntoApp(root, 'apps/web', false);
+  const result = run(['query', 'who_renders', 'DashboardShell', '--root', root], {}, entry, home);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^\/  app\/page\.tsx:2/m);
+  assert.match(result.stdout, /^# complete:/m);
+  assert.doesNotMatch(result.stdout, /project root guessed/);
+});
+
+test('MCP workspace discovery preserves the guess for the Claude plugin and legacy --root launcher', async t => {
+  const { env, home, root } = fixture(t);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  moveIntoApp(root, 'apps/web');
+  fs.mkdirSync(path.join(root, 'apps/worker'));
+  fs.writeFileSync(path.join(root, 'apps/worker/next.config.js'), '');
+  const plugin = readJson(path.join(packageRoot, '.mcp.json')).mcpServers.neorion;
+  const pluginArgs = plugin.args.map(arg => arg.replace('${CLAUDE_PLUGIN_ROOT}', packageRoot).replace('${CLAUDE_PROJECT_DIR}', root));
+  for (const [name, args] of [['legacy --root', [entry, 'mcp', '--root', root]], ['plugin', pluginArgs]]) {
+    await t.test(name, async subtest => {
+      const client = await openMcp(subtest, root, { command: process.execPath, args, cwd: home, env });
+      const result = await client.text('query', { kind: 'who_renders', target: 'DashboardShell' });
+      assert.match(result, /^\/  app\/page\.tsx:2/m);
+      assert.match(result, /^# partial: project root guessed$/m);
+      assert.doesNotMatch(result, /^# complete:/m);
+    });
+  }
+});
+
+test('A selected workspace root gives a confirmation hint and NEORION_ROOT matches --root', async t => {
+  const { env, root, run } = fixture(t);
+  fs.mkdirSync(path.join(root, 'apps/web'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'apps/worker'));
+  fs.writeFileSync(path.join(root, 'apps/web/next.config.js'), '');
+  fs.writeFileSync(path.join(root, 'apps/worker/next.config.js'), '');
+  const search = ['query', 'search', 'DashboardShell'];
+  const initial = run(search);
+  assert.equal(initial.status, 0, initial.stderr);
+  assert.match(initial.stdout, /^# partial: project root guessed$/m);
+  await t.test('root confirmation hint', () => {
+    assert.match(initial.stdout, /Use --root \./);
+    assert.doesNotMatch(initial.stdout, /Run from the chosen directory/);
+  });
+  const confirmed = run([...search, '--root', '.']);
+  assert.equal(confirmed.status, 0, confirmed.stderr);
+  assert.match(confirmed.stdout, /^# complete:/m);
+  await t.test('CLI environment root', () => {
+    const fromEnv = run(search, { NEORION_ROOT: root });
+    assert.equal(fromEnv.status, 0, fromEnv.stderr);
+    assert.equal(fromEnv.stdout, confirmed.stdout);
+  });
+  await t.test('MCP environment root', async subtest => {
+    const client = await openMcp(subtest, root, { command: process.execPath, args: [entry, 'mcp'],
+      cwd: root, env: { ...env, NEORION_ROOT: root } });
+    assert.equal(await client.text('query', { kind: 'search', target: 'DashboardShell' }), confirmed.stdout.trimEnd());
+  });
+  await t.test('Claude plugin discovers even when the workspace root is a candidate', async subtest => {
+    const plugin = readJson(path.join(packageRoot, '.mcp.json')).mcpServers.neorion;
+    const args = plugin.args.map(arg => arg.replace('${CLAUDE_PLUGIN_ROOT}', packageRoot).replace('${CLAUDE_PROJECT_DIR}', root));
+    const client = await openMcp(subtest, root, { command: process.execPath, args, cwd: root, env });
+    const result = await client.text('query', { kind: 'search', target: 'DashboardShell' });
+    assert.match(result, /^# partial: project root guessed$/m);
+    assert.doesNotMatch(result, /^# complete:/m);
+  });
+});
+
+test('CLI Project line shows the full path for an unambiguous nested app', t => {
+  const { root, run } = fixture(t);
+  const project = moveIntoApp(root, 'apps/web');
+  const query = run(['query', 'search', 'DashboardShell']);
+  assert.equal(query.status, 0, query.stderr);
+  assert.equal(query.stdout.split('\n')[0], `Project: ${project}`);
+  assert.match(query.stdout, /^# complete:/m);
+});
+
+test('CLI ranks dependency-only Next libraries below apps and omits them from the app hint', t => {
+  const { root, run } = fixture(t);
+  fs.unlinkSync(path.join(root, 'tsconfig.json'));
+  const app = moveIntoApp(root, 'apps/web');
+  const libraries = ['lib', 'packages/ui', 'packages/utils'];
+  for (const folder of libraries) {
+    const directory = path.join(root, folder);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({
+      devDependencies: nextDep.dependencies, peerDependencies: nextDep.dependencies
+    }));
+    fs.writeFileSync(path.join(directory, 'tsconfig.json'), '{}');
+  }
+  const query = run(['query', 'search', 'DashboardShell']);
+  assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
+  const hint = /^# hint: .*$/m.exec(query.stdout)?.[0];
+  assert.ok(hint?.includes(`Candidates: ${JSON.stringify(app)}.`), query.stdout);
+  for (const folder of libraries) assert.ok(!hint.includes(JSON.stringify(path.join(root, folder))), hint);
+  assert.match(query.stdout, /^# partial: project root guessed$/m);
+  assert.doesNotMatch(query.stdout, /^# complete:/m);
+});
+
 for (const { name, markers, selected, candidates, start = '.', pageRoot = selected, src, javascript, checkMcp } of [
   { name: 'configless JavaScript root with Cypress', markers: { '.': ['dep'], cypress: ['ts'] }, selected: '.', javascript: true },
   { name: 'root Next config with e2e and scripts configs', markers: { '.': ['next.cjs'], e2e: ['ts'], scripts: ['ts'] }, selected: '.' },
@@ -303,12 +410,13 @@ for (const { name, markers, selected, candidates, start = '.', pageRoot = select
     if (javascript) fs.renameSync(path.join(app, 'page.tsx'), path.join(app, 'page.jsx'));
 
     const cwd = path.join(root, start);
-    const label = path.basename(path.join(root, selected));
+    const project = path.join(root, selected);
+    const label = path.basename(project);
     const search = ['query', 'search', 'DashboardShell'];
     // Query first so auto-build must index the selected directory directly.
     const query = run(search, {}, entry, cwd);
     assert.equal(query.status, 0, query.stderr);
-    assert.equal(query.stdout.split('\n')[0], `Project: ${label}`);
+    assert.equal(query.stdout.split('\n')[0], `Project: ${project}`);
     assert.ok(query.stdout.includes(`${pageRoot === selected ? '' : pageRoot + '/'}${src ? 'src/' : ''}app/page.${javascript ? 'jsx' : 'tsx'}:1#DashboardShell`), query.stdout);
     const graph = run(['graph', cwd]);
     assert.equal(graph.status, 0, graph.stderr);
@@ -319,13 +427,13 @@ for (const { name, markers, selected, candidates, start = '.', pageRoot = select
         assert.doesNotMatch(output, /^# complete/m);
         const hint = /^# hint: .*$/m.exec(output)?.[0];
         assert.ok(hint?.includes(candidates.map(dir => JSON.stringify(path.join(root, dir))).join(', ')), output);
-        assert.match(hint, /Run from the chosen directory or use --root <dir>/);
+        assert.match(hint, selected === start ? /Use --root \./ : /Run from the chosen directory or use --root <dir>/);
       }
       for (const candidate of candidates) {
         const directory = path.join(root, candidate);
         const explicit = run([...search, '--root', directory]);
         assert.equal(explicit.status, 0, explicit.stderr);
-        assert.equal(explicit.stdout.split('\n')[0], `Project: ${path.basename(directory)}`);
+        assert.equal(explicit.stdout.split('\n')[0], `Project: ${directory}`);
         assert.match(explicit.stdout, /^# complete:/m);
         if (candidate === '.') continue;
         const direct = run(search, {}, entry, directory);
@@ -1337,6 +1445,6 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
     if (inaccessible) fs.chmodSync(path.join(monorepo, 'aaa-private'), 0o700);
   }
   assert.equal(query.status, 0, query.stderr);
-  assert.match(query.stdout, /^Project: workspace\n/);
+  assert.equal(query.stdout.split('\n')[0], `Project: ${root}`);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
 });

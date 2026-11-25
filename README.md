@@ -180,15 +180,20 @@ npm --prefix extension run build:cli
    directories such as `test/`, `playgrounds/`, `docs/`, and `website/`. For example, a workspace
    whose sole app is `apps/web` selects that app. With several candidates, Neorion prefers the
    requested directory's TS/JS config, then a candidate's TS/JS config, then a Next dependency,
-   in breadth-first alphabetical order.
+   in breadth-first alphabetical order. Packages with only a development dependency on Next and
+   no routes or Next config are fallback candidates. When stronger candidates exist, the hint lists those.
 3. **Library.** With no Next candidate, Neorion uses the first `tsconfig.json` or `jsconfig.json`,
    checking the requested directory first. For example, a library with a root `tsconfig.json`
    and a Next app under `test/` selects the library root. A root that declares `next` and has no
    routes or project config can still be used as a guess.
 
-A guess produces `# partial: project root guessed` and a hint with up to five candidates. VS Code
-shows the guess in its status bar. Open a candidate app directly, or pin the exact directory with
-`neorion query <kind> <target> --root <dir>` or `neorion mcp --root <dir>`.
+The `Project:` line shows the full path of the indexed directory. A guess produces
+`# partial: project root guessed` and a hint with up to five candidates. VS Code also shows the guess
+in its status bar. To confirm a candidate, pass its directory as `--root <dir>` to `query` or `mcp`.
+If the selected directory is the current one, use `--root .`. Passing a workspace to `--root` still
+discovers its apps if the workspace itself is outside the candidate list. `NEORION_ROOT` follows
+the same rule. The Claude plugin and VS Code MCP connections from guessed roots use
+`mcp --workspace <dir>` to keep the guess visible in query results.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,

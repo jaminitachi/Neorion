@@ -48,13 +48,14 @@ export function nextConfig(directory: string): string | undefined {
 }
 
 // A missing manifest allows hoisting. A broken manifest can't establish a project.
-function nextDependency(directory: string): boolean | null {
+function nextDependency(directory: string): 'runtime' | 'development' | false | null {
   const manifest = join(directory, 'package.json');
   if (!isFile(manifest)) return false;
   try {
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
     if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return null;
-    return typeof pkg.dependencies?.next === 'string' || typeof pkg.devDependencies?.next === 'string';
+    if (typeof pkg.dependencies?.next === 'string') return 'runtime';
+    return typeof pkg.devDependencies?.next === 'string' ? 'development' : false;
   } catch (error) {
     if (error instanceof SyntaxError || unavailable(error)) return null;
     throw error;
@@ -134,18 +135,24 @@ function parentProject(start: string) {
     project ||= isFile(join(parent, 'package.json')) || existsSync(join(parent, '.git'));
     const dependency = nextDependency(parent);
     if (dependency === null) break;
-    next ||= dependency;
+    next ||= !!dependency;
     directory = parent;
   }
   return { project, next };
 }
 
-export function selectProject(root: string, explicit = false): ProjectSelection | undefined {
+export function selectProject(root: string, confirm = false): ProjectSelection | undefined {
   const start = resolve(root);
-  if (explicit) return stat(start)?.isDirectory() ? { directory: start } : undefined;
+  const selection = discoverProject(start);
+  if (confirm && (selection?.directory === start || selection?.guessCandidates?.includes(start) ||
+    !selection && stat(start)?.isDirectory())) return { directory: start };
+  return selection;
+}
+
+function discoverProject(start: string): ProjectSelection | undefined {
   if (nextConfig(start)) return { directory: start };
   const manifestNext = nextDependency(start);
-  const dependency = manifestNext === true;
+  const dependency = !!manifestNext;
   if (dependency && hasOwnRoutes(start)) return { directory: start };
   const parent = parentProject(start);
   // A nested candidate can be chosen by opening it directly, including apps with hoisted Next.
@@ -157,23 +164,30 @@ export function selectProject(root: string, explicit = false): ProjectSelection 
 
   const inheritedNext = new Map([[start, manifestNext !== null && (dependency || parent.next)]]);
   const apps: { directory: string; dependency: boolean }[] = [];
+  const developmentPackages: typeof apps = [];
   let visited = 0;
   for (const directory of nestedDirectories(start, name => !excludedNextDirectory(name), projectDepth)) {
     if (visited++ === directoryLimit) break;
     const manifestNext = nextDependency(directory);
-    const dependency = manifestNext === true;
+    const dependency = !!manifestNext;
     const canInherit = manifestNext !== null && inheritedNext.get(dirname(directory)) === true &&
       !existsSync(join(directory, '.git'));
     inheritedNext.set(directory, dependency || canInherit);
-    if (dependency || nextConfig(directory) || canInherit && hasInheritedRoutes(directory)) apps.push({ directory, dependency });
+    if (manifestNext === 'runtime' || nextConfig(directory) || (dependency || canInherit) && hasInheritedRoutes(directory)) {
+      apps.push({ directory, dependency });
+    } else if (dependency) {
+      developmentPackages.push({ directory, dependency });
+    }
   }
   const searchLimited = visited > directoryLimit;
-  if (apps.length === 1 && !searchLimited) return { directory: apps[0].directory };
-  if (apps.length) {
-    const candidates = apps.map(app => app.directory);
+  // A build-time Next dependency is weaker evidence than an app or a runtime dependency.
+  const eligible = apps.length ? apps : developmentPackages;
+  if (apps.length + developmentPackages.length === 1 && !searchLimited) return { directory: eligible[0].directory };
+  if (eligible.length) {
+    const candidates = eligible.map(app => app.directory);
     // Master checks the requested directory's config first, then searches breadth-first.
     if (rootConfig) return { directory: start, guessCandidates: [start, ...candidates], searchLimited };
-    const chosen = apps.find(app => projectConfig(app.directory)) ?? apps.find(app => app.dependency) ?? apps[0];
+    const chosen = eligible.find(app => projectConfig(app.directory)) ?? eligible.find(app => app.dependency) ?? eligible[0];
     return { directory: chosen.directory, guessCandidates: candidates, searchLimited };
   }
 
