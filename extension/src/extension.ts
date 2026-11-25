@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { findProject, generateGraph } from './core/Generate';
-import { missingProject } from './core/FindProject';
+import { generateGraph } from './core/Generate';
+import { formatProjectCandidates, missingProject, selectProject, type ProjectSelection } from './core/FindProject';
 import { AGENT_FILES, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
@@ -23,7 +23,9 @@ export function activate(context: vscode.ExtensionContext) {
         context.subscriptions.push(vscode.commands.registerCommand(command, async () => {
             const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
             if (!root) return vscode.window.showErrorMessage('No workspace folder open');
-            await configureAgents(root, connect ? findProject(root) ?? root : root, connect, context);
+            const selection = connect ? selectProject(root) : undefined;
+            await configureAgents(root, selection?.directory ?? root, connect, context);
+            if (selection) showProjectGuess(root, selection);
         }));
     }
 
@@ -47,6 +49,14 @@ export function activate(context: vscode.ExtensionContext) {
 
     context.subscriptions.push(generateGraphDisposable);
     context.subscriptions.push(showGraphDisposable);
+}
+
+function showProjectGuess(root: string, { directory, guessCandidates, searchLimited }: ProjectSelection) {
+    if (!guessCandidates) return;
+    const local = (candidate: string) => path.relative(root, candidate) || '.';
+    const candidates = formatProjectCandidates(guessCandidates.map(local));
+    const limitNote = searchLimited ? ' Directory scan limit reached.' : '';
+    vscode.window.setStatusBarMessage(`Neorion guessed ${JSON.stringify(local(directory))}. Candidates: ${candidates}.${limitNote}`, 15_000);
 }
 
 async function configureAgents(root: string, project: string, connect: boolean, context: vscode.ExtensionContext) {
@@ -113,11 +123,12 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
     }
 
     const workspaceRoot = workspaceFolders[0].uri.fsPath;
-    const projectPath = findProject(workspaceRoot);
-    if (!projectPath) {
+    const selection = selectProject(workspaceRoot);
+    if (!selection) {
         if (!silent) vscode.window.showErrorMessage(missingProject(workspaceRoot));
         return;
     }
+    const projectPath = selection.directory;
     const run = async (progress?: vscode.Progress<{ message?: string }>) => {
         try {
             const { graph, outputPath } = generateGraph(projectPath, {
@@ -172,6 +183,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
             await run(progress);
         });
     }
+    showProjectGuess(workspaceRoot, selection);
 }
 
 export function deactivate() {}

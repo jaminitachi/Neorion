@@ -164,17 +164,23 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-Neorion uses the requested directory as the project root when it contains a `next.config` file
-(`.js`, `.mjs`, `.ts`, or `.cjs`) or lists `next` in `dependencies` or `devDependencies`. This also
-selects the workspace root in an integrated Nx workspace that declares `next` there. Otherwise,
-Neorion looks for nested Next.js apps, skipping tooling and example directories. A sole Next.js
-candidate wins. For multiple candidates, it keeps the requested directory if it has a `tsconfig.json`
-or `jsconfig.json`. Otherwise it prefers a candidate with one of those configs, then a candidate that
-declares `next`, in breadth-first alphabetical order. With no Next.js candidates, it falls back to the
-first `tsconfig.json` or `jsconfig.json`, starting at the requested directory. Multiple Next.js
-candidates or a nested config fallback produce
-`# partial: project root guessed` and a hint. Run from the intended app or pass `--root <dir>` to
-`neorion query` or `neorion mcp` to select it.
+1. **App.** Neorion uses the requested directory if it has a `next.config.{js,mjs,ts,cjs}` file
+   or declares `next` and has its own routes under `app/`, `pages/`, `src/app/`, or `src/pages/`.
+   For example, a root with `next` and `pages/index.jsx` stays at the root.
+2. **Monorepo.** A bounded search looks for nested apps with a Next config, a Next dependency, or
+   routes and a Next dependency inherited within the checkout. It skips tooling and non-product
+   directories such as `test/`, `playgrounds/`, `docs/`, and `website/`. For example, a workspace
+   whose sole app is `apps/web` selects that app. With several candidates, Neorion prefers the
+   requested directory's TS/JS config, then a candidate's TS/JS config, then a Next dependency,
+   in breadth-first alphabetical order.
+3. **Library.** With no Next candidate, Neorion uses the first `tsconfig.json` or `jsconfig.json`,
+   checking the requested directory first. For example, a library with a root `tsconfig.json`
+   and a Next app under `test/` selects the library root. A root that declares `next` and has no
+   routes or project config can still be used as a guess.
+
+A guess produces `# partial: project root guessed` and a hint with up to five candidates. VS Code
+shows the guess in its status bar. Open a candidate app directly, or pin the exact directory with
+`neorion query <kind> <target> --root <dir>` or `neorion mcp --root <dir>`.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,

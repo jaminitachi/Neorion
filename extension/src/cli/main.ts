@@ -135,7 +135,8 @@ async function main([command, ...args]: string[]) {
     allowPositionals: query
   });
   const root = resolve(values.root ?? process.env.NEORION_ROOT ?? '.');
-  if (!query) return serve(root, { autoBuild: true });
+  const explicit = values.root !== undefined;
+  if (!query) return serve(root, { autoBuild: true, explicit });
   const [kind, target, to] = positionals;
   if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
   if (values.kind !== undefined && kind !== 'search') throw new Error('--kind requires the search query.');
@@ -149,7 +150,7 @@ async function main([command, ...args]: string[]) {
   const externalOption = values['no-external'] ? { includeExternal: false } :
     values['include-external'] ? { includeExternal: true } : {};
   if (kind !== 'wrappers' && 'includeExternal' in externalOption) throw new Error('External wrapper flags require the wrappers query.');
-  const selection = selectProject(root);
+  const selection = selectProject(root, explicit);
   if (!selection) throw new Error(missingProject(root));
   const project = selection.directory;
   const build = await ensureFresh(project);

@@ -66,8 +66,8 @@ export function runQueries(root: string) {
   });
 }
 
-export async function serve(root: string, { autoBuild }: { autoBuild: boolean }) {
-  const selection = autoBuild ? selectProject(root) : { directory: root };
+export async function serve(root: string, { autoBuild, explicit }: { autoBuild: boolean; explicit?: boolean }) {
+  const selection = autoBuild ? selectProject(root, explicit) : { directory: root };
   const project = selection?.directory;
   let worker: Worker | undefined;
   let nextId = 0;

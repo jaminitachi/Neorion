@@ -28,8 +28,8 @@ function fixture(t) {
   delete env.CODEX_HOME;
   for (const key of Object.keys(env)) if (key !== 'PATH' && key.toUpperCase() === 'PATH') delete env[key];
   env.PATH = process.env.PATH;
-  const run = (args, overrides = {}, cliEntry = entry) => spawnSync(process.execPath, [cliEntry, ...args], {
-    cwd: root, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
+  const run = (args, overrides = {}, cliEntry = entry, cwd = root) => spawnSync(process.execPath, [cliEntry, ...args], {
+    cwd, env: { ...env, ...overrides }, encoding: 'utf8', timeout: 15_000
   });
   return { root, cache, home, env, run };
 }
@@ -248,28 +248,35 @@ const nextDep = { dependencies: { next: '15.0.0' } };
 const projectMarkers = {
   dep: ['package.json', JSON.stringify(nextDep)],
   nx: ['package.json', JSON.stringify({ devDependencies: nextDep.dependencies, workspaces: ['apps/*'] })],
+  manifest: ['package.json', '{}'],
+  gitfile: ['.git', 'gitdir: ../.git/modules/checkout\n'],
   ts: ['tsconfig.json', '{}'],
   js: ['jsconfig.json', '{}'],
   ...Object.fromEntries(['js', 'mjs', 'ts', 'cjs'].map(ext => [`next.${ext}`, [`next.config.${ext}`, '']]))
 };
 
-for (const { name, markers, selected, candidates, start = '.', pageRoot = selected, javascript, checkMcp } of [
+for (const { name, markers, selected, candidates, start = '.', pageRoot = selected, src, javascript, checkMcp } of [
   { name: 'configless JavaScript root with Cypress', markers: { '.': ['dep'], cypress: ['ts'] }, selected: '.', javascript: true },
   { name: 'root Next config with e2e and scripts configs', markers: { '.': ['next.cjs'], e2e: ['ts'], scripts: ['ts'] }, selected: '.' },
   { name: 'Dub from repository root', markers: { 'apps/web': ['dep', 'ts'], 'packages/cli': ['ts'] }, selected: 'apps/web' },
-  { name: 'Dub with a second Next app', markers: { 'apps/admin': ['dep'], 'apps/web': ['dep', 'ts'], 'packages/cli': ['ts'] },
+  { name: 'Dub with a second Next app', markers: { '.': ['manifest'], 'apps/admin': ['dep'], 'apps/web': ['dep', 'ts'], 'packages/cli': ['ts'] },
     selected: 'apps/web', candidates: ['apps/admin', 'apps/web'], checkMcp: true },
   { name: 'Rallly from repository root', markers: { 'apps/web': ['next.ts', 'ts'], 'apps/landing': ['next.ts', 'ts'] },
     selected: 'apps/landing', candidates: ['apps/landing', 'apps/web'] },
   { name: 'Formbricks from repository root', markers: { 'apps/deployment-check': ['ts'], 'apps/web': ['next.mjs', 'ts'] }, selected: 'apps/web' },
-  { name: 'integrated Nx with Next declared in the root', markers: { '.': ['nx'], 'apps/web': ['dep', 'ts'] }, selected: '.', pageRoot: 'apps/web' },
+  { name: 'integrated Nx with Next declared in the root', markers: { '.': ['nx'], 'apps/web': ['next.js', 'ts'] }, selected: 'apps/web' },
+  { name: 'hoisted Next with no child config or dependency', markers: { '.': ['dep'], 'apps/web': ['manifest'] }, selected: 'apps/web', src: true },
+  { name: 'checkout boundary stops Next inheritance', markers: { '.': ['dep', 'ts'], 'apps/checkout': ['gitfile', 'manifest'] },
+    selected: '.', pageRoot: 'apps/checkout' },
   { name: 'library with Next examples and a root config', markers: { '.': ['ts'],
-    ...Object.fromEntries(['node_modules', 'cypress', 'e2e', 'playwright', 'tests', 'scripts',
-      'example', 'examples', 'demo', 'demos', 'samples', 'docs', 'playground'].map(dir => [`${dir}/web`, ['dep', 'ts']])) }, selected: '.' },
+    ...Object.fromEntries(['node_modules', 'cypress', 'e2e', 'playwright', 'test', 'tests', '__tests__', 'scripts',
+      'example', 'examples', 'demo', 'demos', 'samples', 'docs', 'website', 'playground', 'playgrounds', 'storybook',
+      'ssr-testing', 'bundler-tests', 'playground-v6'].map(dir => [`${dir}/web`, ['dep', 'ts']])) }, selected: '.' },
   { name: 'library with a root config and several Next packages outside examples', markers: { '.': ['ts'],
     'examples/web': ['dep', 'ts'], 'integrations/web': ['next.js', 'ts'], 'packages/next': ['dep', 'ts'] },
     selected: '.', candidates: ['.', 'integrations/web', 'packages/next'] },
   { name: 'sole nested Next app in a workspace with a root config', markers: { '.': ['ts'], 'apps/web': ['dep', 'ts'] }, selected: 'apps/web' },
+  { name: 'nested scan stops at depth four', markers: { '.': ['ts'], 'one/two/three/four/five': ['next.js'] }, selected: '.' },
   { name: 'wrapper containing a clone', markers: { 'clone/apps/web': ['next.js'] }, selected: 'clone/apps/web' },
   { name: 'saas-starter root', markers: { '.': ['dep', 'next.ts', 'ts'] }, selected: '.' },
   { name: 'config-only fallback below the requested directory', markers: { scripts: ['ts'], 'scripts/other': ['dep'], tools: ['js'] },
@@ -287,18 +294,21 @@ for (const { name, markers, selected, candidates, start = '.', pageRoot = select
         fs.writeFileSync(path.join(directory, file), contents);
       }
     }
-    const app = path.join(root, pageRoot, 'app');
-    if (pageRoot !== '.') fs.renameSync(path.join(root, 'app'), app);
+    const app = path.join(root, pageRoot, src ? 'src/app' : 'app');
+    if (pageRoot !== '.' || src) {
+      fs.mkdirSync(path.dirname(app), { recursive: true });
+      fs.renameSync(path.join(root, 'app'), app);
+    }
     if (javascript) fs.renameSync(path.join(app, 'page.tsx'), path.join(app, 'page.jsx'));
 
     const cwd = path.join(root, start);
     const label = path.basename(path.join(root, selected));
     const search = ['query', 'search', 'DashboardShell'];
     // Query first so auto-build must index the selected directory directly.
-    const query = run([...search, '--root', cwd]);
+    const query = run(search, {}, entry, cwd);
     assert.equal(query.status, 0, query.stderr);
     assert.equal(query.stdout.split('\n')[0], `Project: ${label}`);
-    assert.ok(query.stdout.includes(`${pageRoot === selected ? '' : pageRoot + '/'}app/page.${javascript ? 'jsx' : 'tsx'}:1#DashboardShell`), query.stdout);
+    assert.ok(query.stdout.includes(`${pageRoot === selected ? '' : pageRoot + '/'}${src ? 'src/' : ''}app/page.${javascript ? 'jsx' : 'tsx'}:1#DashboardShell`), query.stdout);
     const graph = run(['graph', cwd]);
     assert.equal(graph.status, 0, graph.stderr);
     assert.ok(graph.stdout.split('\n')[0].includes(` · ${label} · ${pageRoot === selected ? 'app' : 'none'} router · `), graph.stdout);
@@ -310,11 +320,17 @@ for (const { name, markers, selected, candidates, start = '.', pageRoot = select
         assert.ok(hint?.includes(candidates.map(dir => JSON.stringify(path.join(root, dir))).join(', ')), output);
         assert.match(hint, /Run from the chosen directory or use --root <dir>/);
       }
-      const candidate = candidates.at(-1);
-      const explicit = run([...search, '--root', path.join(root, candidate)]);
-      assert.equal(explicit.status, 0, explicit.stderr);
-      assert.equal(explicit.stdout.split('\n')[0], `Project: ${path.basename(candidate)}`);
-      assert.match(explicit.stdout, /^# complete:/m);
+      for (const candidate of candidates) {
+        const directory = path.join(root, candidate);
+        const explicit = run([...search, '--root', directory]);
+        assert.equal(explicit.status, 0, explicit.stderr);
+        assert.equal(explicit.stdout.split('\n')[0], `Project: ${path.basename(directory)}`);
+        assert.match(explicit.stdout, /^# complete:/m);
+        if (candidate === '.') continue;
+        const direct = run(search, {}, entry, directory);
+        assert.equal(direct.status, 0, direct.stderr);
+        assert.equal(direct.stdout, explicit.stdout);
+      }
     } else {
       assert.match(query.stdout, /^# complete:/m);
       assert.doesNotMatch(graph.stdout + query.stdout, /project root guessed/);
@@ -326,10 +342,39 @@ for (const { name, markers, selected, candidates, start = '.', pageRoot = select
       assert.match(miss.stdout, /^# partial: target unresolved$/m);
       assert.doesNotMatch(miss.stdout, /^# complete/m);
       const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
-      assert.equal(await client.text('query', { kind: 'search', target: 'DashboardShell' }), query.stdout.trimEnd());
+      // Graph rebuilt the index after the CLI query, possibly in a different minute.
+      const withoutIndexTime = text => text.trimEnd().replace(/\(index [\dTZ:-]+, fresh\)/, '(index, fresh)');
+      assert.equal(withoutIndexTime(await client.text('query', { kind: 'search', target: 'DashboardShell' })),
+        withoutIndexTime(query.stdout));
+      await client.close();
+      const explicit = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp', '--root', root], cwd: root, env });
+      assert.equal(await explicit.text('query', { kind: 'search', target: 'DashboardShell' }),
+        run([...search, '--root', root]).stdout.trimEnd());
     }
   });
 }
+
+test('CLI shows five project candidates and stops scanning wide trees', t => {
+  const { root, run } = fixture(t);
+  for (let index = 0; index < 7; index++) {
+    const directory = path.join(root, 'apps', String(index));
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'next.config.js'), '');
+  }
+  const search = ['query', 'search', 'DashboardShell'];
+  const query = run(search);
+  assert.equal(query.status, 0, query.stderr);
+  assert.match(query.stdout, /and 3 more\./);
+  assert.doesNotMatch(query.stdout, /^# complete|scan reached its limit/m);
+
+  const wide = path.join(root, 'generated');
+  fs.mkdirSync(wide);
+  for (let index = 0; index < 2100; index++) fs.mkdirSync(path.join(wide, String(index)));
+  const limited = run(search);
+  assert.equal(limited.status, 0, limited.stderr);
+  assert.match(limited.stdout, /scan reached its limit/);
+  assert.doesNotMatch(limited.stdout, /^# complete/m);
+});
 
 for (const withConfig of [true, false]) {
   test(`JavaScript ${withConfig ? 'jsconfig' : 'configless'} defaults exclude build outputs and public assets`, t => {
@@ -956,7 +1001,7 @@ test('CLI project discovery skips hidden, generated, and unreadable directories'
   }
   let query;
   try {
-    query = run(['query', 'search', 'DashboardShell', '--root', monorepo]);
+    query = run(['query', 'search', 'DashboardShell'], {}, entry, monorepo);
   } finally {
     if (inaccessible) fs.chmodSync(path.join(monorepo, 'aaa-private'), 0o700);
   }

@@ -3,7 +3,7 @@ import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
-import type { ProjectSelection } from '../core/FindProject';
+import { formatProjectCandidates, type ProjectSelection } from '../core/FindProject';
 import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
 import { projectSnapshot, workspaceInputsHash } from '../core/ProjectSnapshot';
 
@@ -128,10 +128,11 @@ export function projectLabel(root: string) {
   return basename(root).replace(/[\r\n]/g, ' ');
 }
 
-export function projectRootNotice({ guessCandidates }: ProjectSelection) {
+export function projectRootNotice({ directory, guessCandidates, searchLimited }: ProjectSelection) {
   if (!guessCandidates) return '';
-  const candidates = guessCandidates.map(directory => JSON.stringify(directory)).join(', ');
-  return `\n# partial: project root guessed\n# hint: Candidates: ${candidates}. Run from the chosen directory or use --root <dir> with query or mcp.`;
+  const candidates = formatProjectCandidates(guessCandidates);
+  const limitNote = searchLimited ? ' The directory scan reached its limit.' : '';
+  return `\n# partial: project root guessed\n# hint: Selected ${JSON.stringify(directory)}. Candidates: ${candidates}.${limitNote} Run from the chosen directory or use --root <dir> with query or mcp.`;
 }
 
 export function projectText(selection: ProjectSelection, text: string) {

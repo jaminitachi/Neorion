@@ -66,6 +66,20 @@ test('R1 and R6 opt-in is off, legacy instructions persist, and global configura
   assert.ok(!fs.existsSync(cachePath(env.file('.'), '.neorion/connect-state.json')));
 });
 
+test('VS Code reports the guessed directory and candidate paths after graph generation', async t => {
+  const { file, write } = setup(t);
+  write('apps/admin/next.config.js', '');
+  write('apps/web/next.config.js', '');
+  const messages = [];
+  const { commands } = register(file('.'), undefined, [], {
+    window: { setStatusBarMessage: message => messages.push(message) }
+  });
+  await commands.get('neo.generateGraph')();
+  const admin = JSON.stringify(path.join('apps', 'admin'));
+  const web = JSON.stringify(path.join('apps', 'web'));
+  assert.deepEqual(messages, [`Neorion guessed ${admin}. Candidates: ${admin}, ${web}.`]);
+});
+
 test('R2, R3, R5 and R6 merge byte-preservingly, match client formats, and reverse registration', async t => {
   const env = setup(t);
   env.write('.mcp.json', original);

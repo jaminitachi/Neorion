@@ -1,27 +1,42 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 
 export const ignoredProjectDirectories = ['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage', 'public'] as const;
 const excluded = new Set<string>(ignoredProjectDirectories);
-const excludedNext = new Set([...excluded, 'cypress', 'e2e', 'playwright', 'tests', 'scripts',
-  'examples', 'example', 'demo', 'demos', 'samples', 'docs', 'playground']);
+const excludedConfigs = new Set([...excluded, 'example', 'examples', 'demo', 'demos', 'samples', 'docs',
+  'website', 'playground', 'playgrounds', 'storybook']);
+const tooling = new Set(['cypress', 'e2e', 'playwright', 'test', 'tests', '__tests__', 'scripts']);
 const configNames = ['tsconfig.json', 'jsconfig.json'];
 const nextConfigNames = ['js', 'mjs', 'ts', 'cjs'].map(ext => `next.config.${ext}`);
+const projectDepth = 4;
+const directoryLimit = 2048;
+const hintLimit = 5;
 
-export type ProjectSelection = { directory: string; guessCandidates?: string[] };
+export type ProjectSelection = { directory: string; guessCandidates?: string[]; searchLimited?: boolean };
+
+function excludedConfigDirectory(name: string) {
+  return excludedConfigs.has(name) || /-(?:test|tests|testing|e2e)$|^(?:playgrounds?|demos?|examples?)-/.test(name);
+}
+
+function excludedNextDirectory(name: string) {
+  return tooling.has(name) || excludedConfigDirectory(name);
+}
 
 function unavailable(error: unknown) {
   return ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '');
 }
 
-function isFile(file: string) {
+function stat(file: string, followLinks = true) {
   try {
-    return statSync(file, { throwIfNoEntry: false })?.isFile();
+    return (followLinks ? statSync : lstatSync)(file, { throwIfNoEntry: false });
   } catch (error) {
     if (!unavailable(error)) throw error;
-    return false;
   }
+}
+
+function isFile(file: string) {
+  return stat(file)?.isFile();
 }
 
 export function projectConfig(directory: string): string | undefined {
@@ -32,62 +47,155 @@ export function nextConfig(directory: string): string | undefined {
   return nextConfigNames.map(name => join(directory, name)).find(isFile);
 }
 
-function hasNextDependency(directory: string): boolean {
+// A missing manifest allows hoisting. A broken manifest can't establish a project.
+function nextDependency(directory: string): boolean | null {
   const manifest = join(directory, 'package.json');
   if (!isFile(manifest)) return false;
   try {
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
-    return typeof pkg?.dependencies?.next === 'string' || typeof pkg?.devDependencies?.next === 'string';
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return null;
+    return typeof pkg.dependencies?.next === 'string' || typeof pkg.devDependencies?.next === 'string';
   } catch (error) {
-    if (error instanceof SyntaxError || unavailable(error)) return false;
+    if (error instanceof SyntaxError || unavailable(error)) return null;
     throw error;
   }
 }
 
-function* nestedDirectories(start: string, ignored: ReadonlySet<string>, maxDepth = Infinity) {
+function entries(directory: string) {
+  try {
+    return readdirSync(directory, { withFileTypes: true });
+  } catch (error) {
+    if (!unavailable(error)) throw error;
+    return [];
+  }
+}
+
+function* nestedDirectories(start: string, descend: (name: string, directory: string) => boolean, maxDepth: number) {
   let level = [start];
   const home = homedir();
   for (let depth = 0; level.length && depth < maxDepth; depth++) {
     const next: string[] = [];
     for (const directory of level) {
       if (directory === home) continue;
-      try {
-        for (const entry of readdirSync(directory, { withFileTypes: true })) {
-          if (entry.isDirectory() && !entry.name.startsWith('.') && !ignored.has(entry.name)) {
-            next.push(join(directory, entry.name));
-          }
+      for (const entry of entries(directory)) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && descend(entry.name, directory)) {
+          next.push(join(directory, entry.name));
         }
-      } catch (error) {
-        if (!unavailable(error)) throw error;
       }
+      if (next.length > directoryLimit) break;
     }
     level = next.sort((a, b) => a.localeCompare(b));
     yield* level;
   }
 }
 
-export function selectProject(root: string): ProjectSelection | undefined {
-  const start = resolve(root);
-  if (hasNextDependency(start) || nextConfig(start)) return { directory: start };
-
-  const apps = [];
-  for (const directory of nestedDirectories(start, excludedNext)) {
-    const dependency = hasNextDependency(directory);
-    if (dependency || nextConfig(directory)) apps.push({ directory, dependency });
+function hasOwnRoutes(directory: string) {
+  const src = join(directory, 'src');
+  const bases = stat(src, false)?.isDirectory() && !existsSync(join(src, '.git')) ? [directory, src] : [directory];
+  for (const router of ['app', 'pages']) {
+    for (const base of bases) {
+      const root = join(base, router);
+      // Don't follow linked router directories. Discovery only examines this checkout.
+      if (!stat(root, false)?.isDirectory() || existsSync(join(root, '.git'))) continue;
+      if (hasRouteFile(root, router)) return true;
+      let remaining = directoryLimit;
+      const routes = nestedDirectories(root, (name, parent) => !excluded.has(name) &&
+        (router === 'pages' || !name.startsWith('_')) && !existsSync(join(parent, name, '.git')), Infinity);
+      for (const folder of routes) {
+        if (--remaining === 0) break;
+        if (hasRouteFile(folder, router)) return true;
+      }
+    }
   }
-  if (apps.length === 1) return { directory: apps[0].directory };
+  return false;
+}
+
+function hasRouteFile(directory: string, router: string) {
+  return entries(directory).some(entry => entry.isFile() && (router === 'app'
+    ? /^(?:page|layout|route)\.[jt]sx?$/.test(entry.name)
+    // In the Pages Router, ordinary source basenames such as index.jsx are routes.
+    : /\.[jt]sx?$/.test(entry.name) && !/(?:^_(?:app|document|error)\.|\.(?:d|test|spec)\.[jt]sx?$)/.test(entry.name)));
+}
+
+function hasInheritedRoutes(directory: string) {
+  // src/app and src/pages belong to the project above src.
+  return basename(directory) !== 'src' && hasOwnRoutes(directory);
+}
+
+function parentProject(start: string) {
+  let directory = start;
+  let project = false;
+  let next = false;
+  for (let depth = 0; depth < projectDepth && !existsSync(join(directory, '.git')); depth++) {
+    const name = basename(directory);
+    if (excludedNextDirectory(name) || name.startsWith('.')) break;
+    const parent = dirname(directory);
+    if (parent === directory || parent === homedir()) break;
+    project ||= isFile(join(parent, 'package.json')) || existsSync(join(parent, '.git'));
+    const dependency = nextDependency(parent);
+    if (dependency === null) break;
+    next ||= dependency;
+    directory = parent;
+  }
+  return { project, next };
+}
+
+export function selectProject(root: string, explicit = false): ProjectSelection | undefined {
+  const start = resolve(root);
+  if (explicit) return stat(start)?.isDirectory() ? { directory: start } : undefined;
+  if (nextConfig(start)) return { directory: start };
+  const manifestNext = nextDependency(start);
+  const dependency = manifestNext === true;
+  if (dependency && hasOwnRoutes(start)) return { directory: start };
+  const parent = parentProject(start);
+  // A nested candidate can be chosen by opening it directly, including apps with hoisted Next.
+  if (parent.project && (dependency || manifestNext !== null && parent.next && hasInheritedRoutes(start))) {
+    return { directory: start };
+  }
   const rootConfig = projectConfig(start);
-  if (apps.length > 1) {
+  if (rootConfig && excludedNextDirectory(basename(start))) return { directory: start };
+
+  const inheritedNext = new Map([[start, manifestNext !== null && (dependency || parent.next)]]);
+  const apps: { directory: string; dependency: boolean }[] = [];
+  let visited = 0;
+  for (const directory of nestedDirectories(start, name => !excludedNextDirectory(name), projectDepth)) {
+    if (visited++ === directoryLimit) break;
+    const manifestNext = nextDependency(directory);
+    const dependency = manifestNext === true;
+    const canInherit = manifestNext !== null && inheritedNext.get(dirname(directory)) === true &&
+      !existsSync(join(directory, '.git'));
+    inheritedNext.set(directory, dependency || canInherit);
+    if (dependency || nextConfig(directory) || canInherit && hasInheritedRoutes(directory)) apps.push({ directory, dependency });
+  }
+  const searchLimited = visited > directoryLimit;
+  if (apps.length === 1 && !searchLimited) return { directory: apps[0].directory };
+  if (apps.length) {
     const candidates = apps.map(app => app.directory);
     // Master checks the requested directory's config first, then searches breadth-first.
-    if (rootConfig) return { directory: start, guessCandidates: [start, ...candidates] };
+    if (rootConfig) return { directory: start, guessCandidates: [start, ...candidates], searchLimited };
     const chosen = apps.find(app => projectConfig(app.directory)) ?? apps.find(app => app.dependency) ?? apps[0];
-    return { directory: chosen.directory, guessCandidates: candidates };
+    return { directory: chosen.directory, guessCandidates: candidates, searchLimited };
   }
 
-  if (rootConfig) return { directory: start };
-  const configs = [...nestedDirectories(start, excluded, 4)].filter(projectConfig);
-  if (configs.length) return { directory: configs[0], guessCandidates: configs };
+  if (rootConfig) return searchLimited ? { directory: start, guessCandidates: [start], searchLimited } : { directory: start };
+  const configs: string[] = [];
+  let visitedConfigs = 0;
+  for (const directory of nestedDirectories(start, name => !excludedConfigDirectory(name), projectDepth)) {
+    if (visitedConfigs++ === directoryLimit) break;
+    if (projectConfig(directory)) configs.push(directory);
+  }
+  // Preserve master's config-first fallback for repos without Next evidence, including Cypress.
+  const directory = dependency ? start : configs[0];
+  if (directory) {
+    const candidates = dependency ? [start, ...configs] : configs;
+    return { directory, guessCandidates: candidates, searchLimited: searchLimited || visitedConfigs > directoryLimit };
+  }
+}
+
+export function formatProjectCandidates(candidates: string[]) {
+  const names = candidates.slice(0, hintLimit).map(directory => JSON.stringify(directory));
+  const remaining = candidates.length - names.length;
+  return names.join(', ') + (remaining ? ` and ${remaining} more` : '');
 }
 
 export function findProject(root: string): string | undefined {
