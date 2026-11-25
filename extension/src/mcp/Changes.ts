@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { lstatSync, readFileSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { compare, graphRow, moduleStops, quantity, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
-import { routeAsset, sourceFile, traceHistory, type Removal } from './ChangesHistory';
+import { routeAsset, sourceFile, traceHistory, type ImportEdit, type Removal } from './ChangesHistory';
 import { isMiddlewareFile, type QueryIndex, type SymbolEntry } from './Index';
 
 export type ChangeScope = 'all' | 'staged' | 'unstaged';
@@ -100,15 +100,22 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   try {
     let refs: string[] = [];
     if (base) {
+      const shallow = () => git(['rev-parse', '--is-shallow-repository']).trim() === 'true';
+      const shallowHelp = 'shallow repository history; run git fetch --unshallow or use a reachable ref';
       const commit = known(base);
-      if (!commit) return empty(`invalid base ref ${base}`);
+      if (!commit) {
+        const count = known('HEAD') ? git(['rev-list', '--max-count=2', 'HEAD', '--']).trim().split('\n').length : 0;
+        const hint = shallow() ? shallowHelp : count === 0 ? 'repository has no commits' :
+          count === 1 ? 'only one commit is available; use a reachable ref or fetch more history' : 'use a reachable ref';
+        return empty(`invalid base ref ${base}; ${hint}`);
+      }
       try {
         const ancestor = git(['merge-base', commit, 'HEAD']).trim();
-        if (!/^[a-f0-9]{40,64}$/.test(ancestor)) return empty('no merge base with HEAD');
+        if (!/^[a-f0-9]{40,64}$/.test(ancestor)) return empty(shallow() ? `no merge base with HEAD; ${shallowHelp}` : 'no merge base with HEAD');
         comparison = ancestor;
         refs = [comparison];
       } catch (error) {
-        if ((error as { status?: number }).status === 1) return empty('no merge base with HEAD');
+        if ((error as { status?: number }).status === 1) return empty(shallow() ? `no merge base with HEAD; ${shallowHelp}` : 'no merge base with HEAD');
         throw error;
       }
     } else if (scope !== 'unstaged') {
@@ -180,6 +187,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   let limited = false;
   let untrackedBytes = 0;
   const removals: Removal[] = [];
+  const importEdits = new Map<string, ImportEdit>();
   const middlewareFiles = new Map<string, string>();
   let missingSource = 0;
   let unmappedDeletions = 0;
@@ -279,6 +287,9 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
         previous = inspectChangeSource(old ?? file, before, scanComments, middleware);
         const next = inspectChangeSource(file, after, scanComments, middleware);
         newCode = next.code;
+        if (!stagedDrift && entry.hunks.length) importEdits.set(file, {
+          before: previous.moduleSpecifiers, after: next.moduleSpecifiers
+        });
         for (const name of previous.names) {
           if (!next.names.has(name) && (!next.stars.size || name === 'default')) {
             removedNames.add(name);
@@ -355,6 +366,8 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       if (!old) changes.push(graphRow(`file ${file}${worktree}`, file));
     }
     let statementIndex = 0;
+    let removalEdit: Edit | undefined;
+    const beforeEdits = modified.size;
     const statementsAt = (line: number) => {
       const statements = previous?.statements;
       if (!statements) return [];
@@ -370,7 +383,12 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       if (hunk.removed.length === 1 && hunk.added.length === 1 &&
           hunk.removed[0].replace(/^(\s*)export(?:\s+default)?\s+/, '$1') === hunk.added[0]) {
         const owners = statementsAt(hunk.oldLine);
-        if (owners.length && owners.every(removedStatement)) continue;
+        if (owners.length && owners.every(removedStatement)) {
+          removalEdit ??= { file, line: hunk.line, added: 0, removed: 0, comment: false };
+          removalEdit.added++;
+          removalEdit.removed++;
+          continue;
+        }
       }
       for (let i = 0; i < hunk.added.length; i++) record(hunk.line + i, false, 1, 0);
       if (hunk.added.length || !sourceFile.test(file)) {
@@ -386,7 +404,11 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       for (const [offset, text] of hunk.removed.entries()) {
         const owners = statementsAt(hunk.oldLine + offset);
         if (owners.length && owners.every(statement => removedStatement(statement) &&
-          (statement.start >= hunk.oldLine && statement.end <= last || /^\s*export(?:\s+default)?\s*$/.test(text)))) continue;
+          (statement.start >= hunk.oldLine && statement.end <= last || /^\s*export(?:\s+default)?\s*$/.test(text)))) {
+          removalEdit ??= { file, line: Math.max(1, hunk.line), added: 0, removed: 0, comment: false };
+          removalEdit.removed++;
+          continue;
+        }
         const anchors = owners.length === 1 ? [
           ...(owners[0].start < hunk.oldLine ? [hunk.line] : []),
           ...(owners[0].end > last ? [hunk.line + 1] : [])
@@ -397,6 +419,9 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
         record(Math.max(1, anchors[0] ?? hunk.line), false, 0, 1, symbol ?? null);
       }
       if (unmapped) unmappedDeletions++;
+    }
+    if (removalEdit && !old && modified.size === beforeEdits) {
+      changes.push(graphRow(`file ${file}:${removalEdit.line} ${stats(removalEdit)}${worktree}`, file));
     }
   }
 
@@ -426,8 +451,26 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   let history: ReturnType<typeof traceHistory> | undefined;
   if ((removals.length || middlewareFiles.size) && !expired()) {
     const renamed = new Map(files.flatMap(({ old, file, status }) => old && status === 'R' ? [[old, file]] : []));
+    const editedSources = new Map(files.slice(0, maxFiles).filter(entry => sourceFile.test(entry.file) &&
+      entry.hunks.length && !['D', 'A', '?'].includes(entry.status)).map(entry => [entry.file, entry]));
+    const importEdit = (file: string) => {
+      const existing = importEdits.get(file);
+      if (existing || stagedDrift) return existing;
+      const entry = editedSources.get(file);
+      if (!entry || expired()) return;
+      const before = show(comparison, entry.old ?? file);
+      const after = readSource(file);
+      if (before === undefined || after === undefined || before.includes('\0') || after.includes('\0')) return;
+      const { inspectChangeSource } = require('./graph.cjs') as typeof import('../cli/graph');
+      const edit = {
+        before: inspectChangeSource(entry.old ?? file, before, false).moduleSpecifiers,
+        after: inspectChangeSource(file, after, false).moduleSpecifiers
+      };
+      importEdits.set(file, edit);
+      return edit;
+    };
     try {
-      history = traceHistory(root, removals.slice(0, maxSeeds), middlewareFiles, graph, renamed, gitBytes,
+      history = traceHistory(root, removals.slice(0, maxSeeds), middlewareFiles, graph, renamed, importEdit, gitBytes,
         comparison, prefix, depth, deadline);
       changes.push(...history.rows);
     } catch {
@@ -539,6 +582,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     noRemovalRoutes ? 'no page or API routes traced for removals' : undefined,
     history?.unknownExports ? 'runtime export availability not resolved' : undefined,
     history?.unknownNamespaces ? 'namespace import members not resolved' : undefined,
+    history?.unverifiedMoves ? `old-path imports not verified in ${quantity(history.unverifiedMoves, 'file')}` : undefined,
     trace.partial, baseTrace?.partial, stops ? 'module-level importers not traced' : undefined,
     unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined].filter(Boolean))].join('; ') || undefined;
   return {

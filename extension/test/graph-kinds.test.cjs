@@ -722,7 +722,10 @@ test('changes traces a retained deletion beside an export removal and finds old-
   }
   assert.doesNotMatch(moved, /^removed /m);
   git('add', '.');
-  assert.match(changes('--staged'), /3 files, 0 symbols, 2 routes/);
+  const current = changes('--staged');
+  assert.match(current, /3 files, 0 symbols, 2 routes/);
+  assert.doesNotMatch(current, /^importer .*\[base\]/m);
+  assert.match(current, /^# complete:/m);
 });
 
 test('changes traces an unindexed binding from its importer and reports other uncovered removals', { timeout: 65_000 }, t => {
@@ -749,6 +752,8 @@ test('changes traces an unindexed binding from its importer and reports other un
   const output = changes();
   assert.match(output, /^route api GET \/api\/unindexed .* <- 검토 \[removed\] d1/m);
   assert.match(output, /^route api GET \/api\/indexed .* <- known \[removed\] d1/m);
+  assert.match(output, /^file lib\/unindexed\.ts:1 \+1 -1$/m);
+  assert.match(output, /^file lib\/indexed\.ts:1 \+1 -1$/m);
   assert.match(output, /^importer lib\/disconnected\.ts:1 <- removed 누락 \[base\]/m);
   assert.match(output, /# partial: no page or API routes traced for removals$/);
 });
@@ -1221,4 +1226,38 @@ test('Pages middleware paths check concrete catch-all URLs against the matcher',
   assert.match(query('path', '/api/auth/[...parts]', 'middleware'), /1 middleware .*\[possible\]/);
   assert.match(query('path', '/base/api/auth/csrf/embed?check=1', 'middleware'), /1 middleware .*\/:path\*\/embed/);
   assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
+});
+
+test('changes verifies a symbol rename against live imports and retains a stale importer', { timeout: 65_000 }, t => {
+  const { file, edit, git, changes } = gitFixture(t);
+  fs.writeFileSync(file('lib/measure.ts'), 'export function oldMeasure() { return 1; }\n');
+  const routes = ['updated', 'stale'];
+  for (const name of routes) {
+    const route = file(`app/api/${name}/route.ts`);
+    fs.mkdirSync(path.dirname(route), { recursive: true });
+    fs.writeFileSync(route, 'import { oldMeasure } from "../../../lib/measure";\n' +
+      'export const GET = () => Response.json(oldMeasure());\n');
+  }
+  fs.writeFileSync(file('lib/measure-type.ts'), 'import { oldMeasure } from "./measure";\n' +
+    'export type Measure = ReturnType<typeof oldMeasure>;\n');
+  git('add', '.');
+  git('commit', '-qm', 'Add measurement importers and a type query');
+  edit('lib/measure.ts', text => text.replaceAll('oldMeasure', 'newMeasure'));
+  edit('lib/measure-type.ts', text => text.replaceAll('oldMeasure', 'newMeasure'));
+  edit('app/api/updated/route.ts', text => text.replaceAll('oldMeasure', 'newMeasure'));
+  const partialRename = changes();
+  assert.match(partialRename, /^importer app\/api\/stale\/route\.ts:.* \[base\]/m);
+  assert.doesNotMatch(partialRename, /^importer .*\/updated\/route\.ts|^importer lib\/measure-type\.ts/m);
+  edit('app/api/stale/route.ts', text => text.replaceAll('oldMeasure', 'newMeasure'));
+  const fullRename = changes();
+  assert.match(fullRename, /2 routes/);
+  assert.doesNotMatch(fullRename, /^importer /m);
+  assert.match(fullRename, /^# complete:/m);
+});
+
+test('invalid changes base explains shallow and single-commit history', { timeout: 65_000 }, t => {
+  const { file, git, changes } = gitFixture(t);
+  assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; only one commit is available/m);
+  fs.writeFileSync(file('.git/shallow'), git('rev-parse', 'HEAD').trim() + '\n');
+  assert.match(changes('--base', 'HEAD~3'), /^# partial: invalid base ref HEAD~3; shallow repository history; run git fetch --unshallow or use a reachable ref$/m);
 });

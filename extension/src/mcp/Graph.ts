@@ -346,6 +346,13 @@ export class DependencyGraph {
       }
     }
     const ids = new Set(origin.ids);
+  importsFrom(importer: string, target: string) {
+    const sourceId = this.fileIds.get(importer);
+    const targetId = this.fileIds.get(target);
+    return sourceId === undefined || targetId === undefined ? [] :
+      (this.index.moduleImports![sourceId] ?? []).filter(entry => entry[0] === targetId);
+  }
+
     let uses = origin.ids.flatMap(id => this.predecessors(id)).filter(edge =>
       !ids.has(edge.from) && (!origin.externalOnly || edge.file !== origin.file));
     type Site = { file: string; line: number };
