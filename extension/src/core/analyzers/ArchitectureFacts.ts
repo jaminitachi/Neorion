@@ -1263,6 +1263,9 @@ function apiSegments(url: UrlText, config?: NextConfig, requestPath = false) {
   const trailingSlash = pathname.endsWith('/');
   const path = trailingSlash ? pathname.slice(0, -1) : pathname;
   const segments = path.slice(1).split('/');
+  // Arbitrary App Router paths need a fixed prefix. An external HTTP URL
+  // with a wholly dynamic first segment cannot identify one of our routes.
+  if (requestPath && !localApi.test(local) && unknownSlot.test(segments[0])) return;
   const boundedTail = pathname === local && segments.at(-1) === slot && pathname.indexOf(slot) === pathname.length - 1;
   return { segments, spanning, dynamic: spanning || !!url.dynamic && !boundedTail,
     partial: !!prefix || !!url.partial || trailingSlash && !unknownSlot.test(pathname),

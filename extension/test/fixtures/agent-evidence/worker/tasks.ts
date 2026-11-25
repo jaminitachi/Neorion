@@ -10,3 +10,7 @@ export async function runTasks() {
 export function ignoreLiteral() {
   return '/services/refresh';
 }
+
+export function externalRequest(date: string) {
+  return fetch(`https://external.example/${date}/refresh`);
+}

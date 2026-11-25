@@ -1362,7 +1362,8 @@ test('queries preserve MDX layouts, conditional list renders, callbacks, and HTT
   const consumers = query('api_consumers', '/services/refresh');
   assert.match(consumers, /worker\/tasks\.ts:6 runTasks POST fetch/);
   assert.match(consumers, /worker\/tasks\.ts:7 runTasks POST Node HTTP request/);
-  assert.doesNotMatch(consumers, /ignoreLiteral/);
+  assert.doesNotMatch(consumers, /ignoreLiteral|externalRequest/);
+  assert.match(consumers, /2 sites in 1 file: 2 requests/);
   assert.match(consumers, /# partial: .*deployment trigger untraced/);
   assert.match(query('impact', 'refreshResources'), /fetch worker\/tasks\.ts:6 POST \/services\/refresh/);
 });
