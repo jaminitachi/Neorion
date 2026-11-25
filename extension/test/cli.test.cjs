@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -13,16 +14,19 @@ const packageRoot = path.resolve(__dirname, '../../neorion');
 const entry = path.join(packageRoot, 'dist/neorion.cjs');
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 
-function fixture(t) {
+function fixture(t, withStarter = true) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-cli-'));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
   const root = path.join(temp, 'workspace');
   const cache = path.join(temp, 'cache');
   const home = path.join(temp, 'home');
-  fs.mkdirSync(path.join(root, 'app'), { recursive: true });
+  fs.mkdirSync(root);
   fs.mkdirSync(home);
-  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["app/**/*"],"compilerOptions":{"jsx":"preserve"}}');
-  fs.writeFileSync(path.join(root, 'app/page.tsx'), 'function DashboardShell() { return <main />; }\nexport default function Page() { return <DashboardShell />; }\n');
+  if (withStarter) {
+    fs.mkdirSync(path.join(root, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["app/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+    fs.writeFileSync(path.join(root, 'app/page.tsx'), 'function DashboardShell() { return <main />; }\nexport default function Page() { return <DashboardShell />; }\n');
+  }
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, HOME: home, USERPROFILE: home };
   delete env.CLAUDE_CONFIG_DIR;
   delete env.CODEX_HOME;
@@ -183,249 +187,335 @@ test('CLI discovers configless Next.js projects and diagnoses missing projects',
   assert.deepEqual(fs.readdirSync(root).sort(), ['app', 'package.json']);
 });
 
-test('CLI prefers a configless JavaScript Next.js root over a Cypress tsconfig', t => {
-  const { root, run } = fixture(t);
-  fs.unlinkSync(path.join(root, 'tsconfig.json'));
-  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(root, 'app/page.jsx'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"js-app","dependencies":{"next":"15.0.0"}}');
-  fs.mkdirSync(path.join(root, 'cypress'));
-  fs.writeFileSync(path.join(root, 'cypress/tsconfig.json'), '{"include":["*.ts"]}');
-  fs.writeFileSync(path.join(root, 'cypress/home.cy.ts'), 'export const home = () => cy.visit("/");');
-
-  const graph = run(['graph']);
-  assert.equal(graph.status, 0, graph.stderr);
-  assert.match(graph.stdout, /js-app · app router · 2 source files/);
-  const query = run(['query', 'who_renders', 'DashboardShell']);
-  assert.equal(query.status, 0, query.stderr);
-  assert.match(query.stdout, /^\/  app\/page\.jsx:2/m);
-});
-
-test('CLI uses a TypeScript Next.js root with src/app and a nested e2e tsconfig', t => {
-  const { root, run } = fixture(t);
-  fs.mkdirSync(path.join(root, 'src'));
-  fs.renameSync(path.join(root, 'app'), path.join(root, 'src/app'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"ts-app","dependencies":{"next":"15.0.0"}}');
-  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
-  fs.mkdirSync(path.join(root, 'e2e'));
-  fs.writeFileSync(path.join(root, 'e2e/tsconfig.json'), '{"include":["*.ts"]}');
-  fs.writeFileSync(path.join(root, 'e2e/home.spec.ts'), 'export const home = () => "/";');
-
-  const graph = run(['graph']);
-  assert.equal(graph.status, 0, graph.stderr);
-  assert.match(graph.stdout, /ts-app · app router · 1 source files/);
-  const query = run(['query', 'who_renders', 'DashboardShell']);
-  assert.equal(query.status, 0, query.stderr);
-  assert.match(query.stdout, /^\/  src\/app\/page\.tsx:2/m);
-});
-
-test('CLI and MCP prefer a configured Next.js app to a workspace root with hoisted Next.js', async t => {
-  const { root, env, run } = fixture(t);
-  const web = path.join(root, 'apps/web');
-  fs.mkdirSync(web, { recursive: true });
-  fs.renameSync(path.join(root, 'app'), path.join(web, 'app'));
-  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(web, 'tsconfig.json'));
-  fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web"}');
-  const manifest = path.join(root, 'package.json');
-  const workspaces = ['apps/*'];
-  fs.writeFileSync(manifest, JSON.stringify({ workspaces }));
-  fs.mkdirSync(path.join(root, 'apps/aaa-utils/src/app'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'apps/aaa-utils/package.json'), '{"name":"aaa-utils"}');
-  fs.writeFileSync(path.join(root, 'apps/aaa-utils/tsconfig.json'), '{"include":["src/**/*"]}');
-  fs.writeFileSync(path.join(root, 'apps/aaa-utils/src/app/index.ts'), 'export const Shared = 1;');
-  fs.mkdirSync(path.join(root, 'playwright/app'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'playwright/tsconfig.json'), '{}');
-  fs.writeFileSync(path.join(root, 'playwright/app/fixture.ts'), 'export const fixture = true;');
-
-  const control = run(['graph']);
-  assert.equal(control.status, 0, control.stderr);
-  assert.match(control.stdout, /playwright · none router · 1 source files/);
-
-  fs.writeFileSync(manifest, JSON.stringify({ workspaces, devDependencies: { next: '15.0.0' } }));
-  const graph = run(['graph']);
-  assert.equal(graph.status, 0, graph.stderr);
-  assert.match(graph.stdout, /web · app router · 1 source files/);
-  const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
-  const result = await client.text('query', { kind: 'who_renders', target: 'DashboardShell' });
-  assert.match(result, /^Project: web$/m);
-  assert.match(result, /^\/  app\/page\.tsx:2/m);
-  assert.equal(run(['query', 'who_renders', 'DashboardShell']).stdout.trimEnd(), result);
-
-  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["bootstrap.ts"]}');
-  fs.writeFileSync(path.join(root, 'bootstrap.ts'), 'export const ready = true;');
-  const withBaseConfig = run(['graph']);
-  assert.equal(withBaseConfig.status, 0, withBaseConfig.stderr);
-  assert.match(withBaseConfig.stdout, /web · app router · 1 source files/);
-});
-
-for (const separateCheckout of [false, true]) {
-  test(`CLI keeps an explicit root ${separateCheckout ? 'in a separate Git checkout' : 'outside the declared workspace members'}`, t => {
-    const { root, env, run } = fixture(t);
-    const checkout = path.join(root, 'checkouts/standalone-tools');
-    const utility = path.join(checkout, 'packages/utility');
-    const workspaces = separateCheckout ? ['checkouts/**'] : ['apps/*'];
-    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ workspaces, dependencies: { next: '15.0.0' } }));
-    fs.mkdirSync(path.join(checkout, 'src'), { recursive: true });
-    fs.writeFileSync(path.join(checkout, 'package.json'), '{"name":"standalone-tools"}');
-    fs.writeFileSync(path.join(checkout, 'tsconfig.json'), '{"include":["src/**/*"]}');
-    fs.writeFileSync(path.join(checkout, 'src/root.ts'), 'export function RootMarker() { return true; }');
-    if (separateCheckout) {
-      const git = spawnSync('git', ['init', '-q', checkout], { env, encoding: 'utf8' });
-      assert.equal(git.status, 0, git.stderr || git.error?.message);
-    }
-    fs.mkdirSync(path.join(utility, 'src/app'), { recursive: true });
-    fs.writeFileSync(path.join(utility, 'package.json'), '{"name":"utility"}');
-    fs.writeFileSync(path.join(utility, 'tsconfig.json'), '{"include":["src/**/*"]}');
-    // Keep a route so the test exercises workspace boundaries independently of route detection.
-    fs.writeFileSync(path.join(utility, 'src/app/route.ts'), 'export function GET() { return new Response(); }');
-
-    const graph = run(['graph', checkout]);
-    assert.equal(graph.status, 0, graph.stderr);
-    assert.match(graph.stdout, /standalone-tools · none router · 1 source files/);
-    const query = run(['query', 'search', 'RootMarker', '--root', checkout]);
-    assert.equal(query.status, 0, query.stderr);
-    assert.match(query.stdout, /^Project: standalone-tools$/m);
-    assert.match(query.stdout, /src\/root\.ts:1/);
+function projectFixture(root, env) {
+  const next = { next: '15.5.8' };
+  const put = (directory, file, value) => {
+    const target = path.join(root, directory, file);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, typeof value === 'string' ? value : JSON.stringify(value));
+  };
+  const pkg = (dir, name, options = {}) => put(dir, 'package.json', { name, ...options });
+  const config = (dir, include) => put(dir, 'tsconfig.json', {
+    include: [include], compilerOptions: { jsx: 'preserve' },
   });
+  const page = (dir, file, marker) => put(dir, file, `export default function ${marker}() { return <main />; }\n`);
+  const app = (dir, name, { route = 'app/page', configured = true, ownNext = true, marker = 'Page',
+    include = route.split('/')[0] + '/**/*' } = {}) => {
+    pkg(dir, name, ownNext ? { dependencies: next } : {});
+    if (configured) config(dir, include);
+    page(dir, route + (configured ? '.tsx' : '.jsx'), marker);
+  };
+  const library = (dir, file = 'index.ts', marker = 'ready', include = file) => {
+    config(dir, include);
+    put(dir, file, `export const ${marker} = true;\n`);
+  };
+  const tooling = dir => library(dir, 'check.ts', 'ready', '*.ts');
+  const pnpm = (dir, patterns) => put(dir, 'pnpm-workspace.yaml',
+    'packages:\n' + patterns.map(pattern => `  - '${pattern}'\n`).join(''));
+  const gitInit = dir => {
+    const git = spawnSync('git', ['init', '-q', path.join(root, dir)], { env, encoding: 'utf8' });
+    assert.equal(git.status, 0, git.stderr || git.error?.message);
+  };
+  return { next, put, pkg, config, page, app, library, tooling, pnpm, gitInit };
 }
 
-for (const [workspace, configured] of [['npm', true], ['pnpm', true], ['pnpm', false], [undefined, false]]) {
-  const app = workspace ? `${configured ? 'configured' : 'configless'} ${workspace} app with hoisted Next.js` : 'configless Next.js app';
-  test(`CLI keeps an explicit ${app} over its nested example`, t => {
-    const { root, run } = fixture(t);
-    const web = path.join(root, 'apps/web');
-    const example = path.join(web, 'examples/admin');
-    const page = configured ? 'page.tsx' : 'page.jsx';
-    const next = { next: '15.0.0' };
-    fs.mkdirSync(path.join(web, 'src/app'), { recursive: true });
-    fs.renameSync(path.join(root, 'app/page.tsx'), path.join(web, 'src/app', page));
-    if (workspace === 'npm') {
-      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ dependencies: next, workspaces: ['apps/*'] }));
-    } else if (workspace === 'pnpm') {
-      const manifest = configured ? { dependencies: next } : { dependencies: next, workspaces: ['apps/**'] };
-      fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest));
-      fs.writeFileSync(path.join(root, 'pnpm-workspace.yaml'), configured
-        ? "packages:\n  - 'apps/*' # Workspace apps\n"
-        : "packages: ['apps/**', '!apps/web/examples/**']\n");
-    }
-    if (configured) {
-      fs.writeFileSync(path.join(web, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
-    }
-    fs.writeFileSync(path.join(web, 'package.json'), JSON.stringify({ name: 'web', ...(workspace ? {} : { dependencies: next }) }));
-    fs.mkdirSync(path.join(example, 'app'), { recursive: true });
-    fs.writeFileSync(path.join(example, 'package.json'), JSON.stringify({ name: 'admin', dependencies: next }));
-    fs.renameSync(path.join(root, 'tsconfig.json'), path.join(example, 'tsconfig.json'));
-    fs.writeFileSync(path.join(example, 'app/page.tsx'), 'export default function Page() { return <aside />; }');
-
-    const graph = run(['graph', web]);
-    assert.equal(graph.status, 0, graph.stderr);
-    assert.match(graph.stdout, /web · app router/);
-    const query = run(['query', 'who_renders', 'DashboardShell', '--root', web]);
-    assert.equal(query.status, 0, query.stderr);
-    assert.match(query.stdout, /^Project: web$/m);
-    assert.ok(query.stdout.includes(`src/app/${page}:2`));
-    if (workspace) {
-      const workspaceGraph = run(['graph', root]);
-      assert.equal(workspaceGraph.status, 0, workspaceGraph.stderr);
-      assert.match(workspaceGraph.stdout, /web · app router/);
-    }
-  });
+function markedExample(f, parent) {
+  f.app(path.join(parent, 'examples/admin'), 'admin', { route: 'src/app/page', marker: 'AdminMarker' });
 }
 
-test('CLI requires a valid package manifest for a workspace member', t => {
-  const { root, run } = fixture(t);
-  const generated = path.join(root, 'apps/generated');
-  fs.mkdirSync(path.join(generated, 'src/app'), { recursive: true });
-  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(generated, 'src/app/page.tsx'));
-  fs.mkdirSync(path.join(root, 'src'));
-  fs.writeFileSync(path.join(root, 'package.json'), '{"name":"workspace","workspaces":["apps/*"],"dependencies":{"next":"15.0.0"}}');
-  fs.writeFileSync(path.join(root, 'src/root.ts'), 'export function RootMarker() { return true; }');
-  for (const directory of [root, generated]) {
-    fs.writeFileSync(path.join(directory, 'tsconfig.json'), '{"include":["src/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+test('project selection follows the precedence rule for all PR #19 review probes', async t => {
+  const cases = [
+    ...['cypress', 'e2e', 'scripts', 'playwright', 'tests'].map(tool => ({
+      name: `configless-src-app-${tool}`,
+      build(f) {
+        f.app('.', 'frontend', { route: 'src/app/page', configured: false });
+        f.tooling(`${tool}/nested`);
+      },
+    })),
+    {
+      name: 'configured-src-pages-with-tooling',
+      build(f) {
+        f.app('.', 'frontend', { route: 'src/pages/index' });
+        f.tooling('e2e');
+      },
+    },
+    ...[false, true].map(declared => ({
+      name: declared ? 'declared workspace discovers its app ahead of a base config' : 'workspace-config-with-child-next-and-ui',
+      build(f) {
+        f.pkg('.', 'workspace', declared ? { workspaces: ['apps/*'] } : {});
+        f.library('.', 'bootstrap.ts');
+        f.app('apps/web', 'web');
+        f.library('packages/ui');
+      },
+      requests: [{ expected: declared ? 'apps/web' : '.' }],
+    })),
+    {
+      name: 'workspace-shared-config-ui-first',
+      build(f) {
+        f.pkg('.', 'workspace');
+        f.app('services/web', 'web', { configured: false });
+        f.library('packages/ui');
+      },
+      requests: [{ expected: 'services/web' }],
+    },
+    {
+      name: 'configured-root-with-nested-next',
+      build(f) {
+        f.app('.', 'frontend', { route: 'src/app/page' });
+        f.app('apps/admin', 'admin');
+      },
+    },
+    {
+      name: 'hoisted-root-with-nested-next (original undeclared fixture)',
+      build(f) {
+        f.pkg('.', 'workspace', { dependencies: f.next });
+        f.app('apps/web', 'web', { ownNext: false, route: 'src/app/page' });
+        f.app('apps/web/examples/admin', 'admin');
+      },
+      requests: [{ from: 'apps/web', expected: 'apps/web', query: ['Page', /src\/app\/page\.tsx:1/] }, { expected: '.' }],
+    },
+    {
+      name: 'configless-root-with-nested-next',
+      build(f) {
+        f.app('.', 'frontend', { route: 'src/app/page', configured: false });
+        f.app('examples/admin', 'admin');
+        f.tooling('cypress');
+      },
+      requests: [{ expected: '.', query: ['Page', /src\/app\/page\.jsx:1/] }],
+    },
+    ...[[true, true], [false, true], [false, false]].map(([configured, tooling]) => ({
+      name: `routerless-root-${configured ? 'configured' : 'configless'}-${tooling ? 'with-tooling' : 'alone'}`,
+      build(f) {
+        f.pkg('.', 'frontend', { dependencies: f.next });
+        if (configured) f.config('.', 'lib/*.ts');
+        f.put('.', configured ? 'lib/index.ts' : 'lib/index.js', 'export const ready = true;');
+        if (tooling) f.tooling('cypress');
+      },
+    })),
+    {
+      name: 'routerless-configured-monorepo-with-ui',
+      build(f) {
+        f.pkg('.', 'workspace');
+        f.pkg('apps/web', 'web', { dependencies: f.next });
+        f.library('apps/web', 'lib/index.ts');
+        f.library('packages/ui');
+        f.tooling('e2e');
+      },
+      requests: [{ expected: 'apps/web' }],
+    },
+    {
+      name: 'no-next-packages-ui-with-src-app',
+      build(f) {
+        f.tooling('cypress');
+        f.pkg('packages/ui', 'ui');
+        f.library('packages/ui', 'src/app/index.ts', 'ready', 'src/**/*');
+      },
+      requests: [{ expected: 'packages/ui' }],
+    },
+    {
+      name: 'tooling config remains available when it is the only project',
+      build(f) { f.tooling('cypress'); },
+      requests: [{ expected: 'cypress' }],
+    },
+    {
+      name: 'explicit-ui-with-next-example',
+      build(f) {
+        f.pkg('.', 'ui');
+        f.library('.');
+        f.app('examples/web', 'example');
+      },
+      requests: [{ expected: '.', query: ['ready', /index\.ts:1/] }],
+    },
+    {
+      name: 'turbo-mixed-config',
+      build(f) {
+        f.put('.', 'turbo.json', { tasks: {} });
+        f.pkg('.', 'workspace');
+        f.app('apps/alpha', 'alpha', { configured: false });
+        f.app('apps/zeta', 'zeta');
+        f.library('packages/ui');
+      },
+      requests: [{ expected: 'apps/zeta' }],
+    },
+    ...['checkout', 'checkout without outer Next', 'out-of-pattern', 'checkout with routed utility'].map(boundary => ({
+      name: `nested explicit root (${boundary})`,
+      build(f) {
+        const checkout = 'checkouts/standalone-tools';
+        const utility = checkout + '/packages/utility';
+        const dependencies = boundary === 'checkout without outer Next' ? undefined : f.next;
+        f.pkg('.', 'outer-next', { workspaces: ['apps/*'], dependencies });
+        f.pkg(checkout, 'standalone-tools');
+        f.library(checkout, 'src/root.ts', 'RootMarker', 'src/**/*');
+        if (boundary.startsWith('checkout')) f.gitInit(checkout);
+        f.pkg(utility, 'utility');
+        f.library(utility, 'src/app/index.ts', 'UtilityMarker', 'src/**/*');
+        if (boundary === 'out-of-pattern' || boundary === 'checkout with routed utility') {
+          f.put(utility, 'src/app/route.ts', 'export function GET() { return new Response(); }');
+        }
+      },
+      requests: [{ from: 'checkouts/standalone-tools', expected: 'checkouts/standalone-tools', query: ['RootMarker', /src\/root\.ts:1/] }],
+    })),
+    ...[false, true].flatMap(utility => [false, true].map(ancestor => ({
+      name: `hoisted workspace ${utility ? 'with non-route utility' : 'alone'} (${ancestor ? 'ancestor dependency' : 'root dependency'})`,
+      build(f) {
+        const ws = ancestor ? 'workspace' : '.';
+        if (ancestor) f.pkg('.', 'checkout', { devDependencies: f.next });
+        f.pkg(ws, 'workspace', { workspaces: ['apps/*'], devDependencies: ancestor ? undefined : f.next });
+        f.app(path.join(ws, 'apps/web'), 'web', { ownNext: false, route: 'src/app/page', marker: 'WebPage' });
+        if (utility) {
+          f.pkg(path.join(ws, 'apps/aaa-utils'), 'aaa-utils');
+          f.library(path.join(ws, 'apps/aaa-utils'), 'src/app/index.ts', 'UtilityMarker', 'src/**/*');
+        }
+      },
+      requests: [ancestor
+        ? { from: 'workspace', expected: 'workspace/apps/web', query: ['WebPage', /src\/app\/page\.tsx:1/], mcp: utility }
+        : { expected: '.', query: ['WebPage', /apps\/web\/src\/app\/page\.tsx:1/] }],
+    }))),
+    ...['package-json', 'pnpm-yaml', 'undeclared', 'pnpm configless'].map(manager => ({
+      name: `hoisted-${manager} explicit with distinct markers`,
+      build(f) {
+        f.pkg('.', 'workspace', { dependencies: f.next, workspaces: manager === 'package-json' ? ['apps/*'] : undefined });
+        if (manager.startsWith('pnpm')) f.pnpm('.', ['apps/*']);
+        f.app('apps/web', 'web', { ownNext: false, route: 'src/app/page', configured: manager !== 'pnpm configless', marker: 'WebMarker' });
+        markedExample(f, 'apps/web');
+      },
+      requests: [{ from: 'apps/web', expected: 'apps/web', query: ['WebMarker', /src\/app\/page\.[jt]sx:1/] }],
+    })),
+    ...['ts', 'js', 'xml'].map(extension => ({
+      name: `metadata-only with sitemap.${extension}`,
+      build(f) {
+        f.pkg('.', extension === 'xml' ? 'static-metadata-app' : 'metadata-app', { dependencies: f.next });
+        if (extension === 'js') f.tooling('cypress');
+        else f.config('.', 'src/**/*');
+        f.put('.', `src/app/sitemap.${extension}`, extension === 'xml' ? '<urlset></urlset>'
+          : 'export default function SitemapMarker() { return [{ url: "https://example.com" }]; }');
+        markedExample(f, '.');
+      },
+      requests: [{ expected: '.', overview: '/sitemap.xml',
+        query: extension === 'xml' ? ['AdminMarker', /0 results/] : ['SitemapMarker', /src\/app\/sitemap\.[jt]s:1/] }],
+    })),
+    ...[undefined, '{', '[]'].flatMap(manifest => [false, true].map(ancestor => ({
+      name: `workspace glob with ${manifest || 'missing'} member manifest (${ancestor ? 'ancestor dependency' : 'root dependency'})`,
+      build(f) {
+        const ws = ancestor ? 'workspace' : '.';
+        if (ancestor) f.pkg('.', 'checkout', { dependencies: f.next });
+        f.pkg(ws, 'workspace', { workspaces: ['apps/*'], dependencies: ancestor ? undefined : f.next });
+        f.library(ws, 'src/root.ts', 'RootMarker', 'src/**/*');
+        const generated = path.join(ws, 'apps/generated');
+        f.config(generated, 'src/**/*');
+        f.page(generated, 'src/app/page.tsx', 'TemplateMarker');
+        if (manifest) f.put(generated, 'package.json', manifest);
+      },
+      requests: [{ from: ancestor ? 'workspace' : '.', expected: ancestor ? 'workspace' : '.', query: ['RootMarker', /src\/root\.ts:1/] }],
+    }))),
+    ...[
+      ['pnpm-dot-explicit', ['apps/./*', 'apps/*/examples/*'], false],
+      ['pnpm-dot-segment', ['apps/./*', '!apps/web/examples/**', 'examples/*'], true],
+      ['pnpm-exclusion-first', ['!apps/web/examples/**', 'apps/**'], true],
+    ].map(([name, patterns, workspaceProbe]) => ({
+      name,
+      build(f) {
+        f.pkg('.', 'workspace', { dependencies: f.next });
+        f.pnpm('.', patterns);
+        f.app('apps/web', 'web', { route: 'src/app/page', ownNext: false, marker: 'WebMarker' });
+        markedExample(f, 'apps/web');
+        if (workspaceProbe) {
+          f.app('examples/alternate', 'alternate', { route: 'src/app/page', marker: 'AlternateMarker' });
+          f.library('.', 'src/root.ts', 'RootMarker', 'src/*.ts');
+        }
+      },
+      requests: [{ from: 'apps/web', expected: 'apps/web', query: ['WebMarker', /src\/app\/page\.tsx:1/] },
+        ...(workspaceProbe ? [{ expected: '.', query: ['WebMarker', /0 results/] }] : [])],
+    })),
+    ...[
+      ['normalized pnpm include', ['./apps//unused/.././*/', 'apps/*/examples/*'], true],
+      ['pnpm exclusion before include', ['!./apps/web/examples/**', 'apps/**'], false],
+      ['pnpm exclusion after include', ['apps/**', '!apps/web/examples/**'], false],
+    ].map(([name, patterns, ownNext]) => ({
+      name,
+      build(f) {
+        f.pkg('.', 'checkout', { dependencies: f.next });
+        f.pkg('workspace', 'workspace', { workspaces: ['apps/**'] });
+        f.pnpm('workspace', patterns);
+        f.library('workspace', 'bootstrap.ts');
+        f.app('workspace/apps/web', 'web', { ownNext, route: 'src/app/page', marker: 'WebMarker' });
+        markedExample(f, 'workspace/apps/web');
+      },
+      requests: [{ from: 'workspace', expected: 'workspace/apps/web', query: ['WebMarker', /src\/app\/page\.tsx:1/] }],
+    })),
+    {
+      name: 'ancestor dependency is available to a configless app outside workspace patterns',
+      build(f) {
+        f.pkg('.', 'checkout');
+        f.pkg('projects', 'parent', { optionalDependencies: f.next, workspaces: ['apps/*'] });
+        f.page('projects/checkouts/web', 'src/pages/index.jsx', 'WebMarker');
+        markedExample(f, 'projects/checkouts/web');
+      },
+      requests: [{ from: 'projects/checkouts/web', expected: 'projects/checkouts/web', query: ['WebMarker', /src\/pages\/index\.jsx:1/] }],
+    },
+    {
+      name: 'gitfile stops explicit inheritance and a workspace cannot enter the nested checkout',
+      build(f) {
+        f.pkg('.', 'outer', { workspaces: ['apps/**'] });
+        f.library('.', 'bootstrap.ts');
+        f.pkg('apps', 'hoisted', { dependencies: f.next });
+        f.put('apps/checkout', '.git', 'gitdir: /unused/worktree');
+        f.app('apps/checkout/web', 'web', { ownNext: false, configured: false, marker: 'WebMarker' });
+        markedExample(f, 'apps/checkout/web');
+      },
+      requests: [{ from: 'apps/checkout/web', expected: 'apps/checkout/web/examples/admin' }, { expected: '.' }],
+    },
+    {
+      name: 'workspace searches configured members beyond the generic fallback depth and skips tooling',
+      build(f) {
+        f.pnpm('.', ['packages/**', 'scripts/*']);
+        f.app('packages/one/two/three/four/web', 'web', { route: 'src/pages/index' });
+        f.app('scripts/fixture', 'fixture');
+        f.library('config');
+      },
+      requests: [{ expected: 'packages/one/two/three/four/web' }],
+    },
+    {
+      name: 'a route-less Next package takes precedence over a tooling config',
+      build(f) {
+        f.tooling('cypress');
+        f.pkg('apps/web', 'web', { dependencies: f.next });
+        f.put('apps/web', 'lib/index.js', 'export const ready = true;');
+      },
+      requests: [{ expected: 'apps/web' }],
+    },
+  ];
+
+  for (const { name, build, requests = [{ expected: '.' }] } of cases) {
+    await t.test(name, async t => {
+      const { root, cache, env, run } = fixture(t, false);
+      build(projectFixture(root, env));
+      for (const { from = '.', expected, query, overview, mcp } of requests) {
+        const requestedRoot = path.join(root, from);
+        const graph = run(['graph', requestedRoot]);
+        assert.equal(graph.status, 0, graph.stderr);
+        const graphFile = /^Overview: (.+)$/m.exec(graph.stdout)?.[1];
+        assert.ok(graphFile, graph.stdout);
+        const expectedRoot = fs.realpathSync(path.join(root, expected));
+        const cacheKey = createHash('sha256').update(expectedRoot).digest('hex');
+        assert.equal(graphFile, path.join(cache, 'neorion', cacheKey, 'codebase_graph.md'), graph.stdout);
+        if (overview) assert.ok(fs.readFileSync(graphFile, 'utf8').includes(overview));
+        if (query) {
+          const [target, matches] = query;
+          const result = run(['query', 'search', target, '--root', requestedRoot]);
+          assert.equal(result.status, 0, result.stderr);
+          assert.match(result.stdout, matches);
+          if (mcp) {
+            const client = await openMcp(t, requestedRoot, {
+              command: process.execPath, args: [entry, 'mcp'], cwd: requestedRoot, env,
+            });
+            const reply = await client.text('query', { kind: 'search', target });
+            assert.equal(reply, result.stdout.trimEnd());
+          }
+        }
+      }
+    });
   }
-
-  for (const invalidManifest of [undefined, '{', '[]']) {
-    if (invalidManifest) fs.writeFileSync(path.join(generated, 'package.json'), invalidManifest);
-    const graph = run(['graph', root]);
-    assert.equal(graph.status, 0, graph.stderr);
-    assert.match(graph.stdout, /workspace · none router · 1 source files/);
-    const query = run(['query', 'search', 'RootMarker', '--root', root]);
-    assert.equal(query.status, 0, query.stderr);
-    assert.match(query.stdout, /^Project: workspace$/m);
-    assert.match(query.stdout, /src\/root\.ts:1/);
-  }
-});
-
-for (const sitemap of ['sitemap.ts', 'sitemap.xml']) {
-  test(`CLI keeps an explicit Next.js app with only ${sitemap} over its nested example`, t => {
-    const { root, run } = fixture(t);
-    const example = path.join(root, 'examples/admin');
-    fs.mkdirSync(example, { recursive: true });
-    fs.renameSync(path.join(root, 'app'), path.join(example, 'app'));
-    fs.renameSync(path.join(root, 'tsconfig.json'), path.join(example, 'tsconfig.json'));
-    fs.writeFileSync(path.join(example, 'package.json'), '{"name":"admin","dependencies":{"next":"15.0.0"}}');
-    fs.writeFileSync(path.join(root, 'package.json'), '{"name":"metadata-app","dependencies":{"next":"15.0.0"}}');
-    fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"include":["src/**/*"]}');
-    fs.mkdirSync(path.join(root, 'src/app'), { recursive: true });
-    fs.writeFileSync(path.join(root, 'src/app', sitemap), sitemap === 'sitemap.ts'
-      ? 'export default function SitemapMarker() { return [{ url: "https://example.com" }]; }'
-      : '<urlset></urlset>');
-
-    const graph = run(['graph', root]);
-    assert.equal(graph.status, 0, graph.stderr);
-    assert.match(graph.stdout, /metadata-app · app router/);
-    assert.ok(fs.readFileSync(/^Overview: (.+)$/m.exec(graph.stdout)[1], 'utf8').includes('/sitemap.xml'));
-    if (sitemap === 'sitemap.ts') {
-      const query = run(['query', 'search', 'SitemapMarker', '--root', root]);
-      assert.equal(query.status, 0, query.stderr);
-      assert.match(query.stdout, /^Project: workspace$/m);
-      assert.match(query.stdout, /src\/app\/sitemap\.ts:1/);
-    }
-  });
-}
-
-for (const configured of [false, true]) {
-  test(`CLI prefers a route-less ${configured ? 'configured workspace app' : 'configless Next.js root'} over tooling`, t => {
-    const { root, run } = fixture(t);
-    const web = configured ? path.join(root, 'apps/web') : root;
-    fs.rmSync(path.join(root, 'app'), { recursive: true });
-    fs.mkdirSync(path.join(root, 'e2e'));
-    fs.unlinkSync(path.join(root, 'tsconfig.json'));
-    fs.writeFileSync(path.join(root, 'e2e/tsconfig.json'), '{"include":["*.ts"]}');
-    fs.writeFileSync(path.join(root, 'e2e/home.spec.ts'), 'export const home = () => "/";');
-    fs.mkdirSync(path.join(web, 'lib'), { recursive: true });
-    fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web","dependencies":{"next":"15.0.0"}}');
-    fs.writeFileSync(path.join(web, configured ? 'lib/index.ts' : 'lib/index.js'), 'export const ready = true;');
-    if (configured) {
-      fs.writeFileSync(path.join(web, 'tsconfig.json'), '{"include":["lib/**/*"]}');
-      fs.mkdirSync(path.join(root, 'packages/ui'), { recursive: true });
-      fs.writeFileSync(path.join(root, 'packages/ui/tsconfig.json'), '{"include":["index.ts"]}');
-      fs.writeFileSync(path.join(root, 'packages/ui/index.ts'), 'export const Shared = true;');
-    }
-
-    const graph = run(['graph']);
-    assert.equal(graph.status, 0, graph.stderr);
-    assert.match(graph.stdout, /web · none router/);
-  });
-}
-
-test('CLI finds a Next.js app alongside a standalone config and a Next.js tooling fixture', t => {
-  const { root, run } = fixture(t);
-  const web = path.join(root, 'apps/web');
-  const tooling = path.join(root, 'scripts/fixture');
-  fs.mkdirSync(path.join(web, 'src/pages'), { recursive: true });
-  fs.renameSync(path.join(root, 'app/page.tsx'), path.join(web, 'src/pages/index.jsx'));
-  fs.writeFileSync(path.join(web, 'package.json'), '{"name":"web","dependencies":{"next":"15.0.0"}}');
-  fs.mkdirSync(path.join(tooling, 'app'), { recursive: true });
-  fs.writeFileSync(path.join(tooling, 'app/page.tsx'), 'export default function Page() { return <main />; }');
-  fs.writeFileSync(path.join(tooling, 'package.json'), '{"dependencies":{"next":"15.0.0"}}');
-  fs.renameSync(path.join(root, 'tsconfig.json'), path.join(tooling, 'tsconfig.json'));
-  fs.mkdirSync(path.join(root, 'config'));
-  fs.writeFileSync(path.join(root, 'config/tsconfig.json'), '{}');
-  fs.writeFileSync(path.join(root, 'config/build.ts'), 'export const build = true;');
-
-  const graph = run(['graph']);
-  assert.equal(graph.status, 0, graph.stderr);
-  assert.match(graph.stdout, /web · pages router · 1 source files/);
 });
 
 for (const withConfig of [true, false]) {

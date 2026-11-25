@@ -75,16 +75,15 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-From your project root, run the CLI directly from the clone. Neorion keeps a routed Next.js app at
-the requested root even when it contains another app. Discovery looks for `page`, `layout`,
-`route`, and supported metadata files under `app` or `src/app`, and page or API files under
-`pages` or `src/pages`. An app can declare `next` in its own `package.json` or use `next` from
-its nearest workspace root. Workspace members must have a `package.json` and match the patterns
-in `pnpm-workspace.yaml` or `package.json#workspaces`. When searching a workspace for a routed
-app, Neorion checks its members and respects Git checkout boundaries. Routed Next.js apps outside
-`cypress`, `e2e`, `playwright`, `scripts`, and `tests` take priority over standalone configs.
-Before an app has routes, a package outside those tooling directories that declares `next` takes
-priority over the first config if that config is inside one of those directories.
+From your project root, run the CLI directly from the clone. Neorion keeps the requested directory
+when it declares `next` or has routes and inherits `next` from an ancestor `package.json` in the
+same Git checkout. Discovery looks for `page`, `layout`, `route`, and supported metadata files
+under `app` or `src/app`, and page or API files under `pages` or `src/pages`. A workspace root
+without its own Next.js evidence searches its members for a routed app. Members need a valid
+`package.json` and must match the patterns in
+`pnpm-workspace.yaml` or `package.json#workspaces`. Exclusions apply regardless of pattern order.
+A standalone root with a config keeps that config. In discovery, configs under `cypress`, `e2e`,
+`playwright`, `scripts`, and `tests` come after other configs and Next.js packages.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package, Neorion uses
 `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`, `vendor`,
