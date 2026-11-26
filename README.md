@@ -201,7 +201,9 @@ For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`
 
 ## Cursor
 
-From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to use the CLI copied into the local workspace cache, with a pinned GitHub release as a fallback, or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to use the CLI copied into the local workspace cache or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+
+If the cached CLI is missing, a single-app launcher uses a pinned GitHub release. A multi-app launcher asks you to run `neorion setup cursor` again. After upgrading Neorion, rerun setup to refresh the cached CLI. Then restart the MCP server in Cursor.
 
 Run `neorion setup cursor --remove` from the same project to remove the rule block and the MCP entry owned by setup.
 

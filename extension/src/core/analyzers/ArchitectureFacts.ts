@@ -665,6 +665,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
             file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
             inlineRender: scope?.inlineLayout ? { tag, owner: scope.renderOwner } : undefined,
             line: startLine(source), conditional: branchConditional, provider, providerTag, external, workspacePackage,
+            unresolvedWorkspace: !definition ? workspace?.unresolvedBinding(target) : undefined,
             site, evidence: property && site && (assignment?.site ? `${property} assigned at ${site.file}:${site.line}` :
               `${property} fallback at ${site.file}:${site.line}`) || undefined,
             definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
@@ -904,7 +905,8 @@ function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies
     });
     const forwards = localChains.length > 0;
     const known = tRPC || forwards || origin?.module === 'next-i18next' && origin.name === 'appWithTranslation';
-    const hoc = locations(value, callee.getText(), known ? undefined : 'possible wrapper');
+    const hoc = { ...locations(value, callee.getText(), known ? undefined : 'possible wrapper'),
+      unresolvedWorkspace: !known ? workspace?.unresolvedBinding(callee) : undefined };
     application = application.flatMap(outer => (localChains.length ? localChains : [emptyChain])
       .map(inner => andThen(outer, { ...inner, locations: [hoc, ...inner.locations] }))).slice(0, 16);
     if (!known) issues.push(`opaque App wrapper ${callee.getText()} (${relativePath(value.getSourceFile())}:${startLine(value)})`);

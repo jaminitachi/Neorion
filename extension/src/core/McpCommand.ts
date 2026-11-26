@@ -13,8 +13,8 @@ export function isTemporaryCliInstall(entry: string): boolean {
 }
 
 export function mcpCommand({ localEntry, detectCache = false, root, discover = false, platform = process.platform,
-  registryVersion = version, useRelease = false, workspaceCli }: { localEntry?: string; detectCache?: boolean; root?: string;
-    discover?: boolean; platform?: NodeJS.Platform; registryVersion?: string; useRelease?: boolean; workspaceCli?: string } = {}) {
+  registryVersion = version, useRelease = false, workspaceCli, requireWorkspaceCli = false }: { localEntry?: string; detectCache?: boolean; root?: string;
+    discover?: boolean; platform?: NodeJS.Platform; registryVersion?: string; useRelease?: boolean; workspaceCli?: string; requireWorkspaceCli?: boolean } = {}) {
   if (localEntry && (!detectCache || !isTemporaryCliInstall(localEntry))) {
     return { command: process.execPath, args: [localEntry, 'mcp', ...(root === undefined ? [] : [discover ? '--workspace' : '--root', root])] };
   }
@@ -40,7 +40,9 @@ export function mcpCommand({ localEntry, detectCache = false, root, discover = f
     });
     if (result.error) console.error(result.error.message);
     process.exitCode = result.status ?? 1;`;
-    const launch = bundled ? `(() => { ${bundled}\n${fallback} })();` : fallback;
+    const missingBundle = `console.error('Neorion MCP bundle missing. Run neorion setup cursor at the workspace root.');
+    process.exitCode = 1;`;
+    const launch = bundled ? `(() => { ${bundled}\n${requireWorkspaceCli ? missingBundle : fallback} })();` : fallback;
     return { command: 'node', args: ['-e', launch.replace(/\n\s*/g, ' '), '--', ...(root === undefined ? [] : [root])] };
   }
   return { command: 'npx', args: ['-y', spec, 'mcp', ...(root === undefined ? [] : ['--root', root])] };

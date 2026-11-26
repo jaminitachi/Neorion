@@ -1,7 +1,7 @@
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 8;
+export const WRAPPER_INDEX_REVISION = 9;
 export const QUERY_INDEX_REVISION = 10;
 export const GRAPH_INDEX_REVISION = 15;
 export const INDEX_SCHEMA = 2;
@@ -42,6 +42,7 @@ export interface Wrapper {
   possible?: boolean;
   external?: string;
   workspacePackage?: string;
+  unresolvedWorkspace?: string;
   provider?: boolean;
   providerTag?: boolean;
   definitionFile?: string;
@@ -170,7 +171,7 @@ export interface QueryIndex {
   trpcFiles?: string[];
   workspaceSources?: WorkspaceSources;
   workspacePackages?: Record<string, string>;
-  workspaceUnresolved?: Record<string, string[]>;
+  workspaceDependencies?: Record<number, { module: string; gates?: FlowGate[] }[]>;
   workspaceDiscoveryLimited?: true;
   // Legacy index inputs used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };

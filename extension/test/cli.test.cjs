@@ -455,7 +455,7 @@ if (threads.isMainThread) threads.Worker = class extends threads.Worker {
   assert.match(cli('graph'), /--all-apps/);
 });
 
-test('workspace gaps follow the files a query traverses and retain external call rows', t => {
+test('workspace gaps follow traversed runtime sites and retain external call rows', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });
   fs.rmSync(path.join(root, 'tsconfig.json'));
@@ -489,10 +489,19 @@ import type { Event } from '@fixture/sdk';
 import { send } from '@fixture/declarations';
 import { Leaf } from './leaf';
 export function Track() { track('view'); send(); return <Leaf />; }
+export function Unrelated(event: Event) { return event; }
+export function MissingRender() { return <Missing />; }
+import { Missing } from '@fixture/types/render';
 `);
   fs.writeFileSync(path.join(app, 'tracking/leaf.tsx'), 'export function Leaf() { return <span />; }');
-  const query = (kind, target) => {
-    const result = run(['query', kind, target, '--app', 'web']);
+  fs.mkdirSync(path.join(app, 'wrapped'));
+  fs.writeFileSync(path.join(app, 'wrapped/page.tsx'), 'export default function WrappedPage() { return <main />; }');
+  fs.writeFileSync(path.join(app, 'wrapped/layout.tsx'), `
+import { MissingProvider } from '@fixture/types/provider';
+export default function WrappedLayout({ children }) { return <MissingProvider>{children}</MissingProvider>; }
+`);
+  const query = (kind, target, ...flags) => {
+    const result = run(['query', kind, target, '--app', 'web', ...flags]);
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };
@@ -503,8 +512,17 @@ export function Track() { track('view'); send(); return <Leaf />; }
   assert.match(callees, /^d1 ext @fixture\/sdk +track:6$/m);
   assert.match(callees, /^d1 ext @fixture\/declarations +send:6$/m);
   assert.match(callees, partial);
-  assert.match(query('who_renders', 'Leaf'), partial);
-  assert.match(query('callees', 'TrackingPage'), partial);
+  const firstHopScope = /# complete: indexed calls, renders, fetches, package calls \(depth 1\)\s*$/;
+  assert.match(query('callees', 'TrackingPage', '--depth', '1'), firstHopScope);
+  assert.match(query('callees', 'TrackingPage', '--depth', '2'), partial);
+  assert.match(query('callees', 'Unrelated'), firstHopScope);
+  assert.match(query('rename_impact', 'Unrelated'), /# complete: checker-resolved edit files\s*$/);
+  assert.match(query('who_renders', 'Leaf'), /# complete: indexed JSX paths\s*$/);
+  const search = query('search', 'Leaf');
+  assert.match(search, /^# neighbors:/m);
+  assert.match(search, /# complete: indexed name and path matches\s*$/);
+  assert.match(query('callees', 'MissingRender'), /# partial: unresolved workspace modules @fixture\/types\/render\s*$/);
+  assert.match(query('wrappers', '/wrapped'), /# partial: unresolved workspace modules @fixture\/types\/provider\s*$/);
 });
 
 test('workspace discovery orders docs and website with production apps', t => {
@@ -1275,16 +1293,16 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   assert.equal(invoke(payload('Grep', 'DashboardShell', undefined, 'non-next-project')), '');
 });
 
-function assertCursorLauncher({ command, args, type }) {
+function assertCursorLauncher({ command, args, type }, releaseFallback = true) {
   assert.equal(command, 'node');
   assert.equal(type, 'stdio');
   assert.deepEqual([args[0], ...args.slice(2)], ['-e', '--', '${workspaceFolder}']);
   assert.ok(args[1].includes(cursorWorkspaceCli));
-  assert.ok(args[1].includes(releaseSpec()));
+  assert.equal(args[1].includes(releaseSpec()), releaseFallback);
   assert.ok(!args[1].includes(entry));
 }
 
-test('Cursor launchers use the local CLI for single apps and monorepos with a release fallback', async t => {
+test('Cursor uses the local CLI and keeps release fallback for single apps', async t => {
   for (const monorepo of [false, true]) {
     await t.test(monorepo ? 'monorepo' : 'single app', async subtest => {
       const { root, env, cache, home, run } = fixture(subtest);
@@ -1298,11 +1316,22 @@ test('Cursor launchers use the local CLI for single apps and monorepos with a re
       const cached = path.join(cache, 'neorion', path.basename(cachePath(root)), cursorWorkspaceCli);
       assert.ok(fs.existsSync(cached));
       const config = readJson(path.join(root, '.cursor/mcp.json')).mcpServers.neorion;
-      assertCursorLauncher(config);
+      assertCursorLauncher(config, !monorepo);
+      const launch = { ...config, args: config.args.map(arg => arg === '${workspaceFolder}' ? root : arg), cwd: home, env };
+      if (monorepo) {
+        fs.rmSync(path.dirname(cached), { recursive: true });
+        const missing = spawnSync(launch.command, launch.args, { cwd: home, env, encoding: 'utf8', timeout: cliSpawnTimeout });
+        assert.equal(missing.status, 1);
+        assert.equal(missing.stdout, '');
+        assert.match(missing.stderr, /Neorion MCP bundle missing.*neorion setup cursor.*workspace root/);
+        const repaired = run(['setup', 'cursor']);
+        assert.equal(repaired.status, 0, repaired.stderr);
+        assert.ok(fs.existsSync(cached));
+        assert.ok(fs.existsSync(path.join(path.dirname(cached), 'graph.cjs')));
+        assert.deepEqual(readJson(path.join(root, '.cursor/mcp.json')).mcpServers.neorion, config);
+      }
       await subtest.test('stdio', async serverTest => {
-        const client = await openMcp(serverTest, root, {
-          ...config, args: config.args.map(arg => arg === '${workspaceFolder}' ? root : arg), cwd: home, env
-        });
+        const client = await openMcp(serverTest, root, launch);
         const result = await client.text('query', { kind: 'search', target: monorepo ? 'SharedCard' : 'DashboardShell' });
         if (monorepo) {
           assert.match(result, /^App: "apps\/admin"$/m);

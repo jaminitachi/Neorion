@@ -126,6 +126,8 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
 
   const root = args.at(-1);
   if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
+  if (matches(mcpCommand({ root, discover: true, useRelease: true, workspaceCli: CURSOR_WORKSPACE_CLI,
+    requireWorkspaceCli: true }))) return true;
   // Compare the full launch arguments after extracting the installed package's version.
   const spec = (command === 'npx' ? args[1] : /\bnpx -y (\S+) mcp\b/.exec(args[1] ?? '')?.[1]) ?? '';
   const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
@@ -155,7 +157,7 @@ export function mcpSnippet(tool: 'Codex CLI' | 'Windsurf' | 'Gemini CLI', root: 
 }
 
 export function planMcp(root: string, project: string, targets: McpTarget[], bundled: boolean, bundleSource: string,
-  connect: boolean, { discover = false, cursorSetup }: { discover?: boolean; cursorSetup?: { legacyLocalEntry: string } } = {}) {
+  connect: boolean, { discover = false, cursorSetup }: { discover?: boolean; cursorSetup?: { legacyLocalEntry: string; requireWorkspaceCli?: boolean } } = {}) {
   const changes: Change[] = [];
   const directories = new Set<string>();
   const cache = workspaceCache(root);
@@ -222,7 +224,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
       ? { command: 'node', args: ['-e', launchBundle(discover ? '--workspace' : '--root'), '--',
           variable ? '${workspaceFolder}' : '.', projectArgument] }
       : mcpCommand({ root: scopedProject, discover, useRelease: !!cursorSetup,
-          workspaceCli: cursorSetup && CURSOR_WORKSPACE_CLI });
+          workspaceCli: cursorSetup && CURSOR_WORKSPACE_CLI, requireWorkspaceCli: cursorSetup?.requireWorkspaceCli });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);

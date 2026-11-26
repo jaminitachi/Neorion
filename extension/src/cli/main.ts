@@ -129,7 +129,10 @@ async function main([command, ...args]: string[]) {
     const root = process.cwd();
     const remove = !!values.remove;
     if (agent === 'cursor') {
-      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, { discover: true, cursorSetup: { legacyLocalEntry: __filename } });
+      const requireWorkspaceCli = !remove && (selectProject(root)?.apps?.length ?? 0) > 1;
+      const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, {
+        discover: true, cursorSetup: { legacyLocalEntry: __filename, requireWorkspaceCli }
+      });
       mcp.commit(() => {
         const writeRule = !remove && !hasActiveCursorRule(root, CURSOR_EXTENSION_RULE);
         if (updateAgentFiles(root, root, [CURSOR_SETUP_RULE], writeRule, true, queryHint(`npx -y ${releaseSpec()}`))) {

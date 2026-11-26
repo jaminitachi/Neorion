@@ -377,7 +377,6 @@ export class QueryEngine {
     const neighbors = !expired() && single?.name.toLowerCase() === needle ? this.graph()?.neighbors(single.id, expired) : undefined;
     return {
       title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row), suggestedFilter,
-      traversed: neighbors?.files,
       notes: neighbors ? [{ ...neighbors, files: [] }] : hits.length || expired() ? [] :
         this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired, undefined, kind !== 'any')
     };
@@ -387,7 +386,6 @@ export class QueryEngine {
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
       possible: boolean; depth: number; slots: string[]; issue?: string }>();
     let directIssue: string | undefined;
-    const traversed = new Set<string>();
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
@@ -397,8 +395,6 @@ export class QueryEngine {
         const entry = pending[i];
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
-        const file = this.symbols.get(entry.id)?.file;
-        if (file) traversed.add(file);
         for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
           if (!entry.depth || only && route !== only) continue;
           const previous = reached.get(route.id);
@@ -462,7 +458,7 @@ export class QueryEngine {
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
       issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
-    return { rows, traversed, count: rows.length ? count + directLabel : undefined,
+    return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
@@ -472,7 +468,7 @@ export class QueryEngine {
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
-    const traversed = new Set<string>();
+    const unresolvedWorkspace = new Set<string>();
     const notes: Row[] = [];
     if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
     const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
@@ -481,9 +477,8 @@ export class QueryEngine {
       if (expired()) return [];
       const sites = new Map(this.index.pagesWrapSites?.[route.id]?.[id]);
       const chain = this.index.wrapChains[id] ?? [];
-      for (const { file, definitionFile } of chain) {
-        traversed.add(file);
-        if (definitionFile) traversed.add(definitionFile);
+      for (const item of chain) {
+        if (item.unresolvedWorkspace) unresolvedWorkspace.add(item.unresolvedWorkspace);
       }
       const items = chain.map((item, index) =>
         sites.has(index) ? { ...item, evidence: sites.get(index) } : item)
@@ -546,7 +541,7 @@ export class QueryEngine {
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
     return { rows, title: route.url, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}, 1 page`, targets: [route.file],
-      notes, traversed, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
+      notes, unresolvedWorkspace, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
   }
 
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
@@ -986,21 +981,9 @@ export class QueryEngine {
       if (resultBytes >= 6000) break;
     }
     const notes = (result.notes ?? []).flatMap(renderRow);
-    const unresolved = new Set<string>();
-    const byImporter = this.index.workspaceUnresolved;
-    if (byImporter && !Array.isArray(byImporter)) {
-      const collect = (file: string) => {
-        const modules = byImporter[file];
-        if (Array.isArray(modules)) for (const module of modules) unresolved.add(module);
-      };
-      for (const file of result.traversed ?? []) collect(file);
-      for (const file of result.targets ?? []) collect(file);
-      for (const entry of result.rows) for (const file of entry.files) collect(file);
-    }
-    const modules = [...unresolved].sort();
+    const modules = [...result.unresolvedWorkspace ?? []].sort();
     const workspaceIssue = [
       this.index.workspaceDiscoveryLimited ? 'workspace package scan limit reached' : '',
-      Array.isArray(byImporter) ? 'regenerate legacy workspace index' : '',
       modules.length ? 'unresolved workspace modules ' + modules.slice(0, 3).join(', ') +
         (modules.length > 3 ? ` and ${modules.length - 3} more` : '') : ''
     ].filter(Boolean).join('; ');

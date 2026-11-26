@@ -911,6 +911,13 @@ export class QueryIndexBuilder {
         }
         return found;
       };
+      const recordWorkspaceDependency = (node: Node, owner: number, module: string | undefined) => {
+        if (!module) return;
+        const gates = gatesOf(flow.gates(node));
+        const dependencies = ((index.workspaceDependencies ??= {})[owner] ??= []);
+        if (!gates.length && dependencies.some(entry => entry.module === module && !entry.gates)) return;
+        dependencies.push(gates.length ? { module, gates } : { module });
+      };
       const recordCall = (node: Node, expression: Node, owner: number, found: boolean) => {
         const binding = receiver(expression);
         if (!binding) return;
@@ -918,6 +925,7 @@ export class QueryIndexBuilder {
         const imported = packageBindings.get(root.getText());
         const declaration = imported || !found ? root.getSymbol()?.getDeclarations()[0] : undefined;
         if (imported && declaration === imported.binding) {
+          if (workspace?.isUnresolved(file, imported.module)) recordWorkspaceDependency(node, owner, imported.module);
           const name = [imported.name, ...members].slice(0, 2).join('.');
           const calls = externalCalls.get(owner) ?? new Map();
           const key = imported.module + '\0' + name;
@@ -1064,7 +1072,11 @@ export class QueryIndexBuilder {
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
           const [owner, graphOwner, possible] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
-            recordDynamic(node, node.getArguments()[0], graphOwner);
+            const specifier = node.getArguments()[0];
+            recordDynamic(node, specifier, graphOwner);
+            if (Node.isStringLiteral(specifier) && workspace?.isUnresolved(file, specifier.getLiteralValue())) {
+              recordWorkspaceDependency(node, graphOwner ?? fileId, specifier.getLiteralValue());
+            }
           }
           const trpcUses = trpcFacts.active && Node.isCallExpression(node) ? trpcFacts.uses(node) : undefined;
           if (trpcUses) {
@@ -1106,7 +1118,10 @@ export class QueryIndexBuilder {
           });
         } else if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
           (Node.isIdentifier(node.getTagNameNode()) || Node.isPropertyAccessExpression(node.getTagNameNode()))) {
-          renderSites.push({ node, owner: owners(node)[1], line: startLine(node), file: relative });
+          const owner = owners(node)[1];
+          renderSites.push({ node, owner, line: startLine(node), file: relative });
+          const module = workspace?.unresolvedBinding(node.getTagNameNode());
+          recordWorkspaceDependency(node, owner ?? fileId, module);
         } else if (Node.isShorthandPropertyAssignment(node)) {
           const symbol = node.getValueSymbol();
           if (symbol) record(node, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
@@ -1172,6 +1187,7 @@ export class QueryIndexBuilder {
     if (unbound.length) index.trpcUnbound = unbound;
     const scopes = new Set([
       ...Object.values(index.callGates ?? {}).flat(),
+      ...Object.values(index.workspaceDependencies ?? {}).flatMap(dependencies => dependencies.flatMap(entry => entry.gates ?? [])),
       ...Object.values(index.flowIssues ?? {}).flatMap(issues => issues.flatMap(issue => issue.gates)),
       ...(index.flowCalls ?? []).flatMap(call => call[5] ?? []),
       ...index.fetches.flatMap(fetch => fetch.gates ?? []),
@@ -1189,11 +1205,6 @@ export class QueryIndexBuilder {
         return pkg ? [[relativePath(file), pkg.name] as const] : [];
       });
       if (packages.length) index.workspacePackages = Object.fromEntries(packages);
-      const unresolved = files.flatMap(file => {
-        const modules = workspace.unresolvedFor(file);
-        return modules.length ? [[relativePath(file), modules] as const] : [];
-      });
-      if (unresolved.length) index.workspaceUnresolved = Object.fromEntries(unresolved);
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
     }
     return index;

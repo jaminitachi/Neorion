@@ -18,7 +18,7 @@ type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boo
 export type QueryRow = { text: string; files: string[]; pathEnd?: number };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
-  traversed?: Iterable<string>;
+  unresolvedWorkspace?: Iterable<string>;
   notes?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
 };
 export type ChangeOrigin = { file: string; name: string; ids: NodeId[]; removed?: boolean; startsAt?: number;
@@ -167,6 +167,9 @@ export class DependencyGraph {
     for (const request of index.uncertainPropRequests ?? []) {
       append(this.propRequests, request.owner, request);
       for (const gate of request.gates ?? []) this.gateScopes.add(gate.scope);
+    }
+    for (const dependencies of Object.values(index.workspaceDependencies ?? {})) for (const entry of dependencies) {
+      for (const gate of entry.gates ?? []) this.gateScopes.add(gate.scope);
     }
     for (const issues of Object.values(index.flowIssues ?? {})) for (const issue of issues) {
       for (const gate of issue.gates) this.gateScopes.add(gate.scope);
@@ -741,12 +744,7 @@ export class DependencyGraph {
     if (rows.length || supplier !== undefined) {
       rows.push(...this.terminalRows(trace.terminals.filter(({ terminal }) => terminal.kind === 'page' || terminal.pages), 40));
     }
-    return { rows, partial: trace.partial, traversed: this.traceFiles(trace.visited) };
-  }
-
-  private traceFiles(visited: Map<NodeId, Visit>) {
-    return this.index.workspaceUnresolved && [...visited].flatMap(([id, visit]) =>
-      visit.edge ? [this.file(id), visit.edge.file] : [this.file(id)]);
+    return { rows, partial: trace.partial };
   }
 
   terminalRows(reached: Reached[], limit: number): QueryRow[] {
@@ -902,7 +900,7 @@ export class DependencyGraph {
     notes.push(graphRow(`# risk: ${quantity(routeCount, 'route')} (${quantity(pageIds.size, 'page')}, ${quantity(apiFiles.size, 'API')}` +
       `${other ? `, ${quantity(other, 'meta or special file')}` : ''}), ${quantity(actions.length, 'server action')}, ` +
       `${quantity(layouts, 'layout')}; ${quantity(symbols, 'symbol')} in ${quantity(files.size, 'file')}; max depth ${used}; ${quantity(trace.tests.size, 'test')}`));
-    return { rows, notes, traversed: this.traceFiles(trace.visited), count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
+    return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
       (used > depth ? ` (limit ${depth} + renders/events)` : '') +
       (trace.hubs.length ? ', hub collapsed' : ''),
       partial: [...middlewareReasons, trace.partial, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
@@ -927,7 +925,6 @@ export class DependencyGraph {
     let flowIssue: string | undefined;
     const stops = new Set<string>();
     const traced = new Set<ChangeOrigin>();
-    const traversed = this.index.workspaceUnresolved && new Set<string>();
     const visit = (state: State) => {
       const key = stateKey(state.id, state.gates);
       const seen = reached.get(key);
@@ -939,7 +936,6 @@ export class DependencyGraph {
       if (seen) seen.add(state.origin);
       else reached.set(key, new Set([state.origin]));
       pending.push(state);
-      traversed?.add(this.file(state.id));
     };
     const remember = (terminal: Terminal, impact: Impact) => {
       if (terminal.kind === 'action') return;
@@ -1052,7 +1048,7 @@ export class DependencyGraph {
     const limit = nodeLimited ? 'node budget' : depthLimit(unexplored.size, maxDepth);
     const partial = [limit, trpc, flowIssue, sdkIssue].filter(Boolean).join('; ') ||
       (uncertain ? 'dynamic URL fetch' : undefined);
-    return { routes: ordered, wrappers: [...wrappers.values()].sort((a, b) => compare(a.name, b.name)), partial, stops, traced, traversed };
+    return { routes: ordered, wrappers: [...wrappers.values()].sort((a, b) => compare(a.name, b.name)), partial, stops, traced };
   }
 
   routeStarts(route: Route): NodeId[] {
@@ -1088,8 +1084,15 @@ export class DependencyGraph {
       ? [...contexts.filter(([scope]) => scope !== edge.to), [edge.to, edge.site ?? '']] : contexts;
   }
 
+  private addWorkspaceDependencies(modules: Set<string> | undefined, id: NodeId, contexts: RenderContexts) {
+    if (!modules || typeof id !== 'number') return;
+    for (const entry of this.index.workspaceDependencies?.[id] ?? []) {
+      if (permits(entry.gates, contexts)) modules.add(entry.module);
+    }
+  }
+
   path(starts: NodeId[], goals: NodeId[], expired: () => boolean, route?: Route, pathname?: string): QueryResult {
-    const traversed = this.index.workspaceUnresolved && new Set<string>();
+    const unresolvedWorkspace = this.index.workspaceDependencies && new Set<string>();
     type Step = { id: NodeId; depth: number; weak: number; contexts: RenderContexts; previous?: Step; edge?: PathEdge; alternatives: Set<NodeId> };
     const depthBudget = 12;
     const targets = new Set(goals);
@@ -1132,7 +1135,7 @@ export class DependencyGraph {
       const next = new Map<NodeId, Step>();
       for (const current of layer) {
         if (expired()) break;
-        traversed?.add(this.file(current.id));
+        this.addWorkspaceDependencies(unresolvedWorkspace, current.id, current.contexts);
         trpc ??= this.coverageIssue(current.id) ?? this.unresolvedTrpc(current.id, false);
         if (apiGoals.length && typeof current.id === 'number' && this.propRequests.get(current.id)?.some(request =>
           (!isTestFile(request.file) || isTestFile(this.file(starts[0]))) &&
@@ -1199,12 +1202,11 @@ export class DependencyGraph {
       [...new Set([reason, appCoverage, sdkIssue].filter(Boolean))].join('; ') || undefined;
     if (!goal) {
       const trace = this.traceImpact(goals, 6, false, expired);
-      for (const file of this.traceFiles(trace.visited) ?? []) traversed?.add(file);
       const pages = new Set(trace.terminals.flatMap(({ terminal }) => terminal.kind === 'page' ? [terminal.name] :
         terminal.pages?.map(page => page.url) ?? []));
       const notes = [graphRow(`# from reaches ${seen.size} nodes` +
         (pages.size ? `; to is reached from routes: ${[...pages].slice(0, 5).join(', ')}${pages.size > 5 ? ', +' + (pages.size - 5) : ''}` : ''))];
-      return { rows: [], notes, traversed, count: 'no directed path',
+      return { rows: [], notes, unresolvedWorkspace, count: 'no directed path',
         partial: coverage(partial ?? (route && this.index.pagesIssues?.[route.id]?.[0]) ?? trpc) ?? flowIssue ?? trace.trpc,
         scope: 'no directed path ' + scope };
     }
@@ -1244,7 +1246,7 @@ export class DependencyGraph {
     else rows.unshift(graphRow(`0 ${symbol?.kind ?? 'module'} ${location(this.file(origin.id), symbol?.line)} ${this.name(origin.id)}`, this.file(origin.id)));
     const notes = otherSteps.size ? [graphRow(`# alternatives: ${quantity(otherSteps.size, 'other shortest step')} (via ` +
       `${[...otherSteps].slice(0, 2).map(id => `${this.file(id)}#${this.name(id)}`).join(', ')})`)] : [];
-    return { rows, notes, traversed, count: quantity(goal.depth, 'hop'),
+    return { rows, notes, count: quantity(goal.depth, 'hop'),
       partial: coverage(partial ?? chosenIssue ?? pathIssue ?? (!this.index.pagesEdges ? trpc : undefined)),
       scope: 'shortest directed path ' + scope + (rows.some(row => /^\d+ trpc /.test(row.text)) ? ', including tRPC' : '') };
   }
@@ -1257,8 +1259,7 @@ export class DependencyGraph {
       (terminal.kind === 'action' || terminal.kind === 'middleware' ? [] : [terminal.file])));
     return graphRow(`# neighbors: ${callers.size} caller ${callers.size === 1 ? 'file' : 'files'}, ${callees.size} callees, reaches ${routes.size} routes` +
       (this.action(id) ? '; server action' : '') + (trace.trpc ? `; ${trace.trpc}` : '') +
-      (trace.stops.size ? `; ${moduleStops(trace.stops.size)}` : '') + '. Next: impact | callees',
-    ...(this.traceFiles(trace.visited) ?? []));
+      (trace.stops.size ? `; ${moduleStops(trace.stops.size)}` : '') + '. Next: impact | callees');
   }
 
   callees(seed: NodeId | NodeId[], depth: number, uses: boolean, expired: () => boolean, route?: Route): QueryResult {
@@ -1269,7 +1270,7 @@ export class DependencyGraph {
     const rows: QueryRow[] = [];
     const packages = new Set<string>();
     const notes: QueryRow[] = [];
-    const traversed = this.index.workspaceUnresolved && new Set<string>();
+    const unresolvedWorkspace = this.index.workspaceDependencies && new Set<string>();
     const project = new Set<string>();
     const renders = new Set<NodeId>();
     const fetches = new Set<string>();
@@ -1291,7 +1292,7 @@ export class DependencyGraph {
       if (typeof current.id === 'number') sdkIssue = strongerTransportIssue(sdkIssue, this.uncertainTransports.get(current.id));
       const d = current.depth + 1;
       const file = this.file(current.id);
-      traversed?.add(file);
+      this.addWorkspaceDependencies(unresolvedWorkspace, current.id, current.contexts);
       const parent = d > 1 ? ` < ${this.name(current.id)}` : '';
       const edges = (this.outgoing.get(current.id) ?? []).flatMap(edge => {
         if (!uses && edge.label === 'use') return [];
@@ -1373,7 +1374,7 @@ export class DependencyGraph {
     const partial = [budget ? 'node budget' : trpc, flowIssue,
       unresolved ? `${quantity(unresolved, 'unresolved call')} on local variables or parameters` : undefined,
       sdkIssue].filter(Boolean).join('; ');
-    return { rows, notes, traversed, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
+    return { rows, notes, unresolvedWorkspace, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
       (navigation.size ? `, ${navigation.size} navigation targets` : '') + (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };
   }

@@ -271,25 +271,16 @@ export class WorkspaceBindings {
     };
   }
 
-  unresolvedFor(file: SourceFile) {
-    const missing = this.unresolved.get(file.getFilePath());
-    if (!missing) return [];
-    const runtime = new Set<string>();
-    for (const literal of file.getImportStringLiterals()) {
-      const name = literal.getLiteralValue();
-      if (!missing.has(name)) continue;
-      const parent = literal.getParent();
-      if (Node.isImportDeclaration(parent)) {
-        const bindings = parent.getNamedImports();
-        if (parent.isTypeOnly() || (!parent.getDefaultImport() && bindings.length && bindings.every(binding => binding.isTypeOnly()))) continue;
-      } else if (Node.isExportDeclaration(parent)) {
-        const bindings = parent.getNamedExports();
-        if (parent.isTypeOnly() || (bindings.length && bindings.every(binding => binding.isTypeOnly()))) continue;
-      } else if (Node.isLiteralTypeNode(parent) || (Node.isExternalModuleReference(parent) &&
-          parent.getParentIfKind(ts.SyntaxKind.ImportEqualsDeclaration)?.isTypeOnly())) continue;
-      runtime.add(name);
-    }
-    return [...runtime].sort();
+  isUnresolved(file: SourceFile, module: string) {
+    return this.unresolved.get(file.getFilePath())?.has(module) ?? false;
+  }
+
+  unresolvedBinding(expression: Node) {
+    let root = expression;
+    while (Node.isPropertyAccessExpression(root) || Node.isElementAccessExpression(root)) root = root.getExpression();
+    if (!this.unresolved.has(root.getSourceFile().getFilePath())) return;
+    const binding = importBinding(root);
+    if (binding && this.isUnresolved(root.getSourceFile(), binding.module)) return binding.module;
   }
 
   resolve(expression: Node | undefined) {
