@@ -1802,10 +1802,11 @@ test('typed render collections of uninstalled package icons resolve externally',
   const file = path.join(root, 'app/page.tsx');
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8')
     .replace('const OPTS', 'declare function loadIcon(): typeof BellIcon;\n    const OPTS')
-    .replace('icon: ClockIcon', 'icon: loadIcon()'));
+    .replace('value: string; icon: typeof BellIcon', 'value: string; icon: typeof BellIcon; metadata?: () => any')
+    .replace('icon: ClockIcon', 'icon: loadIcon(), metadata: StoredIcon'));
   build();
   assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced/m);
-  assert.match(query('who_renders', 'StoredIcon'), /^# complete:/m);
+  assert.doesNotMatch(query('who_renders', 'StoredIcon'), /^# partial: component lookup key untraced/m);
 });
 
 test('typed recursive collection properties trace nested icons', t => {

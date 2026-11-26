@@ -1104,55 +1104,93 @@ export class QueryIndexBuilder {
     };
 
     const traceLookupInputs = (roots: Iterable<Node>, issue: NonNullable<ReturnType<typeof addLookupIssue>>) => {
-      const seen = new Set<Node>();
-      const visit = (input: Node | undefined) => {
-        if (!input || seen.has(input) || seen.size >= 128 || !projectFiles.has(input.getSourceFile())) return;
-        seen.add(input);
+      type Members = (string | null)[];
+      const seen = new Map<Node, Set<string>>();
+      let budget = 160;
+      const visit = (input: Node | undefined, members: Members = [], supplier?: SourceFile) => {
+        if (!input || --budget < 0 || !projectFiles.has(input.getSourceFile())) return;
+        const key = JSON.stringify(members);
+        const prior = seen.get(input) ?? new Set<string>();
+        if (prior.has(key)) return;
+        prior.add(key);
+        seen.set(input, prior);
         const id = byNode.get(input);
-        if (id !== undefined && index.symbols[id - 1].kind === 'component') {
+        if (!members.length && id !== undefined && index.symbols[id - 1].kind === 'component') {
           const uses = (index.scopedRenderValueIssues ??= {});
-          const valueFile = relativePath(input.getSourceFile());
-          if (!uses[id] || isTestFile(uses[id].file)) uses[id] = { ...issue, valueFile };
+          const valueFile = relativePath(supplier ?? input.getSourceFile());
+          if (!uses[id] || isTestFile(uses[id].file) || isTestFile(uses[id].valueFile)) uses[id] = { ...issue, valueFile };
           return;
         }
+        const follow = (node: Node | undefined, path = members) => visit(node, path, supplier);
         const prop = flow.read(input);
         if (prop) {
-          flow.values(prop).forEach(binding => visit(binding.value));
+          flow.values(prop).forEach(binding => visit(binding.value, members, binding.site.getSourceFile()));
           return;
         }
-        if (Node.isElementAccessExpression(input) || Node.isPropertyAccessExpression(input)) {
-          visit(input.getExpression());
+        if (Node.isPropertyAccessExpression(input)) {
+          follow(input.getExpression(), [input.getName(), ...members]);
+        } else if (Node.isElementAccessExpression(input)) {
+          const selector = input.getArgumentExpression();
+          for (const choice of selector ? finiteTemplateValues(selector) : [undefined]) {
+            follow(input.getExpression(), [choice ?? null, ...members]);
+          }
         } else if (Node.isIdentifier(input)) {
           const parent = input.getParent();
           const declarations = Node.isShorthandPropertyAssignment(parent)
             ? parent.getValueSymbol()?.getDeclarations() : declarationsOf(input);
-          declarations?.forEach(visit);
+          declarations?.forEach(declaration => follow(declaration));
         } else if (Node.isBindingElement(input)) {
-          const owner = input.getParent().getParent();
-          if (Node.isVariableDeclaration(owner)) visit(constValue(owner));
-          if (Node.isParameterDeclaration(owner)) visit(owner);
+          if (input.getDotDotDotToken()) return;
+          const pattern = input.getParent();
+          const property = input.getPropertyNameNode() ?? input.getNameNode();
+          const name = Node.isArrayBindingPattern(pattern) ? String(pattern.getElements().indexOf(input)) :
+            Node.isIdentifier(property) ? property.getText() : Node.isStringLiteral(property) ? property.getLiteralText() : undefined;
+          const owner = pattern.getParent();
+          if (name !== undefined) follow(Node.isParameterDeclaration(owner) ? owner : constValue(owner), [name, ...members]);
         } else if (Node.isParameterDeclaration(input)) {
           const callback = input.getParent();
           const call = throughWrappers(callback).getParent();
           if (Node.isCallExpression(call) && call.getArguments()[0] === throughWrappers(callback)) {
             const callee = call.getExpression();
             if (Node.isPropertyAccessExpression(callee) && ['map', 'flatMap', 'find', 'filter'].includes(callee.getName())) {
-              visit(callee.getExpression());
+              follow(callee.getExpression(), [null, ...members]);
             }
           }
         } else if (Node.isCallExpression(input)) {
-          input.getArguments().forEach(visit);
+          // An opaque factory can use its arguments to produce the selected member.
+          input.getArguments().forEach(argument => follow(argument, []));
         } else if (Node.isVariableDeclaration(input)) {
-          visit(constValue(input));
+          follow(constValue(input));
         } else if (Node.isExportAssignment(input)) {
-          visit(input.getExpression());
-        } else if (Node.isArrayLiteralExpression(input) || Node.isObjectLiteralExpression(input) ||
-            Node.isPropertyAssignment(input) || Node.isShorthandPropertyAssignment(input) ||
-            Node.isSpreadAssignment(input) || Node.isSpreadElement(input) || Node.isConditionalExpression(input)) {
-          input.forEachChild(child => {
-            if (!Node.isPropertyAssignment(input) || child === input.getInitializer()) visit(child);
-          });
-        } else visit(wrappedExpression(input));
+          follow(input.getExpression());
+        } else if (Node.isArrayLiteralExpression(input)) {
+          const [member, ...rest] = members;
+          const elements = input.getElements();
+          if (member == null || elements.some(Node.isSpreadElement)) {
+            for (const element of elements) {
+              if (Node.isSpreadElement(element)) follow(element.getExpression(), members);
+              else follow(element, rest);
+            }
+          } else if (/^(?:0|[1-9]\d*)$/.test(member)) follow(elements[Number(member)], rest);
+        } else if (Node.isObjectLiteralExpression(input)) {
+          const [member, ...rest] = members;
+          for (const property of [...input.getProperties()].reverse()) {
+            if (Node.isSpreadAssignment(property)) {
+              follow(property.getExpression(), members);
+            } else if (member == null || property.getName() === member) {
+              follow(property, rest);
+              if (member != null) break;
+            }
+          }
+        } else if (Node.isPropertyAssignment(input)) {
+          follow(input.getInitializer());
+        } else if (Node.isShorthandPropertyAssignment(input)) {
+          follow(input.getNameNode());
+        } else if (Node.isConditionalExpression(input)) {
+          const predicate = valueNode(input.getCondition());
+          if (!Node.isFalseLiteral(predicate)) follow(input.getWhenTrue());
+          if (!Node.isTrueLiteral(predicate)) follow(input.getWhenFalse());
+        } else follow(wrappedExpression(input));
       };
       for (const root of roots) visit(root);
     };
