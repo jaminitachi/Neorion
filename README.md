@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router and Pages Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
+Neorion maps Next.js App Router and Pages Router projects written in TypeScript or JavaScript. Source builds also support React Router v7 Framework Mode and Remix v2. Neorion answers architecture questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
@@ -117,14 +117,15 @@ Later tRPC tracing (#18) and query fixes (#23) add build time. A fresh ShareTab 
 
 ## Framework support
 
-Source builds were measured on two shallow, source-only checkouts. Build time and peak RSS are medians of three `neorion graph` runs. Registration matches compare route ID, module file, URL, parent and index flag against each framework's manifest builder.
+The table compares route ID, module file, parent, index flag and path against each framework's manifest. The query sample uses one question per query kind on each app.
 
-| App | Framework | Registration matches | Build time | Peak RSS | Query sample |
-| --- | --- | ---: | ---: | ---: | ---: |
-| [Indie Stack](https://github.com/remix-run/indie-stack/tree/56abb93bf81f635b574d9ca23eed05602699458a) | Remix v2 | 10/10 | 2.97 s | 346,944 KiB | 9 partial |
-| [Epic Stack](https://github.com/epicweb-dev/epic-stack/tree/893610db76127fb5a5f1ffa786bee6b050637429) | React Router 7.16 | 49/49 | 8.12 s | 410,864 KiB | 9 partial |
+| App | Framework | Registration matches | Complete without dependencies | Complete with dependencies |
+| --- | --- | ---: | ---: | ---: |
+| [Indie Stack](https://github.com/remix-run/indie-stack/tree/56abb93bf81f635b574d9ca23eed05602699458a) | Remix v2 | 10/10 | 2/9 | 7/9 |
+| [Epic Stack](https://github.com/epicweb-dev/epic-stack/tree/893610db76127fb5a5f1ffa786bee6b050637429) | React Router 7.16 | 49/49 | 0/9 | 5/9 |
+| [React Router docs](https://github.com/remix-run/react-router-website/tree/5f1b6fb9016192acfa2d24edfcb2666efd234ff7) | React Router 7.15 | 15/15 | 0/9 | 6/9 |
 
-Partial results included missing dependencies and runtime destinations. Epic Stack also had unresolved forwarding through external providers and a possible submit method after a JSX spread.
+Missing packages can make source-only results partial. With dependencies installed, partial results still included form props that could change a method or destination, runtime links and redirects, and a diff that reached the query's depth limit. Querying the docs site's dev-only playground registration also reported the runtime route addition.
 
 ## Install
 

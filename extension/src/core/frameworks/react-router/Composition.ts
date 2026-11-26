@@ -1,5 +1,5 @@
 import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
-import { conditionalAt, declarationsOf } from '../../analyzers/ArchitectureFacts';
+import { conditionalAt, declarationsOf, isPackageSpecifier } from '../../analyzers/ArchitectureFacts';
 import { bindingOf, executionSites, functionNode, valueNode } from '../../analyzers/StaticBindings';
 import { startLine } from '../../analyzers/SourceLines';
 import type { Wrapper } from '../../../mcp/Index';
@@ -69,13 +69,19 @@ export function outletChains(definition: Node, slot: 'children' | 'outlet', file
       if (Node.isIdentifier(tag) && /^[a-z]/.test(tag.getText())) return children;
       const name = tag.getText();
       const target = declarationsOf(tag).find(candidate => files.has(candidate.getSourceFile()) && functionNode(candidate));
-      const context = Node.isPropertyAccessExpression(tag) && tag.getName() === 'Provider';
-      const knownForward = context || imported?.module === 'react' && ['Fragment', 'StrictMode', 'Suspense'].includes(imported.name);
+      const value = valueNode(tag);
+      const factory = Node.isCallExpression(value) ? frameworkBinding(value.getExpression()) : undefined;
+      const context = Node.isPropertyAccessExpression(tag) && tag.getName() === 'Provider' ||
+        factory?.module === 'react' && factory.name === 'createContext';
+      const external = !target && imported && isPackageSpecifier(imported.module) && !imported.module.startsWith('~/')
+        ? imported.module : undefined;
+      const provider = name.endsWith('Provider') || !!imported?.name.endsWith('Provider');
+      const knownForward = context || external && provider ||
+        imported?.module === 'react' && ['Fragment', 'StrictMode', 'Suspense'].includes(imported.name);
       const site = locate(tag);
       const wrapper: Wrapper = {
         ...(target ? locate(target) : site), symbol: target?.getSymbol()?.getName() ?? name,
-        conditional: false, provider: context || name.endsWith('Provider'),
-        external: !target && imported && !imported.module.startsWith('.') ? imported.module : undefined
+        conditional: false, provider: context || provider, external
       };
       const add = (slot: Slot): Slot => ({ ...slot,
         wrappers: [{ ...wrapper, conditional: slot.conditional, possible: slot.possible || undefined }, ...slot.wrappers],

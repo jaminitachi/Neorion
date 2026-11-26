@@ -1,5 +1,6 @@
 import type { Node, SourceFile } from 'ts-morph';
 import type { RouteNode } from '../../types/GraphTypes';
+import type { RouterRegistryIssue } from '../../../mcp/Index';
 import type { RouterFramework } from '../RouterProbe';
 
 export type Registration = {
@@ -12,7 +13,7 @@ export type Registration = {
   children?: Registration[];
 };
 
-export type Issue = (site: Node | undefined, message: string) => void;
+export type Issue = (site: Node | undefined, message: string, registration?: RouterRegistryIssue['registration']) => void;
 
 export type RouterRoute = RouteNode & {
   router: NonNullable<RouteNode['router']>;
@@ -25,7 +26,7 @@ export type RouterProject = {
   app: string;
   basename: string;
   routes: RouterRoute[];
-  registryIssues: string[];
+  registryIssues: RouterRegistryIssue[];
   registryFiles: string[];
 };
 

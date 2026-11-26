@@ -4,7 +4,7 @@ import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
 import { ignoredProjectDirectories, nextConfig, projectConfig } from './FindProject';
 import { routerFramework } from './frameworks/RouterProbe';
-import { projectSnapshot } from './ProjectSnapshot';
+import { projectSnapshot, routerDependencySnapshot } from './ProjectSnapshot';
 import { readNextConfig } from './analyzers/NextConfig';
 import { WorkspaceBindings } from './analyzers/WorkspaceBindings';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
@@ -37,6 +37,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     options.onProgress?.("Analyzing project structure...");
 
     const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
+    const routerDependencies = framework && options.markdown ? routerDependencySnapshot(projectPath) : undefined;
     const project = openProject(projectPath);
     if (framework && !project.getCompilerOptions().moduleResolution) {
         // Framework projects are bundled, including source-only checkouts
@@ -66,7 +67,10 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
         .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown, router);
 
-    if (analysis.index) analysis.index.projectSnapshot = snapshot;
+    if (analysis.index) {
+        analysis.index.projectSnapshot = snapshot;
+        if (analysis.index.router) analysis.index.router.dependencies = routerDependencies;
+    }
 
     const directories = new Map<string, DirectoryMetadata>();
     const routeDirectories = (router ? [router.app] : [appDir, pagesDir]).map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));

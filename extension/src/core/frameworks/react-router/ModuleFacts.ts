@@ -1,11 +1,12 @@
 import { isBuiltin } from 'node:module';
 import { createHash } from 'node:crypto';
+import { posix as path } from 'node:path';
 import { Node, SyntaxKind, ts, type SourceFile } from 'ts-morph';
 import { conditionalAt, httpRequest } from '../../analyzers/ArchitectureFacts';
 import { bindingOf, functionNode, valueNode } from '../../analyzers/StaticBindings';
 import { startLine } from '../../analyzers/SourceLines';
-import { type QueryIndex, type RouterEdge, type RouterIssue, type Wrapper } from '../../../mcp/Index';
-import { routerAncestry } from '../RouterMatch';
+import { ROUTER_INDEX_REVISION, type QueryIndex, type RouterEdge, type RouterIssue, type Wrapper } from '../../../mcp/Index';
+import { matchRouterRoutes, routerAncestry } from '../RouterMatch';
 import { outletChains, redirectPackages } from './Composition';
 import { resolveReference, routerReferences, type Reference } from './Navigation';
 import type { RouterProject, RouterRoute } from './RouteTypes';
@@ -21,6 +22,7 @@ type Context = {
   symbol: (node: Node) => number | undefined;
   owner: (node: Node) => number | undefined;
   fileSymbol: (file: string) => number | undefined;
+  handledCall: (node: Node) => void;
 };
 
 const entries = new Map([
@@ -42,6 +44,18 @@ function runtimeModules(file: SourceFile) {
 
 const knownModules = new Set([...redirectPackages, '@react-router/dev/routes', '@react-router/dev/vite',
   '@react-router/fs-routes', '@remix-run/dev', '@remix-run/dev/vite', 'react-router-auto-routes']);
+
+function assetImport(specifier: string) {
+  const [filename, query] = specifier.split('?', 2);
+  return /\.(?:css|scss|sass|less|styl|stylus|pcss|png|jpe?g|gif|svg|webp|avif|ico|bmp|tiff?|apng|woff2?|ttf|otf|eot)$/i.test(filename) ||
+    /(?:^|&)(?:url|raw|inline)(?:=|&|$)/.test(query ?? '');
+}
+
+function serverBuildImport(file: string, specifier: string) {
+  if (!/^(?:server(?:\/(?:index|app|server|entry))?|(?:[^/]+\/)*entry\.server)\.[cm]?[jt]sx?$/.test(file)) return false;
+  return specifier.startsWith('virtual:react-router/') ||
+    specifier.startsWith('.') && /^build\/server\/[^/].*\.[cm]?js$/.test(path.normalize(path.join(path.dirname(file), specifier)));
+}
 
 function enforcedActionMethod(definition: Node) {
   const fn = functionNode(definition);
@@ -75,24 +89,26 @@ function enforcedActionMethod(definition: Node) {
   if (Node.isPropertyAssignment(status) && status.getInitializer()?.getText() === '405') return method;
 }
 
-export function indexRouterFacts({ index, project, files, relative, exports, symbol, owner, fileSymbol }: Context) {
+export function indexRouterFacts({ index, project, files, relative, exports, symbol, owner, fileSymbol, handledCall }: Context) {
   const { routes, framework, basename, registryIssues } = project;
   const issues: RouterIssue[] = [];
   const edges: RouterEdge[] = [];
-  index.router = { framework, basename, registryIssues, registryFiles: project.registryFiles, issues, edges };
+  index.router = { revision: ROUTER_INDEX_REVISION, framework, basename, registryIssues, registryFiles: project.registryFiles, issues, edges };
   const fileSet = new Set(files);
   const compiler = files[0]?.getProject().getCompilerOptions();
   const byId = new Map(routes.map(route => [route.id, route]));
   const indexed = new Map(index.routes.flatMap(route => route.router ? [[route.router.id, route] as const] : []));
   const loc = (node: Node) => ({ file: relative(node.getSourceFile()), line: startLine(node) });
   const issueKeys = new Set<string>();
-  const addIssue = (site: Node, message: string, kind: RouterIssue['kind'], route?: number) => {
-    const { file, line } = loc(site);
-    const reason = `${message} (${file}:${line})`;
-    const key = JSON.stringify([reason, kind, route]);
+  const recordIssue = (issue: RouterIssue) => {
+    const key = JSON.stringify(issue);
     if (issueKeys.has(key)) return;
     issueKeys.add(key);
-    issues.push({ reason, file, kind, route });
+    issues.push(issue);
+  };
+  const addIssue = (site: Node, message: string, kind: 'import' | 'module' | 'wrapper', route?: number) => {
+    const { file, line } = loc(site);
+    recordIssue({ reason: `${message} (${file}:${line})`, file, kind, route });
   };
   const definitions = new Map<RouterRoute, Map<string, { node: Node; entry: Entry }>>();
   for (const route of routes) {
@@ -265,22 +281,39 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
     owners.push(route);
     byModule.set(route.file, owners);
   }
+  const additions = registryIssues.flatMap(issue => issue.registration ? [{
+    ...issue, router: { id: issue.registration.id, parentId: 'root', pattern: issue.registration.url }
+  }] : []);
   const edgesSeen = new Set<string>();
   const reference = (ref: Reference) => {
     const { site, kind, via, method } = ref;
     const position = loc(site);
     const from = owner(site) ?? fileSymbol(position.file);
     if (from === undefined) return;
+    handledCall(site);
     const origins = [...navigable.get(from) ?? []];
     const fromModule = byModule.get(position.file) ?? [];
     const context = origins.length ? origins : fromModule.length && from === fileSymbol(position.file) ? fromModule : [undefined];
     for (const origin of context) {
       const source = origin && indexed.get(origin.id);
       const resolution = resolveReference(ref, origin, routes, byId, basename);
-      if (resolution.unresolved || ref.possible) addIssue(site, `${via} destination or method unresolved`, 'navigation', source?.id);
-      if (resolution.unresolved) continue;
       const matches = resolution.targets ?? [];
-      if (matches.length > 1) addIssue(site, `${via} destination is ambiguous`, 'navigation', source?.id);
+      const request = (kind === 'load' || kind === 'submit') && via !== 'useRouteLoaderData';
+      const destinations = !ref.destinationUncertain && resolution.targets
+        ? matches.map(target => indexed.get(target.id)!.id) : undefined;
+      const navigationIssue = (message: string) => recordIssue({
+        kind: 'navigation', reason: `${via} ${message} (${position.file}:${position.line})`,
+        file: position.file, route: source?.id, owner: from, request, destinations
+      });
+      if (resolution.unresolved || ref.possible) navigationIssue('destination or method unresolved');
+      if (matches.length > 1) navigationIssue('destination is ambiguous');
+      if (resolution.pathname) for (const addition of additions) {
+        if (matchRouterRoutes(resolution.pathname, [addition], resolution.basename).length) {
+          recordIssue({ kind: 'registry', reason: addition.reason, file: position.file, route: source?.id, owner: from,
+            destinations: request ? matches.map(target => indexed.get(target.id)!.id) : [] });
+        }
+      }
+      if (resolution.unresolved) continue;
       for (const target of matches) {
         const destination = indexed.get(target.id)!;
         const load = kind === 'load' || kind === 'submit';
@@ -311,7 +344,7 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
   for (const file of files) {
     for (const statement of runtimeModules(file)) {
       const specifier = statement.getModuleSpecifierValue();
-      if (!specifier || knownModules.has(specifier) || isBuiltin(specifier)) continue;
+      if (!specifier || knownModules.has(specifier) || isBuiltin(specifier) || assetImport(specifier)) continue;
       const resolved = statement.getModuleSpecifierSourceFile();
       if (!resolved || !resolved.isInNodeModules() && (!fileSet.has(resolved) && !resolved.isDeclarationFile())) {
         addIssue(statement, `unresolved import ${specifier}`, 'import');
@@ -322,6 +355,7 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
             ...statement.getDefaultImport() ? ['default'] : []] :
           statement.getNamedExports().filter(entry => !entry.isTypeOnly()).map(entry => entry.getName());
         for (const name of names) {
+          if (name === 'default' && resolved.getExtension() === '.json') continue;
           if (!exported?.has(name)) addIssue(statement, `unresolved import ${name} from ${specifier}`, 'import');
         }
       }
@@ -333,8 +367,10 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
         if (called.getKind() === SyntaxKind.ImportKeyword || Node.isIdentifier(called) && called.getText() === 'require' &&
             !called.getSymbol()?.getDeclarations().some(node => fileSet.has(node.getSourceFile()))) {
           const specifier = stringValue(site.getArguments()[0]);
-          const resolved = specifier && compiler && ts.resolveModuleName(specifier, file.getFilePath(), compiler, ts.sys).resolvedModule;
-          if (!specifier || !knownModules.has(specifier) && !isBuiltin(specifier) && !resolved) {
+          const ignored = specifier && (knownModules.has(specifier) || isBuiltin(specifier) || assetImport(specifier) ||
+            serverBuildImport(relative(file), specifier));
+          const resolved = !ignored && specifier && compiler && ts.resolveModuleName(specifier, file.getFilePath(), compiler, ts.sys).resolvedModule;
+          if (!ignored && !resolved) {
             addIssue(site, specifier ? `unresolved dynamic import ${specifier}` : 'dynamic import target unresolved', 'import');
           }
         }

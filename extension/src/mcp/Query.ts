@@ -1,10 +1,10 @@
-import { matchRouterRoutes } from '../core/frameworks/RouterMatch';
+import { matchRouterRoutes, routerAncestry } from '../core/frameworks/RouterMatch';
 import { matchNextRoutes, normalizeNextUrl, routeSegments, segmentRank } from '../core/analyzers/NextRouteMatch';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION, isTestFile as testFile, renderSiteKey,
+import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION, isTestFile as testFile, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -664,41 +664,83 @@ export class QueryEngine {
     };
   }
 
-  private frameworkCoverage(tool: QueryKind, target: string, to: string, includeTests: boolean, result: Result) {
+  private frameworkCoverage(args: ReturnType<typeof validate>, result: Result) {
+    const { tool, target, to, filter, includeTests } = args;
     const router = this.index.router!;
+    if (router.revision !== ROUTER_INDEX_REVISION) return 'regenerate legacy router index';
     const files = new Set([...(result.targets ?? []), ...result.rows.flatMap(row => row.files)]);
-    const named = [target, to].filter(text => text && (text.startsWith('/') || text.startsWith('route:') ||
-      !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text)));
-    const matched = ['wrappers', 'path', 'callees', 'api_consumers'].includes(tool)
-      ? named.flatMap(text => this.matchFrameworkRoute(text, tool === 'api_consumers' ? 'api' : undefined)) : [];
-    const ids = new Set(matched.length ? matched.map(route => route.id) :
-      this.index.routes.filter(route => files.has(route.file)).map(route => route.id));
+    const named = ['wrappers', 'path', 'callees', 'api_consumers', 'impact'].includes(tool)
+      ? [target, to].filter(text => text.startsWith('/') || text.startsWith('route:') ||
+        !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text)) : [];
+    const routes = this.index.routes;
+    const matched = named.flatMap(text => this.matchFrameworkRoute(text, tool === 'api_consumers' ? 'api' : undefined));
+    const ids = new Set((named.length ? matched : routes.filter(route => files.has(route.file))).map(route => route.id));
+    const byRouteId = new Map(routes.flatMap(route => route.router ? [[route.router.id, route] as const] : []));
+    const ancestry = new Set(matched.flatMap(route => routerAncestry(route, byRouteId).map(parent => parent.id)));
     const paths = Object.keys(this.index.files);
-    const byId = new Map(this.index.fileSymbols?.map((id, i) => [id, paths[i]]));
-    const related = new Set(files);
-    const pending = [...byId].flatMap(([id, file]) => files.has(file) ? [id] : []);
-    const visited = new Set<number>();
-    for (let i = 0; i < pending.length; i++) {
-      const id = pending[i];
-      if (visited.has(id)) continue;
-      visited.add(id);
-      for (const [to, , kind] of this.index.moduleImports?.[id] ?? []) {
-        const file = byId.get(to);
-        if (!file || kind === 'type') continue;
-        related.add(file);
-        pending.push(to);
+    const fileIds = new Map(this.index.fileSymbols?.map((id, i) => [paths[i], id]));
+    const reachable = (roots: Iterable<string>) => {
+      const reached = new Set(roots);
+      const pending = [...reached];
+      for (let i = 0; i < pending.length; i++) {
+        const id = fileIds.get(pending[i]);
+        for (const [to, , kind] of id === undefined ? [] : this.index.moduleImports?.[id] ?? []) {
+          const file = this.symbols.get(to)?.file;
+          if (!file || kind === 'type' || reached.has(file)) continue;
+          reached.add(file);
+          pending.push(file);
+        }
       }
-    }
-    const reasons = [...router.registryIssues];
-    const reverse = ['impact', 'changes', 'who_renders', 'rename_impact', 'api_consumers'].includes(tool);
+      return reached;
+    };
+    const traversed = result.routerTraversal;
+    const traversalFiles = [...traversed ?? []].flatMap(id => this.symbols.get(id)?.file ?? []);
+    const related = tool === 'rename_impact' || tool === 'search' ? files : reachable([...files, ...traversalFiles]);
+    const forward = tool === 'callees' || tool === 'path';
+    const inverse = tool === 'who_renders' || tool === 'impact' || tool === 'changes' && files.size > 0;
+    const routeSearch = tool === 'search' && ['any', 'route', 'api'].includes(filter);
+    // Path's destination does not determine the source registration's context.
+    const origin = forward && named.includes(target) ? this.matchFrameworkRoute(target) : [];
+    const origins = new Set(origin.flatMap(route => routerAncestry(route, byRouteId).map(parent => parent.id)));
+    const inTraversal = (owner: number, route?: number) => traversed?.has(owner) &&
+      (route === undefined || !origins.size || origins.has(route));
+    const navigation = forward && (router.edges.some(edge => edge.from !== undefined && inTraversal(edge.from, edge.source)) ||
+      router.issues.some(issue => issue.kind === 'navigation' && inTraversal(issue.owner, issue.route)));
+    const routeScope = named.length > 0 || !!navigation || inverse || routeSearch;
+    const targetFiles = new Set(result.targets ?? []);
+    const root = byRouteId.get('root');
+    const reasons = router.registryIssues.filter(({ registration }) => {
+      if (!registration) return routeScope;
+      const { url, file, id } = registration;
+      const candidate = { router: { id, pattern: url, parentId: 'root' } };
+      if (named.some(text => text === 'route:' + id || !text.startsWith('/') && text === file ||
+        text.startsWith('/') && matchRouterRoutes(text, [candidate], router.basename).length)) return true;
+      if (routeSearch) {
+        const needle = target.toLowerCase();
+        return [url, file, id].some(value => value.toLowerCase().includes(needle)) ||
+          target.startsWith('/') && matchRouterRoutes(target, [candidate], router.basename).length > 0;
+      }
+      if (!inverse) return false;
+      if (files.has(file) || root && (ids.has(root.id) ||
+        [...reachable([root.file])].some(dependency => targetFiles.has(dependency)))) return true;
+      if (!fileIds.has(file)) return targetFiles.size > 0 || tool === 'changes';
+      return [...reachable([file])].some(dependency => targetFiles.has(dependency) || tool === 'changes' && files.has(dependency));
+    }).map(issue => issue.reason);
+
     const relevant = router.issues.filter(issue => {
       if (!includeTests && testFile(issue.file) && !files.has(issue.file)) return false;
-      if (issue.kind === 'import') return tool === 'search' || reverse || related.has(issue.file);
-      if (issue.kind === 'navigation') return tool === 'api_consumers' ||
-        (tool === 'path' || tool === 'callees') && (issue.route === undefined || ids.has(issue.route) || related.has(issue.file));
-      if (issue.kind === 'wrapper') return tool === 'who_renders' || tool === 'impact' || tool === 'changes' ||
-        ['wrappers', 'path', 'callees'].includes(tool) && ids.has(issue.route ?? 0);
-      return reverse || ids.has(issue.route ?? 0) || related.has(issue.file) || tool === 'search';
+      if (issue.kind === 'import') return related.has(issue.file);
+      if (issue.kind === 'navigation') return tool === 'api_consumers' && matched.length > 0 && issue.request &&
+        (!issue.destinations || issue.destinations.some(id => ids.has(id))) || forward && inTraversal(issue.owner, issue.route);
+      if (issue.kind === 'registry') return forward && inTraversal(issue.owner, issue.route) ||
+        tool === 'api_consumers' && issue.destinations.some(id => ids.has(id));
+      if (issue.route === undefined) return related.has(issue.file);
+      if (issue.kind === 'module') return ids.has(issue.route) || ancestry.has(issue.route) || related.has(issue.file);
+      if (tool === 'wrappers' || tool === 'path' || tool === 'callees' && named.length) return ids.has(issue.route);
+      if (!inverse) return false;
+      if (ids.has(issue.route)) return true;
+      const affected = routes.find(route => route.id === issue.route);
+      return !!affected && [...reachable([affected.file])].some(file => targetFiles.has(file));
     });
     relevant.sort((a, b) => Number(!files.has(a.file)) - Number(!files.has(b.file)));
     reasons.push(...relevant.map(issue => issue.reason));
@@ -1048,7 +1090,7 @@ export class QueryEngine {
         }
       }
     }
-    if (this.index.router) result.partial = this.frameworkCoverage(tool, target, args.to, !!args.includeTests, result);
+    if (this.index.router) result.partial = this.frameworkCoverage(args, result);
 
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
     const status = new Map<string, boolean>();

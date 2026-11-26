@@ -19,6 +19,20 @@ export function defaultValue(source: SourceFile | undefined) {
 
 export function readRouteConfig(source: SourceFile, app: string, issue: Issue): Registration[] {
   const checked = new Set<Node>();
+  const exported = defaultValue(source);
+  const root = valueNode(exported);
+  const appendedRoute = (mutation: Node | undefined) => {
+    if (!Node.isCallExpression(mutation)) return;
+    const [entry, ...rest] = mutation.getArguments();
+    if (rest.length || !Node.isCallExpression(entry)) return;
+    const helper = frameworkBinding(entry.getExpression());
+    const args = entry.getArguments();
+    if (helper?.module !== '@react-router/dev/routes' || helper.name !== 'route' || args.length !== 2) return;
+    const pathname = stringValue(args[0]);
+    const file = stringValue(args[1]);
+    if (pathname === undefined || /[:*?%#\\]/.test(pathname) || !file) return;
+    return { url: '/' + trimPath(pathname), file, id: path.posix.normalize(file).replace(/\.[^/.]+$/, '') };
+  };
   const definition = (node: Node | undefined) => {
     const value = valueNode(node);
     const declaration = bindingOf(node);
@@ -34,7 +48,11 @@ export function readRouteConfig(source: SourceFile, app: string, issue: Issue): 
             assign && assign.getLeft() === parent && assign.getOperatorToken().getKind() === SyntaxKind.EqualsToken ||
             Node.isCallExpression(parent) && parent.getArguments().includes(ref) &&
               !['route', 'layout', 'prefix'].includes(frameworkBinding(parent.getExpression())?.name ?? '')) {
-          issue(ref, 'route config is mutated at runtime');
+          // A single literal append to the exported array can only add this
+          // registration. Unknown mutations may change any registration.
+          const registration = value === root && Node.isPropertyAccessExpression(parent) && parent.getName() === 'push' &&
+            parent.getExpression() === ref ? appendedRoute(parent.getParent()) : undefined;
+          issue(ref, 'route config is mutated at runtime', registration);
         }
       }
     }
@@ -143,5 +161,5 @@ export function readRouteConfig(source: SourceFile, app: string, issue: Issue): 
     return [{ id: routeId ?? path.posix.normalize(file).replace(/\.[^/.]+$/, ''), file, path: pathname, index,
       caseSensitive, site: node, children: children && walk(children, stack) }];
   };
-  return walk(defaultValue(source));
+  return walk(exported);
 }

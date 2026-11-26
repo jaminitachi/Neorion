@@ -31,12 +31,16 @@ function viteOptions(file: SourceFile | undefined, framework: RouterFramework, i
 }
 
 export function analyzeRouter(root: string, project: Project, framework: RouterFramework): RouterProject {
-  const registryIssues: string[] = [];
+  const registryIssues: RouterProject['registryIssues'] = [];
   const registryFiles = new Set<string>();
   const relative = (file: SourceFile) => slash(path.relative(root, file.getFilePath()));
-  const issue: Issue = (site, message) => {
+  const issue: Issue = (site, message, registration) => {
     const reason = site ? `${message} (${relative(site.getSourceFile())}:${startLine(site)})` : message;
-    if (!registryIssues.includes(reason)) registryIssues.push(reason);
+    const affected = registration && {
+      ...registration, file: slash(path.relative(root, path.resolve(app, registration.file)))
+    };
+    if (!registryIssues.some(entry => entry.reason === reason && entry.registration?.url === affected?.url &&
+        entry.registration?.file === affected?.file)) registryIssues.push({ reason, registration: affected });
   };
   const realRoot = realpathSync(root);
   const sourceFor = (file: string) => {
@@ -106,8 +110,10 @@ export function analyzeRouter(root: string, project: Project, framework: RouterF
     }
     const filename = path.resolve(app, entry.file);
     const source = sourceFor(filename);
-    if (!source) issue(entry.site, `route module unresolved (${entry.file})`);
-    if (!within(root, filename)) return;
+    if (!within(root, filename)) {
+      issue(entry.site, `route module unresolved (${entry.file})`);
+      return;
+    }
     const parentPath = parent ? trimPath(parent.path) : '';
     const local = trimPath(entry.path ?? '');
     let full = [parentPath, local].filter(Boolean).join('/');
@@ -119,6 +125,7 @@ export function analyzeRouter(root: string, project: Project, framework: RouterF
       full = local;
     }
     const file = slash(path.relative(root, filename));
+    if (!source) issue(entry.site, `route module unresolved (${entry.file})`, { url: '/' + full, id: entry.id, file: entry.file });
     const route: RouterRoute = {
       id: entry.id, file, path: '/' + full, source, site: entry.site,
       type: !parent || !entry.index && entry.path === undefined ? 'layout' : 'page',

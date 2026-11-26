@@ -15,6 +15,8 @@ export type Reference = {
   relative?: string;
   routeId?: string;
   possible?: boolean;
+  destinationUncertain?: boolean;
+  indexUncertain?: boolean;
   document?: boolean;
 };
 
@@ -55,8 +57,17 @@ function destination(node: Node | undefined, absent: string | undefined) {
     }
   }
   const alternatives = urlTexts(node)?.filter(value => !value.dynamic && !value.partial);
-  if (alternatives?.length && alternatives.every(value => value.text === alternatives[0].text)) return { url: alternatives[0].text };
-  return { url: undefined, possible: true };
+  if (alternatives?.length && alternatives.every(value => value.text === alternatives[0].text)) {
+    const url = alternatives[0].text;
+    const [location] = url.split('#', 1);
+    const [pathname] = location.split('?', 1);
+    // No prefix proves whether this is local, relative or external.
+    if (/^[\x00\x01]/.test(pathname)) return { possible: true, destinationUncertain: true };
+    const uncertain = /[\x00\x01]/.test(pathname) || undefined;
+    return { url, possible: uncertain, destinationUncertain: uncertain,
+      indexUncertain: /[\x00\x01]/.test(location.slice(pathname.length)) || undefined };
+  }
+  return { url: undefined, possible: true, destinationUncertain: true };
 }
 
 type JsxAttributes = Map<string, Node | undefined>;
@@ -103,12 +114,13 @@ export function routerReferences(file: SourceFile): Reference[] {
       const method = isForm ? stringValue(attributes.get('method'))?.toUpperCase() ??
         (attributes.has('method') ? undefined : 'GET') : undefined;
       const resolved = destination(attributes.get(target), isForm && !attributes.has('action') ? '.' : undefined);
+      const destinationUncertain = resolved.destinationUncertain || unknown(target) ||
+        !resolved.url?.startsWith('/') && (unknown('relative') || attributes.has('relative') && relative === undefined);
       references.push({ site, via: name, relative, method,
         document: attributes.has('reloadDocument') && !Node.isFalseLiteral(valueNode(attributes.get('reloadDocument'))),
         kind: isForm ? method === 'GET' ? 'load' : 'submit' : 'navigate',
-        ...resolved,
-        possible: resolved.possible || unknown(target) || isForm && unknown('method') ||
-          unknown('relative') && !resolved.url?.startsWith('/') || attributes.has('relative') && relative === undefined || undefined });
+        ...resolved, destinationUncertain,
+        possible: destinationUncertain || isForm && unknown('method') || undefined });
       return;
     }
     if (!Node.isCallExpression(site)) return;
@@ -139,33 +151,46 @@ export function routerReferences(file: SourceFile): Reference[] {
       return;
     }
     const method = stringValue(opts?.get('method'))?.toUpperCase() ?? (opts?.has('method') || options && !opts ? undefined : 'GET');
+    const resolved = destination(opts?.get('action'), '.');
+    const implicitAction = !opts?.has('action') && Node.isIdentifier(arg);
     references.push({ kind: method === 'GET' ? 'load' : 'submit', site, via: origin ?? 'fetcher.submit', relative, method,
-      ...destination(opts?.get('action'), '.'), possible: possible || !opts?.has('action') && Node.isIdentifier(arg) ||
+      ...resolved, destinationUncertain: resolved.destinationUncertain || possible || implicitAction,
+      possible: resolved.possible || possible || implicitAction ||
         !opts?.has('method') && !!arg && !Node.isNullLiteral(valueNode(arg)) && !Node.isObjectLiteralExpression(valueNode(arg)) });
   });
   return references;
 }
 
 export function resolveReference(ref: Reference, origin: RouterRoute | undefined, routes: RouterRoute[],
-  byId: Map<string, RouterRoute>, basename: string) {
+  byId: Map<string, RouterRoute>, basename: string): {
+    targets?: RouterRoute[]; unresolved?: boolean; pathname?: string; basename?: string;
+  } {
   if (ref.via === 'useRouteLoaderData') {
     if (ref.routeId === undefined || !origin) return { unresolved: true };
     const ancestor = routerAncestry(origin, byId).find(entry => entry.id === ref.routeId);
     return { targets: ancestor ? [ancestor] : [] };
   }
   const { url } = ref;
-  if (url === undefined || ref.kind === 'submit' && !ref.method ||
-      ref.relative !== undefined && !['path', 'route'].includes(ref.relative)) return { unresolved: true };
+  if (url === undefined || ref.relative !== undefined && !['path', 'route'].includes(ref.relative)) return { unresolved: true };
+  const unresolved = ref.kind === 'submit' && !ref.method;
   if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(url)) return { targets: [] };
   const mode = ref.kind === 'submit' || ref.kind === 'load' ? ref.kind : 'url';
+  const match = (absolute: string, base: string) => {
+    const pathname = absolute.split(/[?#]/, 1)[0];
+    const targets = mode !== 'url' && ref.indexUncertain
+      ? [...new Set([...matchRouterRoutes(pathname, routes, base, mode),
+        ...matchRouterRoutes(pathname + '?index', routes, base, mode)])]
+      : matchRouterRoutes(absolute, routes, base, mode);
+    return { targets, pathname, basename: base, unresolved };
+  };
   if (url.startsWith('/')) {
     const absolute = ref.kind === 'redirect' ? url : basename.replace(/\/$/, '') + url;
-    return { targets: matchRouterRoutes(absolute, routes, basename, mode) };
+    return match(absolute, basename);
   }
   if (!origin) return { unresolved: true };
   if ((url === '.' || url === '') && mode !== 'url' &&
       (origin.router.pattern || origin.router.index || origin.id === 'root') &&
-      (!origin.router.index || !['fetcher.load', 'fetch'].includes(ref.via))) return { targets: [origin] };
+      ref.via !== 'fetch') return { targets: [origin], unresolved };
   const [pathname] = url.split(/[?#]/, 1);
   const query = url.slice(pathname.length);
   if (!pathname && mode === 'url') return { targets: [origin] };
@@ -182,5 +207,5 @@ export function resolveReference(ref: Reference, origin: RouterRoute | undefined
     else base.push(part);
   }
   if (base.some(part => part.startsWith(':') || part === '*' || part.endsWith('?'))) return { unresolved: true };
-  return { targets: matchRouterRoutes('/' + base.join('/') + query, routes, '/', mode) };
+  return match('/' + base.join('/') + query, '/');
 }

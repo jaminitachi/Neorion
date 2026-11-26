@@ -32,6 +32,12 @@ export function projectSnapshot(root: string) {
     return hash.digest('hex');
 }
 
+// Installing dependencies can change router import resolution without changing tracked sources.
+export function routerDependencySnapshot(root: string) {
+    const directory = statSync(join(root, 'node_modules'), { throwIfNoEntry: false });
+    return directory?.isDirectory() ? JSON.stringify([directory.ino, directory.mtimeMs, directory.ctimeMs]) : '';
+}
+
 export function workspaceInputsHash(root: string, offset: string, files: string[]) {
   if (offset !== '' && !/^\.\.(?:\/\.\.){0,7}$/.test(offset) || files.length > 256) return;
   const base = resolve(root, offset);

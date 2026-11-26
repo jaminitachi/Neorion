@@ -66,9 +66,9 @@ export function matchRouterRoutes<T extends { router?: RouterPattern }>(input: s
   for (const entry of candidates) {
     const route = entry.router;
     if (!route || !route.index && route.pattern === undefined && route.parentId) continue;
-    if (hasIndex && !route.index || mode !== 'url' && !hasIndex && route.index) continue;
+    const chain = routerAncestry(entry, byId);
     let tokens: Segment[] = [];
-    for (const { router } of routerAncestry(entry, byId)) {
+    for (const { router } of chain) {
       const { pattern, caseSensitive } = router!;
       if (!pattern) continue;
       const fragments = parts(pattern);
@@ -81,7 +81,11 @@ export function matchRouterRoutes<T extends { router?: RouterPattern }>(input: s
     if (!Number.isFinite(score) || score < best) continue;
     if (score > best) result = [];
     best = score;
-    result.push(entry);
+    // Select the branch before choosing the submission/loader target. A pathless
+    // index shares its parent's URL, but a path-bearing index contributes its own.
+    const target = mode === 'url' || hasIndex && route.index ? entry :
+      chain.reduce((last, match) => match.router?.pattern ? match : last, chain[0]);
+    if (!result.includes(target)) result.push(target);
   }
   return result;
 }

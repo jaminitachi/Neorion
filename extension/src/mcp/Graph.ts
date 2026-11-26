@@ -19,6 +19,7 @@ export type QueryRow = { text: string; files: string[]; pathEnd?: number };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
   notes?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
+  routerTraversal?: ReadonlySet<number>;
 };
 export type ChangeOrigin = { file: string; name: string; ids: NodeId[]; removed?: boolean; startsAt?: number;
   renamed?: boolean; externalOnly?: boolean; importFiles?: ReadonlySet<string> };
@@ -1134,6 +1135,7 @@ export class DependencyGraph {
     const initial = starts.map(id => ({ id, depth: 0, weak: 0, contexts: [] as Step['contexts'], alternatives: new Set<NodeId>() }));
     let layer: Step[] = initial;
     const seen = new Set(starts);
+    const routerTraversal = this.index.router && new Set<number>();
     let flowIssue: string | undefined;
     let goal: Step | undefined;
     let partial: string | undefined;
@@ -1169,6 +1171,7 @@ export class DependencyGraph {
       const next = new Map<NodeId, Step>();
       for (const current of layer) {
         if (expired()) break;
+        if (typeof current.id === 'number') routerTraversal?.add(current.id);
         trpc ??= this.coverageIssue(current.id) ?? this.unresolvedTrpc(current.id, false);
         if (apiGoals.length && typeof current.id === 'number' && this.propRequests.get(current.id)?.some(request =>
           (!isTestFile(request.file) || isTestFile(this.file(starts[0]))) &&
@@ -1241,7 +1244,7 @@ export class DependencyGraph {
         terminal.pages?.map(page => page.url) ?? []));
       const notes = [graphRow(`# from reaches ${seen.size} nodes` +
         (pages.size ? `; to is reached from routes: ${[...pages].slice(0, 5).join(', ')}${pages.size > 5 ? ', +' + (pages.size - 5) : ''}` : ''))];
-      return { rows: [], notes, count: 'no directed path',
+      return { rows: [], notes, count: 'no directed path', routerTraversal,
         partial: coverage(partial ?? (route && this.index.pagesIssues?.[route.id]?.[0]) ?? trpc) ?? flowIssue ?? trace.trpc,
         scope: 'no directed path ' + scope };
     }
@@ -1281,7 +1284,7 @@ export class DependencyGraph {
     else rows.unshift(graphRow(`0 ${symbol?.kind ?? 'module'} ${location(this.file(origin.id), symbol?.line)} ${this.name(origin.id)}`, this.file(origin.id)));
     const notes = otherSteps.size ? [graphRow(`# alternatives: ${quantity(otherSteps.size, 'other shortest step')} (via ` +
       `${[...otherSteps].slice(0, 2).map(id => `${this.file(id)}#${this.name(id)}`).join(', ')})`)] : [];
-    return { rows, notes, count: quantity(goal.depth, 'hop'),
+    return { rows, notes, count: quantity(goal.depth, 'hop'), routerTraversal,
       partial: coverage(partial ?? chosenIssue ?? pathIssue ?? (!this.index.pagesEdges ? trpc : undefined)),
       scope: 'shortest directed path ' + scope + (rows.some(row => /^\d+ trpc /.test(row.text)) ? ', including tRPC' : '') };
   }
@@ -1303,6 +1306,7 @@ export class DependencyGraph {
     const seeds = Array.isArray(seed) ? seed : [seed];
     const seen = new Set<NodeId>(seeds);
     const pending = seeds.map(id => ({ id, depth: 0, contexts: [] as RenderContexts }));
+    const routerTraversal = this.index.router && new Set<number>();
     const rows: QueryRow[] = [];
     const packages = new Set<string>();
     const notes: QueryRow[] = [];
@@ -1320,6 +1324,7 @@ export class DependencyGraph {
       const current = pending[i];
       if (current.depth >= depth) break;
       if (typeof current.id === 'number') {
+        routerTraversal?.add(current.id);
         flowIssue ??= this.index.flowIssues?.[current.id]?.find(issue => permits(issue.gates, current.contexts))?.reason;
         if (this.propRequests.get(current.id)?.some(request => permits(request.gates, current.contexts))) flowIssue ??= propUrlIssue;
       }
@@ -1409,7 +1414,7 @@ export class DependencyGraph {
     const partial = [budget ? 'node budget' : trpc, flowIssue,
       unresolved ? `${quantity(unresolved, 'unresolved call')} on local variables or parameters` : undefined,
       sdkIssue].filter(Boolean).join('; ');
-    return { rows, notes, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
+    return { rows, notes, routerTraversal, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
       (navigation.size ? `, ${navigation.size} navigation targets` : '') + (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };
   }

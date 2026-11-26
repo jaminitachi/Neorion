@@ -5,6 +5,7 @@ export const WRAPPER_INDEX_REVISION = 8;
 export const TRANSPORT_QUERY_REVISION = 9;
 export const QUERY_INDEX_REVISION = 12;
 export const GRAPH_INDEX_REVISION = 15;
+export const ROUTER_INDEX_REVISION = 1;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -135,7 +136,12 @@ export type RouterEdge = {
   possible?: boolean;
 };
 
-export type RouterIssue = { reason: string; file: string; route?: number; kind: 'import' | 'module' | 'wrapper' | 'navigation' };
+export type RouterIssue =
+  | { kind: 'import' | 'module' | 'wrapper'; reason: string; file: string; route?: number }
+  | { kind: 'navigation'; reason: string; file: string; route?: number; owner: number; request: boolean; destinations?: number[] }
+  | { kind: 'registry'; reason: string; file: string; route?: number; owner: number; destinations: number[] };
+
+export type RouterRegistryIssue = { reason: string; registration?: { url: string; file: string; id: string } };
 
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
@@ -208,7 +214,9 @@ export interface QueryIndex {
   router?: {
     framework: 'react-router' | 'remix';
     basename: string;
-    registryIssues: string[];
+    revision: number;
+    dependencies?: string;
+    registryIssues: RouterRegistryIssue[];
     registryFiles: string[];
     issues: RouterIssue[];
     edges: RouterEdge[];

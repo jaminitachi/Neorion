@@ -210,6 +210,7 @@ export class QueryIndexBuilder {
       defaultSymbols: Object.create(null), exportSymbols: {}, runtimeExports: {}, moduleImports: {},
       routeFiles: Object.create(null), layoutStyles: Object.create(null), trpcFiles: []
     };
+    const routerCallSites = router && new Map<Node, number>();
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
     const exports = new Map(files.map(file => [file, this.exportsOf(file)]));
@@ -1014,6 +1015,7 @@ export class QueryIndexBuilder {
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
+          routerCallSites?.set(node, owner);
           if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
             const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
             sites.push([relative, startLine(node), expression.getText()]);
@@ -1303,7 +1305,13 @@ export class QueryIndexBuilder {
     }
     if (router) (require('../frameworks/react-router/ModuleFacts') as typeof import('../frameworks/react-router/ModuleFacts'))
       .indexRouterFacts({ index, project: router, files, relative: relativePath, exports,
-        symbol: node => byNode.get(node), owner: node => owners(node)[1], fileSymbol: file => byGraphId.get(`file:${file}`) });
+        symbol: node => byNode.get(node), owner: node => owners(node)[1], fileSymbol: file => byGraphId.get(`file:${file}`),
+        handledCall: node => {
+          const id = routerCallSites?.get(node);
+          if (id === undefined || !routerCallSites?.delete(node)) return;
+          // Router references carry their own coverage, including ambiguous or dynamic sites.
+          if (--index.unresolvedCalls![id] === 0) delete index.unresolvedCalls![id];
+        } });
     index.pagesWorkspaceInputs = workspace?.snapshot();
     return index;
   }
