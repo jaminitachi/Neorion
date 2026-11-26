@@ -314,6 +314,30 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('callees', 'useItems', '--uses', '--depth', '2'), /d2 call .*parse/);
 });
 
+test('CLI path uses a longer deadline and reports the effective budget on timeout', t => {
+  const { root, run, build } = fixture(t);
+  build();
+  const clock = path.join(path.dirname(root), 'clock.cjs');
+  fs.writeFileSync(clock, `
+    const now = performance.now.bind(performance);
+    let queryStarted = false;
+    Object.defineProperty(performance, 'now', { value() {
+      if (!new Error().stack.includes('.query (')) return now();
+      if (!queryStarted) {
+        queryStarted = true;
+        return 0;
+      }
+      return 2000;
+    } });
+  `);
+  const env = { NODE_OPTIONS: `--require=${JSON.stringify(clock)}`, NEORION_AUTOBUILD: '0' };
+  const args = ['query', 'path', '/items', 'createItem'];
+  assert.match(run(args, env), /^# complete:/m);
+  const timed = run(args, { ...env, NEORION_QUERY_DEADLINE_MS: '1000' });
+  assert.match(timed, /^# timeout path /m);
+  assert.match(timed, /^# partial: timed out \(1000 ms budget\)$/m);
+});
+
 test('impact reports bounded hubs, timeout, and legacy index coverage', { timeout: 30_000 }, t => {
   const { root, query, run, build } = fixture(t);
   const hub = Array.from({ length: 200 }, (_, i) => `export function caller${i}() { return cn(); }`).join('\n');
@@ -1612,7 +1636,7 @@ test('Pages expands nested children in an inline layout and forwarded children i
   });
   for (const route of ['/', '/forward']) {
     const output = query('wrappers', route);
-    assert.match(output, /Layout \[Layout assigned at /);
+    assert.match(output, /Layout \(inline\) \[Layout assigned at /);
     assert.match(output, /\bOuter\b/);
     assert.match(output, /\bInner\b/);
     assert.match(output, /^# complete:/m);
@@ -1671,10 +1695,10 @@ for (const [form, setup, admin, plain, conditional] of [
   ['nullish ternary', 'const Layout = Component.Layout != null ? Component.Layout : EmptyLayout;', 'AdminLayout', 'EmptyLayout'],
   ['const component alias', 'const Layout = EmptyLayout;', 'EmptyLayout', 'EmptyLayout'],
   ['let component alias', 'let Layout = EmptyLayout;', 'EmptyLayout', 'EmptyLayout'],
-  ['guarded replacement', "let Layout = EmptyLayout; if (router.pathname === '/m') Layout = MarketingLayout;",
+  ['runtime guarded replacement', "let Layout = EmptyLayout; if (router.pathname.startsWith('/m')) Layout = MarketingLayout;",
     'EmptyLayout', 'EmptyLayout', 'both'],
   ['else-if replacement', "let Layout = EmptyLayout; if (Component.Layout) { Layout = Component.Layout; } " +
-    "else if (router.pathname === '/m') { Layout = MarketingLayout; }", 'AdminLayout', 'EmptyLayout', 'plain'],
+    "else if (router.pathname.startsWith('/m')) { Layout = MarketingLayout; }", 'AdminLayout', 'EmptyLayout', 'plain'],
   ['last write', 'let Layout = Component.Layout || EmptyLayout; Layout = MarketingLayout;', 'MarketingLayout', 'MarketingLayout'],
   ['falsy alias guard', 'let Layout = Component.Layout; if (!Layout) Layout = EmptyLayout;', 'AdminLayout', 'EmptyLayout']
 ]) {
@@ -1713,8 +1737,6 @@ for (const [form, setup, admin, plain, conditional] of [
 }
 
 for (const [form, setup, invoke] of [
-  ['switch', "let Layout; switch (router.pathname) { case '/m': Layout = MarketingLayout; break; " +
-    'default: Layout = Component.Layout || EmptyLayout; }', '<Layout><Component/></Layout>'],
   ['opaque JSX alias', 'const Layout = unknownLayout();', '<Layout><Component/></Layout>'],
   ['opaque getLayout alias', 'const getLayout = unknownLayout();', 'getLayout(<Component/>)'],
   ['opaque forwarded JSX alias', 'const Layout = unknownLayout();', '<Layout Component={Component}/>']
@@ -1731,6 +1753,81 @@ for (const [form, setup, invoke] of [
     assert.match(query('who_renders', 'AdminLayout'), /^# partial: custom App page slot unresolved$/m);
   });
 }
+
+for (const [form, setup, admin, plain, conditional] of [
+  ['runtime ternary', "const Layout = router.pathname.startsWith('/a') ? AdminLayout : EmptyLayout;",
+    ['AdminLayout', 'EmptyLayout'], ['AdminLayout', 'EmptyLayout'], true],
+  ['static page ternary', 'const Layout = Component.isAdmin ? AdminLayout : EmptyLayout;', ['AdminLayout'], ['EmptyLayout']],
+  ['compound guard', "let Layout = EmptyLayout; if (Component.Layout && router.pathname !== '/review-plain') Layout = Component.Layout;",
+    ['AdminLayout'], ['EmptyLayout']],
+  ['compound runtime guard', 'let Layout = EmptyLayout; if (Component.Layout && router.isPreview) Layout = Component.Layout;',
+    ['AdminLayout', 'EmptyLayout'], ['EmptyLayout'], true],
+  ['nullish guard', 'let Layout = Component.Layout; if (Component.Layout == null) Layout = EmptyLayout;',
+    ['AdminLayout'], ['EmptyLayout']],
+  ['strict null guard', 'let Layout = EmptyLayout; if (Component.Layout !== null && Component.Layout !== undefined) Layout = Component.Layout;',
+    ['AdminLayout'], ['EmptyLayout']],
+  ['simple switch', "let Layout; switch (router.pathname) { default: Layout = EmptyLayout; break; case '/review-admin': Layout = AdminLayout; }",
+    ['AdminLayout'], ['EmptyLayout']],
+  ['runtime switch', "let Layout; switch (router.mode) { case 'admin': Layout = AdminLayout; break; default: Layout = EmptyLayout; }",
+    ['AdminLayout', 'EmptyLayout'], ['AdminLayout', 'EmptyLayout'], true]
+]) {
+  test(`Pages chooses App wrapper branches for ${form}`, t => {
+    const query = pagesReviewFixture(t, {
+      ...reviewedLayouts,
+      'pages/_app.page.tsx': `import { AdminLayout, EmptyLayout } from '../lib/review-layouts';
+        export default function MyApp({ Component, router }) { ${setup} return <Layout><Component /></Layout>; }`,
+      'pages/review-admin.page.tsx': reviewAdmin + 'Admin.Layout = AdminLayout;\nAdmin.isAdmin = true;'
+    });
+    for (const [route, names] of [['/review-admin', admin], ['/review-plain', plain]]) {
+      const wrappers = query('wrappers', route);
+      assert.match(wrappers, /^# complete:/m);
+      for (const name of ['AdminLayout', 'EmptyLayout']) {
+        assert.equal(wrappers.includes(name), names.includes(name), wrappers);
+      }
+      assert.equal(wrappers.includes('[cond]'), !!conditional && names.length > 1, wrappers);
+    }
+    const renders = query('who_renders', 'AdminLayout');
+    assert.match(renders, /^\/review-admin .*\[via layout\]/m);
+    assert.equal(/^\/review-plain /m.test(renders), plain.includes('AdminLayout'), renders);
+    assert.match(renders, /^# complete:/m);
+  });
+}
+
+for (const [flow, setup] of [
+  ['switch', "switch (router.pathname) { case '/review-admin': Layout = MarketingLayout; default: Layout = EmptyLayout; }"],
+  ['try/catch/finally', 'try { Layout = MarketingLayout; } catch { Layout = EmptyLayout; }'],
+  ['loop', 'for (const value of router.layouts) Layout = MarketingLayout;'],
+  ['callback', 'router.layouts.forEach(() => { Layout = MarketingLayout; });'],
+  ['closure', 'function change() { Layout = MarketingLayout; } change();']
+]) {
+  test(`Pages diagnoses an opaque App ${flow} write`, t => {
+    const query = pagesReviewFixture(t, {
+      ...reviewedLayouts,
+      'pages/_app.page.tsx': `${reviewedApp} let Layout = EmptyLayout; ${setup} return <Layout><Component/></Layout>; }`
+    });
+    for (const output of [query('wrappers', '/review-plain'), query('who_renders', 'MarketingLayout')]) {
+      assert.match(output, /^# partial: custom App page slot unresolved/m);
+      assert.ok(output.includes(`(${flow} write)`), output);
+      assert.doesNotMatch(output, /\[via layout\]|EmptyLayout/);
+    }
+  });
+}
+
+test('Pages labels an anonymous class App layout at its fallback site', t => {
+  const query = pagesReviewFixture(t, {
+    ...reviewedLayouts,
+    'pages/_app.page.tsx': `export default class MyApp {
+      render() {
+        const { Component } = this.props;
+        const Layout = Component.Layout || (({ children }) => <>{children}</>);
+        return <Layout><Component /></Layout>;
+      }
+    }`
+  });
+  const wrappers = query('wrappers', '/review-plain');
+  assert.match(wrappers, /Layout \(inline\) \[Layout fallback at pages\/_app\.page\.tsx:5\]/);
+  assert.match(wrappers, /^# complete:/m);
+});
 
 for (const [form, setup] of [
   ['ternary', 'const getLayout = Component.getLayout ? Component.getLayout : page => page;'],
@@ -1814,7 +1911,7 @@ test('Pages preserves JSX lines and named render hops through inline page layout
   assert.match(arrow, /^2 render lib\/review-layouts\.tsx:2 Shell$/m);
   assert.match(query('path', '/review-block', 'AdminLayout'), /^1 render pages\/review-block\.page\.tsx:4 AdminLayout .*\[cond\]$/m);
   const output = query('wrappers', '/review-function');
-  assert.match(output, /Layout \[Layout assigned at pages\/review-function\.page\.tsx:3\]/);
+  assert.match(output, /InlineLayout \[Layout assigned at pages\/review-function\.page\.tsx:3\]/);
   assert.match(output, /AdminLayout, Shell/);
   assert.match(output, /^# complete:/m);
   const reverse = query('who_renders', 'Shell');

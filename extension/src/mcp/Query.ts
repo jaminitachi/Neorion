@@ -34,6 +34,7 @@ const apiEvidence = new Map([
 const shellArg = (value: string) => /^[\w./:-]+$/.test(value) ? value : process.platform === 'win32'
   ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'";
 type CliReplay = { invocation: string[]; root: string };
+const dynamicRenderReason = 'rendered through a dynamic reference';
 
 function queryCommand(cli: CliReplay, kind: QueryKind, targets: string[], options: string[]) {
   const flags = [...options, '--root', cli.root].map(shellArg);
@@ -450,7 +451,7 @@ export class QueryEngine {
       issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
     return { rows, count: rows.length ? count + directLabel : undefined,
-      partial: dynamicReference ? 'rendered through a dynamic reference' :
+      partial: dynamicReference ? dynamicRenderReason :
         this.index.queryRevision !== undefined && this.index.queryRevision < QUERY_INDEX_REVISION ? 'regenerate legacy index' :
         directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
@@ -846,8 +847,10 @@ export class QueryEngine {
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
-    const budget = tool === 'changes' ? historyBudgetMs : 1850;
-    const deadline = performance.now() + (configured > 0 ? Math.min(budget, configured) : budget);
+    const cliPath = cli && tool === 'path';
+    const budget = tool === 'changes' ? historyBudgetMs : cliPath ? 5000 : 1850;
+    const timeoutMs = configured > 0 ? Math.min(budget, configured) : budget;
+    const deadline = performance.now() + timeoutMs;
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
@@ -984,6 +987,7 @@ export class QueryEngine {
     let noteCount = notes.length;
     const truncation = 'output truncated';
     const truncationWithReason = result.partial ? `${truncation}; ${result.partial}` : truncation;
+    const compactReason = result.partial === dynamicRenderReason ? `${truncation}; dynamic ref` : truncation;
     for (;;) {
       const visible = renderedRows.slice(0, shown);
       const extras = notes.slice(0, noteCount);
@@ -997,7 +1001,7 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
-      const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
+      const reason = expired() ? cliPath ? `timed out (${timeoutMs} ms budget)` : 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
@@ -1013,7 +1017,7 @@ export class QueryEngine {
       const output = `${body}\n${coverage}`;
       if (bytes(output) <= 6000) return output;
       if (tool === 'who_renders' && result.partial && reason === truncationWithReason) {
-        const compact = `${body}\n# partial: ${truncation}`;
+        const compact = `${body}\n# partial: ${compactReason}`;
         if (bytes(compact) <= 6000) return compact;
       }
       if (noteCount) noteCount--;

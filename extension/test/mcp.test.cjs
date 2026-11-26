@@ -355,7 +355,7 @@ test('schema aliases consumed by zod inference are indexed as constants', async 
   assert.ok(!index.dynamicRenderComponents?.includes(schema.id));
 });
 
-test('who_renders keeps the same rows when a secondary truncation reason exceeds the byte budget', async t => {
+test('who_renders retains the dynamic reason when rows fill the byte budget', async t => {
   const root = temporary(t);
   const index = emptyIndex();
   index.symbols.push(
@@ -376,10 +376,55 @@ test('who_renders keeps the same rows when a secondary truncation reason exceeds
   const plain = await client.text('who_renders', { component: 'Static' });
   const dynamic = await client.text('who_renders', { component: 'Opaque' });
   assert.match(plain, /40 routes, showing 25/);
-  assert.equal(dynamic, plain.replace('#Static', '#Opaque'));
+  assert.match(dynamic, /40 routes, showing 2[45]/);
+  assert.match(dynamic, /# partial: output truncated; (dynamic ref|rendered through a dynamic reference)$/);
+  const rows = answer => answer.split('\n').filter(line => line.startsWith('/'));
+  assert.deepEqual(rows(dynamic), rows(plain).slice(0, rows(dynamic).length));
   assert.ok(Buffer.byteLength(dynamic) <= 6000);
   const short = await client.text('who_renders', { component: 'Opaque', limit: 1 });
   assert.match(short, /# partial: output truncated; rendered through a dynamic reference$/);
+});
+
+test('who_renders follows React lazy and Next dynamic imports from their JSX sites', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve","baseUrl":".","paths":{"@/*":["./*"]}}}');
+  write(root, 'components/foo.tsx', 'export default function Foo() { return <i />; }');
+  write(root, 'components/bar.tsx', 'export function Bar() { return <i />; }');
+  write(root, 'components/barrel.ts', "export { Bar as NamedBar } from './bar';");
+  write(root, 'components/baz.tsx', 'export function Baz() { return <i />; }');
+  write(root, 'components/unknown.tsx', 'export function Unknown() { return <i />; }');
+  write(root, 'components/unrendered.tsx', 'export default function Unrendered() { return <i />; }');
+  write(root, 'components/data.tsx', 'export default function Data() { return <i />; }');
+  write(root, 'components/mixed.tsx', 'export default function Mixed() { return <i />; }');
+  write(root, 'app/page.tsx', [
+    "'use client';",
+    "import React, { lazy as load } from 'react';",
+    "import dynamic from 'next/dynamic';",
+    "const LazyFoo = load(() => import('@/components/foo'));",
+    "const DynBar = dynamic(() => import('@/components/barrel').then(m => m.NamedBar));",
+    "const LazyBaz = React.lazy(() => import('@/components/baz').then(m => ({ default: m.Baz })));",
+    "const Opaque = dynamic(() => import('@/components/unknown').then(m => m[chooseExport()]));",
+    "const unused = load(() => import('@/components/unrendered'));",
+    "const data = import('@/components/data');",
+    "const LazyMixed = load(() => import('@/components/mixed'));",
+    'register({ component: LazyMixed });',
+    'export default function Page({ show }) { return <><LazyFoo />{show && <DynBar />}<LazyBaz /><Opaque /><LazyMixed /></>; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const [component, binding, conditional] of [['Foo', 'LazyFoo'], ['Bar', 'DynBar', true], ['Baz', 'LazyBaz']]) {
+    const output = await client.text('who_renders', { component });
+    assert.match(output, /: 1 route/);
+    assert.ok(output.includes(`[imported via ${binding}]`), output);
+    assert.equal(output.includes('[cond]'), !!conditional);
+    assert.match(output, /# complete: indexed JSX paths$/);
+  }
+  assert.match(await client.text('who_renders', { component: 'Unknown' }), /# partial: rendered through a dynamic reference$/);
+  assert.match(await client.text('who_renders', { component: 'Unrendered' }), /# partial: rendered through a dynamic reference$/);
+  assert.match(await client.text('who_renders', { component: 'Data' }), /0 results [^\n]*\n# complete: indexed JSX paths$/);
+  const mixed = await client.text('who_renders', { component: 'Mixed' });
+  assert.match(mixed, /: 1 route/);
+  assert.match(mixed, /# partial: rendered through a dynamic reference$/);
 });
 
 test('wrappers list rendered providers in chain order for each branch', async t => {

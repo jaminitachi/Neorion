@@ -13,13 +13,14 @@ import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
-import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper } from './RenderBindings';
+import { bindingOf, importBinding } from './StaticBindings';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -74,21 +75,52 @@ function receiver(expression: Node) {
   if (Node.isIdentifier(expression)) return { root: expression, members };
 }
 
+function throughWrappers(node: Node) {
+  for (let parent = node.getParent(); parent && wrappedExpression(parent) === node; parent = node.getParent()) node = parent;
+  return node;
+}
+
 function dynamicExport(node: Node) {
-  const parent = node.getParent();
-  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return { name: 'default' };
+  const expression = throughWrappers(node);
+  const parent = expression.getParent();
+  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return { name: 'default', expression };
   const call = parent.getParent();
-  const callback = Node.isCallExpression(call) ? call.getArguments()[0] : undefined;
+  if (!Node.isCallExpression(call) || call.getExpression() !== parent) return;
+  const callback = call.getArguments()[0];
   if (!Node.isArrowFunction(callback) && !Node.isFunctionExpression(callback)) return;
-  const body = callback.getBody();
-  const statements = Node.isBlock(body) ? body.getStatements() : [];
-  const result = Node.isBlock(body)
-    ? statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined
-    : body;
-  if (Node.isPropertyAccessExpression(result) &&
-      result.getExpression().getText() === callback.getParameters()[0]?.getName()) {
-    return { name: result.getName(), selector: result.getNameNode() };
+  let result = simpleReturn(callback.getBody());
+  while (result && wrappedExpression(result)) result = wrappedExpression(result);
+  // React.lazy expects an object with a default export.
+  if (Node.isObjectLiteralExpression(result) && result.getProperties().length === 1) {
+    const [member] = result.getProperties();
+    if (Node.isPropertyAssignment(member) && member.getName() === 'default') result = member.getInitializer();
   }
+  if (Node.isPropertyAccessExpression(result) && bindingOf(result.getExpression()) === callback.getParameters()[0]) {
+    return { name: result.getName(), selector: result, expression: throughWrappers(call) };
+  }
+}
+
+function simpleReturn(body: Node) {
+  if (!Node.isBlock(body)) return body;
+  const [statement, extra] = body.getStatements();
+  if (!extra && Node.isReturnStatement(statement)) return statement.getExpression();
+}
+
+function lazyLoader(node: Node) {
+  const loader = node.getFirstAncestor(ancestor => Node.isFunctionLikeDeclaration(ancestor) || Node.isFunctionExpression(ancestor));
+  if (!Node.isArrowFunction(loader) && !Node.isFunctionExpression(loader)) return;
+  const argument = throughWrappers(loader);
+  const call = argument.getParent();
+  if (!Node.isCallExpression(call) || call.getArguments()[0] !== argument) return;
+  const callee = call.getExpression();
+  const origin = importBinding(callee);
+  if (!(origin?.module === 'next/dynamic' && origin.name === 'default' && Node.isIdentifier(callee) ||
+        origin?.module === 'react' && packageMember(callee, 'react') === 'lazy')) return;
+  const initializer = throughWrappers(call);
+  const binding = initializer.getParent();
+  const variable = Node.isVariableDeclaration(binding) && binding.getInitializer() === initializer &&
+    binding.getVariableStatement()?.getDeclarationKind() === 'const' ? binding : undefined;
+  return { variable, result: simpleReturn(loader.getBody()) };
 }
 
 export class QueryIndexBuilder {
@@ -725,7 +757,9 @@ export class QueryIndexBuilder {
       });
     }
 
-    const dynamicBindings = new Map<Node, number>();
+    const dynamicBindings = new Map<Node, { id: number; rendered: boolean }>();
+    const unresolvedLazyComponents = new Set<number>();
+    const opaqueBindings = new Set<Node>();
     const componentValues = new Set<number>();
     const componentProperties = new Map<Node, Set<number>>();
     const componentFactories = new Set<Node>();
@@ -761,6 +795,7 @@ export class QueryIndexBuilder {
       }
     }
     const recordComponentDeclaration = (node: Node, property?: Node) => {
+      if (Node.isVariableDeclaration(node)) opaqueBindings.add(node);
       const id = byNode.get(node);
       if (id === undefined || index.symbols[id - 1].kind !== 'component') return;
       componentValues.add(id);
@@ -1018,33 +1053,39 @@ export class QueryIndexBuilder {
         }
       };
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
-        if (!Node.isStringLiteral(specifier)) return;
-        const targetExport = dynamicExport(node);
-        if (!targetExport) return;
-        const { name, selector } = targetExport;
+        if (!Node.isStringLiteral(specifier) && !Node.isNoSubstitutionTemplateLiteral(specifier)) return;
         const resolved = declarationsOf(specifier).find(Node.isSourceFile) ?? fileByName.get(ts.resolveModuleName(
           specifier.getLiteralText(), file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
         ).resolvedModule?.resolvedFileName ?? '');
-        const targets = resolved && exports.get(resolved)?.get(name);
-        if (!targets?.length) return;
-        const moduleId = byGraphId.get(`file:${relativePath(resolved!)}`);
-        if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
-        const variable = node.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
-        const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
-        if (id !== undefined && variable && byNode.has(variable)) {
-          const initializer = variable.getInitializer();
-          const wrapper = Node.isCallExpression(initializer) && receiver(initializer.getExpression());
-          const imported = wrapper && packageBindings.get(wrapper.root.getText());
-          if (imported && (imported.module === 'next/dynamic' || imported.module === 'react' &&
-            (imported.name === 'lazy' || wrapper.members[0] === 'lazy')) &&
-            wrapper.root.getSymbol()?.getDeclarations().includes(imported.binding)) {
-            dynamicBindings.set(variable, id);
-            // JSX sites already point to the imported component. Keep a
-            // module-level import edge without inserting the local alias.
-            if (owner === byNode.get(variable)) owner = undefined;
-            if (selector) dynamicSelectors.add(selector);
+        const exported = resolved && exports.get(resolved);
+        if (!exported) return;
+        const targetExport = dynamicExport(node);
+        const targets = targetExport && exported.get(targetExport.name);
+        const loader = lazyLoader(node);
+        if (loader) {
+          const exact = targetExport && loader.result === targetExport.expression;
+          const ids = new Set((targetExport?.selector || exact ?
+            targets ?? [] : [...exported.values()].flat()).flatMap(target => {
+            const id = byNode.get(target);
+            return id !== undefined && index.symbols[id - 1].kind === 'component' ? [id] : [];
+          }));
+          const id = [...ids][0];
+          if (loader.variable && ids.size === 1 && targetExport && exact) {
+            if (!historyOnly) dynamicBindings.set(loader.variable, { id, rendered: false });
+            // JSX is the render site. Keep the loader's import at module level.
+            if (owner === byNode.get(loader.variable)) owner = undefined;
+            if (targetExport.selector) {
+              dynamicSelectors.add(targetExport.selector.getNameNode());
+              dynamicSelectors.add(throughWrappers(targetExport.selector));
+            }
+          } else if (!historyOnly) {
+            for (const candidate of ids) unresolvedLazyComponents.add(candidate);
           }
         }
+        if (!targetExport || !targets?.length) return;
+        const moduleId = byGraphId.get(`file:${relativePath(resolved!)}`);
+        const { name } = targetExport;
+        if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
         for (const target of targets) {
           const id = byNode.get(target);
           if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
@@ -1184,7 +1225,8 @@ export class QueryIndexBuilder {
           (Node.isIdentifier(node.getTagNameNode()) || Node.isPropertyAccessExpression(node.getTagNameNode()))) {
           renderSites.push({ node, owner: owners(node)[1], line: startLine(node), file: relative });
         } else if (Node.isPropertyAssignment(node)) {
-          if (!historyOnly) recordComponentValue(node.getInitializer(), node);
+          const value = node.getInitializer();
+          if (!historyOnly && value && !dynamicSelectors.has(value)) recordComponentValue(value, node);
         } else if (Node.isShorthandPropertyAssignment(node)) {
           const symbol = node.getValueSymbol();
           if (symbol) {
@@ -1240,16 +1282,25 @@ export class QueryIndexBuilder {
     }
     if (dynamicBindings.size) for (const site of renderSites) {
       if (!Node.isJsxOpeningElement(site.node) && !Node.isJsxSelfClosingElement(site.node)) continue;
-      const declarations = declarationsOf(site.node.getTagNameNode());
-      const binding = declarations.find(node => dynamicBindings.has(node));
-      if (binding) {
-        componentValues.delete(dynamicBindings.get(binding)!);
-        const owner = site.owner;
-        const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
-        const conditional = conditionalAt(site.node, body);
+      const tag = site.node.getTagNameNode();
+      const declarations = declarationsOf(tag);
+      const binding = declarations.map(node => dynamicBindings.get(node)).find(Boolean);
+      if (!binding) continue;
+      const { id } = binding;
+      const owner = site.owner;
+      const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
+      const conditional = conditionalAt(site.node, body);
+      if (owner !== undefined && index.symbols[owner - 1].kind === 'component' && owner !== id) {
+        wrapperEdges.push([owner, id, site.line, conditional, undefined, undefined, `imported via ${tag.getText()}`]);
+        binding.rendered = true;
+      } else {
+        unresolvedLazyComponents.add(id);
         const refs = index.graphReferences![byGraphId.get(`file:${site.file}`)!] ??= [];
-        refs.push([dynamicBindings.get(binding)!, site.line, GraphReferenceKind.Render, owner, conditional]);
+        refs.push([id, site.line, GraphReferenceKind.Render, owner, conditional]);
       }
+    }
+    for (const [binding, { id, rendered }] of dynamicBindings) {
+      if (!rendered || opaqueBindings.has(binding)) unresolvedLazyComponents.add(id);
     }
     if (componentValues.size) {
       // Value references without a resolved render site can hide JSX behind a registry or callback.
@@ -1277,8 +1328,9 @@ export class QueryIndexBuilder {
           }
         }
       }
-      if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     }
+    for (const id of unresolvedLazyComponents) componentValues.add(id);
+    if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
