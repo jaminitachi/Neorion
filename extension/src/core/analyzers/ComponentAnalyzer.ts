@@ -10,7 +10,7 @@ import { visitKinds } from './CompilerWalk';
 import { packageMember } from './CallableFlow';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { jsxValue, PropFlow } from './PropFlow';
-import { renderBindings } from './RenderBindings';
+import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
@@ -37,6 +37,7 @@ function externalAlias(node: Node | undefined, files: Set<SourceFile>): string |
   const imported = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
   const module = imported?.getModuleSpecifierValue();
   if (!module || !isPackageSpecifier(module) || declarationsOf(root).some(target => files.has(target.getSourceFile()))) return;
+  if (module === 'zod' || module.startsWith('zod/')) return;
   const name = Node.isImportSpecifier(binding) ? binding.getName() :
     Node.isNamespaceImport(binding) ? '' : 'default';
   const member = node.getText().slice(root.getText().length).replace(/^\./, '');
@@ -45,13 +46,32 @@ function externalAlias(node: Node | undefined, files: Set<SourceFile>): string |
   return module + '#' + [name, member].filter(Boolean).join('.');
 }
 
+function zodSchemaBindings(file: SourceFile): Set<Node> {
+  const schemas = new Set<Node>();
+  const imports = file.getImportDeclarations().filter(entry => /^zod(?:\/|$)/.test(entry.getModuleSpecifierValue()));
+  if (!imports.length) return schemas;
+  visitKinds(file, new Set([SyntaxKind.TypeQuery]), node => {
+    if (!Node.isTypeQuery(node)) return;
+    const reference = node.getParent();
+    if (!Node.isTypeReference(reference)) return;
+    const type = reference.getTypeName();
+    const binding = Node.isQualifiedName(type) ? type.getLeft() : type;
+    const origin = binding.getSymbol()?.getDeclarations().find(declaration =>
+      imports.some(entry => declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration) === entry));
+    const name = Node.isQualifiedName(type) ? type.getRight().getText() :
+      Node.isImportSpecifier(origin) ? origin.getName() : undefined;
+    if (!origin || !name || !['infer', 'input', 'output'].includes(name)) return;
+    for (const declaration of declarationsOf(node.getExprName())) schemas.add(declaration);
+  });
+  return schemas;
+}
+
 function unwrapComponent(node: Node | undefined): Node | undefined {
   while (node) {
-    if (Node.isParenthesizedExpression(node)) node = node.getExpression();
-    else if (Node.isCallExpression(node) &&
-             /(?:^|\.)(?:memo|forwardRef)$/.test(node.getExpression().getText())) {
-      node = node.getArguments()[0];
-    } else return node;
+    const wrapped = wrappedExpression(node);
+    if (wrapped) node = wrapped;
+    else if (isComponentWrapper(node)) node = node.getArguments()[0];
+    else return node;
   }
 }
 
@@ -310,6 +330,7 @@ export class ComponentAnalyzer {
         for (const target of targets) defaultDeclarations.add(target);
       }
       const exported = new Set<Node>([...file.getExportedDeclarations().values()].flat());
+      const schemaBindings = zodSchemaBindings(file);
       const candidates = [
         ...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getExportAssignments().filter(node => !node.isExportEquals())
@@ -318,7 +339,7 @@ export class ComponentAnalyzer {
         if (aliases.has(node)) continue;
         const fn = callable(node);
         const initializer = Node.isVariableDeclaration(node) ? node.getInitializer() : undefined;
-        const aliasOf = externalAlias(initializer, projectFiles);
+        const aliasOf = schemaBindings.has(node) ? undefined : externalAlias(initializer, projectFiles);
         const body = fn ? fn.getBody() : (aliasOf ? initializer : undefined) ??
           (Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined);
         if (!body) continue;

@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
+import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION, isTestFile as testFile, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -200,6 +200,7 @@ export class QueryEngine {
   private symbols: Map<number, SymbolEntry>;
   private names: Map<string, SymbolEntry[]>;
   private incoming: Map<number, Edge[]>;
+  private dynamicRenderComponents: Set<number>;
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
@@ -210,6 +211,7 @@ export class QueryEngine {
     this.symbols = new Map(index.symbols.map(symbol => [symbol.id, symbol]));
     this.names = group(index.symbols, symbol => symbol.name);
     this.incoming = group(index.renderEdges, edge => edge[1]);
+    this.dynamicRenderComponents = new Set(index.dynamicRenderComponents);
     for (const edges of this.incoming.values()) edges.sort((a, b) => {
       const left = this.symbols.get(a[0]);
       const right = this.symbols.get(b[0]);
@@ -373,6 +375,7 @@ export class QueryEngine {
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
       possible: boolean; depth: number; slots: string[]; issue?: string }>();
     let directIssue: string | undefined;
+    let dynamicReference = false;
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
@@ -382,6 +385,7 @@ export class QueryEngine {
         const entry = pending[i];
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
+        dynamicReference ||= this.dynamicRenderComponents.has(entry.id);
         for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
           if (!entry.depth || only && route !== only) continue;
           const previous = reached.get(route.id);
@@ -446,7 +450,9 @@ export class QueryEngine {
       issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
     return { rows, count: rows.length ? count + directLabel : undefined,
-      partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
+      partial: dynamicReference ? 'rendered through a dynamic reference' :
+        this.index.queryRevision !== undefined && this.index.queryRevision < QUERY_INDEX_REVISION ? 'regenerate legacy index' :
+        directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
         (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
@@ -608,7 +614,7 @@ export class QueryEngine {
       const generated = generatedFile(fetch.file);
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
-      const legacyTransport = via === AI_SDK_TRANSPORT && this.index.queryRevision !== QUERY_INDEX_REVISION;
+      const legacyTransport = via === AI_SDK_TRANSPORT && (this.index.queryRevision ?? 0) < TRANSPORT_QUERY_REVISION;
       const method = legacyTransport ? '?' : fetch.method;
       const override = via === AI_SDK_TRANSPORT && (fetch.transportOverride || legacyTransport);
       transportOverride ||= override;
@@ -976,6 +982,8 @@ export class QueryEngine {
     }
     let shown = renderedRows.length;
     let noteCount = notes.length;
+    const truncation = 'output truncated';
+    const truncationWithReason = result.partial ? `${truncation}; ${result.partial}` : truncation;
     for (;;) {
       const visible = renderedRows.slice(0, shown);
       const extras = notes.slice(0, noteCount);
@@ -990,8 +998,7 @@ export class QueryEngine {
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : truncated ?
-          ['output truncated', result.partial].filter(Boolean).join('; ') :
+        staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {
@@ -1001,9 +1008,14 @@ export class QueryEngine {
         path: 'indexed directed edges', changes: 'git diff and indexed impacts'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
-      const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
-        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), coverage].join('\n');
+      const body = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
+        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : [])].join('\n');
+      const output = `${body}\n${coverage}`;
       if (bytes(output) <= 6000) return output;
+      if (tool === 'who_renders' && result.partial && reason === truncationWithReason) {
+        const compact = `${body}\n# partial: ${truncation}`;
+        if (bytes(compact) <= 6000) return compact;
+      }
       if (noteCount) noteCount--;
       else shown--;
     }
