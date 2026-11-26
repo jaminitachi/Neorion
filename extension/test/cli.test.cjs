@@ -459,6 +459,60 @@ if (threads.isMainThread) threads.Worker = class extends threads.Worker {
   assert.match(cli('graph'), /--all-apps/);
 });
 
+test('a React Router app and a Next.js app share a workspace with separate route indexes', async t => {
+  const { root, env, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  fs.rmSync(path.join(root, 'apps/admin'), { recursive: true });
+
+  const router = path.join(root, 'apps/router');
+  fs.mkdirSync(path.join(router, 'app'), { recursive: true });
+  fs.writeFileSync(path.join(router, 'package.json'), JSON.stringify({
+    name: '@fixture/router', dependencies: { 'react-router': '*', '@fixture/ui': 'workspace:*' },
+    devDependencies: { '@react-router/dev': '*' }
+  }));
+  fs.writeFileSync(path.join(router, 'react-router.config.ts'), 'export default {};\n');
+  fs.writeFileSync(path.join(router, 'app/root.tsx'), `
+import { Outlet } from 'react-router';
+export default function RouterRoot() { return <Outlet />; }
+`);
+  fs.writeFileSync(path.join(router, 'app/routes.ts'), `
+import { index } from '@react-router/dev/routes';
+export default [index('home.tsx')];
+`);
+  fs.writeFileSync(path.join(router, 'app/home.tsx'), `
+import { SharedCard } from '@fixture/ui/card';
+export default function RouterHome() { return <SharedCard options={null} />; }
+`);
+  const cli = (...args) => {
+    const result = run(args);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+
+  const graph = cli('graph');
+  assert.match(graph, /^App: "apps\/router"$\nNeorion .* · react-router router · /m);
+  assert.match(graph, /^App: "apps\/web"$\nNeorion .* · app router · /m);
+  const [routerIndex, nextIndex] = [...graph.matchAll(/^Overview: (.+)$/gm)]
+    .map(match => readJson(path.join(path.dirname(match[1]), indexFile)));
+  assert.deepEqual(routerIndex.routes.map(route => [route.file, route.router.id]), [
+    ['app/root.tsx', 'root'], ['app/home.tsx', 'home']
+  ]);
+  assert.deepEqual(nextIndex.routes.map(route => [route.file, route.router]), [['app/page.tsx', undefined]]);
+  assert.equal(routerIndex.workspacePackages['../../packages/ui/src/card.tsx'], '@fixture/ui');
+
+  const rootQuery = cli('query', 'wrappers', '/');
+  assert.match(rootQuery, /^\["apps\/router"\].*RouterRoot/m);
+  assert.match(rootQuery, /^\["apps\/web"\] page app\/page\.tsx:/m);
+  const routerQuery = cli('query', 'wrappers', '/', '--app', '@fixture/router');
+  assert.match(routerQuery, /^page app\/home\.tsx:/m);
+  assert.doesNotMatch(routerQuery, /app\/page\.tsx/);
+
+  const client = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  assert.equal(await client.text('query', { kind: 'wrappers', target: '/', app: 'apps/router' }), routerQuery.trimEnd());
+});
+
 test('workspace gaps follow traversed runtime sites and retain external call rows', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });

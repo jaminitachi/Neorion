@@ -9,6 +9,7 @@ import {
 } from './ArchitectureFacts';
 import { visitKinds } from './CompilerWalk';
 import { packageMember } from './CallableFlow';
+import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { jsxValue, PropFlow } from './PropFlow';
 import { isComponentWrapper, preferRenderBinding, renderBindings, type RenderCertainty } from './RenderBindings';
@@ -238,14 +239,23 @@ function lexicalName(node: Node): string | undefined {
 export class ComponentAnalyzer {
   constructor(private readonly root: string, private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
 
-  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, historyOnly = false) {
+  public analyze(files: SourceFile[], routes: RouteNode[], includeFacts: boolean, historyOnly = false, router?: RouterProject) {
     const components = new Map<Node, ComponentNode>();
-    const index = includeFacts ? new QueryIndexBuilder() : undefined;
     const bodies = new Map<Node, Node>();
     const aliases = new Map<Node, Node[]>();
     const hooks = new Map<string, HookNode>();
     const localHooks = new Map<Node, HookNode>();
     const projectFiles = new Set(files);
+    const exportsByFile = new Map<SourceFile, ReturnType<SourceFile['getExportedDeclarations']>>();
+    const exportsOf = (file: SourceFile) => {
+      let exported = exportsByFile.get(file);
+      if (!exported) {
+        exported = file.getExportedDeclarations();
+        if (projectFiles.has(file)) exportsByFile.set(file, exported);
+      }
+      return exported;
+    };
+    const index = includeFacts ? new QueryIndexBuilder(exportsOf) : undefined;
     const actions = new Set<string>();
     const actionIds = new Map<Node, string>();
     const actionNames = new Set<Node>();
@@ -285,7 +295,7 @@ export class ComponentAnalyzer {
         const module = file.getSymbol()?.compilerSymbol;
         const exportedActions = new Map<string, string>();
         if (module) actionModules.set(module, exportedActions);
-        for (const [name, declarations] of file.getExportedDeclarations()) {
+        for (const [name, declarations] of exportsOf(file)) {
           const specifier = named.get(name);
           if (specifier?.isTypeOnly() || specifier?.getExportDeclaration().isTypeOnly()) continue;
           for (const declaration of declarations) {
@@ -337,7 +347,7 @@ export class ComponentAnalyzer {
         aliases.set(assignment, targets);
         for (const target of targets) defaultDeclarations.add(target);
       }
-      const exported = new Set<Node>([...file.getExportedDeclarations().values()].flat());
+      const exported = new Set<Node>([...exportsOf(file).values()].flat());
       const schemaBindings = zodSchemaBindings(file);
       const candidates = [
         ...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
@@ -404,14 +414,16 @@ export class ComponentAnalyzer {
     for (const file of files) {
       const relative = relativePath(file);
       const route = routesByFile.get(relative);
-      const isPagesApp = /^(?:src\/)?pages\/_app\.[jt]sx?$/.test(relative);
+      const isPagesApp = !router && /^(?:src\/)?pages\/_app\.[jt]sx?$/.test(relative);
       if (!isPagesApp && (!route || route.type === 'api' || isMetadata(route) || route.componentId)) continue;
-      const exported = file.getExportedDeclarations().get('default');
+      const exported = exportsOf(file).get('default');
       const componentId = exported?.flatMap(node => aliases.get(node) ?? [node])
         .map(node => resolveComponent(node)).find(Boolean)?.id;
       if (isPagesApp) pagesApps.push({ file: relative, componentId });
       else if (route) route.componentId = componentId;
     }
+
+    if (router) for (const route of routes) route.componentId = routesByFile.get(route.file)?.componentId;
 
     const edges = new Map<string, ComponentEdge>();
     const componentCalls = new Set<Node>();
@@ -495,6 +507,7 @@ export class ComponentAnalyzer {
     const renderTargets = new Map<Node, ComponentNode[]>();
     const renderChoices = new Map<Node, Map<string, RenderCertainty>>();
     const unresolvedLookups = new Map<Node, Node[]>();
+    const isFetcherForm = router && (require('../frameworks/react-router/Navigation') as typeof import('../frameworks/react-router/Navigation')).isFetcherForm;
     const callbackBodies = new Set<ts.Node>();
     const componentForBinding = (target: ReturnType<typeof renderBindings>['targets'][number]['target'], tag: Node) => {
       let binding: Node = target;
@@ -529,7 +542,7 @@ export class ComponentAnalyzer {
         } else if (Node.isCallExpression(node) && /(?:^|\.)createElement$/.test(node.getExpression().getText())) {
           tag = node.getArguments()[0];
         }
-        if (!tag) return;
+        if (!tag || isFetcherForm?.(tag)) return;
         const targets = Node.isElementAccessExpression(tag) ? [tag] : declarationsOf(tag);
         const resolved = declaredRenderTargets(targets);
         renderTargets.set(tag, resolved);
@@ -742,10 +755,10 @@ export class ComponentAnalyzer {
         const body = targets.map(target => bodies.get(target)).find(Boolean);
         if (body) bodies.set(node, body);
       }
-      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts);
+      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts, exportsOf);
       collectRenderFacts(this.root, routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
-      collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace, flow);
+      if (!router) collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace, flow);
     }
-    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow, historyOnly), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
+    return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow, historyOnly, router), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
   }
 }

@@ -2,8 +2,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
-import { hasOwnRoutes, ignoredProjectDirectories, projectConfig, workspaceDirectories } from './FindProject';
-import { projectSnapshot } from './ProjectSnapshot';
+import { hasOwnRoutes, ignoredProjectDirectories, projectConfig, projectRouterFramework, workspaceDirectories } from './FindProject';
+import { projectSnapshot, routerDependencySnapshot } from './ProjectSnapshot';
 import { readNextConfig } from './analyzers/NextConfig';
 import { WorkspaceBindings, within } from './analyzers/WorkspaceBindings';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
@@ -22,6 +22,8 @@ interface GenerateOptions {
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
     const packageJsonPath = path.join(projectPath, 'package.json');
+    const pkg = fs.existsSync(packageJsonPath) ? JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8')) : undefined;
+    const framework = projectRouterFramework(projectPath, pkg);
     const routerDirectory = (name: string) => {
         const root = path.join(projectPath, name);
         return fs.existsSync(root) ? root : path.join(projectPath, 'src', name);
@@ -32,10 +34,23 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     options.onProgress?.("Analyzing project structure...");
 
     const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
-    const rootWorkspaceApp = workspaceDirectories(projectPath)?.directories.some(directory => directory !== projectPath) && hasOwnRoutes(projectPath);
+    const rootWorkspaceApp = workspaceDirectories(projectPath)?.directories.some(directory => directory !== projectPath) &&
+        (!!framework || hasOwnRoutes(projectPath));
     const workspace = new WorkspaceBindings(projectPath, rootWorkspaceApp);
     const workspaceSources = options.markdown ? workspace.snapshot() : undefined;
     const project = openProject(projectPath, workspace);
+    const routerDependencies = framework && options.markdown ? routerDependencySnapshot(projectPath) : undefined;
+    if (framework && !project.getCompilerOptions().moduleResolution) {
+        // Framework projects are bundled, including source-only checkouts
+        // whose package-provided tsconfig could not be loaded.
+        const compiler = project.getCompilerOptions();
+        project.compilerOptions.set({ module: compiler.module ?? ts.ModuleKind.ESNext,
+            moduleResolution: ts.ModuleResolutionKind.Bundler, jsx: compiler.jsx ?? ts.JsxEmit.Preserve });
+    }
+    const router = framework
+        ? (require('./frameworks/react-router/ReactRouterAdapter') as typeof import('./frameworks/react-router/ReactRouterAdapter'))
+            .analyzeRouter(projectPath, project, framework)
+        : undefined;
 
     const sourceFiles = project.getSourceFiles().filter(file => {
         const filePath = file.getFilePath();
@@ -43,22 +58,23 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
             !path.relative(projectPath, filePath).split(path.sep)
                 .some(part => part === 'node_modules' || part === '.next');
     });
-    const pagesConfig = fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const routes = new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
+    const pagesConfig = !router && fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
+    const routes = router?.routes ?? new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
-        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown);
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown, router);
 
     if (analysis.index) {
         analysis.index.projectSnapshot = snapshot;
+        if (analysis.index.router) analysis.index.router.dependencies = routerDependencies;
         analysis.index.workspaceSources = workspaceSources;
     }
 
     const directories = new Map<string, DirectoryMetadata>();
-    const routeDirectories = [appDir, pagesDir].map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
+    const routeDirectories = (router ? [router.app] : [appDir, pagesDir]).map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
     for (const file of sourceFiles) {
         if (!within(projectPath, file.getFilePath())) continue;
         const parts = path.relative(projectPath, file.getFilePath()).split(path.sep).slice(0, -1);
@@ -74,8 +90,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     let name = path.basename(projectPath);
     let libraries: LibraryInfo[] = [];
     let devDependencies: string[] = [];
-    if (fs.existsSync(packageJsonPath)) {
-        const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
+    if (pkg !== undefined) {
         if (typeof pkg?.name === 'string' && pkg.name.trim()) name = pkg.name;
         libraries = Object.entries(pkg?.dependencies ?? {}).map(([name, version]) => ({
             name,
@@ -88,7 +103,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     const graph: CodebaseGraph = {
         metadata: {
             name,
-            router: hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none'),
+            router: router?.framework ?? (hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none')),
             directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
         },
         routes,
