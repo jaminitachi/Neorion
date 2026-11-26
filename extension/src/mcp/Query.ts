@@ -1043,7 +1043,9 @@ export class QueryEngine {
 
   private detailQuery(target: string, cli: CliReplay | undefined, expired: () => boolean): { result: Result; ambiguous?: boolean } {
     const details = this.index.detailFacts;
-    if (!details) return { result: { rows: [], partial: 'regenerate index for handler and state facts' } };
+    if (!details || !Array.isArray(details.requests)) {
+      return { result: { rows: [], partial: 'regenerate index for handler and state facts' } };
+    }
     const methodTarget = /^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)\s+(.+)$/i.exec(target);
     const routeTarget = methodTarget?.[2] ?? target;
     const notes = new Set<string>();
@@ -1066,15 +1068,25 @@ export class QueryEngine {
       const title = methodTarget ? methodTarget[1].toUpperCase() + ' ' + route.url : route.url;
       const handlers = details.handlers[route.id];
       const methods = methodTarget ? [methodTarget[1].toUpperCase()] : Object.keys(handlers ?? {});
-      if (!methods.length) notes.add('method exports unresolved');
+      const requests = new Map<string, DetailFact[]>();
+      for (const [method, candidates, fact] of details.requests) {
+        if (!candidates.includes(route.id)) continue;
+        const found = requests.get(method) ?? [];
+        found.push(fact);
+        requests.set(method, found);
+      }
+      if (!methods.length) {
+        notes.add('method exports unresolved');
+        for (const [method, facts] of requests) if (method !== '?') append(facts, 'client ');
+      }
       for (const method of methods) {
         const facts = handlers?.[method];
         if (facts?.length) append(facts.slice(0, 1), method + ' ');
         else notes.add(method + ' handler unresolved');
-        append(details.requests[method + ' ' + route.url] ?? [], 'client ');
+        append(requests.get(method) ?? [], 'client ');
         if (facts) append(facts.slice(1), method + ' ');
       }
-      append(details.requests['? ' + route.url] ?? [], 'client ');
+      append(requests.get('?') ?? [], 'client ');
       return { result: { title, rows, targets: [route.file], scope: 'direct handler and indexed request syntax',
         partial: [...notes].join('; ') || undefined } };
     }
@@ -1099,6 +1111,7 @@ export class QueryEngine {
     append(own.filter(fact => isRender(fact) && isControl(fact)));
     append(own.filter(fact => isRender(fact) && !isControl(fact)));
     append(own.filter(isSetter));
+    if (details.untracedStateOwners.includes(symbol.id)) notes.add('state or setter use outside indexed owner facts');
     if (details.unresolvedJsxHandlers?.includes(symbol.id)) notes.add('JSX callback handoff unresolved');
     if (!rows.length) notes.add('no supported state or prop facts resolved');
     if (this.index.dynamicRenderComponents?.includes(symbol.id) ||

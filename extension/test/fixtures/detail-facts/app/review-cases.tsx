@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { executeAsync } from '../lib/edit-request';
 declare function addDraft(payload: object): void;
@@ -72,4 +72,62 @@ export function DownloadLinks() {
     <LinkedDownload url="/api/teams/example/downloads/first" />
     <LinkedDownload url="/api/teams/example/downloads/second" />
   </>;
+}
+
+declare const ArchiveLinkModal: typeof Button;
+declare const ModalContext: { Provider: typeof Button };
+
+export function useArchiveLinkModal() {
+  const [showArchiveLinkModal, setShowArchiveLinkModal] = useState(false);
+  const ArchiveLinkModalCallback = useCallback(() => (
+    <ArchiveLinkModal open={showArchiveLinkModal} setOpen={setShowArchiveLinkModal} />
+  ), [showArchiveLinkModal]);
+  return useMemo(() => ({ setShowArchiveLinkModal, ArchiveLinkModal: ArchiveLinkModalCallback }), [ArchiveLinkModalCallback]);
+}
+
+export function useReturnedSetter() {
+  const [open, setOpen] = useState(false);
+  return [open, setOpen];
+}
+
+export function useReturnedCallback() {
+  const [open, setOpen] = useState(false);
+  return () => setOpen(true);
+}
+
+export function ModalProvider() {
+  const [open, setOpen] = useState(false);
+  return <ModalContext.Provider value={{ open, setOpen }} />;
+}
+
+export function useContextSetter() {
+  const [open, setOpen] = useState(false);
+  registerSetter(setOpen);
+}
+declare function registerSetter(setter: (value: boolean) => void): void;
+
+export function useLocalState() {
+  const [open, setOpen] = useState(false);
+  setOpen(true);
+}
+
+export function MaintenanceChecker({ pathname }: { pathname: string }) {
+  function checkMaintenance() {
+    return fetch('/api/maintenance/check');
+  }
+  useEffect(() => {
+    if (pathname === '/maintenance') return;
+    checkMaintenance();
+  }, [pathname]);
+  return null;
+}
+
+export function PreviewPagesViewer() {
+  const [busy, setBusy] = useState(false);
+  const pagesApiEndpoint = '/api/teams/sample/documents/example/preview-pages';
+  function ensurePagesLoaded() {
+    fetch(pagesApiEndpoint, { method: 'POST' });
+    setBusy(true);
+  }
+  return <button onClick={ensurePagesLoaded} disabled={busy} />;
 }

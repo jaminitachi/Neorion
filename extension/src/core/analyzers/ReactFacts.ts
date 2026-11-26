@@ -9,7 +9,7 @@ import { functionNode, importBinding } from './StaticBindings';
 import { jsxLabel } from './CallableFlow';
 
 export type IndexedRequest = Pick<FetchEntry, 'url' | 'method'> & { partialUrl: boolean };
-type State = { name: string; setter: string; owner: number; writes: Write[]; effects: string[] };
+type State = { name: string; setter: string; owner: number; fn?: Node; writes: Write[]; effects: string[] };
 type Write = { call: CallExpression; fn?: Node; label: string; partial?: string };
 type Call = { node: CallExpression; fn?: Node };
 type Request = {
@@ -101,14 +101,16 @@ export class ReactFacts {
   private readonly formAppends: CallExpression[] = [];
   private readonly xhrSends: Call[] = [];
   private readonly filters: CallExpression[] = [];
+  private readonly indexedStateUses = new Set<Node>();
 
   constructor(private file: SourceFile, private relative: string, private flow: PropFlow,
     private ownerOf: (node: Node) => number | undefined,
     private addFact: (owner: number, fact: DetailFact) => void,
     private indexedRequests: ReadonlyMap<Node, ReadonlyMap<string, IndexedRequest>>,
-    private addRequest: (method: string, route: string, fact: DetailFact) => void) {}
+    private addRequest: (method: string, routes: string[], fact: DetailFact) => void,
+    private untracedStateOwners: Set<number>) {}
 
-  collect() {
+  collect(calls: readonly CallExpression[]) {
     const text = this.file.compilerNode.text;
     const hasXhr = text.includes('XMLHttpRequest');
     const imports = /useState|useEffect|useDropzone/.test(text) ?
@@ -120,8 +122,11 @@ export class ReactFacts {
       if (maybeHooks.has(specifier.getName())) maybeHooks.add(specifier.getAliasNode()?.getText() ?? specifier.getName());
     }
     const memberCandidates = new Set(['append', 'set', 'open', 'send', 'filter', ...maybeHooks]);
-    visitKinds(this.file, callKind, node => {
-      if (!Node.isCallExpression(node)) return;
+    for (const node of calls) {
+      const callee = node.compilerNode.expression;
+      const rawName = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '';
+      if (!callbackName.test(rawName) && !(scanHooks &&
+        (ts.isIdentifier(callee) || memberCandidates.has(rawName) || rawName === 'fetch'))) continue;
       const expression = node.getExpression();
       const name = Node.isIdentifier(expression) ? expression.getText() : Node.isPropertyAccessExpression(expression) ? expression.getName() : '';
       if (maybeHooks.has(name)) {
@@ -136,12 +141,7 @@ export class ReactFacts {
       if (hasXhr && name === 'send') this.xhrSends.push({ node, fn: enclosingFunction(node) });
       if (name === 'append' || name === 'set') this.formAppends.push(node);
       if (name === 'filter') this.filters.push(node);
-    }, { filterRaw: node => {
-      if (!ts.isCallExpression(node)) return false;
-      const callee = node.expression;
-      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '';
-      return callbackName.test(name) || scanHooks && (ts.isIdentifier(callee) || memberCandidates.has(name) || name === 'fetch');
-    } });
+    }
     for (const call of this.directCalls) this.recordStateAndPropCall(call);
     for (const call of this.requestCandidates) this.recordRequest(call);
     for (const request of this.requests) this.indexRequest(request);
@@ -153,6 +153,7 @@ export class ReactFacts {
       this.add(this.ownerOf(node), node, functionName(enclosingFunction(node)) + ' reads state via ' + expressionLabel(node),
         'filter result evaluated at runtime');
     }
+    this.recordUntracedStateUses();
     return this.states.size > 0 || this.effectCalls.length > 0 || this.dropzones.length > 0;
   }
 
@@ -173,7 +174,10 @@ export class ReactFacts {
       this.add(owner, call, 'useState binding', 'state and setter bindings unresolved');
       return;
     }
-    const state = { name: value.getName(), setter: update.getName(), owner, writes: [], effects: [] };
+    const state = { name: value.getName(), setter: update.getName(), owner,
+      fn: enclosingFunction(call), writes: [], effects: [] };
+    this.indexedStateUses.add(value.getNameNode());
+    this.indexedStateUses.add(update.getNameNode());
     this.states.set(value, state);
     this.setters.set(update, state);
     this.settersNames.add(state.setter);
@@ -202,6 +206,7 @@ export class ReactFacts {
     const setter = this.setterOf(callee);
     if (setter) {
       const fn = enclosingFunction(node);
+      if (fn === setter.fn) this.indexedStateUses.add(callee);
       const conditional = conditionalAt(node, fn) || node.hasQuestionDotToken();
       const write = { call: node, fn, label: expressionLabel(node) + (conditional ? ' [conditional]' : ''),
         partial: conditional ? 'setter execution is conditional' :
@@ -311,7 +316,7 @@ export class ReactFacts {
     this.add(owner, call, text, partial);
     if (owner !== undefined) {
       const fact: DetailFact = [this.relative, startLine(call), text, partial];
-      for (const route of request.routes) this.addRequest(request.method, route, fact);
+      this.addRequest(request.method, request.routes, fact);
     }
   }
 
@@ -338,16 +343,29 @@ export class ReactFacts {
       const target = Node.isIdentifier(callee) ? resolveFunction(callee) : undefined;
       const requests = this.requests.filter(request => request.call === node || target && request.fn === target);
       if (target || requests.length) {
-        effects.push(expressionLabel(callee) + (requests.length ? ' → ' + requests.map(requestTarget).join(', ') : ''));
+        const guardedCall = conditionalAt(node, fn) || node.hasQuestionDotToken();
+        const callLabel = expressionLabel(callee) + (guardedCall ? ' [conditional]' : '');
+        let guardedRequest = false;
+        const steps = requests.map(request => {
+          const conditional = request.call !== node && (conditionalAt(request.call, target) || request.call.hasQuestionDotToken());
+          guardedRequest ||= !!conditional;
+          return requestTarget(request) + (conditional ? ' [conditional]' : '');
+        });
+        effects.push(callLabel + (steps.length ? ' → ' + steps.join(', ') : ''));
+        if (guardedCall || guardedRequest) partial ??= 'effect call execution is conditional';
         if (requests.some(request => request.partial)) partial ??= 'effect request binding unresolved';
       }
     }
     const detail = 'useEffect ' + expressionLabel(dependencies) + (effects.length ? ' → ' + effects.join(', ') : '');
     this.add(owner, effect, detail, calls.length > effects.length || deps.some(Node.isSpreadElement)
       ? 'effect calls or dependencies unresolved' : partial);
+    const effectOwner = enclosingFunction(effect);
     for (const dep of deps) {
       const state = this.stateOf(dep);
-      if (state && Node.isIdentifier(dep)) state.effects.push(detail + ' @' + startLine(effect));
+      if (state && Node.isIdentifier(dep)) {
+        if (state.fn === effectOwner) this.indexedStateUses.add(dep);
+        state.effects.push(detail + ' @' + startLine(effect));
+      }
     }
   }
 
@@ -471,17 +489,28 @@ export class ReactFacts {
     return found;
   }
 
-  private referencesState(value: Node | undefined) {
-    if (!value || !this.states.size) return false;
-    let found = false;
-    visitKinds(value, identifierKind, identifier => {
-      const declaration = binding(identifier);
-      found = !!declaration && (this.states.has(declaration) || this.setters.has(declaration));
-    }, { filterRaw: node => !found && ts.isIdentifier(node) &&
-      (this.stateNames.has(node.text) || this.settersNames.has(node.text)) });
-    return found;
+  private recordUntracedStateUses() {
+    if (!this.states.size) return;
+    this.visitStateReferences(this.file, (identifier, state) => {
+      if (!this.indexedStateUses.has(identifier)) this.untracedStateOwners.add(state.owner);
+      return false;
+    });
   }
 
+  private referencesState(value: Node | undefined) {
+    return !!value && this.states.size > 0 && this.visitStateReferences(value, () => true);
+  }
+
+  private visitStateReferences(root: Node, visit: (identifier: Node, state: State) => boolean) {
+    let stopped = false;
+    visitKinds(root, identifierKind, identifier => {
+      const declaration = binding(identifier);
+      const state = declaration && (this.states.get(declaration) ?? this.setters.get(declaration));
+      if (state) stopped = visit(identifier, state);
+    }, { filterRaw: node => !stopped && ts.isIdentifier(node) &&
+      (this.stateNames.has(node.text) || this.settersNames.has(node.text)) });
+    return stopped;
+  }
 }
 
 function requestTarget({ method, url, partialUrl }: Request) {

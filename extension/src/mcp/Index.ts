@@ -168,7 +168,8 @@ export interface DetailFacts {
   handlers: Record<number, Record<string, DetailFact[]>>;
   symbols: Record<number, DetailFact[]>;
   renders: Record<number, DetailFact[]>;
-  requests: Record<string, DetailFact[]>;
+  requests: [method: string, routes: number[], fact: DetailFact][];
+  untracedStateOwners: number[];
   unresolvedJsxHandlers: number[];
 }
 

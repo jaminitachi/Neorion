@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind, ts, type CallExpression } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
@@ -23,8 +23,7 @@ import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
-import { handlerFacts } from './HandlerFacts';
-import { ReactFacts, type IndexedRequest } from './ReactFacts';
+import type { ReactFacts, IndexedRequest } from './ReactFacts';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -773,7 +772,13 @@ export class QueryIndexBuilder {
         ({ ...target, gates, supplied: value })) : []);
     };
     const suppliedCallbacks = new Set<Node>();
+    const reactFacts = historyOnly ? undefined : (require('./ReactFacts') as typeof import('./ReactFacts')).ReactFacts;
+    const factCalls = new Map<SourceFile, CallExpression[]>();
     for (const file of files) {
+      // Keep call sites from the existing walk, in source order. Facts still
+      // resolve owners and fetch targets after the index has been assembled.
+      const calls: CallExpression[] | undefined = reactFacts?.appliesTo(file, true) ? [] : undefined;
+      if (calls) factCalls.set(file, calls);
       visitKinds(file, FLOW_KINDS, node => {
         if (Node.isJsxAttribute(node)) {
           const site = node.getParent()?.getParent();
@@ -821,6 +826,7 @@ export class QueryIndexBuilder {
           return;
         }
         if (!Node.isCallExpression(node)) return;
+        calls?.push(node);
         const expression = node.getExpression();
         // Existing references cover ordinary declarations. Resolve value flow for
         // lexical bindings, property reads, and calls whose target is returned.
@@ -1465,6 +1471,7 @@ export class QueryIndexBuilder {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
       const content = historyOnly ? '' : file.getFullText();
+      const escapedIdentifiers = file.compilerNode.text.includes('\\u');
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -1976,7 +1983,7 @@ export class QueryIndexBuilder {
         filterRaw: node => {
           if (!ts.isIdentifier(node)) return true;
           // Use the source spelling, including Unicode escapes, just as the reference visitor does.
-          const name = node.getText(file.compilerNode);
+          const name = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
           return names.has(name) || localNames.has(name) || namespaces.has(name);
         }
       });
@@ -2168,9 +2175,9 @@ export class QueryIndexBuilder {
       if (packages.length) index.workspacePackages = Object.fromEntries(packages);
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
     }
-    if (!historyOnly) {
+    if (reactFacts) {
       const details: DetailFacts = index.detailFacts = {
-        handlers: {}, symbols: {}, renders: {}, requests: {}, unresolvedJsxHandlers: []
+        handlers: {}, symbols: {}, renders: {}, requests: [], untracedStateOwners: [], unresolvedJsxHandlers: []
       };
       const add = <K extends string | number>(table: Record<K, DetailFact[]>, key: K, row: DetailFact) =>
         (table[key] ??= []).push(row);
@@ -2180,10 +2187,17 @@ export class QueryIndexBuilder {
         const entries = source && exports.get(source);
         const methods = (route.methods ?? []).map(method => {
           const declarations = entries?.get(method);
+          const { handlerFacts } = require('./HandlerFacts') as typeof import('./HandlerFacts');
           return [method, handlerFacts(declarations?.length === 1 ? declarations[0] : undefined,
             node => relativePath(node.getSourceFile()))] as const;
         });
         details.handlers[route.id] = Object.fromEntries(methods);
+      }
+      const apiRoutesByUrl = new Map<string, number[]>();
+      for (const { kind, url, id } of index.routes) if (kind === 'api') {
+        const ids = apiRoutesByUrl.get(url) ?? [];
+        ids.push(id);
+        apiRoutesByUrl.set(url, ids);
       }
       const indexedRequests = new Map<Node, Map<string, IndexedRequest>>();
       for (const { node, via, route, method, url, partial, propUrlUnknown } of this.fetches) {
@@ -2196,6 +2210,7 @@ export class QueryIndexBuilder {
       }
       const jsxFiles = new Set(renderSites.map(site => site.file));
       const react = new Map<SourceFile, ReactFacts>();
+      const untracedStateOwners = new Set<number>();
       const scope = (node: Node) => {
         for (let parent = node.compilerNode.parent; parent; parent = parent.parent) {
           const id = graphOwners.get(parent);
@@ -2205,11 +2220,15 @@ export class QueryIndexBuilder {
         return owners(node)[1];
       };
       for (const [relative, source] of filesByRelative) {
-        if (!ReactFacts.appliesTo(source, jsxFiles.has(relative))) continue;
-        const collector = new ReactFacts(source, relative, flow, scope,
+        const calls = factCalls.get(source);
+        if (!calls?.length || !reactFacts.appliesTo(source, jsxFiles.has(relative))) continue;
+        const collector = new reactFacts(source, relative, flow, scope,
           (owner, fact) => add(details.symbols, owner, fact), indexedRequests,
-          (method, route, fact) => add(details.requests, method + ' ' + route, fact));
-        if (collector.collect()) react.set(source, collector);
+          (method, routes, fact) => {
+            const candidates = routes.flatMap(route => apiRoutesByUrl.get(route) ?? []);
+            if (candidates.length) details.requests.push([method, candidates, fact]);
+          }, untracedStateOwners);
+        if (collector.collect(calls)) react.set(source, collector);
       }
       const untracedHandlers = new Set<number>();
       for (const site of renderSites) {
@@ -2241,6 +2260,7 @@ export class QueryIndexBuilder {
         }
       }
       details.unresolvedJsxHandlers = [...untracedHandlers];
+      details.untracedStateOwners = [...untracedStateOwners];
     }
     return index;
   }

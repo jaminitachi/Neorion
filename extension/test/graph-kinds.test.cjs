@@ -119,8 +119,9 @@ test('facts handles the review cases', async t => {
     const original = handlerRows('/api/faqs', 'GET').find(([, , text]) => text.startsWith('Prisma store.faq.findFirst('));
     assert.match(original[2], /where: \{ status: "PUBLISHED" \}/);
     assert.equal(original[3], null);
-    const bodyRows = index.detailFacts.requests['PATCH /api/admin/users/[id]'].filter(([, , text]) =>
-      text.includes('JSON fields'));
+    const userRoute = index.routes.find(route => route.url === '/api/admin/users/[id]');
+    const bodyRows = index.detailFacts.requests.filter(([method, routes, [, , text]]) =>
+      method === 'PATCH' && routes.includes(userRoute.id) && text.includes('JSON fields')).map(([, , fact]) => fact);
     assert.equal(bodyRows.length, 2);
     for (const [, , text, partial] of bodyRows) {
       assert.match(text, /JSON fields \{ <unresolved keys> \}/);
@@ -146,6 +147,69 @@ test('facts handles the review cases', async t => {
     assert.match(output, /# partial: .*JSX state or setter binding depends on runtime/);
     assert.doesNotMatch(output, /^# complete:/m);
     assert.match(facts('EditApprovalButton'), /^# partial:/m);
+  });
+
+  await t.test('B1 prime keeps mutated const values opaque in updates and JSON responses', () => {
+    const rows = handlerRows('/api/workflows/[workflowId]/steps', 'POST');
+    const update = rows.find(([, , text]) => text.startsWith('Prisma store.link.update('));
+    assert.match(update[2], /data: \{ allowList: <unresolved keys> \}/);
+    assert.equal(update[3], 'ORM argument values unresolved');
+    const response = rows.find(([, , text]) => text.startsWith('JSON response 500 '));
+    for (const name of ['runs', 'errors', 'indexed', 'names', 'members', 'recipients', 'aliasTarget']) {
+      assert.ok(response[2].includes(name + ': <unresolved keys>'), name);
+    }
+    assert.match(response[2], /unchanged: \["keep"\]/);
+    assert.equal(response[3], 'response values unresolved');
+  });
+
+  await t.test('B3 prime marks returned and forwarded state or setters partial on their owners', () => {
+    for (const owner of ['useArchiveLinkModal', 'useReturnedSetter', 'useReturnedCallback', 'ModalProvider', 'useContextSetter']) {
+      const output = facts(owner);
+      assert.match(output, /state .* ← useState\(false\) setter/);
+      assert.match(output, /^# partial: .*state or setter use outside indexed owner facts/m);
+      assert.doesNotMatch(output, /^# complete:/m);
+    }
+    assert.match(facts('useLocalState'), /^# complete:/m);
+  });
+
+  await t.test('G1 includes client requests when Pages Router handler methods are unresolved', () => {
+    const url = '/api/teams/[teamId]/documents/[id]/preview-pages';
+    const post = facts('POST ' + url).split('\n').find(line => line.includes('ensurePagesLoaded → POST'));
+    assert.ok(post);
+    const output = facts(url);
+    assert.ok(output.split('\n').includes(post));
+    assert.match(output, /^# partial: method exports unresolved/m);
+  });
+
+  await t.test('G2 reports conditional effect calls after an early exit', () => {
+    const output = facts('MaintenanceChecker');
+    assert.match(output, /useEffect \[pathname\] → checkMaintenance \[conditional\] → GET \/api\/maintenance\/check/);
+    assert.match(output, /^# partial: .*effect call execution is conditional/m);
+  });
+
+  await t.test('G3 stores one uncertain request row for a call with multiple candidate routes', () => {
+    const entries = index.detailFacts.requests.filter(([, , [, , text]]) => text.includes('fetchStatus → GET'));
+    assert.equal(entries.length, 1);
+    const [method, candidates, [, , text]] = entries[0];
+    const routes = ['/api/teams/[teamId]/downloads/[jobId]', '/api/teams/[teamId]/documents/[id]/views/[viewId]/stats'];
+    for (const url of routes) {
+      assert.ok(candidates.includes(index.routes.find(route => route.url === url).id), url);
+      assert.equal(facts(method + ' ' + url).split('\n').filter(line => line.endsWith(text)).length, 1);
+    }
+    assert.doesNotMatch(facts('GET /api/media'), /fetchStatus/);
+  });
+
+  await t.test('G4 retains a filter across trusted Prisma reads and marks untrusted calls opaque', () => {
+    const rows = handlerRows('/api/trash', 'GET');
+    const count = rows.find(([, , text]) => text.startsWith('Prisma prisma.file.count('));
+    const lists = rows.filter(([, , text]) => text.startsWith('Prisma prisma.file.findMany('));
+    assert.equal(lists.length, 2);
+    for (const [, , text, partial] of [count, lists[0]]) {
+      assert.match(text, /where: \{ ownerId: "owner", deletedAt: \{ not: null \} \}/);
+      assert.equal(partial, null);
+    }
+    assert.match(lists[1][2], /where: <unresolved keys>/);
+    assert.equal(lists[1][3], 'ORM argument values unresolved');
   });
 
   await t.test('F1 deduplicates fetch rows at a route and at the source symbol', () => {

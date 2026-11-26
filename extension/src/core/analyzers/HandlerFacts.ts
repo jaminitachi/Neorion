@@ -2,7 +2,7 @@ import { Node, SyntaxKind, ts } from 'ts-morph';
 import type { DetailFact } from '../../mcp/Index';
 import { visitKinds } from './CompilerWalk';
 import { startLine } from './SourceLines';
-import { constInitializer, expressionLabel, factValue, literalLabel, objectFields, unwrapFact } from './FactSyntax';
+import { constInitializer, expressionLabel, factValue, literalLabel, objectFields, prismaModule, unwrapFact } from './FactSyntax';
 import { functionNode, importBinding, valueNode } from './StaticBindings';
 
 const handlerKinds = new Set([
@@ -98,13 +98,11 @@ export function handlerFacts(declaration: Node | undefined, relative: (node: Nod
         // The call itself is evidence. A conventional name alone cannot prove
         // that this object is a Prisma client.
         const initialized = constInitializer(client);
-        const prismaImport = (module: string | undefined) => module === '@prisma/client' ||
-          /(?:^|\/)generated\/prisma(?:\/client)?$/.test(module ?? '');
-        const prisma = prismaImport(origin?.module) ||
+        const prisma = prismaModule(origin?.module) ||
           origin?.declaration.getModuleSpecifierSourceFile()?.getImportDeclarations()
-            .some(entry => prismaImport(entry.getModuleSpecifierValue()) &&
+            .some(entry => prismaModule(entry.getModuleSpecifierValue()) &&
               entry.getNamedImports().some(binding => binding.getName() === 'PrismaClient')) ||
-          Node.isNewExpression(initialized) && prismaImport(importBinding(initialized.getExpression())?.module);
+          Node.isNewExpression(initialized) && prismaModule(importBinding(initialized.getExpression())?.module);
         const args = node.getArguments();
         const result = args.length ? shape(args[0]) : undefined;
         add(node, (prisma ? 'Prisma ' : 'model-shaped call ') + expressionLabel(callee) +
