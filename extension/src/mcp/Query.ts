@@ -731,8 +731,12 @@ export class QueryEngine {
     const origins = new Set(origin.flatMap(route => routerAncestry(route, byRouteId).map(parent => parent.id)));
     const inTraversal = (owner: number, route?: number) => traversed?.has(owner) &&
       (route === undefined || !origins.size || origins.has(route));
+    // Route callees puts its registration's navigation edges at depth one, independent of owner depth.
+    const flattenedRoute = tool === 'callees' && origin.length === 1 ? origin[0].id : undefined;
+    const fromFlattenedRoute = (route?: number) => route !== undefined && route === flattenedRoute;
+    const inForwardScope = (owner: number, route?: number) => fromFlattenedRoute(route) || inTraversal(owner, route);
     const navigation = forward && (router.edges.some(edge => edge.from !== undefined && inTraversal(edge.from, edge.source)) ||
-      router.issues.some(issue => issue.kind === 'navigation' && inTraversal(issue.owner, issue.route)));
+      router.issues.some(issue => issue.kind === 'navigation' && inForwardScope(issue.owner, issue.route)));
     const routeScope = named.length > 0 || !!navigation || inverse || routeSearch;
     const targetFiles = new Set(result.targets ?? []);
     const root = byRouteId.get('root');
@@ -755,11 +759,13 @@ export class QueryEngine {
     }).map(issue => issue.reason);
 
     const relevant = router.issues.filter(issue => {
+      if (issue.kind === 'missing-action') return false;
+      if ((issue.kind === 'navigation' || issue.kind === 'registry') && fromFlattenedRoute(issue.route)) return true;
       if (!includeTests && testFile(issue.file) && !files.has(issue.file)) return false;
       if (issue.kind === 'import') return related.has(issue.file);
       if (issue.kind === 'navigation') return tool === 'api_consumers' && matched.length > 0 && issue.request &&
-        (!issue.destinations || issue.destinations.some(id => ids.has(id))) || forward && inTraversal(issue.owner, issue.route);
-      if (issue.kind === 'registry') return forward && inTraversal(issue.owner, issue.route) ||
+        (!issue.destinations || issue.destinations.some(id => ids.has(id))) || forward && inForwardScope(issue.owner, issue.route);
+      if (issue.kind === 'registry') return forward && inForwardScope(issue.owner, issue.route) ||
         tool === 'api_consumers' && issue.destinations.some(id => ids.has(id));
       if (issue.route === undefined) return related.has(issue.file);
       if (issue.kind === 'module') return ids.has(issue.route) || ancestry.has(issue.route) || related.has(issue.file);
@@ -769,6 +775,11 @@ export class QueryEngine {
       const affected = routes.find(route => route.id === issue.route);
       return !!affected && [...reachable([affected.file])].some(file => targetFiles.has(file));
     });
+    if (tool === 'callees') {
+      const notes = new Map(router.issues.flatMap(issue => issue.kind === 'missing-action' && inForwardScope(issue.owner, issue.route)
+        ? [[issue.reason, row(`# ${issue.reason}`, issue.file)] as const] : []));
+      if (notes.size) (result.notes ??= []).push(...notes.values());
+    }
     relevant.sort((a, b) => Number(!files.has(a.file)) - Number(!files.has(b.file)));
     reasons.push(...relevant.map(issue => issue.reason));
     if (result.partial) reasons.unshift(result.partial);

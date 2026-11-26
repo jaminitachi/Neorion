@@ -322,8 +322,17 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
         const handlers = definitions.get(target);
         const client = handlers?.get('client-' + role)?.entry;
         const server = handlers?.get(role)?.entry;
-        const handler = !ref.document && via !== 'fetch' ? client ?? server : server;
+        const clientAllowed = !ref.document && via !== 'fetch';
+        const handler = clientAllowed ? client ?? server : server;
         const rejected = kind === 'submit' && handler?.method && handler.method !== '?' && handler.method !== method;
+        if (kind === 'submit' && !handler && matches.length === 1 && !ref.possible && !ref.destinationUncertain) {
+          const runtime = destination.fileSymbol === undefined ? undefined : index.runtimeExports?.[destination.fileSymbol];
+          if (runtime && !runtime.unknownStar && (!runtime.names.action || runtime.names.action === 'type') &&
+              (!clientAllowed || !runtime.names.clientAction || runtime.names.clientAction === 'type')) {
+            recordIssue({ kind: 'missing-action', file: position.file, route: source?.id, owner: from,
+              reason: `${via}: target route has no action (${method} ${destination.url} → route:${target.id}, ${position.file}:${position.line})` });
+          }
+        }
         const applicable = load && handler && !rejected ? [handler] : [];
         if (load && !applicable.length) continue;
         const conditional = !!conditionalAt(site);

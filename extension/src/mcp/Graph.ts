@@ -716,7 +716,8 @@ export class DependencyGraph {
         if (!visits || terminalCertainty(current) < terminalCertainty(visits[visits.length - 1])) {
           append(visited, id, current);
         }
-        if (current.edge?.label !== 'middleware') pagesIssue ??= this.coverageIssue(id);
+        // Router render lookups describe outgoing JSX. Incoming uncertain edges carry their own coverage.
+        if (!this.index.router && current.edge?.label !== 'middleware') pagesIssue ??= this.coverageIssue(id);
         if (gates.some(gate => gate.partial)) flowIssue ??= propValueIssue;
         const endpoints = this.terminals(id).filter(terminal =>
           !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.scope === id && gate.unscoped));

@@ -1,5 +1,5 @@
 import { Node, SyntaxKind, type SourceFile } from 'ts-morph';
-import { bindingOf, valueNode } from '../../analyzers/StaticBindings';
+import { bindingOf, executionSites, functionNode, valueNode } from '../../analyzers/StaticBindings';
 import { urlTexts } from '../../analyzers/ArchitectureFacts';
 import { matchRouterRoutes, routerAncestry } from '../RouterMatch';
 import { redirectPackages, routerPackages } from './Composition';
@@ -41,6 +41,10 @@ function fetcherMember(node: Node, seen = new Set<Node>()): string | undefined {
   if (Node.isVariableDeclaration(binding) && hook(binding.getInitializer()) === 'useFetcher') {
     return (decl.getPropertyNameNode() ?? decl.getNameNode()).getText();
   }
+}
+
+export function isFetcherForm(tag: Node) {
+  return fetcherMember(tag) === 'Form';
 }
 
 function destination(node: Node | undefined, absent: string | undefined) {
@@ -97,17 +101,57 @@ function readAttributes(site: import('ts-morph').JsxOpeningElement | import('ts-
 }
 
 const navigators = new Set(['Link', 'NavLink', 'Navigate']);
+type FormInputs = Map<Node, Reference[]>;
+
+function eventTarget(node: Node | undefined) {
+  const value = valueNode(node);
+  if (Node.isPropertyAccessExpression(value) && value.getName() === 'currentTarget') {
+    return bindingOf(value.getExpression());
+  }
+}
+
+function recordFormInputs(form: Reference, props: ReturnType<typeof readAttributes>, events: FormInputs, inputs: FormInputs) {
+  const add = (bindings: FormInputs, parameter: Node, form: Reference) => {
+    const forms = bindings.get(parameter) ?? [];
+    if (!forms.includes(form)) forms.push(form);
+    bindings.set(parameter, forms);
+  };
+  for (const [name, value] of props.attributes) {
+    if (!/^on[A-Z]/.test(name) || props.unknown(name)) continue;
+    const handler = functionNode(value);
+    const event = handler?.getParameters()[0];
+    if (!event || handler.getSourceFile() !== form.site.getSourceFile()) continue;
+    add(events, event, form);
+    for (const { node } of executionSites(handler.getBody()).calls) {
+      const called = valueNode(node.getExpression());
+      // A wrapper may forward arguments to its callback, as in useDebounce(callback).
+      // Its argument mapping remains possible until the wrapper itself is traced.
+      const callback = functionNode(called) ?? (Node.isCallExpression(called) ? functionNode(called.getArguments()[0]) : undefined);
+      if (!callback || callback.getSourceFile() !== form.site.getSourceFile()) continue;
+      const parameters = callback.getParameters();
+      for (const [i, arg] of node.getArguments().entries()) {
+        if (Node.isSpreadElement(arg)) break;
+        const parameter = parameters[i];
+        if (parameter && !parameter.isRestParameter() && eventTarget(arg) === event) add(inputs, parameter, form);
+      }
+    }
+  }
+}
 
 export function routerReferences(file: SourceFile): Reference[] {
   const references: Reference[] = [];
+  const events: FormInputs = new Map();
+  const inputs: FormInputs = new Map();
+  const submissions: { reference: Reference; arg?: Node; options?: Node }[] = [];
   file.forEachDescendant(site => {
     if (Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site)) {
       const tag = site.getTagNameNode();
       const binding = frameworkBinding(tag);
       const name = binding && routerPackages.has(binding.module) ? binding.name :
-        fetcherMember(tag) === 'Form' ? 'fetcher.Form' : undefined;
+        isFetcherForm(tag) ? 'fetcher.Form' : undefined;
       if (!name || !navigators.has(name) && !['Form', 'fetcher.Form'].includes(name)) return;
-      const { attributes, unknown } = readAttributes(site);
+      const props = readAttributes(site);
+      const { attributes, unknown } = props;
       const isForm = !navigators.has(name);
       const target = isForm ? 'action' : 'to';
       const relative = stringValue(attributes.get('relative'));
@@ -116,11 +160,13 @@ export function routerReferences(file: SourceFile): Reference[] {
       const resolved = destination(attributes.get(target), isForm && !attributes.has('action') ? '.' : undefined);
       const destinationUncertain = resolved.destinationUncertain || unknown(target) ||
         !resolved.url?.startsWith('/') && (unknown('relative') || attributes.has('relative') && relative === undefined);
-      references.push({ site, via: name, relative, method,
+      const reference: Reference = { site, via: name, relative, method,
         document: attributes.has('reloadDocument') && !Node.isFalseLiteral(valueNode(attributes.get('reloadDocument'))),
         kind: isForm ? method === 'GET' ? 'load' : 'submit' : 'navigate',
         ...resolved, destinationUncertain,
-        possible: destinationUncertain || isForm && unknown('method') || undefined });
+        possible: destinationUncertain || isForm && unknown('method') || undefined };
+      references.push(reference);
+      if (isForm) recordFormInputs(reference, props, events, inputs);
       return;
     }
     if (!Node.isCallExpression(site)) return;
@@ -150,15 +196,34 @@ export function routerReferences(file: SourceFile): Reference[] {
       references.push({ kind: 'navigate', site, via: origin, relative, ...destination(arg, undefined), possible });
       return;
     }
-    const method = stringValue(opts?.get('method'))?.toUpperCase() ?? (opts?.has('method') || options && !opts ? undefined : 'GET');
-    const resolved = destination(opts?.get('action'), '.');
-    const implicitAction = !opts?.has('action') && Node.isIdentifier(arg);
-    references.push({ kind: method === 'GET' ? 'load' : 'submit', site, via: origin ?? 'fetcher.submit', relative, method,
-      ...resolved, destinationUncertain: resolved.destinationUncertain || possible || implicitAction,
-      possible: resolved.possible || possible || implicitAction ||
-        !opts?.has('method') && !!arg && !Node.isNullLiteral(valueNode(arg)) && !Node.isObjectLiteralExpression(valueNode(arg)) });
+    const reference: Reference = { kind: 'submit', site, via: origin ?? 'fetcher.submit', relative, possible };
+    references.push(reference);
+    submissions.push({ reference, arg, options });
   });
-  return references;
+  const resolvedSubmissions = new Map<Reference, Reference[]>();
+  for (const { reference, arg, options } of submissions) {
+    const opts = properties(options);
+    const value = valueNode(arg);
+    const event = eventTarget(value);
+    const parameter = Node.isIdentifier(value) ? bindingOf(value) : undefined;
+    const forms = event ? events.get(event) : parameter ? inputs.get(parameter) : undefined;
+    const data = !arg || Node.isNullLiteral(value) || Node.isObjectLiteralExpression(value) ||
+      Node.isNewExpression(value) && ['FormData', 'URLSearchParams'].includes(value.getExpression().getText()) &&
+        bindingOf(value.getExpression())?.getSourceFile().isDeclarationFile() !== false;
+    if (options && !opts) continue;
+    const explicitAction = !!opts?.has('action');
+    const explicitMethod = !!opts?.has('method');
+    resolvedSubmissions.set(reference, (forms ?? [undefined]).map(form => {
+      const formMethod = form?.method && (form.method === 'GET' ? 'GET' : 'POST');
+      const method = explicitMethod ? stringValue(opts?.get('method'))?.toUpperCase() : formMethod ?? (data ? 'GET' : undefined);
+      const action = explicitAction || !form ? destination(opts?.get('action'), data ? '.' : undefined) : form;
+      return { ...reference, kind: method === 'GET' ? 'load' : 'submit', method, url: action.url,
+        relative: explicitAction || !form ? reference.relative : form.relative, indexUncertain: action.indexUncertain,
+        possible: reference.possible || action.possible || !data && (!explicitAction || !explicitMethod),
+        destinationUncertain: action.destinationUncertain || reference.possible || !data && !explicitAction };
+    }));
+  }
+  return references.flatMap(ref => resolvedSubmissions.get(ref) ?? ref);
 }
 
 export function resolveReference(ref: Reference, origin: RouterRoute | undefined, routes: RouterRoute[],

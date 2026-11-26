@@ -507,6 +507,7 @@ export class ComponentAnalyzer {
     const renderTargets = new Map<Node, ComponentNode[]>();
     const renderChoices = new Map<Node, Map<string, RenderCertainty>>();
     const unresolvedLookups = new Map<Node, Node[]>();
+    const isFetcherForm = router && (require('../frameworks/react-router/Navigation') as typeof import('../frameworks/react-router/Navigation')).isFetcherForm;
     const callbackBodies = new Set<ts.Node>();
     const componentForBinding = (target: ReturnType<typeof renderBindings>['targets'][number]['target'], tag: Node) => {
       let binding: Node = target;
@@ -541,7 +542,7 @@ export class ComponentAnalyzer {
         } else if (Node.isCallExpression(node) && /(?:^|\.)createElement$/.test(node.getExpression().getText())) {
           tag = node.getArguments()[0];
         }
-        if (!tag) return;
+        if (!tag || isFetcherForm?.(tag)) return;
         const targets = Node.isElementAccessExpression(tag) ? [tag] : declarationsOf(tag);
         const resolved = declaredRenderTargets(targets);
         renderTargets.set(tag, resolved);

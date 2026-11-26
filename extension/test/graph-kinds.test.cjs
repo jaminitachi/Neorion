@@ -2755,7 +2755,6 @@ test('pathless index data requests target their path-contributing parent unless 
   write('section.tsx', `
     import { Outlet } from 'react-router';
     export function loader() { return null; }
-    export function action() { return null; }
     export default function Users() { return <Outlet />; }
   `);
   write('index-form.tsx', `
@@ -2778,18 +2777,22 @@ test('pathless index data requests target their path-contributing parent unless 
     }
   `);
   app.build();
-  assert.match(app.query('api_consumers', 'route:section'), /: 3 results /);
+  assert.match(app.query('api_consumers', 'route:section'), /: 1 results /);
   const indexConsumers = app.query('api_consumers', 'route:index-form');
   assert.match(indexConsumers, /: 2 results /);
   assert.match(indexConsumers, /GET fetcher.load/);
-  assert.match(app.query('callees', 'Home'), /^# complete:/m);
+  const home = app.query('callees', 'Home');
+  assert.match(home, /Form: target route has no action \(POST \/users → route:section, src\/ui\/home\.tsx:\d+\)/);
+  assert.match(home, /^# complete:/m);
+  assert.doesNotMatch(home, /^d1 submit .*POST \/users .*section\.tsx/m);
+  assert.match(app.query('callees', 'route:home'), /target route has no action/);
   fs.appendFileSync(path.join(app.root, 'src/ui/home.tsx'), `
     export function QueryIndex({ query }: { query: string }) {
       return <Form method="post" action={\`/users?\${query}\`} />;
     }
   `);
   const dynamic = app.run(['query', 'callees', 'QueryIndex']);
-  assert.match(dynamic, /section\.tsx[^\n]+\[possible\]/);
+  assert.doesNotMatch(dynamic, /^d1 submit .*section\.tsx/m);
   assert.match(dynamic, /index-form\.tsx[^\n]+\[possible\]/);
   assert.match(dynamic, /^# partial:/m);
 });
@@ -2875,7 +2878,7 @@ test('router Outlet chains forward through external providers and React context 
   assert.match(output, /^# partial: outlet forwarding unresolved/m);
 });
 
-test('router callees reports unresolved navigation only in functions visited within depth', t => {
+test('router callees scopes unresolved navigation to the flattened route or visited functions', t => {
   const app = routerFixture(t, 'react-router-config');
   fs.writeFileSync(path.join(app.root, 'src/ui/nav.ts'), `
     import { redirect } from 'react-router';
@@ -2883,8 +2886,14 @@ test('router callees reports unresolved navigation only in functions visited wit
     export function DynamicRedirect(url: string) { return redirect(\`\${url}?known=value\`); }
     export function CallsDynamic(url: string) { return DynamicRedirect(url); }
   `);
-  fs.appendFileSync(path.join(app.root, 'src/ui/home.tsx'), `
-    import { Link } from 'react-router';
+  fs.writeFileSync(path.join(app.root, 'src/ui/home.tsx'), `
+    import { Form, Link } from 'react-router';
+    import { CallsDynamic } from './nav';
+    export function loader({ request }: { request: Request }) { return CallsDynamic(request.url); }
+    export function action() { return null; }
+    export default function Home({ search }: { search: string }) {
+      return <><Form method="post" /><Link to={{ pathname: '/receiver', search }} /></>;
+    }
     export function DynamicLink({ url }: { url: string }) { return <Link to={url} />; }
   `);
   app.build();
@@ -2895,6 +2904,80 @@ test('router callees reports unresolved navigation only in functions visited wit
   assert.match(app.query('callees', 'CallsDynamic', '--depth', '2'),
     /^# partial: redirect destination or method unresolved .*nav\.ts:4/m);
   assert.match(app.query('callees', 'DynamicLink'), /^# partial: Link destination or method unresolved/m);
+  for (const target of ['/site/Case', 'route:case-sensitive']) {
+    const route = app.query('callees', target);
+    assert.match(route, /^d1 submit .* POST \/Case /m);
+    assert.match(route, /^# partial: .*Link destination or method unresolved .*home\.tsx:7.*redirect destination or method unresolved .*nav\.ts:4/m);
+    assert.doesNotMatch(route, /home\.tsx:9\)/);
+  }
+});
+
+test('router impact ignores outgoing render lookups and recognizes bound fetcher forms', t => {
+  const app = routerFixture(t, 'react-router-config');
+  const pkg = path.join(app.root, 'node_modules/react-router');
+  fs.mkdirSync(pkg, { recursive: true });
+  fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ name: 'react-router', types: 'index.d.ts' }));
+  fs.writeFileSync(path.join(pkg, 'index.d.ts'), `
+    export function useFetcher(): { Form: (props: { action: string; method: string }) => any };
+  `);
+  fs.writeFileSync(path.join(app.root, 'src/ui/registry.ts'), `
+    import { register, index } from './helpers';
+    export const registry = [index('home.tsx'), register('receiver', 'receiver.ts')];
+  `);
+  for (const file of ['route.tsx', 'index-form.tsx']) fs.unlinkSync(path.join(app.root, 'src/ui', file));
+  fs.writeFileSync(path.join(app.root, 'src/ui/home.tsx'), `
+    import { useFetcher } from 'react-router';
+    export default function Home() {
+      const fetcher = useFetcher();
+      return <fetcher.Form action="/receiver" method="post" />;
+    }
+  `);
+  fs.writeFileSync(path.join(app.root, 'src/ui/lookup.tsx'), `
+    function Icon() { return <span />; }
+    const icons = { Icon };
+    export function DynamicLookup({ name }: { name: keyof typeof icons }) {
+      const Selected = icons[name];
+      return <Selected />;
+    }
+  `);
+  app.build();
+  assert.match(app.query('callees', 'Home'), /d1 submit .*POST \/receiver .*fetcher\.Form → action/);
+  assert.match(app.query('callees', 'Home'), /^# complete:/m);
+  assert.match(app.query('impact', 'src/ui/home.tsx'), /^# complete:/m);
+  assert.match(app.query('api_consumers', 'route:receiver'), /^# complete:/m);
+  assert.match(app.query('callees', 'DynamicLookup'), /^# partial: component lookup key untraced/m);
+  assert.match(app.query('impact', 'DynamicLookup'), /^# complete:/m);
+});
+
+test('router useSubmit follows a form passed through an event callback and leaves unknown forms unresolved', t => {
+  const app = routerFixture(t, 'react-router-config');
+  fs.appendFileSync(path.join(app.root, 'src/ui/root.tsx'), '\nexport function loader() { return null; }\n');
+  fs.writeFileSync(path.join(app.root, 'src/ui/home.tsx'), `
+    import { Form, useSubmit } from 'react-router';
+    declare function useDebounce<T>(callback: T, delay: number): T;
+    export default function Home() {
+      const submit = useSubmit();
+      const handleChange = useDebounce((form: HTMLFormElement) => submit(form), 400);
+      return <Form method="GET" action="/receiver" onChange={event => handleChange(event.currentTarget)} />;
+    }
+    export function UnknownForm(form: HTMLFormElement) {
+      const submit = useSubmit();
+      submit(form);
+    }
+    export function Override() {
+      const submit = useSubmit();
+      return <Form action="/receiver" method="get"
+        onChange={event => submit(event.currentTarget, { action: '/guarded', method: 'post' })} />;
+    }
+  `);
+  app.build();
+  const home = app.query('callees', 'Home');
+  assert.match(home, /^d1 load .*GET \/receiver .*useSubmit → loader.*\[possible\]/m);
+  assert.doesNotMatch(home, /GET \/ .*useSubmit/);
+  const unknown = app.query('callees', 'UnknownForm');
+  assert.doesNotMatch(unknown, /^d1 (?:load|submit) /m);
+  assert.match(unknown, /^# partial: .*useSubmit destination or method unresolved/m);
+  assert.match(app.query('callees', 'Override', '--depth', '2'), /^d2 submit .*POST \/guarded .*useSubmit → action/m);
 });
 
 test('router consumer uncertainty follows the possible destination', t => {
@@ -2933,6 +3016,9 @@ test('runtime route configuration and unresolved imports surface partials throug
     export function DynamicDestination() { return <Link to="/dynamic" />; }
   `);
   assert.match(config.run(['query', 'callees', 'DynamicDestination']), /^# partial: route config is mutated at runtime/m);
+  const home = path.join(config.root, 'src/ui/home.tsx');
+  fs.writeFileSync(home, fs.readFileSync(home, 'utf8').replace('<article>Home</article>', '<DynamicDestination />'));
+  assert.match(config.run(['query', 'callees', 'route:home']), /^# partial: route config is mutated at runtime/m);
   fs.appendFileSync(path.join(config.root, 'src/ui/registry.ts'), '\nif (process.env.REORDER) registry.reverse();');
   assert.match(config.run(['query', 'wrappers', '/site/panel/left']), /^# partial: route config is mutated at runtime/m);
   const remix = routerFixture(t, 'remix-v2');
