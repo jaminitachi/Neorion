@@ -1722,6 +1722,8 @@ test('React Router Framework registrations, entry roles, Outlet chains and route
   assert.ok(edges.some(edge => edge.kind === 'navigate' && edge.source === registered.get('right').id &&
     edge.destination === registered.get('left').id));
   assert.match(app.query('wrappers', '/site/gate/child'), /# partial: conditional outlet slot/);
+  assert.match(app.query('path', 'route:receiver', 'src/ui/receiver.ts#loader'), /1 data src\/ui\/receiver.ts[^\n]+loader/);
+  assert.match(app.query('path', '/site/panel/right', '/site/panel/left'), /1 navigate src\/ui\/route.tsx[^\n]+Link/);
   assert.match(app.query('wrappers', '/site/Case'), /^# wrappers \/Case /m);
   assert.doesNotMatch(app.query('wrappers', '/site/case'), /^page /m);
   assert.match(app.query('wrappers', '/site/users/123'), /^# wrappers \/users\/:id\? /m);

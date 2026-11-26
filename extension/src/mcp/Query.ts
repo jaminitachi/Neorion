@@ -936,8 +936,9 @@ export class QueryEngine {
         candidates: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)),
         notes: () => this.suggestions(target.split('#').pop()!, undefined, expired) };
     };
-    const source = resolve(from, this.index.pagesUrlConfig ? undefined : 'page');
-    const destination = resolve(to, this.index.pagesUrlConfig ? undefined : 'api');
+    const routeEndpoints = this.index.pagesUrlConfig || this.index.router;
+    const source = resolve(from, routeEndpoints ? undefined : 'page');
+    const destination = resolve(to, routeEndpoints ? undefined : 'api');
     const title = `${source.label} -> ${destination.label}`;
     for (const endpoint of [source, destination]) {
       if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
