@@ -18,6 +18,10 @@
             "changes"
           ]
         },
+        "app": {
+          "type": "string",
+          "description": "Next.js app path or package name in the workspace. Omit to query all apps when available."
+        },
         "target": {
           "type": "string",
           "description": "Required for every kind except changes. Name, path#Name, route URL/file, or search text."

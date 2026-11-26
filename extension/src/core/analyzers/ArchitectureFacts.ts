@@ -240,7 +240,7 @@ const externalProviderName = (name: string) => /(?:Config|Context)$/.test(name);
 const layoutPrimitive = (name: string) => /(?:^|\.)(?:Grid|Column|Suspense|ErrorBoundary)$/.test(name);
 
 function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath,
-  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), scope?: PagesWrapperScope): WrapperChain[] {
+  bodies: Map<Node, Node>, projectFiles: Set<SourceFile>, seen = new Set<Node>(), scope?: PagesWrapperScope, workspace?: WorkspaceBindings): WrapperChain[] {
   if (seen.has(body) || seen.size >= 12) return [];
   const { page, parameter: pageParameter, forwarded, issues, renderCondition, propertyRead, assignmentRead } = scope ?? {};
   const pagesScope = !!scope;
@@ -637,7 +637,9 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
         while (Node.isPropertyAccessExpression(root)) root = root.getExpression();
         const binding = root.getSymbol()?.getDeclarations()[0];
         const module = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
-        const external = !definition && module && isPackageSpecifier(module) ? module : undefined;
+        const workspacePackage = (definition && workspace?.packageFor(definition.getSourceFile().getFilePath())?.name) ||
+          (module && workspace?.has(module) ? module.split('/').slice(0, module.startsWith('@') ? 2 : 1).join('/') : undefined);
+        const external = !definition && !workspacePackage && module && isPackageSpecifier(module) ? module : undefined;
         const exportedName = Node.isFunctionDeclaration(definition) || Node.isClassDeclaration(definition) ||
           Node.isVariableDeclaration(definition) ? definition.getName() ?? name : name;
         const importedName = root === tag && Node.isImportSpecifier(binding) ? binding.getName() : name;
@@ -647,7 +649,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
           module ? `${module}#${name}` : `${relativePath(tag.getSourceFile())}#${name}`;
         const nestedScope = scope && { page, issues, renderCondition, propertyRead, assignmentRead,
           inlineLayout: inline ? resolved : scope.inlineLayout, renderOwner: inline ? undefined : definition };
-        const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope) : [];
+        const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope, workspace) : [];
         const primitive = names.some(layoutPrimitive);
         const implementation = namedProvider ? functionNode(definition) : undefined;
         const parameter = implementation?.getParameters()[0];
@@ -676,7 +678,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
           const location: ChainWrapper = {
             file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
             inlineRender: scope?.inlineLayout ? { tag, owner: scope.renderOwner } : undefined,
-            line: startLine(source), conditional: branchConditional, provider, providerTag, external,
+            line: startLine(source), conditional: branchConditional, provider, providerTag, external, workspacePackage,
+            unresolvedWorkspace: !definition ? workspace?.unresolvedBinding(target) : undefined,
             guard, guardFile: guard ? relativePath(tag.getSourceFile()) : undefined,
             site, evidence: property && site && (assignment?.site ? `${property} assigned at ${site.file}:${site.line}` :
               `${property} fallback at ${site.file}:${site.line}`) || undefined,
@@ -731,7 +734,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
             const method = appClass.getInstanceMethod(callee.getName());
             const methodBody = method?.getBody();
             if (methodBody && !method?.isAsync() && !method?.isGenerator()) {
-              const delegated = wrappedChains(methodBody, true, relativePath, bodies, projectFiles, seen, scope);
+              const delegated = wrappedChains(methodBody, true, relativePath, bodies, projectFiles, seen, scope, workspace);
               if (delegated.length) visit(node, root, outer, conditional, possible, delegated);
               walk?.skip();
               return;
@@ -771,14 +774,14 @@ function pagePropertyValue(page: PageProperties, key: string): StaticValue {
   return assignment ? staticValue(assignment.value) : page.opaque ? unknownValue : undefined;
 }
 
-function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, files: Set<SourceFile>) {
+function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, files: Set<SourceFile>, workspace?: WorkspaceBindings) {
   type Cached = { properties: Map<string, StaticValue>; assignments: Map<string, Node | undefined>;
     chains: WrapperChain[]; issues: string[]; layoutTags: Set<string>;
     conditions: [Node, PageRenderCondition][] };
   const cache = new Map<Node, Map<string, Cached[]>>();
   return (body: Node, pagesApp: boolean, scope: PagesWrapperScope) => {
     const page = scope.page;
-    if (!page) return wrappedChains(body, pagesApp, relativePath, bodies, files, new Set(), scope);
+    if (!page) return wrappedChains(body, pagesApp, relativePath, bodies, files, new Set(), scope, workspace);
     const mode = pagesApp ? 'app' : 'layout:' + scope.parameter;
     const modes = cache.get(body) ?? new Map<string, Cached[]>();
     cache.set(body, modes);
@@ -802,7 +805,7 @@ function cachePageChains(relativePath: RelativePath, bodies: Map<Node, Node>, fi
           assignments.set(key, page.assignments.get(key)?.site);
         },
         renderCondition: (tag, decision) => conditions.push([tag, decision])
-      });
+      }, workspace);
       result = { properties, assignments, chains, issues, conditions, layoutTags };
       if (entries.length < 16) entries.push(result);
     }
@@ -913,11 +916,12 @@ function pagesApplication(source: SourceFile, relativePath: RelativePath, bodies
             Node.isJsxSpreadAttribute(attribute) && bindingOf(attribute.getExpression()) === fn.getParameters()[0])))) : [];
     const localChains = forwarding.flatMap(fn => {
       const body = fn?.getBody();
-      return body && parameter ? wrappedChains(body, true, relativePath, bodies, files, new Set(), { forwarded: parameter, issues }) : [];
+      return body && parameter ? wrappedChains(body, true, relativePath, bodies, files, new Set(), { forwarded: parameter, issues }, workspace) : [];
     });
     const forwards = localChains.length > 0;
     const known = tRPC || forwards || origin?.module === 'next-i18next' && origin.name === 'appWithTranslation';
-    const hoc = locations(value, callee.getText(), known ? undefined : 'possible wrapper');
+    const hoc = { ...locations(value, callee.getText(), known ? undefined : 'possible wrapper'),
+      unresolvedWorkspace: !known ? workspace?.unresolvedBinding(callee) : undefined };
     application = application.flatMap(outer => (localChains.length ? localChains : [emptyChain])
       .map(inner => andThen(outer, { ...inner, locations: [hoc, ...inner.locations] }))).slice(0, 16);
     if (!known) issues.push(`opaque App wrapper ${callee.getText()} (${relativePath(value.getSourceFile())}:${startLine(value)})`);
@@ -989,7 +993,7 @@ export function collectRenderFacts(
     const id = `cmp:${relativePath(node.getSourceFile())}#${suffix}`;
     return componentsById.has(id) ? [[body, id] as const] : [];
   }));
-  const pageChains = cachePageChains(relativePath, bodies, projectFiles);
+  const pageChains = cachePageChains(relativePath, bodies, projectFiles, workspace);
   const apps = new Map<string, ReturnType<typeof pagesApplication>>();
   const documents = new Map<string, Wrapper>();
   const wrapperLocations = new Map<string, Wrapper>();
@@ -1032,7 +1036,7 @@ export function collectRenderFacts(
         if (component) wrapperRoots.set(wrapper, component);
         const definition = exported[0];
         const symbol = component && componentsById.get(component)?.name || 'default';
-        const paths = body ? wrappedChains(body, false, relativePath, bodies, projectFiles) : [];
+        const paths = body ? wrappedChains(body, false, relativePath, bodies, projectFiles, undefined, undefined, workspace) : [];
         wrapperLocations.set(wrapper, {
           file: wrapper, symbol,
           line: definition && definition.getSourceFile() === source ? startLine(definition) : 1, conditional: false,

@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { ignoredProjectDirectories } from '../core/FindProject';
+import { ignoredProjectDirectories, workspaceDirectories } from '../core/FindProject';
 import type { RouteNode } from '../core/types/GraphTypes';
 import type { collectExcludedRequests } from '../core/analyzers/ExcludedHttp';
 import type { FetchEntry, QueryIndex } from './Index';
@@ -21,6 +21,7 @@ export function scanExcludedRequests(root: string, index: QueryIndex, checkPath:
     methods: route.methods, isClient: false, domain: ''
   }));
   if (!routes.length) return result;
+  const workspacePackages = new Set(workspaceDirectories(root)?.directories);
   const url = index.appUrlConfig ?? index.pagesUrlConfig;
   const config = url && { url, rules: [], issues: [] };
   const parse = (...args: Parameters<typeof collectExcludedRequests>) =>
@@ -41,6 +42,7 @@ export function scanExcludedRequests(root: string, index: QueryIndex, checkPath:
       if (child.name.startsWith('.') || ignored.has(child.name)) continue;
       const file = directory ? directory + '/' + child.name : child.name;
       if (child.isDirectory()) {
+        if (workspacePackages.has(path.join(root, file))) continue;
         if (!scan(file)) return false;
         continue;
       }

@@ -1,9 +1,10 @@
 import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
+import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 9;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 13;
+export const QUERY_INDEX_REVISION = 14;
 export const GRAPH_INDEX_REVISION = 18;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -44,6 +45,8 @@ export interface Wrapper {
   conditional: boolean;
   possible?: boolean;
   external?: string;
+  workspacePackage?: string;
+  unresolvedWorkspace?: string;
   provider?: boolean;
   providerTag?: boolean;
   definitionFile?: string;
@@ -184,7 +187,11 @@ export interface QueryIndex {
   trpcUnbound?: number[];
   trpcIssues?: Record<number, [file: number, line: number][]>;
   trpcFiles?: string[];
-  // External workspace files used for Pages bindings and SDK version inference.
+  workspaceSources?: WorkspaceSources;
+  workspacePackages?: Record<string, string>;
+  workspaceDependencies?: Record<number, { module: string; gates?: FlowGate[] }[]>;
+  workspaceDiscoveryLimited?: true;
+  // Legacy index inputs used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
   pagesUrlConfig?: NextUrlConfig;
   appUrlConfig?: NextUrlConfig;

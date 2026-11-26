@@ -1,0 +1,1 @@
+{"extends":"@fixture/config/base.json","include":["app"]}
