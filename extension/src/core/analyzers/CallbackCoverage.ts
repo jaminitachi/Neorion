@@ -69,6 +69,11 @@ export class CallbackCoverage {
         if (!constValue(parent) || !factory && this.isExported(parent)) return Coverage.Unresolved;
         return binding(parent.getNameNode(), members, stored, eventProp);
       }
+      // Reference searches can return the name of a module member instead of
+      // the full expression that carries the callable value.
+      if (Node.isPropertyAccessExpression(parent) && parent.getNameNode() === value ||
+          Node.isElementAccessExpression(parent) && parent.getArgumentExpression() === value &&
+            staticMember(value, false) !== undefined) return visit(parent, members, stored, eventProp);
       if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === value ||
           Node.isElementAccessExpression(parent) && parent.getExpression() === value) {
         if (!members.length) return Coverage.Unresolved;
@@ -150,7 +155,8 @@ export class CallbackCoverage {
       // Imports and barrels expose the same factory to the indexed project. A
       // re-export of an already created callback is an escape.
       if (factory && (Node.isImportSpecifier(parent) || Node.isImportClause(parent) ||
-          Node.isExportSpecifier(parent) || Node.isExportAssignment(parent))) return Coverage.Covered;
+          Node.isExportSpecifier(parent) || Node.isExportAssignment(parent) ||
+          Node.isImportSpecifier(value) || Node.isExportSpecifier(value))) return Coverage.Covered;
       return Coverage.Unresolved;
     };
     const visit = (value: Node, members: string[], stored: boolean, eventProp = false): Coverage => {
