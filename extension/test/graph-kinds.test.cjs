@@ -1575,6 +1575,7 @@ test('an unresolved typed render lookup only affects components used as values',
     export function UnusedIcon() { return <span/>; }
     export function StoredIcon() { return <span/>; }
     export function DefaultIcon() { return <span/>; }
+    export function OrphanDefault() { return <span/>; }
     export function RenamedIcon() { return <span/>; }
     export function BarrelOnlyIcon() { return <span/>; }
     export function TypeOnlyIcon() { return <span/>; }
@@ -1593,6 +1594,10 @@ test('an unresolved typed render lookup only affects components used as values',
     export { BarrelOnlyIcon as BarrelIcon } from './unused';
     export type { TypeOnlyIcon as IconType } from './unused';
   `);
+  fs.writeFileSync(path.join(root, 'ui/orphan.ts'), `
+    import { OrphanDefault as View } from './unused';
+    export default View;
+  `);
   const other = path.join(root, 'app/other');
   fs.mkdirSync(other);
   fs.writeFileSync(path.join(other, 'page.tsx'), `
@@ -1600,10 +1605,10 @@ test('an unresolved typed render lookup only affects components used as values',
     export default function OtherPage() { return <RenderedMemo/>; }
   `);
   fs.writeFileSync(path.join(root, 'app/page.tsx'), `
-    import OtherPage from './other/page';
+    import DefaultIcon from '../ui/values';
     type Item = { icon: () => any };
     declare function loadNav(entry: () => any): Item[];
-    const NAV = loadNav(OtherPage);
+    const NAV = loadNav(DefaultIcon);
     export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
   `);
   build();
@@ -1615,11 +1620,11 @@ test('an unresolved typed render lookup only affects components used as values',
     assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
     assert.doesNotMatch(output, /^(?:page )?\/\s/m);
   }
-  for (const target of ['UnusedIcon', 'RenamedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon',
+  for (const target of ['UnusedIcon', 'OrphanDefault', 'RenamedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon',
     'TypeOnlyIcon', 'app/other/page.tsx#OtherPage']) {
     assert.match(query('who_renders', target), /^# complete:/m);
   }
-  for (const target of ['UnusedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  for (const target of ['UnusedIcon', 'OrphanDefault', 'BarrelOnlyIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
   assert.match(query('who_renders', 'StoredIcon'), /^# partial: rendered through a dynamic reference/m);
   const inner = query('who_renders', 'RenderedInner');
   assert.match(inner, /^\/other\s.*depth 2 via RenderedMemo$/m);
@@ -1645,7 +1650,7 @@ test('opaque element and factory lookups flag only value-used render candidates'
     import { getMap } from 'map-package';
     import { MapIcon } from '../ui/registry';
     export const icons = [MapIcon];
-    const MAP = getMap();
+    const MAP = getMap(icons);
     export default function Page({ keyName }) {
       const Icon = MAP[keyName];
       return <Icon/>;
@@ -1800,7 +1805,7 @@ test('typed render collections of uninstalled package icons resolve externally',
     .replace('icon: ClockIcon', 'icon: loadIcon()'));
   build();
   assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced/m);
-  assert.match(query('who_renders', 'StoredIcon'), /^# partial: component lookup key untraced/m);
+  assert.match(query('who_renders', 'StoredIcon'), /^# complete:/m);
 });
 
 test('typed recursive collection properties trace nested icons', t => {

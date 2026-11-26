@@ -229,8 +229,8 @@ function resolveAppSlot(page: PageProperties | undefined, slot: AppSlot, issues?
 
 const emptyChain: WrapperChain = { path: [], locations: [] };
 
-function returnsFromBranch(node: Node): boolean {
-  if (Node.isReturnStatement(node)) return true;
+export function returnsFromBranch(node: Node): boolean {
+  if (Node.isReturnStatement(node) || Node.isThrowStatement(node)) return true;
   if (Node.isBlock(node)) return node.getStatements().some(returnsFromBranch);
   if (!Node.isIfStatement(node)) return false;
   const otherwise = node.getElseStatement();

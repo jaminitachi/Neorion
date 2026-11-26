@@ -4,8 +4,8 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 17;
-export const GRAPH_INDEX_REVISION = 23;
+export const QUERY_INDEX_REVISION = 18;
+export const GRAPH_INDEX_REVISION = 24;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -92,7 +92,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 // by their position in the ordered file table.
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
-export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse }
+export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse, ReturnedUse }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
@@ -112,6 +112,14 @@ export interface ServerAction {
 
 export type PageRenderCondition = 'excluded' | 'possible' | 'conditional';
 export const renderSiteKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
+export const renderGuardKey = (from: number, to: number, line: number, site?: string | null) =>
+  `${renderSiteKey(from, to, line)}:${site ?? ''}`;
+
+export function advanceRenderGuards(pending: string[][], incoming: string | null | undefined, started: string[][] | undefined) {
+  const matching = incoming ? pending.filter(path => path[0] === incoming).map(path => path.slice(1)) : [];
+  if (matching.some(path => !path.length) || started?.some(path => !path.length)) return;
+  return started ? [...matching, ...started] : matching;
+}
 
 export interface PagesEdge {
   from: number;
@@ -184,10 +192,12 @@ export interface QueryIndex {
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
   renderExclusions?: Record<string, string[]>;
+  renderGuardPaths?: Record<string, string[][]>;
+  renderConditionalPaths?: Record<string, string[][]>;
+  renderWitnessPaths?: Record<string, string[][]>;
   contextRenderExclusions?: string[];
   renderLookupIssues?: Record<number, string>;
   opaqueRenderLookupIssues?: Record<number, string>;
-  renderValueUses?: Record<number, string>;
   scopedRenderValueIssues?: Record<number, { file: string; reason: string; valueFile: string }>;
   dynamicRenderComponents?: number[];
   wrapperRevision?: number;

@@ -4,10 +4,11 @@ import { isFunction, packageMember, returnedValues } from './CallableFlow';
 import { constValue, type PropFlow, type RenderSite } from './PropFlow';
 import { functionNode, importBinding, valueNode } from './StaticBindings';
 import { isTypeOnlyExport } from './RuntimeExports';
+import type { RenderSelection } from './RenderGuards';
 
 const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
-export type RenderCertainty = { possible: boolean; conditional: boolean; contextExcluded?: true };
+export type RenderCertainty = { possible: boolean; conditional: boolean; contextExcluded?: true; selection?: RenderSelection };
 type ArrayBinding = { parameter: ParameterDeclaration; receiver: Node; outer?: ArrayBinding };
 type Supply = { site: RenderSite; name: string };
 type Lookup = { selector: Node; member?: string };
@@ -295,8 +296,15 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
     let scoped = targets.get(supply);
     if (!scoped) targets.set(supply, scoped = new Map());
     const prior = scoped.get(node);
-    const choice = { possible, conditional, lookup, contextExcluded };
-    if (!prior || preferRenderBinding(choice, prior)) scoped.set(node, choice);
+    const selection = lookup?.member === undefined ? undefined : { selector: lookup.selector, members: [lookup.member] };
+    const choice = { possible, conditional, lookup, contextExcluded, selection };
+    const best = !prior || preferRenderBinding(choice, prior) ? choice : prior;
+    if (prior) {
+      best.selection = selection && prior.selection?.selector === selection.selector ? {
+        selector: selection.selector, members: [...new Set([...prior.selection.members, ...selection.members])]
+      } : undefined;
+    }
+    scoped.set(node, best);
     return Resolution.Local;
   };
   const resolve = (node: Node | undefined, step: Step, remaining: number): Resolution => {
@@ -509,7 +517,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
       const selector = node.getArgumentExpression();
       const key = lookupKey(selector);
       const resolved = next(node.getExpression(), { members: [key ?? null, ...members],
-        lookup: indexedLoader && key === undefined && selector ? { selector } : lookup });
+        lookup: key === undefined && selector ? { selector } : lookup });
       if (!resolved) opaqueLookups.add(node);
       return resolved;
     }

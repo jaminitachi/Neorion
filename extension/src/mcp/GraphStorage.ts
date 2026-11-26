@@ -66,6 +66,14 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   });
   facts.renderSites = [];
   const excludedSites = new Set(Object.values(index.renderExclusions ?? {}).flat());
+  for (const [key, paths] of [
+    ...Object.entries(index.renderGuardPaths ?? {}), ...Object.entries(index.renderConditionalPaths ?? {}),
+    ...Object.entries(index.renderWitnessPaths ?? {})
+  ]) {
+    const site = key.split(':').slice(3).join(':');
+    if (site) excludedSites.add(site);
+    for (const path of paths) for (const supplier of path) excludedSites.add(supplier);
+  }
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
     if (!site || excludedSites.has(site)) return edge;

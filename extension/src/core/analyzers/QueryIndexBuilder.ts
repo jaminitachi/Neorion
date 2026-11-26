@@ -5,7 +5,7 @@ import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -22,6 +22,7 @@ import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -52,45 +53,6 @@ function configuredPaths(source: SourceFile, root: string, specifier: string) {
   }).sort((a, b) => b.rank - a.rank);
   const match = matches[0];
   return match ? match.targets.map(target => path.resolve(root, options.baseUrl ?? '.', target.replace('*', match.wildcard))) : [];
-}
-
-function componentValueUse(node: Node, indexedComponent: (node: Node | undefined) => boolean): boolean {
-  if (Node.isShorthandPropertyAssignment(node)) return true;
-  if (Node.isExportSpecifier(node)) return false;
-  let value = node;
-  for (let parent = value.getParent(); parent; parent = value.getParent()) {
-    if (wrappedExpression(parent) === value ||
-        Node.isPropertyAccessExpression(parent) && parent.getNameNode() === value ||
-        Node.isConditionalExpression(parent) && parent.getCondition() !== value) {
-      value = parent;
-      continue;
-    }
-    if (Node.isBinaryExpression(parent) &&
-        [SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken, SyntaxKind.AmpersandAmpersandToken]
-          .includes(parent.getOperatorToken().getKind())) {
-      value = parent;
-      continue;
-    }
-    if (Node.isJsxExpression(parent)) {
-      const attribute = parent.getParent();
-      return Node.isJsxAttribute(attribute) && attribute.getNameNode().getText() !== 'children';
-    }
-    if (Node.isCallExpression(parent) && parent.getArguments()[0] === value) {
-      const helper = packageMember(parent.getExpression(), 'react');
-      if (helper === 'createElement' || (helper === 'memo' || helper === 'forwardRef') && indexedComponent(parent.getParent())) {
-        return false;
-      }
-    }
-    if (Node.isExportAssignment(parent)) {
-      return !parent.isExportEquals() && Node.isIdentifier(node) && unwrapValue(value) === node && !!importBinding(node);
-    }
-    return Node.isArrayLiteralExpression(parent) || Node.isSpreadElement(parent) || Node.isSpreadAssignment(parent) ||
-      ((Node.isPropertyAssignment(parent) || Node.isVariableDeclaration(parent)) && parent.getInitializer() === value) ||
-      ((Node.isCallExpression(parent) || Node.isNewExpression(parent)) && parent.getArguments().includes(value)) ||
-      Node.isReturnStatement(parent) || Node.isArrowFunction(parent) && parent.getBody() === value ||
-      Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getRight() === value;
-  }
-  return false;
 }
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
@@ -175,6 +137,20 @@ function simpleReturn(body: Node) {
     Node.isVariableStatement(statement) && statement.getDeclarationKind() === 'const')) return last.getExpression();
 }
 
+function returnedValueUse(node: Node) {
+  let child = node;
+  for (let parent = child.getParent(); parent; child = parent, parent = parent.getParent()) {
+    if (Node.isReturnStatement(parent)) return parent.getExpression() === child;
+    if (Node.isArrowFunction(parent)) return parent.getBody() === child;
+    if (wrappedExpression(parent) === child || Node.isShorthandPropertyAssignment(parent) ||
+        Node.isPropertyAssignment(parent) && parent.getInitializer() === child ||
+        Node.isObjectLiteralExpression(parent) || Node.isArrayLiteralExpression(parent) ||
+        Node.isConditionalExpression(parent) && parent.getCondition() !== child) continue;
+    return false;
+  }
+  return false;
+}
+
 function lazyFactory(call: import('ts-morph').CallExpression) {
   const callee = call.getExpression();
   if (!Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return false;
@@ -236,9 +212,10 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
     } else if (!selection && Node.isPropertyAccessExpression(node)) {
       follow(node.getExpression(), possible, { name: node.getName(), selector: node }, binding);
     } else if (!selection && Node.isElementAccessExpression(node)) {
-      const key = valueNode(node.getArgumentExpression());
-      if (Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key)) {
-        follow(node.getExpression(), possible, { name: key.getLiteralText() }, binding);
+      const index = node.getArgumentExpression();
+      const keys = index ? finiteTemplateValues(index) : [undefined];
+      for (const key of keys) if (key !== undefined) {
+        follow(node.getExpression(), possible || keys.length !== 1, { name: key }, binding);
       }
     } else if (Node.isObjectLiteralExpression(node) && (!selection || selection.name === 'default')) {
       const [member, extra] = node.getProperties();
@@ -258,7 +235,10 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
           if (binding && owner === binding.parameter) follow(binding.input, possible, { name }, binding.outer);
           else follow(constValue(owner), possible, { name }, binding);
         }
-      } else if (declaration) follow(constValue(declaration), possible, selection, binding);
+      } else if (declaration) {
+        const local = Node.isVariableDeclaration(declaration) && localLoaderValue(declaration, node);
+        follow(constValue(declaration) ?? (local || undefined), possible, selection, binding);
+      }
     } else if (Node.isCallExpression(node)) {
       const callee = node.getExpression();
       const resolved = !selection ? resolvedPromiseValue(node) : undefined;
@@ -271,7 +251,7 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
         const parameter = callback?.getParameters()[0];
         if (callback && files.has(callback.getSourceFile())) {
           const body = callback.getBody();
-          const result = body && simpleReturn(body);
+          const result = body && (simpleReturn(body) ?? mutableLoaderReturn(body));
           const input = callee.getExpression();
           for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) {
             const before = targets.length;
@@ -298,9 +278,43 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
     }
   };
   const body = loader.getBody();
-  const result = body && simpleReturn(body);
+  const result = body && (simpleReturn(body) ?? mutableLoaderReturn(body));
   for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) follow(returned, !result);
   return targets;
+}
+
+function mutableLoaderReturn(body: Node) {
+  const [result, other] = executionSites(body).returned;
+  if (!result || other || result.possible) return;
+  const read = unwrapValue(result.node);
+  const binding = bindingOf(read);
+  if (Node.isIdentifier(read) && Node.isVariableDeclaration(binding) && localLoaderValue(binding, read)) return result.node;
+}
+
+function localLoaderValue(declaration: import('ts-morph').VariableDeclaration, read: import('ts-morph').Identifier) {
+  const statement = declaration.getVariableStatement();
+  const name = declaration.getNameNode();
+  const returned = throughWrappers(read).getParent();
+  if (!statement || statement.getDeclarationKind() !== 'let' || !Node.isIdentifier(name) ||
+      !Node.isReturnStatement(returned) || !Node.isBlock(statement.getParent()) ||
+      statement.getParent() !== returned.getParent() || statement.getStart() >= returned.getStart()) return;
+  let value = declaration.getInitializer();
+  let latest = statement.getStart();
+  for (const symbol of name.findReferences()) for (const reference of symbol.getReferences()) {
+    if (!reference.isWriteAccess() || reference.isDefinition()) continue;
+    const use = reference.getNode();
+    const assignment = use.getParent();
+    if (!Node.isBinaryExpression(assignment) || assignment.getLeft() !== use ||
+        assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) return;
+    const entry = assignment.getParent();
+    if (!Node.isExpressionStatement(entry) || entry.getParent() !== statement.getParent() ||
+        entry.getStart() <= statement.getStart()) return;
+    if (entry.getStart() < returned.getStart() && entry.getStart() > latest) {
+      value = assignment.getRight();
+      latest = entry.getStart();
+    }
+  }
+  return value;
 }
 
 function finiteTemplateValues(node: Node, remaining = 8): (string | undefined)[] {
@@ -313,6 +327,27 @@ function finiteTemplateValues(node: Node, remaining = 8): (string | undefined)[]
     if (Node.isTrueLiteral(condition)) return finiteTemplateValues(value.getWhenTrue(), remaining - 1);
     if (Node.isFalseLiteral(condition)) return finiteTemplateValues(value.getWhenFalse(), remaining - 1);
     return [...new Set([value.getWhenTrue(), value.getWhenFalse()].flatMap(branch => finiteTemplateValues(branch, remaining - 1)))];
+  }
+  if (Node.isElementAccessExpression(value)) {
+    const array = valueNode(value.getExpression());
+    const index = value.getArgumentExpression();
+    if (Node.isArrayLiteralExpression(array) && index && !array.getElements().some(Node.isSpreadElement)) {
+      const keys = finiteTemplateValues(index, remaining - 1);
+      if (keys.every(key => key !== undefined && /^\d+$/.test(key))) {
+        return [...new Set(keys.flatMap(key => {
+          const element = array.getElements()[Number(key)];
+          return element && !Node.isOmittedExpression(element) ? finiteTemplateValues(element, remaining - 1) : ['undefined'];
+        }))];
+      }
+    }
+  }
+  // The checker can prove finite literal domains even when their runtime source
+  // is opaque (for example, an indexed tuple or a union-valued parameter).
+  const type = (value ?? node).getType();
+  const choices = type.isUnion() ? type.getUnionTypes() : [type];
+  if (choices.every(choice => choice.isStringLiteral() || choice.isNumberLiteral() ||
+      choice.isBooleanLiteral() || choice.isNull() || choice.isUndefined())) {
+    return [...new Set(choices.map(choice => String(choice.getLiteralValue() ?? choice.getText())))];
   }
   return [undefined];
 }
@@ -353,11 +388,12 @@ export class QueryIndexBuilder {
   constructor(private readonly exportsOf = (file: SourceFile) => file.getExportedDeclarations()) {}
 
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
+  private renderSelections = new Map<typeof this.edges[number], RenderSelection>();
   private contextExcluded = new Set<typeof this.edges[number]>();
   private replacedInlineRenders = new Set<typeof this.edges[number]>();
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
-  private renderLookupIssues = new Map<string, Node>();
+  private renderLookupIssues = new Map<string, { tag: Node; bindings: Node[] }>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
   private propRequests: { file: string; node: Node; method?: string; gates: PropGate[] }[] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
@@ -383,13 +419,14 @@ export class QueryIndexBuilder {
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
   render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node,
-    detail?: string, site?: RenderSite, file?: string, contextExcluded?: true) {
+    detail?: string, site?: RenderSite, file?: string, contextExcluded?: true, selection?: RenderSelection) {
     const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
       layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
     if (detail) edge[6] = detail;
     if (site) edge[7] = site;
     if (file) edge[8] = file;
     this.edges.push(edge);
+    if (selection) this.renderSelections.set(edge, selection);
     if (contextExcluded) this.contextExcluded.add(edge);
     if (tag) {
       const entries = this.renderSites.get(tag) ?? [];
@@ -402,8 +439,8 @@ export class QueryIndexBuilder {
     }
   }
 
-  unresolvedRenderLookup(owner: string, tag: Node) {
-    if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, tag);
+  unresolvedRenderLookup(owner: string, tag: Node, bindings: Node[]) {
+    if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, { tag, bindings });
   }
 
   private opaqueRenderLookups: { owner: string; tag: Node; sources: Set<Node> }[] = [];
@@ -494,16 +531,28 @@ export class QueryIndexBuilder {
         const target = declarationsOf(specifier).find(Node.isSourceFile) ?? resolve(specifier.getLiteralText());
         return { modules: target ? [target] : [], exact: true };
       }
-      if (!allowTemplate || !Node.isTemplateExpression(specifier)) return { modules: [], exact: false };
+      if (!allowTemplate || !specifier) return { modules: [], exact: false };
+      if (!Node.isTemplateExpression(specifier)) {
+        const choices = finiteTemplateValues(specifier);
+        return { modules: [...new Set(choices.flatMap(value => value === undefined ? [] : resolve(value) ?? []))],
+          exact: choices.length === 1 && choices[0] !== undefined };
+      }
       const placeholder = '\u0000';
       let choices = [specifier.getHead().getLiteralText()];
       let exact = true;
       for (const span of specifier.getTemplateSpans()) {
         const values = finiteTemplateValues(span.getExpression());
         const suffix = span.getLiteral().getLiteralText();
-        const bounded = choices.length * values.length <= 64 ? values : [undefined];
-        exact &&= bounded.length === 1 && bounded[0] !== undefined;
-        choices = [...new Set(choices.flatMap(prefix => bounded.map(value => prefix + (value ?? placeholder) + suffix)))];
+        exact &&= values.length === 1 && values[0] !== undefined;
+        const expanded = new Set<string>();
+        for (const prefix of choices) {
+          for (const value of values) {
+            expanded.add(prefix + (value ?? placeholder) + suffix);
+            if (expanded.size >= 4096) break;
+          }
+          if (expanded.size >= 4096) break;
+        }
+        choices = [...expanded];
       }
       const finite = choices.filter(choice => !choice.includes(placeholder)).flatMap(choice => resolve(choice) ?? []);
       const patterns = choices.filter(choice => choice.includes(placeholder) && choice.split(placeholder, 1)[0].includes('/'))
@@ -1054,40 +1103,76 @@ export class QueryIndexBuilder {
       }
     };
 
-    type LookupIssue = NonNullable<ReturnType<typeof addLookupIssue>>;
-    const opaqueLookupFiles = new Map<SourceFile, LookupIssue>();
-    const opaqueLookupPackages = new Map<string, LookupIssue>();
-    const addLookupSource = <T>(sources: Map<T, LookupIssue>, source: T, issue: LookupIssue) => {
-      const previous = sources.get(source);
-      if (!previous || isTestFile(previous.file)) sources.set(source, issue);
+    const traceLookupInputs = (roots: Iterable<Node>, issue: NonNullable<ReturnType<typeof addLookupIssue>>) => {
+      const seen = new Set<Node>();
+      const visit = (input: Node | undefined) => {
+        if (!input || seen.has(input) || seen.size >= 128 || !projectFiles.has(input.getSourceFile())) return;
+        seen.add(input);
+        const id = byNode.get(input);
+        if (id !== undefined && index.symbols[id - 1].kind === 'component') {
+          const uses = (index.scopedRenderValueIssues ??= {});
+          const valueFile = relativePath(input.getSourceFile());
+          if (!uses[id] || isTestFile(uses[id].file)) uses[id] = { ...issue, valueFile };
+          return;
+        }
+        const prop = flow.read(input);
+        if (prop) {
+          flow.values(prop).forEach(binding => visit(binding.value));
+          return;
+        }
+        if (Node.isElementAccessExpression(input) || Node.isPropertyAccessExpression(input)) {
+          visit(input.getExpression());
+        } else if (Node.isIdentifier(input)) {
+          const parent = input.getParent();
+          const declarations = Node.isShorthandPropertyAssignment(parent)
+            ? parent.getValueSymbol()?.getDeclarations() : declarationsOf(input);
+          declarations?.forEach(visit);
+        } else if (Node.isBindingElement(input)) {
+          const owner = input.getParent().getParent();
+          if (Node.isVariableDeclaration(owner)) visit(constValue(owner));
+          if (Node.isParameterDeclaration(owner)) visit(owner);
+        } else if (Node.isParameterDeclaration(input)) {
+          const callback = input.getParent();
+          const call = throughWrappers(callback).getParent();
+          if (Node.isCallExpression(call) && call.getArguments()[0] === throughWrappers(callback)) {
+            const callee = call.getExpression();
+            if (Node.isPropertyAccessExpression(callee) && ['map', 'flatMap', 'find', 'filter'].includes(callee.getName())) {
+              visit(callee.getExpression());
+            }
+          }
+        } else if (Node.isCallExpression(input)) {
+          input.getArguments().forEach(visit);
+        } else if (Node.isVariableDeclaration(input)) {
+          visit(constValue(input));
+        } else if (Node.isExportAssignment(input)) {
+          visit(input.getExpression());
+        } else if (Node.isArrayLiteralExpression(input) || Node.isObjectLiteralExpression(input) ||
+            Node.isPropertyAssignment(input) || Node.isShorthandPropertyAssignment(input) ||
+            Node.isSpreadAssignment(input) || Node.isSpreadElement(input) || Node.isConditionalExpression(input)) {
+          input.forEachChild(child => {
+            if (!Node.isPropertyAssignment(input) || child === input.getInitializer()) visit(child);
+          });
+        } else visit(wrappedExpression(input));
+      };
+      for (const root of roots) visit(root);
     };
-    const typedLookupFiles = new Map<SourceFile, LookupIssue>();
-    for (const [owner, tag] of this.renderLookupIssues) {
+    for (const [owner, { tag, bindings }] of this.renderLookupIssues) {
       const issue = addLookupIssue(owner, tag);
-      if (issue) addLookupSource(typedLookupFiles, tag.getSourceFile(), issue);
+      if (issue) traceLookupInputs(bindings, issue);
     }
     for (const { owner, tag, sources } of this.opaqueRenderLookups) {
       const issue = addLookupIssue(owner, tag, true);
-      if (!issue) continue;
-      addLookupSource(opaqueLookupFiles, tag.getSourceFile(), issue);
-      for (const source of sources) {
-        addLookupSource(opaqueLookupFiles, source.getSourceFile(), issue);
-        if (!Node.isCallExpression(source) && !Node.isElementAccessExpression(source)) continue;
-        const value = Node.isElementAccessExpression(source) ? valueNode(source.getExpression()) : source;
-        const expression = Node.isCallExpression(value) ? value.getExpression() : source.getExpression();
-        const binding = receiver(expression)?.root;
-        const imported = importBinding(binding);
-        const importedFile = imported?.declaration.getModuleSpecifierSourceFile();
-        if (importedFile && projectFiles.has(importedFile)) addLookupSource(opaqueLookupFiles, importedFile, issue);
-        else if (imported && isPackageSpecifier(imported.module)) addLookupSource(opaqueLookupPackages, imported.module, issue);
-        if (binding) for (const declaration of declarationsOf(binding)) {
-          const file = declaration.getSourceFile();
-          if (projectFiles.has(file)) addLookupSource(opaqueLookupFiles, file, issue);
-        }
-      }
+      if (issue) traceLookupInputs(sources, issue);
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
     const renderExclusions = new Map<string, string[]>();
+    const guardedRenders = new Map<QueryIndex['renderEdges'][number], { tag: Node; selection?: RenderSelection }>();
+    const guardInputs = new Map<number, Map<RenderSite, number>>();
+    const recordRenderInput = (from: number, to: number, site: RenderSite) => {
+      const inputs = guardInputs.get(to) ?? new Map<RenderSite, number>();
+      inputs.set(site, from);
+      guardInputs.set(to, inputs);
+    };
     const contextExcluded = new Set<string>();
     const contextAllowed = new Set<string>();
     const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
@@ -1110,6 +1195,11 @@ export class QueryIndexBuilder {
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
+      if (site && tag && !layout && !historyOnly) {
+        recordRenderInput(source, target, site);
+        const selection = this.renderSelections.get(edge);
+        if (conditional || selection) guardedRenders.set(index.renderEdges[index.renderEdges.length - 1], { tag, selection });
+      }
       if (site && !possible && !historyOnly) {
         const targets = resolvedRenderSites.get(site) ?? new Set<number>();
         targets.add(target);
@@ -1162,6 +1252,13 @@ export class QueryIndexBuilder {
     const componentProperties = new Map<Node, Set<number>>();
     const componentFactories = new Set<Node>();
     const wrapperEdges: QueryIndex['renderEdges'] = [];
+    const lazyRender = (edge: QueryIndex['renderEdges'][number], site: RenderSite) => {
+      edge[7] = siteKey(site);
+      wrapperEdges.push(edge);
+      recordRenderInput(edge[0], edge[1], site);
+      const tag = Node.isCallExpression(site) ? site.getArguments()[0] : site.getTagNameNode();
+      if (tag && edge[3]) guardedRenders.set(edge, { tag });
+    };
     const markPossibleLazy = (choices: LazyTarget[], binding?: Node) => {
       if (binding && choices.length) {
         const targets = possibleLazyBindings.get(binding) ?? new Map<number, LazyTarget>();
@@ -1463,37 +1560,20 @@ export class QueryIndexBuilder {
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
             const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
+            const returnedUse = !typeUse && !callbackUse && !executable && !jsx &&
+              (symbol.kind === 'function' || symbol.kind === 'hook') && returnedValueUse(node);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
-              recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);
+              recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse :
+                returnedUse ? GraphReferenceKind.ReturnedUse : GraphReferenceKind.Use, referenceOwner);
             }
             moduleUse = !typeUse && !jsx && !signature && referenceOwner === undefined;
             referenceCaller = sameFile ? undefined : referenceOwner;
             if (sameFile) referenceOwner = undefined;
             else if (callbackUse) referenceKind = 'callback-argument';
             else if (jsx) referenceKind = 'jsx-use';
+            else if (returnedUse) referenceKind = 'returned-use';
             if (typeUse && !sameFile && referenceKind === 'use') referenceKind = 'type-use';
-          }
-          if ((typedLookupFiles.size || opaqueLookupFiles.size) && (kind === 'use' || kind === 're-export') &&
-              index.symbols[id - 1].kind === 'component' && !routeComponents.has(id) &&
-              !node.getAncestors().some(Node.isTypeNode) && componentValueUse(node, indexedComponent)) {
-            const topLevelDefault = Node.isIdentifier(node) && Node.isExportAssignment(throughWrappers(node).getParent()) &&
-              importBinding(node);
-            if (typedLookupFiles.size && topLevelDefault) {
-              const valueUses = (index.renderValueUses ??= {});
-              if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
-            }
-            // A failed opaque lookup only affects value uses that could reach it.
-            const call = node.getFirstAncestor(Node.isCallExpression);
-            const imported = call && importBinding(receiver(call.getExpression())?.root);
-            const issue = typedLookupFiles.get(file) ?? opaqueLookupFiles.get(file) ??
-              (imported && opaqueLookupPackages.get(imported.module));
-            if (issue) {
-              const uses = (index.scopedRenderValueIssues ??= {});
-              if (!uses[id] || isTestFile(uses[id].valueFile) || isTestFile(uses[id].file)) {
-                uses[id] = { ...issue, valueFile: relative };
-              }
-            }
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
@@ -1890,7 +1970,7 @@ export class QueryIndexBuilder {
               !canSelectLazyMember(choice.lookup.selector, choice.lookup.member, choice.supply?.site))) continue;
           const conditional = Number(choice.conditional || !!conditionalAt(site.node));
           const detail = `${loader.origin} via ${tag.getText()}` + (choice.supply ? ` (prop ${choice.supply.name})` : '');
-          wrapperEdges.push([owner, loader.id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail]);
+          lazyRender([owner, loader.id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail], caller.node as RenderSite);
         }
       }
       if (!binding && !possible.size) continue;
@@ -1899,13 +1979,13 @@ export class QueryIndexBuilder {
       const conditional = conditionalAt(site.node, body);
       if (owner !== undefined && index.symbols[owner - 1].kind === 'component') {
         for (const { id, origin } of possible.values()) {
-          if (owner !== id) wrapperEdges.push([owner, id, site.line, conditional, undefined, true, `${origin} via ${tag.getText()}`]);
+          if (owner !== id) lazyRender([owner, id, site.line, conditional, undefined, true, `${origin} via ${tag.getText()}`], site.node);
         }
       }
       if (!binding) continue;
       const { id, origin } = binding;
       if (owner !== undefined && index.symbols[owner - 1].kind === 'component' && owner !== id) {
-        wrapperEdges.push([owner, id, site.line, conditional, undefined, undefined, `${origin} via ${tag.getText()}`]);
+        lazyRender([owner, id, site.line, conditional, undefined, undefined, `${origin} via ${tag.getText()}`], site.node);
         binding.rendered = true;
       } else {
         unresolvedLazyComponents.add(id);
@@ -1950,6 +2030,46 @@ export class QueryIndexBuilder {
     index.renderEdges.push(...wrapperEdges);
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
+    const componentById = new Map([...components.keys()].map(node => [byNode.get(node), node]));
+    for (const [edge, { tag, selection }] of guardedRenders) {
+      const [from, to, line, , , , , site] = edge;
+      const component = componentById.get(from);
+      const body = component && flow.bodyOf(component);
+      if (!component || !body || !tag.getAncestors().includes(body)) continue;
+      const guards = [...flow.branchConditions(tag, body)];
+      if (!guards.length && !selection) continue;
+      const paths: string[][] = [];
+      const conditionalPaths: string[][] = [];
+      const witnesses: string[][] = [];
+      const evaluated = new Map<Node, RenderSite>();
+      let budget = 2048;
+      const inspect = (owner: Node | undefined, sites: string[]) => {
+        if (--budget < 0) return;
+        const state = evaluateRenderGuards(flow, guards, selection, evaluated);
+        if (state.blocked) {
+          (state.strict || !sites.length ? paths : conditionalPaths).push(sites);
+          return;
+        }
+        if (sites.length && state.supported) witnesses.push(sites);
+        if (!owner || sites.length >= 6 || !state.needed.has(owner) || evaluated.has(owner)) return;
+        for (const [supplier, parent] of guardInputs.get(byNode.get(owner)!) ?? []) {
+          if (budget <= 0) break;
+          evaluated.set(owner, supplier);
+          const outer = componentById.get(parent);
+          inspect(outer, [...sites, siteKey(supplier)]);
+          evaluated.delete(owner);
+        }
+      };
+      inspect(component, []);
+      const key = renderGuardKey(from, to, line, site);
+      if (paths.length) (index.renderGuardPaths ??= {})[key] = paths;
+      if (conditionalPaths.length) (index.renderConditionalPaths ??= {})[key] = conditionalPaths;
+      if (witnesses.length) (index.renderWitnessPaths ??= {})[key] = witnesses;
+      if (paths.length || conditionalPaths.length || witnesses.length) {
+        if (site) excludedSites.add(site);
+        for (const path of [...paths, ...conditionalPaths, ...witnesses]) for (const supplier of path) excludedSites.add(supplier);
+      }
+    }
     const scopes = new Set([
       ...Object.values(index.callGates ?? {}).flat(),
       ...Object.values(index.workspaceDependencies ?? {}).flatMap(dependencies => dependencies.flatMap(entry => entry.gates ?? [])),

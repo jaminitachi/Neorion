@@ -1,12 +1,12 @@
 import { Node, SourceFile, SyntaxKind, ts, type Symbol } from 'ts-morph';
 import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
-import { conditionalAt, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, returnsFromBranch, wrappedExpression } from './ArchitectureFacts';
 import { startLine } from './SourceLines';
 import { valueNode } from './StaticBindings';
 
 export type JsxSite = import('ts-morph').JsxOpeningElement | import('ts-morph').JsxSelfClosingElement;
 export type RenderSite = JsxSite | import('ts-morph').CallExpression;
-type Prop = { component: Node; name: string; fallback?: Node };
+export type Prop = { component: Node; name: string; fallback?: Node };
 type SiteValue = { site: RenderSite; value?: Node; unknown?: boolean };
 type BoundValue = SiteValue & { gates: PropGate[] };
 type ForwardedSpread = { site: JsxSite; excluded: Set<string> };
@@ -66,12 +66,26 @@ export class PropFlow {
     for (const [tag, definitions] of targets) {
       const site = tag.getParent();
       if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site) && !Node.isCallExpression(site)) continue;
-      for (const target of definitions) {
-        const entries = this.sites.get(target) ?? [];
-        entries.push(site);
-        this.sites.set(target, entries);
-      }
+      for (const target of definitions) this.addSite(target, site);
     }
+  }
+
+  addSite(target: Node, site: RenderSite) {
+    const entries = this.sites.get(target) ?? [];
+    if (!entries.includes(site)) entries.push(site);
+    this.sites.set(target, entries);
+  }
+
+  inputsOf(component: Node) {
+    return this.sites.get(component) ?? [];
+  }
+
+  bodyOf(component: Node) {
+    return this.bodies.get(component);
+  }
+
+  propsOwner(declaration: Node) {
+    return this.parameters.get(declaration);
   }
 
   targetsOf(site: JsxSite) {
@@ -301,7 +315,7 @@ export class PropFlow {
     });
   }
 
-  private *branchConditions(node: Node, boundary?: Node) {
+  *branchConditions(node: Node, boundary?: Node) {
     for (let child = node, parent = node.getParent(); parent && child !== boundary; child = parent, parent = parent.getParent()) {
       let condition: Node | undefined;
       let positive = true;
@@ -319,6 +333,13 @@ export class PropFlow {
         }
       }
       if (condition) yield { expression: condition, positive };
+      if (boundary && Node.isBlock(parent)) for (const prior of parent.getStatements()) {
+        if (prior === child) break;
+        if (!Node.isIfStatement(prior)) continue;
+        if (returnsFromBranch(prior.getThenStatement())) yield { expression: prior.getExpression(), positive: false };
+        const other = prior.getElseStatement();
+        if (other && returnsFromBranch(other)) yield { expression: prior.getExpression(), positive: true };
+      }
     }
   }
 

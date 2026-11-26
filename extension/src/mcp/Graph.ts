@@ -1,5 +1,5 @@
 import { compileMiddlewareMatcher, middlewareMatcher } from '../core/analyzers/NextRouteMatch';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, renderIssue, renderSiteKey,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, advanceRenderGuards, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, renderGuardKey, renderIssue, renderSiteKey,
   type ExternalCall, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
   type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
@@ -10,12 +10,13 @@ type Edge = {
   from: NodeId; to: NodeId; label: Label; file: string; line: number;
   site?: string; gates?: FlowGate[];
   local?: boolean;
+  returnedValue?: boolean;
   matcher?: NonNullable<QueryIndex['pagesEdges']>[number]['matcher'];
   detail?: string; destination?: Route; sourceRoute?: number; conditional?: boolean; partial?: boolean; url?: string; method?: string; uncertainty?: string; transportIssue?: string; typeOnly?: true;
   possibleReconnect?: true;
 };
 type PathEdge = Edge;
-type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boolean; via?: string[] };
+type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boolean; via?: string[]; valueOnly?: boolean };
 export type QueryRow = { text: string; files: string[]; pathEnd?: number; annotation?: string; suffix?: string };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
@@ -86,7 +87,7 @@ const terminalKey = (terminal: Terminal) => JSON.stringify([terminal.kind, termi
 const terminalOrder = (a: Reached, b: Reached) => a.visit.depth - b.visit.depth ||
   compare(a.terminal.file, b.terminal.file) || (a.terminal.line ?? 0) - (b.terminal.line ?? 0) ||
   compare(a.terminal.name, b.terminal.name);
-const certaintyFlags = (visit: Visit) => (visit.possible ? 2 : 0) | (visit.conditional ? 1 : 0);
+const certaintyFlags = (visit: Visit) => (visit.valueOnly ? 4 : 0) | (visit.possible ? 2 : 0) | (visit.conditional ? 1 : 0);
 const terminalCertainty = (visit: Visit) => certaintyFlags(visit) | (visit.edge?.partial ? 2 : 0);
 // A shorter path can discover more callers within the depth limit, even if a
 // longer path gives better evidence for a route. Keep both when neither dominates.
@@ -265,7 +266,7 @@ export class DependencyGraph {
     }
     const edges = new Set<string>();
     const addEdge = (edge: Edge) => {
-      const key = JSON.stringify([edge.from, edge.to, edge.label, edge.file, edge.line, edge.detail ?? '', edge.method, edge.site, edge.gates, edge.typeOnly, ...(index.router ? [edge.sourceRoute, edge.destination?.id] : [])]);
+      const key = JSON.stringify([edge.from, edge.to, edge.label, edge.file, edge.line, edge.detail ?? '', edge.method, edge.site, edge.gates, edge.typeOnly, edge.returnedValue, ...(index.router ? [edge.sourceRoute, edge.destination?.id] : [])]);
       if (edges.has(key)) return;
       edges.add(key);
       for (const gate of edge.gates ?? []) this.gateScopes.add(gate.scope);
@@ -298,8 +299,9 @@ export class DependencyGraph {
       if (kind === 'call') {
         const from = graphOwner ?? owner ?? this.fileNode(file);
         invocation(from, target, file, line, detail ?? undefined, undefined, possible);
-      } else if (kind === 'use' || kind === 'type-use') {
-        add({ from: owner ?? this.fileNode(file), to: target, label: 'use', file, line, typeOnly: kind === 'type-use' || undefined });
+      } else if (kind === 'use' || kind === 'type-use' || kind === 'returned-use') {
+        add({ from: owner ?? this.fileNode(file), to: target, label: 'use', file, line,
+          typeOnly: kind === 'type-use' || undefined, returnedValue: kind === 'returned-use' || undefined });
       }
     }
     for (const [fileKey, refs] of Object.entries(index.graphReferences!)) {
@@ -310,7 +312,8 @@ export class DependencyGraph {
           kind === GraphReferenceKind.Render ? 'render' : 'use';
         add({ from: owner ?? fileId, to, label, file, line,
           detail: label === 'call' && detail !== undefined ? index.graphNames![detail] : undefined,
-          conditional: label === 'render' && !!detail, typeOnly: kind === GraphReferenceKind.TypeUse || undefined });
+          conditional: label === 'render' && !!detail, typeOnly: kind === GraphReferenceKind.TypeUse || undefined,
+          returnedValue: kind === GraphReferenceKind.ReturnedUse || undefined });
       }
     }
     for (const [from, to, file, line, detail, gates] of index.flowCalls ?? []) invocation(from, to, file, line, detail, gates ?? []);
@@ -675,7 +678,7 @@ export class DependencyGraph {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const renderSites = new Set<string>();
     const visited = new Map<NodeId, Visit[]>();
-    type State = { id: NodeId; gates: FlowGate[]; visit: Visit };
+    type State = { id: NodeId; gates: FlowGate[]; guards: string[][]; visit: Visit };
     const levels: State[][] = [];
     const states = new Map<string, number[]>();
     const reachedEdges = new Set<Edge>();
@@ -692,8 +695,10 @@ export class DependencyGraph {
     const literals = new Set<string>();
     const stops = new Set<string>();
     let flowIssue: string | undefined;
-    const visit = (id: NodeId, value: Visit, gates: FlowGate[]) => {
-      const key = stateKey(id, gates);
+    const impactKey = (id: NodeId, gates: FlowGate[], guards: string[][]) =>
+      guards.length ? JSON.stringify([id, gates, guards]) : stateKey(id, gates);
+    const visit = (id: NodeId, value: Visit, gates: FlowGate[], guards: string[][]) => {
+      const key = impactKey(id, gates, guards);
       const prior = states.get(key);
       const flags = certaintyFlags(value);
       if (coversVisit(prior, flags, value.depth)) return false;
@@ -704,14 +709,14 @@ export class DependencyGraph {
       const depths = prior ?? [];
       depths[flags] = value.depth;
       states.set(key, depths);
-      (levels[value.depth] ??= []).push({ id, gates, visit: value });
+      (levels[value.depth] ??= []).push({ id, gates, guards, visit: value });
       return true;
     };
-    for (const seed of seeds) visit(seed, { depth: 0 }, initialGates);
+    for (const seed of seeds) visit(seed, { depth: 0 }, initialGates, []);
     for (let level = 0; level < levels.length && !expired(); level++) {
-      for (const { id, gates, visit: current } of levels[level]) {
+      for (const { id, gates, guards, visit: current } of levels[level]) {
         if (expired()) break;
-        if (coversVisit(states.get(stateKey(id, gates)), certaintyFlags(current), level, true)) continue;
+        if (coversVisit(states.get(impactKey(id, gates, guards)), certaintyFlags(current), level, true)) continue;
         const visits = visited.get(id);
         if (!visits || terminalCertainty(current) < terminalCertainty(visits[visits.length - 1])) {
           append(visited, id, current);
@@ -744,7 +749,7 @@ export class DependencyGraph {
           }
         }
         const edges = this.predecessors(id);
-        const additions = new Map<string, { gates: FlowGate[]; visits: (Visit & { edge: Edge })[]; depths: number[] }>();
+        const additions = new Map<string, { gates: FlowGate[]; guards: string[][]; visits: (Visit & { edge: Edge })[]; depths: number[] }>();
         let hasCaller = false;
         for (let edge of edges) {
           if (edge.from === id) continue;
@@ -759,7 +764,12 @@ export class DependencyGraph {
           }
           const awaiting = predecessorGates(edge, gates);
           if (!awaiting) continue;
-          const key = stateKey(edge.from, awaiting);
+          const rules = edge.label === 'render' && typeof edge.from === 'number' && typeof edge.to === 'number'
+            ? this.index.renderGuardPaths?.[renderGuardKey(edge.from, edge.to, edge.line, edge.site)]?.filter(path => path.length)
+            : undefined;
+          const remaining = guards.length || rules ? advanceRenderGuards(guards, edge.site, rules) : guards;
+          if (!remaining) continue;
+          const key = impactKey(edge.from, awaiting, remaining);
           hasCaller = true;
           const cost = impactCost(edge, gates);
           if (level >= depth && cost && edge.label !== 'render' && edge.label !== 'event') {
@@ -771,10 +781,11 @@ export class DependencyGraph {
           if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
           const next = { depth: level + cost, edge, conditional: current.conditional || edge.conditional,
-            possible: current.possible || (edge.label === 'render' || edge.label === 'event') && edge.partial };
+            possible: current.possible || (edge.label === 'render' || edge.label === 'event') && edge.partial,
+            valueOnly: current.valueOnly || !current.edge && edge.returnedValue };
           const flags = certaintyFlags(next);
           if (coversVisit(states.get(key), flags, next.depth)) continue;
-          const pending = additions.get(key) ?? { gates: awaiting, visits: [], depths: [] };
+          const pending = additions.get(key) ?? { gates: awaiting, guards: remaining, visits: [], depths: [] };
           if (coversVisit(pending.depths, flags, next.depth)) continue;
           pending.visits[flags] = next;
           pending.depths[flags] = next.depth;
@@ -793,11 +804,11 @@ export class DependencyGraph {
           hubs.push(graphRow(`d${level + 1} ${label}  ${additions.size} callers in ${quantity(files.length, 'file')} (top: ${files.slice(0, 3).join(', ')})`, ...files.slice(0, 3)));
         }
         const via = additions.size ? [this.name(id), ...current.via ?? []].slice(0, 2) : undefined;
-        for (const { gates: awaiting, visits } of additions.values()) {
+        for (const { gates: awaiting, guards: remaining, visits } of additions.values()) {
           if (expired()) break;
           for (const next of visits) {
             if (!next) continue;
-            if (visit(next.edge.from, { ...next, via }, awaiting) && additions.size > hubSize && level < depth) {
+            if (visit(next.edge.from, { ...next, via }, awaiting, remaining) && additions.size > hubSize && level < depth) {
               hidden.add(next.edge.from);
             }
           }
@@ -843,6 +854,7 @@ export class DependencyGraph {
         (metadata ? ' (+generateMetadata)' : '') + (visit.conditional ? ' [cond]' : '') +
         (visit.edge?.label === 'dyn' ? ' [dyn]' : '') +
         (visit.possible || visit.edge?.partial ? visit.edge?.label === 'fetch' && !visit.edge.uncertainty ? ' [partial url]' : ' [possible]' : '') +
+        (visit.valueOnly ? ' [value only]' : '') +
         (isTestFile(file) ? ' [test]' : '');
       if (groupPages && kind === 'page' && terminal.route) {
         const layouts = terminal.route.layouts ?? [];
@@ -853,7 +865,8 @@ export class DependencyGraph {
         if (limit > 40 && pages.length > 5) for (const page of pages) {
           if (listed.has(page.id)) continue;
           listed.add(page.id);
-          rows.push(graphRow(`page ${page.url}  ${location(page.file, page.line)}  d${visit.depth} via ${file}`, page.file, file));
+          rows.push(graphRow(`page ${page.url}  ${location(page.file, page.line)}  d${visit.depth} via ${file}` +
+            (visit.valueOnly ? ' [value only]' : ''), page.file, file));
         }
       } else if (kind === 'middleware') {
         const clean = typeof node === 'number' ? this.pagesMiddleware.get(node) : undefined;
@@ -1001,15 +1014,10 @@ export class DependencyGraph {
       const issue = typeof id === 'number' && this.index.scopedRenderValueIssues?.[id];
       return issue && (includeTests || !isTestFile(issue.valueFile) && !isTestFile(issue.file)) ? [issue.reason] : [];
     })[0];
-    const unresolvedLookup = scopedLookup || !routeCount && seeds.some(id => {
-      const file = typeof id === 'number' && this.index.renderValueUses?.[id];
-      return file && (includeTests || !isTestFile(file));
-    }) &&
-      Object.entries(this.index.renderLookupIssues ?? {}).find(([id]) => includeTests || !isTestFile(this.file(Number(id))))?.[1];
     return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
       (used > depth ? ` (limit ${depth} + renders/events)` : '') +
       (trace.hubs.length ? ', hub collapsed' : ''),
-      partial: [...middlewareReasons, trace.partial ?? unresolvedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
+      partial: [...middlewareReasons, trace.partial ?? scopedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
         .filter(Boolean).join('; ') || undefined,
       scope: 'indexed call, event, render, action, use, dyn, fetch edges' +
         ([...trace.visited.values()].some(visits => visits.some(visit => visit.edge?.label === 'trpc')) ? ', including tRPC' : '') };

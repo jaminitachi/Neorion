@@ -624,7 +624,8 @@ export class ComponentAnalyzer {
     }
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
-      if (!suppliedComponent && unresolvedLookups.has(tag)) index?.unresolvedRenderLookup(from, tag);
+      const unresolved = !suppliedComponent && unresolvedLookups.get(tag);
+      if (unresolved) index?.unresolvedRenderLookup(from, tag, unresolved);
       const opaque = !suppliedComponent && opaqueLookups.get(tag);
       if (opaque) index?.opaqueRenderLookup(from, tag, opaque);
       const site = tag.getParent();
@@ -633,7 +634,7 @@ export class ComponentAnalyzer {
       }
       const transferred = suppliedComponent ? [] : propRenders.get(tag) ?? [];
       const renders = [...new Set(targets)].map(target => ({ target, ...renderChoices.get(tag)?.get(target.id), detail: undefined as string | undefined }));
-      for (const { target, possible, conditional: guarded, contextExcluded, detail } of [...renders, ...transferred]) {
+      for (const { target, possible, conditional: guarded, contextExcluded, detail, selection } of [...renders, ...transferred]) {
         const attribute = propAttribute(tag, body);
         const element = Node.isJsxOpeningElement(site) ? site.getParent() : site;
         const parent = element?.getParent();
@@ -659,11 +660,11 @@ export class ComponentAnalyzer {
             ? site : undefined;
           if (!slot?.length) {
             index.render(from, target.id, startLine(tag), conditional, undefined, possible || undefined, this.config && tag,
-              lookup, renderSite, undefined, contextExcluded);
+              lookup, renderSite, undefined, contextExcluded, selection);
           } else for (const transfer of slot) {
             index.render(from, target.id, startLine(tag), conditional || Number(transfer.conditional),
               undefined, possible || (transfer.partial ? true : undefined), this.config && tag,
-              lookup ? `${lookup}; ${transfer.detail}` : transfer.detail, renderSite, undefined, contextExcluded);
+              lookup ? `${lookup}; ${transfer.detail}` : transfer.detail, renderSite, undefined, contextExcluded, selection);
           }
         }
       }

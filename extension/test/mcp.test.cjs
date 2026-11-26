@@ -581,6 +581,29 @@ test('lazy loaders trace the returned export and enumerate finite import templat
     const Choice = lazy(() => import(\`../../ui/\${filename}\`));
     export default function Template() { return <Suspense><Choice/></Suspense>; }
   `);
+  write(root, 'app/tuple/page.tsx', `
+    import { lazy } from "react";
+    const files = ["First", "Second"] as const;
+    const filename = files[location.search.includes("first") ? 0 : 1];
+    const Choice = lazy(() => import(\`../../ui/\${filename}\`));
+    export default function Tuple() { return <Choice/>; }
+  `);
+  write(root, 'app/union/page.tsx', `
+    import dynamic from "next/dynamic";
+    declare function choice(): "First" | "Second";
+    const filename = choice();
+    const Choice = dynamic(() => import(\`../../ui/\${filename}\`));
+    export default function Union() { return <Choice/>; }
+  `);
+  write(root, 'app/mutable/page.tsx', `
+    import dynamic from "next/dynamic";
+    const Selected = dynamic(() => import("../../ui/controls").then(mod => {
+      let Current = mod.FieldHeading;
+      Current = mod.TimezonePicker;
+      return Current;
+    }));
+    export default function Mutable() { return <Selected/>; }
+  `);
   write(root, 'app/helper/panel.tsx', 'export function Panel() { return <p/>; }');
   write(root, 'app/helper/page.tsx', `
     import { lazy, Suspense } from "react";
@@ -615,12 +638,17 @@ test('lazy loaders trace the returned export and enumerate finite import templat
   const heading = await renders('ui/controls.tsx#FieldHeading');
   assert.match(heading, /^\/profile\s.*depth 1$/m);
   assert.doesNotMatch(heading, /^\/unrelated\s/m);
+  assert.doesNotMatch(heading, /^\/mutable\s/m);
   assert.match(heading, /^# complete:/m);
   const picker = await renders('ui/controls.tsx#TimezonePicker');
   assert.match(picker, /^\/settings\s.*\[imported via TimezonePicker\]$/m);
+  assert.match(picker, /^\/mutable\s.*\[imported via Selected\]/m);
   assert.match(picker, /^# complete:/m);
   for (const name of ['First', 'Second']) {
-    assert.match(await renders(`ui/${name}.tsx#${name}`), /^\/template\s.*\[possible\]$/m);
+    const output = await renders(`ui/${name}.tsx#${name}`);
+    for (const route of ['template', 'tuple', 'union']) {
+      assert.match(output, new RegExp(`^/${route}\\s.*\\[possible\\]$`, 'm'));
+    }
   }
   assert.doesNotMatch(await renders('ui/First.tsx#First'), /^\/registry\s/m);
   assert.match(await renders('ui/Second.tsx#Second'), /^\/registry\s.*\[possible\]$/m);
@@ -644,7 +672,10 @@ test('render paths through lazy views respect props and prefer feasible JSX chai
   write(root, 'ui/controls.tsx', `
     import { createContext, useContext, useMemo } from 'react';
     export function Clear() { return <button/>; }
-    export function Input({showClear = false}) { return <div>{showClear && <Clear/>}</div>; }
+    export function Input({showClear = false}) {
+      if (!showClear) return <input/>;
+      return <Clear/>;
+    }
     export function Picker({disabled, ...aria}) { return <Input {...aria}/>; }
     export function Image() { return <img/>; }
     function Icon({ type, display }) {
@@ -712,6 +743,91 @@ test('render paths through lazy views respect props and prefer feasible JSX chai
   assert.doesNotMatch(editor, /AppView/);
   assert.match(await renders('WebWidget'), /^\/\s.*\[cond\]$/m);
   assert.doesNotMatch(await renders('EmbeddedWidget'), /^\/\s/m);
+});
+
+test('render constraints follow filtered and finite collections through caller props', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'ui/views.tsx', `
+    export function Email() { return <p/>; }
+    const kinds = () => [{ type: 'link' }, { type: 'email' }];
+    function Preview({ types, mode }) {
+      const selected = types.find(item => item.type === mode);
+      if (!selected || !location.href) return null;
+      return mode === 'email' && <Email/>;
+    }
+    function Dialog({ types, ...props }) { return <Preview types={types} {...props}/>; }
+    export function NoEmail({ mode }) { return <Dialog mode={mode} types={kinds().filter(item => item.type !== 'email')}/>; }
+    export function AllTypes({ mode }) { return <Dialog mode={mode} types={kinds()}/>; }
+    export function Text() { return <input/>; }
+    export function Radio() { return <input type="radio"/>; }
+    const registry = { text: { factory: Text }, radio: { factory: Radio } };
+    export function Field({ field }) {
+      const name = field.type || 'text';
+      const entry = registry[name];
+      return <entry.factory/>;
+    }
+    const templates = { one: [{ type: 'text', label: 'x' }], two: [{ type: 'text', label: 'y' }] };
+    export function Template({ name }) {
+      return <>{templates[name]?.map(field => {
+        const { label, ...rest } = field;
+        return <Field field={{...rest, label: label.toUpperCase()}}/>;
+      })}</>;
+    }
+    export function Addon() { return <b/>; }
+    function Input({ addon }) { return <>{addon && <Addon/>}</>; }
+    function TextField(props) { return <Input {...props}/>; }
+    declare function attributes(): any;
+    function ATitle() { return <TextField {...attributes()}/>; }
+    function ZOptions() { return <TextField addon={location.search ? <span/> : null}/>; }
+    export function Form() { return <><ATitle/><ZOptions/></>; }
+  `);
+  write(root, 'app/filter/page.tsx', `
+    import dynamic from "next/dynamic";
+    const Dialog = dynamic(() => import('../../ui/views').then(m => m.NoEmail));
+    const Template = dynamic(() => import('../../ui/views').then(m => m.Template));
+    export default function Filter({ mode }) { return <><Dialog mode={mode}/><Template name={mode}/></>; }
+  `);
+  write(root, 'app/allowed/page.tsx', `
+    import { AllTypes, Field, Form } from '../../ui/views';
+    export default function Allowed() { return <><AllTypes mode="email"/><Field field={{type: 'radio'}}/><Form/></>; }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const target of ['Email', 'Radio']) {
+    const output = await client.text('query', { kind: 'who_renders', target });
+    assert.match(output, /^\/allowed\s/m);
+    assert.doesNotMatch(output, /^\/filter\s/m);
+  }
+  assert.match(await client.text('query', { kind: 'who_renders', target: 'Text' }), /^\/filter\s/m);
+  const addon = await client.text('query', { kind: 'who_renders', target: 'Addon' });
+  assert.match(addon, /^\/allowed\s.*ZOptions/m);
+  assert.doesNotMatch(addon, /ATitle/);
+});
+
+test('impact marks a route through a hook return when no invocation reaches that route', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'ui/hooks.tsx', `
+    export function notify() {}
+    export function useValue() { return { notify }; }
+    export function Inactive() { return <button onClick={notify}/>; }
+  `);
+  write(root, 'app/value/page.tsx', `
+    import { useValue } from '../../ui/hooks';
+    export default function Page() { useValue(); return <main/>; }
+  `);
+  write(root, 'app/action/page.tsx', `
+    import { notify, useValue } from '../../ui/hooks';
+    export default function Page() { useValue(); return <button onClick={notify}/>; }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const output = await client.text('query', { kind: 'impact', target: 'notify' });
+  assert.match(output, /^page \/value\s.*\[value only\]$/m);
+  assert.match(output, /^page \/action\s/m);
+  assert.doesNotMatch(output, /^page \/action\s.*\[value only\]/m);
+  assert.match(output, /^# complete: .*use/m);
 });
 
 test('wrappers list rendered providers in chain order for each branch', async t => {
