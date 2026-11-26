@@ -31,6 +31,7 @@ function evidenceSuffix(edge: Edge) {
     (edge.transport ? ` [${edge.transport}]` : edge.label === 'trpc' && edge.transportIssue ? ` [${edge.transportIssue}]` : '');
 }
 export type QueryRow = {
+  candidate?: true;
   text: string; files: string[]; pathEnd?: number; context?: string; suffix?: string; evidence?: QueryRow[];
   annotation?: { offset: number; text: string };
 };

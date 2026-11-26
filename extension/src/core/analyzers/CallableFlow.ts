@@ -62,7 +62,14 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
   if (Node.isIdentifier(expression) && declarationsOf(expression).includes(parameter)) return members;
 }
 
-type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; member?: string };
+export function staticMember(node: Node | undefined, identifier = true): string | undefined {
+  if (Node.isIdentifier(node) && identifier) return node.getText();
+  if (Node.isStringLiteral(node) || Node.isNumericLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
+    return String(node.getLiteralValue());
+  }
+}
+
+type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[] };
 export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
   private returns = new WeakMap<FunctionNode, Node[]>();
@@ -122,20 +129,20 @@ export class CallableFlow {
     const result: Target[] = [];
     const seen = new Map<Node, string | number | Set<string | number>>();
     let budget = 64;
-    const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], member?: string): void => {
+    const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], path?: string[]): void => {
       if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return;
-      const key = members.length || member !== undefined ? JSON.stringify([invoke, members, member]) : invoke;
+      const key = members.length || path?.length ? JSON.stringify([invoke, members, path]) : invoke;
       const states = seen.get(node);
       if (states === key || states instanceof Set && states.has(key)) return;
       if (states instanceof Set) states.add(key);
       else seen.set(node, states === undefined ? key : new Set([states, key]));
-      const resolve = (value: Node | undefined, path: string[], calls: number, factories: CallExpression[]) =>
-        visit(value, path, calls, factories, member);
+      const resolve = (value: Node | undefined, selection: string[], calls: number, factories: CallExpression[]) =>
+        visit(value, selection, calls, factories, path);
       const wrapped = wrappedExpression(node);
       if (wrapped) return resolve(wrapped, members, invoke, via);
       if (isFunction(node)) {
         if (!invoke) {
-          if (!members.length) result.push({ fn: node, via: via.map(call => call.getExpression().getText()), factories: via.length ? via : undefined, member });
+          if (!members.length) result.push({ fn: node, via: via.map(call => call.getExpression().getText()), factories: via.length ? via : undefined, path });
           return;
         }
         let values = this.returns.get(node);
@@ -151,10 +158,27 @@ export class CallableFlow {
       }
       if (Node.isBindingElement(node) && !node.getDotDotDotToken()) {
         const pattern = node.getParent();
-        const name = node.getPropertyNameNode() ?? node.getNameNode();
-        if (Node.isObjectBindingPattern(pattern) && (Node.isIdentifier(name) || Node.isStringLiteral(name))) {
-          return resolve(pattern.getParent(), [Node.isStringLiteral(name) ? name.getLiteralText() : name.getText(), ...members], invoke, via);
+        const name = Node.isArrayBindingPattern(pattern)
+          ? String(pattern.getElements().indexOf(node)) : staticMember(node.getPropertyNameNode() ?? node.getNameNode());
+        if (name !== undefined) return resolve(pattern.getParent(), [name, ...members], invoke, via);
+      }
+      if (Node.isArrayLiteralExpression(node)) {
+        const elements = node.getElements();
+        const prefix = elements.findIndex(Node.isSpreadElement);
+        const fixed = prefix < 0 ? elements : elements.slice(0, prefix);
+        if (members.length) {
+          const index = Number(members[0]);
+          if (String(index) === members[0]) resolve(fixed[index], members.slice(1), invoke, via);
+          return;
         }
+        if (collectMembers && !invoke) fixed.forEach((element, index) =>
+          visit(element, [], 0, via, [...path ?? [], String(index)]));
+        return;
+      }
+      if (Node.isConditionalExpression(node)) {
+        resolve(node.getWhenTrue(), members, invoke, via);
+        resolve(node.getWhenFalse(), members, invoke, via);
+        return;
       }
       if (Node.isObjectLiteralExpression(node)) {
         const [name, ...rest] = members;
@@ -162,20 +186,20 @@ export class CallableFlow {
         if (!members.length) {
           if (collectMembers && !invoke) for (const property of properties) {
             if (Node.isSpreadAssignment(property)) continue;
-            if (Node.isComputedPropertyName(property.getNameNode())) continue;
-            visit(property, [], 0, via, member ?? property.getName());
+            const key = staticMember(property.getNameNode());
+            if (key !== undefined) visit(property, [], 0, via, [...path ?? [], key]);
           }
           return;
         }
         for (let i = properties.length - 1; i >= 0; i--) {
           const property = properties[i];
           if (Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode())) return;
-          if (property.getName() === name) return resolve(property, rest, invoke, via);
+          if (staticMember(property.getNameNode()) === name) return resolve(property, rest, invoke, via);
         }
       }
       if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
         const key = Node.isElementAccessExpression(node) ? node.getArgumentExpression() : undefined;
-        const name = Node.isPropertyAccessExpression(node) ? node.getName() : Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
+        const name = Node.isPropertyAccessExpression(node) ? node.getName() : staticMember(key, false);
         if (name && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
           const before = result.length;
           resolve(node.getExpression(), [name, ...members], invoke, via);
@@ -209,7 +233,6 @@ export class CallableFlow {
         const path = selectedMembers(args[0]);
         if (path) return resolve(callee, [...path, ...members], invoke + 1, [...via, node]);
       }
-      if (!members.length && !invoke && !Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return;
       resolve(callee, members, invoke + 1, [...via, node]);
     };
     visit(expression, [], invocations, []);

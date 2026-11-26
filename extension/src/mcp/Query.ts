@@ -843,9 +843,9 @@ export class QueryEngine {
         compare(a.file, b.file) || a.line - b.line || compare(a.method, b.method) || compare(a.via, b.via));
     for (const fetch of fetches) {
       if (expired()) break;
-      files.add(fetch.file);
+      if (!fetch.otherTemplateRoute) files.add(fetch.file);
       const generated = generatedFile(fetch.file);
-      if (generated) generatedFiles.add(fetch.file);
+      if (generated && !fetch.otherTemplateRoute) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
       const legacyTransport = via === AI_SDK_TRANSPORT && (this.index.queryRevision ?? 0) < TRANSPORT_QUERY_REVISION;
       const method = legacyTransport ? '?' : fetch.method;
@@ -871,7 +871,8 @@ export class QueryEngine {
         (generated ? ' [generated]' : '') +
         (fetch.possibleReconnect ? ' [possible reconnect]' : '') +
         (fetch.evidence ? ` (${fetch.evidence})` : '');
-      rows.push({ ...row(text, fetch.file, ...binding ? [binding.file] : []), pathEnd: label.length });
+      rows.push({ ...row(text, fetch.file, ...binding ? [binding.file] : []), pathEnd: label.length,
+        candidate: candidate ? true : undefined });
       if (binding && fetch.owner !== undefined) {
         const result = this.graph()?.consumerEvidence(fetch.graphOwner ?? fetch.owner, includeTests, expired, fetch.gates, binding.supplier);
         propIssue ??= result?.partial;
@@ -883,7 +884,7 @@ export class QueryEngine {
     }
     const callers = levels && requestOwners.size ? this.apiCallers(requestOwners, matchedOwners, levels, includeTests, expired) : undefined;
     for (const entry of callers?.rows ?? []) {
-      files.add(entry.files[0]);
+      if (!entry.candidate) files.add(entry.files[0]);
       rows.push(entry);
     }
     const callerCount = (callers?.rows.length ?? 0) - (callers?.candidates ?? 0);
@@ -897,7 +898,8 @@ export class QueryEngine {
       const total = evidence.get(kind);
       return total ? [`${total} ${kind}${total === 1 ? '' : 's'}`] : [];
     }).join(', ');
-    const count = `${rows.length} ${rows.length === 1 ? 'site' : 'sites'} in ${files.size} ${files.size === 1 ? 'file' : 'files'}` +
+    const confirmed = rows.length - (evidence.get('URL candidate') ?? 0) - (callers?.candidates ?? 0);
+    const count = `${confirmed} ${confirmed === 1 ? 'site' : 'sites'} in ${files.size} ${files.size === 1 ? 'file' : 'files'}` +
       (breakdown ? `: ${breakdown}` : '') +
       (generatedFiles.size ? ` (${generatedFiles.size} generated ${generatedFiles.size === 1 ? 'file' : 'files'})` : '');
     rows.push(...propEvidence.values());
@@ -975,6 +977,7 @@ export class QueryEngine {
     const entries = new Map<string, { owner: number; file: string; line: number; name: string; level: number; evidence: boolean; event?: string }>();
     const parents = matchedOwners.size !== requestOwners.size ? new Map<number, Set<number>>() : undefined;
     const creations = new Map<string, Row>();
+    const gaps = new Map<string, Row>();
     const boundary = new Set<string>();
     let unresolved = false;
     for (let depth = 0; depth <= levels && owners.size && !expired(); depth++) {
@@ -993,7 +996,7 @@ export class QueryEngine {
             boundary.add(key);
             return;
           }
-          const evidence = extra || (local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner)));
+          const evidence = extra || local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner));
           const earlier = entries.get(key);
           if (!earlier || earlier.evidence && !evidence || earlier.evidence === evidence && level < earlier.level) {
             entries.set(key, { owner, file, line, name, level, evidence, event });
@@ -1014,20 +1017,24 @@ export class QueryEngine {
         const invocationScopes = new Set<number>();
         for (const [caller, file, line, event] of invocations) {
           const invocationScope = lexicalOwner(callableOwners, caller);
-          add(file, line, caller, event, invocationScopes.has(invocationScope));
+          add(file, line, caller, event, this.index.callbackCreations?.[owner] === undefined ||
+            invocationScopes.has(invocationScope));
           invocationScopes.add(invocationScope);
         }
 
         const creationSites = (this.index.callbackCreations?.[owner] ?? []).filter(([, file]) => visible(file));
-        if (invocations.some(([, , , , possible]) => possible)) unresolved = true;
-        for (const [factory, file, line, invoked] of creationSites) {
-          unresolved ||= !invoked;
-          if (invoked && this.symbols.get(factory)?.kind !== 'hook') continue;
-          if (depth >= levels) {
-            if (!invoked) boundary.add(`${file}:${line} ${nameOf(factory)} (callback creation)`);
-            continue;
-          }
-          const label = `  create${depth + 1}  ${location(file, line)}`;
+        unresolved ||= invocations.some(([, , , , possible]) => possible);
+        for (const [file, line] of this.index.callbackCoverageGaps?.[owner] ?? []) {
+          if (!visible(file)) continue;
+          unresolved = true;
+          const label = `unresolved  ${location(file, line)}`;
+          const text = `${label} ${name}${flagTest(file)}`;
+          gaps.set(text, { ...row(text, file), pathEnd: label.length });
+        }
+        for (const [factory, file, line, covered] of creationSites) {
+          unresolved ||= !covered;
+          if (covered && depth >= levels) continue;
+          const label = `  create${Math.min(depth + 1, levels)}  ${location(file, line)}`;
           const text = `${label} ${nameOf(factory)}${flagTest(file)}`;
           creations.set(text, { ...row(text, file), pathEnd: label.length });
         }
@@ -1039,7 +1046,7 @@ export class QueryEngine {
       for (const caller of parents.get(owner) ?? []) matchedOwners.add(caller);
     }
     const rows: Row[] = [];
-    const evidence: Row[] = [...creations.values()];
+    const evidence: Row[] = [...creations.values(), ...gaps.values()];
     let candidates = 0;
     const order = (file: string, line: number, name: string, level: number, event?: string) =>
       (!event ? ordinary.get(`${file}:${line} ${name}`) : undefined) ?? levels + level;
@@ -1048,9 +1055,12 @@ export class QueryEngine {
       compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name) || compare(a.event ?? '', b.event ?? ''))) {
       const { owner, file, line, name, level, evidence: detail, event } = entry;
       const candidate = parents && !matchedOwners.has(owner);
-      if (candidate && !detail) candidates++;
       const label = `${detail ? '  ' : ''}${event ? 'event' : 'call'}${level}  ${location(file, line)}`;
-      (detail ? evidence : rows).push({ ...row(`${label} ${name}${event ? ' via ' + event : ''}${candidate ? ' [candidate URL]' : ''}${flagTest(file)}`, file), pathEnd: label.length });
+      if (candidate && !detail) candidates++;
+      (detail ? evidence : rows).push({
+        ...row(`${label} ${name}${event ? ' via ' + event : ''}${candidate ? ' [candidate URL]' : ''}${flagTest(file)}`, file),
+        pathEnd: label.length, candidate: candidate ? true : undefined
+      });
     }
     return { rows, evidence, candidates, more: [...boundary].some(key => !entries.has(key)), unresolved };
   }
@@ -1322,14 +1332,20 @@ export class QueryEngine {
       return [{ ...entry, text: text + context + suffix, annotation: intact ? entry.annotation : undefined }];
     };
     let resultBytes = 0;
-    for (const entry of result.rows) {
-      if (renderedRows.length >= maxRows || (expired() && renderedRows.length)) break;
+    let confirmedShown = 0;
+    const confirmedTotal = result.rows.filter(entry => !entry.candidate).length;
+    for (const [index, entry] of result.rows.entries()) {
+      if (confirmedShown >= maxRows || (expired() && renderedRows.length)) break;
+      // Keep candidate diagnostics in their original display window. Confirmed
+      // rows can fill the remaining slots without displacing those locations.
+      if (entry.candidate && index >= maxRows) continue;
       const [rendered] = renderRow(entry);
       if (!rendered) continue;
       const size = bytes(rendered.text) + (renderedRows.length ? 1 : 0);
       if (resultBytes + size > graphOutputBytes) break;
       resultBytes += size;
       renderedRows.push(rendered);
+      if (!rendered.candidate) confirmedShown++;
     }
     const notes = (result.notes ?? []).flatMap(entry => renderRow(entry));
     const modules = [...result.unresolvedWorkspace ?? []].sort();
@@ -1340,7 +1356,7 @@ export class QueryEngine {
     ].filter(Boolean).join('; ');
     let snapshotStale = false;
     if (this.index.coverage && !ambiguous && !result.partial && !shortened &&
-        renderedRows.length === result.rows.length && (tool === 'search' || result.targets)) {
+        confirmedShown === confirmedTotal && (tool === 'search' || result.targets)) {
       for (const file of Object.keys(this.index.files)) {
         if (expired()) break;
         if (stale(file)) {
@@ -1366,15 +1382,15 @@ export class QueryEngine {
       const staleCount = new Set([...result.targets ?? [], ...[...visible, ...extras].flatMap(entry => entry.files)]
         .filter(stale)).size;
       const freshness = staleCount ? `stale ${staleCount} files; regenerate the index` : 'fresh';
-      const omitted = result.rows.length - shown;
+      const omitted = confirmedTotal - confirmedShown;
       const count = result.count ?? `${result.rows.length} results`;
       const title = result.title ?? target;
       const titleFile = result.targets?.find(file => title.startsWith(file + '#') || title.startsWith(file + ':'));
       const titlePackage = titleFile ? this.workspaceLabel(titleFile) : '';
       const header = shorten(`# ${expired() ? 'timeout ' : ''}${ambiguous ? 'ambiguous ' : ''}${tool} ${title}${titlePackage}` +
-        ` : ${count}${omitted ? `, showing ${shown}` : ''} (index ${timestamp}, ${freshness})`)!;
+        ` : ${count}${omitted ? `, showing ${confirmedShown}` : ''} (index ${timestamp}, ${freshness})`)!;
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
-        limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
+        limitHint(args, confirmedTotal, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || shortened || tool !== 'impact' && noteCount < (result.notes?.length ?? 0);
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
@@ -1435,7 +1451,7 @@ export class QueryEngine {
         return { text, targetResolved };
       }
       if (noteCount) noteCount--;
-      else shown--;
+      else if (!renderedRows[--shown].candidate) confirmedShown--;
     }
   }
 }

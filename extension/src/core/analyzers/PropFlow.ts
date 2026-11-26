@@ -77,6 +77,15 @@ export class PropFlow {
     return this.targets.get(site.getTagNameNode()) ?? [];
   }
 
+  parametersAt(site: JsxSite) {
+    return this.targetsOf(site).map(target => {
+      const fn = this.bodies.get(target)?.getParent();
+      if (Node.isArrowFunction(fn) || Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn)) {
+        return fn.getParameters()[0]?.getNameNode();
+      }
+    });
+  }
+
   lookupUncertain(site: JsxSite) {
     return this.uncertainLookups.has(site.getTagNameNode());
   }

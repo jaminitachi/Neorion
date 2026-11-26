@@ -5,7 +5,7 @@ import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph'
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, lexicalOwner, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -14,6 +14,7 @@ import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { CallbackCoverage } from './CallbackCoverage';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { RouterProject } from '../frameworks/react-router/RouteTypes';
@@ -110,33 +111,6 @@ function receiver(expression: Node) {
     expression = expression.getExpression();
   }
   if (Node.isIdentifier(expression)) return { root: expression, members };
-}
-
-// An object binding can select other members without ever taking the callback.
-function usesReturnedCallback(call: CallExpression, member: string | undefined) {
-  let value: Node = call;
-  let parent = value.getParent();
-  while (parent && wrappedExpression(parent) === value) {
-    value = parent;
-    parent = value.getParent();
-  }
-  if (Node.isExpressionStatement(parent)) return false;
-  if (member === undefined) return true;
-  if (Node.isVariableDeclaration(parent) && parent.getInitializer() === value) {
-    const binding = parent.getNameNode();
-    if (Node.isObjectBindingPattern(binding)) return binding.getElements().some(element => {
-      if (element.getDotDotDotToken()) return true;
-      const name = element.getPropertyNameNode() ?? element.getNameNode();
-      return Node.isIdentifier(name) ? name.getText() === member :
-        !Node.isStringLiteral(name) || name.getLiteralText() === member;
-    });
-  }
-  if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === value) return parent.getName() === member;
-  if (Node.isElementAccessExpression(parent) && parent.getExpression() === value) {
-    const key = parent.getArgumentExpression();
-    if (Node.isStringLiteral(key)) return key.getLiteralText() === member;
-  }
-  return true;
 }
 
 function dynamicExport(node: Node) {
@@ -423,6 +397,7 @@ export class QueryIndexBuilder {
     const projectFiles = new Set(files);
     const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node));
     const localCallables = new Map<number, Node>();
+    const callableDefinitions = new Map<number, FunctionNode>();
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
       let parent: Node | undefined = fn.getParent();
@@ -438,7 +413,10 @@ export class QueryIndexBuilder {
       const returnedCallback = isFunction(returned) && returned !== fn;
       const binding = returnedCallback ? fn : declaration ?? fn;
       const known = byNode.get(fn) ?? byNode.get(binding);
-      if (known !== undefined) return known;
+      if (known !== undefined) {
+        callableDefinitions.set(known, fn);
+        return known;
+      }
       // Top-level declarations already passed through the ordinary symbol index.
       // Keep its exclusions when the same value is referenced indirectly.
       if (!returnedCallback && (Node.isSourceFile(parent) ||
@@ -453,31 +431,92 @@ export class QueryIndexBuilder {
       const id = add(binding, name, 'function', null);
       if (memoized) (index.memoizedCallbacks ??= []).push(id);
       localCallables.set(id, binding);
+      callableDefinitions.set(id, fn);
       if (returnedCallback || !factoryName && !declaredName) index.symbols[id - 1].synthetic = true;
       byNode.set(fn, id);
       return id;
     };
-    const returnedBy = new Map<number, Map<number, Set<string | undefined>>>();
+    const returnedBy = new Map<number, Map<number, Map<string, string[]>>>();
+    const factoryDefinitions = new Map<number, FunctionNode>();
+    const associateReturns = (factory: number, value: FunctionNode) => {
+      if (factoryDefinitions.has(factory)) return;
+      factoryDefinitions.set(factory, value);
+      for (const { fn, path = [], factories } of callableFlow.returnedCallbacks(value)) {
+        const callback = callableId(fn, index.symbols[factory - 1].name + ' (returned callback)');
+        if (callback === undefined || callback === factory || index.symbols[callback - 1].kind === 'component') continue;
+        const callbacks = returnedBy.get(factory) ?? new Map<number, Map<string, string[]>>();
+        const paths = callbacks.get(callback) ?? new Map<string, string[]>();
+        paths.set(JSON.stringify(path), path);
+        callbacks.set(callback, paths);
+        returnedBy.set(factory, callbacks);
+        ((index.callbackCreations ??= {})[callback] ??= []);
+        // A forwarded return can introduce local factories that were absent
+        // from the ordinary symbol index.
+        for (const call of factories ?? []) for (const { fn: inner } of callableFlow.resolve(call.getExpression())) {
+          const innerId = callableId(inner);
+          if (innerId !== undefined) associateReturns(innerId, inner);
+        }
+      }
+    };
     if (!historyOnly && this.fetches.length) for (const [binding, factory] of [...byNode]) {
       const value = isFunction(binding) ? binding : constValue(binding);
       if (!isFunction(value) || value.getSourceFile() !== binding.getSourceFile()) continue;
-      for (const { fn, member } of callableFlow.returnedCallbacks(value)) {
-        if (!fn.getAncestors().includes(value)) continue;
-        const callback = callableId(fn, index.symbols[factory - 1].name + ' (returned callback)');
-        if (callback === undefined || callback === factory) continue;
-        const callbacks = returnedBy.get(factory) ?? new Map<number, Set<string | undefined>>();
-        const members = callbacks.get(callback) ?? new Set<string | undefined>();
-        members.add(member);
-        callbacks.set(callback, members);
-        returnedBy.set(factory, callbacks);
-        ((index.callbackCreations ??= {})[callback] ??= []);
-      }
+      if (index.symbols[factory - 1].kind === 'function') callableDefinitions.set(factory, value);
+      associateReturns(factory, value);
     }
 
+    const creationSites = new Map<number, Set<CallExpression>>();
+    const followedUses = new WeakMap<Node, Set<number>>();
+    const unindexedCallbacks = new Map<FunctionNode, Set<number>>();
+    const recordCallbackScope = (site: Node, target: number, escapingValue = false) => {
+      if (historyOnly || !this.fetches.length) return;
+      const fn = site.getFirstAncestor(isFunction);
+      if (!fn || byNode.has(fn) || byNode.has(fn.getParent()!)) return;
+      let value: Node = fn;
+      let parent = value.getParent();
+      while (parent && (wrappedExpression(parent) === value ||
+          Node.isConditionalExpression(parent) && parent.getCondition() !== value)) {
+        value = parent;
+        parent = value.getParent();
+      }
+      const argument = Node.isCallExpression(parent) && parent.getArguments().includes(value) ? parent : undefined;
+      const callee = argument?.getExpression();
+      const declarations = callee ? flowDeclarations(callee) : [];
+      const react = callee && packageMember(callee, 'react');
+      const scheduler = react && ['useEffect', 'useLayoutEffect', 'useInsertionEffect'].includes(react) ||
+        Node.isIdentifier(callee) && ['setTimeout', 'setInterval', 'queueMicrotask'].includes(callee.getText()) &&
+        !declarations.some(node => projectFiles.has(node.getSourceFile()));
+      if (scheduler && argument?.getArguments()[0] === value) return;
+      const declared = declarations.some(node =>
+        Node.isFunctionDeclaration(node) && !node.getBody() && node.hasDeclareKeyword());
+      if (Node.isFunctionDeclaration(fn) || Node.isVariableDeclaration(parent) ||
+          Node.isReturnStatement(parent) || Node.isPropertyAssignment(parent) || Node.isArrayLiteralExpression(parent) ||
+          Node.isArrowFunction(parent) && parent.getBody() === value || react === 'useCallback' || declared ||
+          argument && escapingValue) {
+        const targets = unindexedCallbacks.get(fn) ?? new Set<number>();
+        targets.add(target);
+        unindexedCallbacks.set(fn, targets);
+      }
+    };
+    const recordCallbackUse = (id: number, site: Node, possible = false) => {
+      if (Node.isCallExpression(site)) recordCallbackScope(site, id, index.callbackCreations?.[id] !== undefined);
+      if (!callableDefinitions.has(id) && !returnedBy.has(id)) return;
+      if (!possible) {
+        const followed = followedUses.get(site) ?? new Set<number>();
+        followed.add(id);
+        followedUses.set(site, followed);
+      }
+      if (Node.isCallExpression(site) && returnedBy.has(id)) {
+        const sites = creationSites.get(id) ?? new Set<CallExpression>();
+        sites.add(site);
+        creationSites.set(id, sites);
+      }
+    };
+
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
-      detail: string; gates?: PropGate[]; lookup: boolean }[] = [];
+      detail: string; gates?: PropGate[]; lookup: boolean; supplied?: Node }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
-    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[] }[]>();
+    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[]; supplied?: Node }[]>();
     const dynamicCallSites = new Set<Node>();
     const callableTargets = (expression: Node) => {
       const prop = flow.read(expression);
@@ -485,15 +524,6 @@ export class QueryIndexBuilder {
       const bindings = flow.bindings(prop);
       return bindings.flatMap(({ value, gates }) => value ? callableFlow.resolve(value).map(target =>
         ({ ...target, gates, supplied: value })) : []);
-    };
-    const invokedReturns = new WeakMap<CallExpression, Set<number>>();
-    const recordInvocation = (id: number, factories: CallExpression[] | undefined) => {
-      if (index.callbackCreations?.[id] === undefined) return;
-      for (const factory of factories ?? []) {
-        const invoked = invokedReturns.get(factory) ?? new Set<number>();
-        invoked.add(id);
-        invokedReturns.set(factory, invoked);
-      }
     };
     const suppliedCallbacks = new Set<Node>();
     for (const file of files) {
@@ -528,20 +558,21 @@ export class QueryIndexBuilder {
           }
           const label = jsxLabel(site);
           const event = isFunction(value) ? name + ' ' + label : undefined;
-          for (const { fn, via, factories, gates, supplied } of targets) {
+          for (const { fn, via, gates, supplied } of targets) {
             const target = callableId(fn, event);
             if (supplied) suppliedCallbacks.add(supplied);
             if (target === undefined) continue;
-            if (delivery !== 'possible') recordInvocation(target, factories);
+            if (!historyOnly && this.fetches.length) associateReturns(target, fn);
             eventSites.push({
               site, attribute: node, target, detail: `${name} <${label}>${via.length ? ' via ' + via.join(' > ') : ''}`, gates,
-              lookup: delivery === 'possible'
+              lookup: delivery === 'possible', supplied
             });
           }
           return;
         }
         if (!Node.isCallExpression(node)) return;
-        const expression = node.getExpression();
+        let expression: Node = node.getExpression();
+        for (let inner = wrappedExpression(expression); inner; inner = wrappedExpression(expression)) expression = inner;
         // Existing references cover ordinary declarations. Resolve value flow for
         // lexical bindings, property reads, and calls whose target is returned.
         if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression) &&
@@ -554,19 +585,19 @@ export class QueryIndexBuilder {
         const bindings = flowDeclarations(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
             (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
-        if (expression === binding && bindings.some(decl => {
+        if (expression === node.getExpression() && expression === binding && bindings.some(decl => {
           const id = byNode.get(decl);
           return id !== undefined && index.symbols[id - 1].kind !== 'constant' && !Node.isBindingElement(decl);
         })) return;
         const targets = callableTargets(expression);
         const ordinaryMember = targets.length && expression !== binding && flowDeclarations(expression)
           .some(decl => byNode.has(decl) && !Node.isBindingElement(decl));
-        const resolved = targets.flatMap(({ fn, via, factories, gates, supplied }) => {
+        const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
           if (supplied) suppliedCallbacks.add(supplied);
           const id = callableId(fn);
           if (id === undefined) return [];
-          recordInvocation(id, factories);
-          return ordinaryMember ? [] : [{ id, via, gates }];
+          if (!historyOnly && this.fetches.length) associateReturns(id, fn);
+          return ordinaryMember ? [] : [{ id, via, gates, supplied }];
         });
         if (resolved.length) indirectCalls.set(node, resolved);
         else if (flow.read(expression)) dynamicCallSites.add(node);
@@ -652,6 +683,9 @@ export class QueryIndexBuilder {
       if (value && !isFunction(value)) eventReferences.add(value);
       const owner = owners(event.site)[1] ?? fileIdOf(event.site);
       addFlowCall(owner, event.target, event.attribute, event.detail, event.gates);
+      const possible = event.lookup || event.gates?.some(gate => gate.partial);
+      recordCallbackUse(event.target, event.attribute, possible);
+      if (event.supplied) recordCallbackUse(event.target, event.supplied, possible);
       if (event.lookup) {
         const file = relativePath(event.attribute.getSourceFile());
         const line = startLine(event.attribute);
@@ -676,19 +710,22 @@ export class QueryIndexBuilder {
             (key ? ` (key ${key})` : '') + (container ? ' ' + container : '');
         });
       });
-      for (const { id, via, gates } of targets) {
+      for (const { id, via, gates, supplied: input } of targets) {
         const prop = flow.read(call.getExpression());
         const supplied = prop && gates?.[0]?.sites[0];
         const viaProp = prop ? 'prop ' + prop.name +
           (supplied ? ` supplied at ${relativePath(supplied.getSourceFile())}:${startLine(supplied)}` : '') : '';
         const detail = [viaProp, via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
         addFlowCall(from, id, call, detail, gates);
+        const possible = !!issue || gates?.some(gate => gate.partial);
+        recordCallbackUse(id, call, possible);
+        if (input) recordCallbackUse(id, input, possible);
         if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
       }
     }
     for (const [from, to, file, line, detail, gates] of index.flowCalls ?? []) {
       actionBySymbol.get(to)?.callers.push([file, line, from]);
-      if (index.callbackCreations?.[to] === undefined) continue;
+      if (!callableDefinitions.has(to)) continue;
       const event = /^on[A-Z]/.test(detail) ? detail : undefined;
       const possible = !!index.callIssues?.[gateKey(from, to, line)] || gates?.some(gate => gate.partial);
       ((index.callbackInvocations ??= {})[to] ??= []).push([from, file, line, event, possible ? true : undefined]);
@@ -873,6 +910,7 @@ export class QueryIndexBuilder {
     for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
       const [owner, graphOwner, possible] = owners(node);
+      if (owner !== undefined) recordCallbackScope(node, owner);
       const key = prop && siteKey(prop.site);
       const binding = prop && key ? {
         file: relativePath(prop.value.getSourceFile()), line: startLine(prop.value), name: prop.name,
@@ -1151,11 +1189,7 @@ export class QueryIndexBuilder {
             if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
             if (Node.isCallExpression(node)) {
               recordCallSite(gateKey(from, id, line), node);
-              for (const [callback, members] of returnedBy.get(id) ?? []) {
-                if (lexicalOwner(index.callableOwners, callback) === lexicalOwner(index.callableOwners, from) ||
-                    ![...members].some(member => usesReturnedCallback(node, member))) continue;
-                index.callbackCreations![callback].push([id, relative, line, invokedReturns.get(node)?.has(callback) ? true : undefined]);
-              }
+              recordCallbackUse(id, node, !!possible);
               if (refWrites.size) {
                 const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
                 if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
@@ -1568,6 +1602,71 @@ export class QueryIndexBuilder {
     }
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);
+    if (!historyOnly && this.fetches.length) {
+      const coverage = new CallbackCoverage(
+        node => projectFiles.has(node.getSourceFile()),
+        node => exported.has(node),
+        (id, site) => followedUses.get(site)?.has(id) === true,
+        (id, fn, path) => returnedBy.get(byNode.get(fn) ?? byNode.get(fn.getParent()!) ?? 0)
+          ?.get(id)?.has(JSON.stringify(path)) === true,
+        attribute => {
+          const site = attribute.getParent()?.getParent();
+          if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return;
+          const name = attribute.getNameNode().getText();
+          const supplied = flow.value(site, { name });
+          if (flow.lookupUncertain(site) || supplied.unknown || supplied.value !== jsxValue(attribute)) return;
+          return flow.parametersAt(site);
+        },
+        (spread, name) => {
+          const site = spread.getParent()?.getParent();
+          return (Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site)) &&
+            flow.eventDelivery(site, name) === true;
+        }
+      );
+      const gap = (id: number, site: [string, number]) => {
+        const gaps = ((index.callbackCoverageGaps ??= {})[id] ??= []);
+        if (gaps.some(([file, line]) => file === site[0] && line === site[1])) return false;
+        gaps.push(site);
+        return true;
+      };
+      const locationOf = (node: Node): [string, number] => [relativePath(node.getSourceFile()), startLine(node)];
+      for (const [factory, callbacks] of returnedBy) {
+        const fn = factoryDefinitions.get(factory)!;
+        const unknownSites = coverage.inspect(factory, fn, [], true, true);
+        for (const [callback, paths] of callbacks) {
+          for (const site of unknownSites) gap(callback, locationOf(site));
+          for (const site of creationSites.get(factory) ?? []) {
+            const issues = [...paths.values()].flatMap(path => [...coverage.inspect(callback, site, path)]);
+            for (const issue of issues) gap(callback, locationOf(issue));
+            index.callbackCreations![callback].push([factory, ...locationOf(site), issues.length ? undefined : true]);
+          }
+        }
+      }
+      for (const [fn, targets] of unindexedCallbacks) {
+        for (const issue of coverage.inspect(0, fn, [], true)) {
+          for (const target of targets) gap(target, locationOf(issue));
+        }
+      }
+      for (const [callback, fn] of callableDefinitions) {
+        if (returnedBy.has(callback)) continue;
+        for (const issue of coverage.inspect(callback, fn, [], true, !localCallables.has(callback))) {
+          gap(callback, locationOf(issue));
+        }
+      }
+      // A factory can itself escape as a callback. Any unknown invocation of it
+      // is also an unknown creation of the callbacks it returns.
+      const producers = new Set(returnedBy.keys());
+      for (const factory of producers) {
+        const gaps = [...index.callbackCoverageGaps?.[factory] ?? []];
+        for (const [, file, line, covered] of index.callbackCreations?.[factory] ?? []) {
+          if (!covered) gaps.push([file, line]);
+        }
+        producers.delete(factory);
+        for (const callback of returnedBy.get(factory)!.keys()) for (const site of gaps) {
+          if (gap(callback, site) && returnedBy.has(callback)) producers.add(callback);
+        }
+      }
+    }
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const scopes = new Set([

@@ -2347,7 +2347,7 @@ test('API consumers climb through hooks that return memoized callbacks', async t
 
 test('API consumers prefer callback invocations and retain ordinary caller rows at small limits', async t => {
   const { build, query, root, env } = fixture(t);
-  for (const target of ['factory', 'plain', 'deferred', 'opaque', 'nested']) {
+  for (const target of ['factory', 'plain', 'deferred', 'opaque', 'nested', 'forwarded']) {
     const directory = path.join(root, 'app/api', target);
     fs.mkdirSync(directory, { recursive: true });
     fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
@@ -2379,11 +2379,13 @@ test('API consumers prefer callback invocations and retain ordinary caller rows 
     '    return { save };',
     '  }, []);',
     '  return makeActions();',
-    '}'
+    '}',
+    "function useRequest() { const run = useCallback(() => fetch('/api/forwarded'), []); return { run }; }",
+    'export function useForwarded() { const request = useRequest(); return request; }'
   ].join('\n'));
   fs.writeFileSync(path.join(root, 'request-views.tsx'), [
     "'use client';",
-    "import { makeFetcher, makeRequest, useOpaque, useProfile, useWizard } from './request-factories';",
+    "import { makeFetcher, makeRequest, useOpaque, useProfile, useWizard, useForwarded } from './request-factories';",
     'const request = makeFetcher();',
     'const deferred = makeRequest();',
     'export function FactoryButton() { return <button onClick={request} />; }',
@@ -2394,46 +2396,247 @@ test('API consumers prefer callback invocations and retain ordinary caller rows 
     'export function Opaque() { const { run } = useOpaque(); register(run); return null; }',
     'export function OpaqueTitle() { const { label } = useOpaque(); return <h1>{label}</h1>; }',
     'export function WizardButton() { const { save } = useWizard(); return <button onClick={save} />; }',
-    'export function OpaqueButton() { const { run } = useOpaque(); return <button onClick={run} />; }'
+    'export function OpaqueButton() { const { run } = useOpaque(); return <button onClick={run} />; }',
+    'export function ForwardedButton() { const { run } = useForwarded(); return <button onClick={() => run()} />; }',
+    'export function ForwardedCommand() { const { run } = useForwarded(); register(run); return null; }'
   ].join('\n'));
   build();
   const factory = query('api_consumers', '/api/factory');
   assert.match(factory, /^call1 +request-factories\.ts:4 send$/m);
   assert.match(factory, /^event1 +request-views\.tsx:5 request .*onClick/m);
-  assert.doesNotMatch(factory, /request-views\.tsx:3\b/);
+  assert.match(factory, /^  create1 +request-views\.tsx:3 makeFetcher$/m);
   assert.match(factory, /^# complete:/m);
   const limited = query('api_consumers', '/api/factory', '--limit', '2');
   assert.match(limited, /^call1 +request-factories\.ts:4 send$/m);
-  assert.doesNotMatch(limited, /^event1|request-views\.tsx:3\b/m);
+  assert.doesNotMatch(limited, /^event1/m);
 
   const plain = query('api_consumers', '/api/plain');
   assert.match(plain, /^event1 +request-views\.tsx:7 refresh .*onClick/m);
-  assert.doesNotMatch(plain, /request-views\.tsx:6\b/);
+  assert.match(plain, /^  create1 +request-views\.tsx:6 useProfile$/m);
+  assert.doesNotMatch(plain, /^ *(?:event|call)\d+ +request-views\.tsx:6\b/m);
   assert.match(plain, /^# complete:/m);
   const deferred = query('api_consumers', '/api/deferred');
   assert.match(deferred, /^call1 +request-factories\.ts:13 send$/m);
   assert.match(deferred, /^call1 +request-views\.tsx:8 validateAndSend$/m);
-  assert.doesNotMatch(deferred, /request-views\.tsx:4\b/);
+  assert.match(deferred, /^  create1 +request-views\.tsx:4 makeRequest$/m);
   assert.match(deferred, /^# complete:/m);
 
   const opaque = query('api_consumers', '/api/opaque', '--depth', '6');
   assert.match(opaque, /^  create1 +request-views\.tsx:10 useOpaque$/m);
   assert.match(opaque, /^event1 +request-views\.tsx:13 run .*onClick/m);
-  assert.doesNotMatch(opaque, /^call\d|^event\d +request-views\.tsx:10\b|request-views\.tsx:11\b|^# complete:/m);
+  assert.match(opaque, /^  create1 +request-views\.tsx:11 useOpaque$/m);
+  assert.doesNotMatch(opaque, /^call\d|^event\d +request-views\.tsx:(?:10|11)\b|^# complete:/m);
   assert.match(opaque, /^# partial: unresolved caller coverage$/m);
   const nested = query('api_consumers', '/api/nested');
   assert.match(nested, /^call1 +request-factories\.ts:23 send$/m);
   assert.match(nested, /^event1 +request-views\.tsx:12 save .*onClick/m);
   assert.match(nested, /^# complete:/m);
+  const forwarded = query('api_consumers', '/api/forwarded');
+  assert.match(forwarded, /^call1 +request-views\.tsx:14 run$/m);
+  assert.match(forwarded, /^  create1 +request-factories\.ts:29 useRequest$/m);
+  assert.match(forwarded, /^  create1 +request-views\.tsx:14 useForwarded$/m);
+  assert.match(forwarded, /^  create1 +request-views\.tsx:15 useForwarded$/m);
+  assert.match(forwarded, /^unresolved +request-views\.tsx:15 run$/m);
+  assert.match(forwarded, /^# partial: unresolved caller coverage$/m);
 
   const mcp = await openMcp(t, root, {
     command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
   });
   for (const [target, expected, depth] of [
-    ['factory', factory], ['plain', plain], ['deferred', deferred], ['opaque', opaque, 6], ['nested', nested]
+    ['factory', factory], ['plain', plain], ['deferred', deferred], ['opaque', opaque, 6], ['nested', nested],
+    ['forwarded', forwarded]
   ]) {
     assert.equal(await mcp.text('query', { kind: 'api_consumers', target: '/api/' + target, depth }), expected);
   }
+});
+
+test('API callback coverage accounts for every consumer through forwarding chains', async t => {
+  const { build, root, env } = fixture(t);
+  const factories = {
+    hook: { name: 'useActions', callback: 'const run = () => send();' },
+    factory: { name: 'makeActions', callback: 'function run() { return send(); }' },
+    useCallback: { name: 'useActions', callback: 'const run = useCallback(() => send(), []);' },
+    useMemo: { name: 'useActions', callback: 'const run = useMemo(() => () => send(), []);' }
+  };
+  const consumers = {
+    call: { body: 'run(); return null;', edge: 'call', binding: '{ run }' },
+    event: { body: 'return <button onClick={run} />;', edge: 'event', binding: '{ run }' },
+    arrow: { body: 'return <button onClick={() => run()} />;', edge: 'call', binding: '{ run }' },
+    external: { body: 'register(run); return null;', opaque: true, binding: '{ run }' },
+    stored: { body: 'const registry = { run }; return <span>{Object.keys(registry)}</span>;', opaque: true, binding: '{ run }' },
+    otherField: { body: 'return <span>{label}</span>;', binding: '{ label }' },
+    spread: { body: 'return <button {...props} />;', opaque: true, binding: 'props' }
+  };
+  const cases = [];
+  for (const depth of [0, 1, 2, 3]) for (const [kind, factory] of Object.entries(factories)) {
+    for (const [consumer, use] of Object.entries(consumers)) for (const count of [1, 2]) {
+      const slug = `matrix-${depth}-${kind.toLowerCase()}-${consumer.toLowerCase()}-${count}`;
+      const route = '/api/' + slug;
+      const directory = path.join(root, 'app/api', slug);
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+
+      const file = slug + '.tsx';
+      const lines = [
+        "'use client';",
+        "import { useCallback, useMemo } from 'react';",
+        'declare function register(callback: () => unknown): void;',
+        `export function send() { return fetch('${route}'); }`,
+        `function ${factory.name}() { ${factory.callback} return { run, label: 'Refresh' }; }`
+      ];
+      let outer = factory.name;
+      const creations = [];
+      for (let layer = 1; layer <= depth; layer++) {
+        const name = (kind === 'factory' ? 'makeForwarded' : 'useForwarded') + layer;
+        lines.push(`function ${name}() { const actions = ${outer}(); return actions; }`);
+        creations.push([lines.length, outer]);
+        outer = name;
+      }
+      const uses = count === 1 ? [use] : [use.edge === 'call' ? consumers.event : consumers.call, use];
+      const invocations = [];
+      for (const [index, consumer] of uses.entries()) {
+        lines.push(`export function Consumer${index}() {`, `  const ${consumer.binding} = ${outer}();`, `  ${consumer.body}`, '}');
+        creations.push([lines.length - 2, outer]);
+        if (consumer.edge) invocations.push([lines.length - 1, consumer.edge]);
+      }
+      fs.writeFileSync(path.join(root, file), lines.join('\n'));
+      cases.push({ route, file, opaque: uses.some(value => value.opaque), creations, invocations });
+    }
+  }
+  build();
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  const query = (target, options) => mcp.text('query', { kind: 'api_consumers', target, ...options });
+  const site = (file, line) => file.replace('.', '\\.') + ':' + line;
+  for (const { route, file, opaque, creations, invocations } of cases) {
+    const out = await query(route, { depth: 6 });
+    assert.match(out, new RegExp(`^send +${site(file, 4)} send GET fetch$`, 'm'), out);
+    assert.match(out, new RegExp(`^call1 +${site(file, 5)} send$`, 'm'), out);
+    if (opaque) assert.match(out, /^# partial: .*unresolved caller coverage/m, out);
+    else assert.match(out, /^# complete:/m, out);
+    for (const [line, name] of creations) {
+      assert.match(out, new RegExp(`^ +create\\d+ +${site(file, line)} ${name}$`, 'm'), out);
+    }
+    for (const [line, edge] of invocations) {
+      assert.match(out, new RegExp(`^ *${edge}\\d+ +${site(file, line)}\\b`, 'm'), out);
+    }
+    const limited = await query(route, { depth: 6, limit: 2 });
+    assert.match(limited, new RegExp(`^send +${site(file, 4)} send GET fetch$`, 'm'), limited);
+    assert.match(limited, new RegExp(`^call1 +${site(file, 5)} send$`, 'm'), limited);
+    if (opaque) {
+      assert.match(limited, /^# partial: .*unresolved caller coverage/m, limited);
+      const defaults = await query(route, {});
+      assert.match(defaults, /^# partial: .*unresolved caller coverage/m, defaults);
+    }
+  }
+});
+
+test('API callback coverage handles tuple bindings and accounts for uses of one creation independently', t => {
+  const { build, query, root } = fixture(t);
+  for (const target of ['tuple', 'mixed', 'unused', 'dropped', 'wrapped', 'hidden', 'prop', 'exported']) {
+    const directory = path.join(root, 'app/api', target);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  }
+  fs.writeFileSync(path.join(root, 'callback-uses.tsx'), [
+    "'use client';",
+    "import { useCallback } from 'react';",
+    'declare function register(callback: () => unknown): void;',
+    'declare function wrap<T>(value: T): T;',
+    "function useTuple() { const run = useCallback(() => fetch('/api/tuple'), []); return [run, 'Run'] as const; }",
+    'export function Tuple() { const [run, label] = useTuple(); return <button onClick={run}>{label}</button>; }',
+    "function useMixed() { const run = () => fetch('/api/mixed'); return { run }; }",
+    'export function Mixed() { const { run } = useMixed(); register(run); return <button onClick={run} />; }',
+    "function makeActions() { const send = () => fetch('/api/unused'); return { send, title: 'Actions' }; }",
+    'export function Button() { const { send, ...labels } = makeActions(); return <button onClick={send}>{labels.title}</button>; }',
+    'export function Discard() { const { send: _discard, ...labels } = makeActions(); return <span>{labels.title}</span>; }',
+    "function useOriginal() { const run = () => fetch('/api/dropped'); return { run }; }",
+    'function useDropped() { return wrap(useOriginal()); }',
+    'export function Dropped() { const { run } = useDropped(); return <button onClick={run} />; }',
+    "function useWrapped() { const run = () => fetch('/api/wrapped'); return { run }; }",
+    'export function Wrapped() { const { run } = useWrapped(); register(() => (run)()); return null; }',
+    "function useHidden() { const run = () => fetch('/api/hidden'); return { ...{ run } }; }",
+    'export function Hidden() { const { run } = useHidden(); register(run); return null; }',
+    "function useProp() { const run = () => fetch('/api/prop'); return { run }; }",
+    'function Child({ action }: { action: () => Promise<Response> }) { register(action); return <button onClick={action} />; }',
+    'export function Parent() { const { run } = useProp(); return <Child action={run} />; }',
+    "function useExported() { const run = () => fetch('/api/exported'); return { run }; }",
+    'const exportedCallback = useExported().run;',
+    'export { exportedCallback };'
+  ].join('\n'));
+  build();
+  const tuple = query('api_consumers', '/api/tuple');
+  assert.match(tuple, /^event1 +callback-uses\.tsx:6 run via onClick/m);
+  assert.match(tuple, /^# complete:/m);
+  const mixed = query('api_consumers', '/api/mixed');
+  assert.match(mixed, /^event1 +callback-uses\.tsx:8 run via onClick/m);
+  assert.match(mixed, /^  create1 +callback-uses\.tsx:8 useMixed$/m);
+  assert.match(mixed, /^# partial: unresolved caller coverage$/m);
+  const unused = query('api_consumers', '/api/unused');
+  assert.match(unused, /^event1 +callback-uses\.tsx:10 send via onClick/m);
+  assert.match(unused, /^  create1 +callback-uses\.tsx:11 makeActions$/m);
+  assert.match(unused, /^# complete:/m);
+  const dropped = query('api_consumers', '/api/dropped', '--depth', '6');
+  assert.match(dropped, /^  create1 +callback-uses\.tsx:13 useOriginal$/m);
+  assert.match(dropped, /^# partial: unresolved caller coverage$/m);
+  const wrapped = query('api_consumers', '/api/wrapped');
+  assert.match(wrapped, /^call1 +callback-uses\.tsx:16 run$/m);
+  assert.match(wrapped, /^# partial: unresolved caller coverage$/m);
+  assert.match(query('api_consumers', '/api/hidden'), /^# partial: unresolved caller coverage$/m);
+  const prop = query('api_consumers', '/api/prop', '--depth', '6');
+  assert.match(prop, /^event1 +callback-uses\.tsx:20 run via onClick/m);
+  assert.match(prop, /^# partial: unresolved caller coverage$/m);
+  const exported = query('api_consumers', '/api/exported');
+  assert.match(exported, /^  create1 +callback-uses\.tsx:23 useExported$/m);
+  assert.match(exported, /^# partial: unresolved caller coverage$/m);
+});
+
+test('API callback coverage follows escapes of wrappers and factories used as callback values', t => {
+  const { build, query, root } = fixture(t);
+  for (const target of ['wrapped-chain', 'returned-factory', 'top-level', 'detached', 'inline', 'receiver']) {
+    const directory = path.join(root, 'app/api', target);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  }
+  fs.writeFileSync(path.join(root, 'callback-escapes.tsx'), [
+    'declare function register(callback: () => unknown): void;',
+    "function useActions() { const run = () => fetch('/api/wrapped-chain'); return { run }; }",
+    'export function Button() {',
+    '  const { run } = useActions();',
+    '  const first = () => run();',
+    '  const second = () => first();',
+    '  register(second);',
+    '  return <button onClick={first} />;',
+    '}',
+    "function makeActions() { const run = () => fetch('/api/returned-factory'); return { run }; }",
+    'function makeFactory() { return makeActions; }',
+    'const create = makeFactory();',
+    'register(create);',
+    'export function Actions() { const { run } = makeActions(); return <button onClick={run} />; }',
+    "function top() { return fetch('/api/top-level'); }",
+    'register(top);',
+    'export function Direct() { top(); return null; }',
+    "function request() { return fetch('/api/detached'); }",
+    'export function Detached() { const callback = () => request(); register(callback); return null; }',
+    "export function Inline() { register(() => fetch('/api/inline')); return null; }",
+    "function useTuple() { const run = () => fetch('/api/receiver'); return [run] as const; }",
+    'export function Receiver() { const callbacks = useTuple(); callbacks.forEach(register); callbacks[0](); return null; }'
+  ].join('\n'));
+  build();
+  for (const [target, line] of [
+    ['wrapped-chain', 7], ['returned-factory', 12], ['top-level', 16], ['detached', 19], ['inline', 20], ['receiver', 22]
+  ]) {
+    const out = query('api_consumers', '/api/' + target, '--depth', '6');
+    assert.match(out, /^# partial: .*unresolved caller coverage/m, out);
+    assert.match(out, new RegExp(`^ *(?:unresolved|create\\d+) +callback-escapes\\.tsx:${line}\\b`, 'm'), out);
+  }
+  const chain = query('api_consumers', '/api/wrapped-chain', '--depth', '6');
+  assert.match(chain, /^call1 +callback-escapes\.tsx:5 run$/m);
+  assert.match(chain, /^ *call1 +callback-escapes\.tsx:6 first$/m);
+  assert.match(chain, /^ *event1 +callback-escapes\.tsx:8 first via onClick/m);
+  const receiver = query('api_consumers', '/api/receiver');
+  assert.match(receiver, /^call1 +callback-escapes\.tsx:22 run$/m);
 });
 
 test('API consumers label URL candidates whose template matches another route', t => {
@@ -2450,16 +2653,21 @@ test('API consumers label URL candidates whose template matches another route', 
     'function PollExport({ teamId }: { teamId: string }) {',
     '  return <button onClick={() => fetch(`/api/teams/${teamId}/export-jobs/${data.exportId}`)}>Poll</button>;',
     '}',
-    'export function Exports() { return <><PollExport teamId={activeTeam} /><PollExport teamId={activeTeam} /></>; }'
+    'export function Exports() { return <><PollExport teamId={activeTeam} /><PollExport teamId={activeTeam} /></>; }',
+    "export function Responses() { return fetch('/api/teams/team/agreements/agreement/responses'); }"
   ].join('\n'));
   build();
   const poll = query('api_consumers', '/api/teams/[teamId]/export-jobs/[exportId]');
   assert.match(poll, /^send +poll-export\.tsx:5 .*GET fetch \[partial url\]/m);
   const agreements = query('api_consumers', '/api/teams/[teamId]/agreements/[agreementId]/responses');
-  assert.doesNotMatch(agreements, /^send +poll-export\.tsx/m);
+  assert.doesNotMatch(agreements, /^send +poll-export\.tsx:5\b/m);
   assert.match(agreements, /^candidate +poll-export\.tsx:5 .*GET fetch$/m);
   assert.match(agreements, /^  template at poll-export\.tsx:5 matches \/api\/teams\/\[teamId\]\/export-jobs\/\[exportId\]/m);
   assert.match(agreements, /^# partial: request URL from JSX prop untraced$/m);
+  const limited = query('api_consumers', '/api/teams/[teamId]/agreements/[agreementId]/responses', '--limit', '1');
+  assert.match(limited, /^send +poll-export\.tsx:8 Responses GET fetch$/m);
+  assert.match(limited, /^candidate +poll-export\.tsx:5/m);
+  assert.doesNotMatch(limited, /output truncated/);
 });
 
 test('API route callers can be traced past the default depth in CLI and MCP', async t => {
