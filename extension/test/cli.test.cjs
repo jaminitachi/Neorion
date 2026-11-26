@@ -529,6 +529,59 @@ export default function WrappedLayout({ children }) { return <MissingProvider>{c
   assert.match(query('wrappers', '/wrapped'), /# partial: unresolved workspace modules @fixture\/types\/provider\s*$/);
 });
 
+test('workspace barrels keep missing runtime re-exports partial and index inline handler names', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const write = (file, text) => {
+    const absolute = path.join(root, file);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, text);
+  };
+  write('packages/sdk/package.json', '{"name":"@fixture/sdk","main":"dist/index.js"}');
+  write('packages/bridge/package.json', '{"name":"@fixture/bridge","main":"src/index.ts"}');
+  write('packages/bridge/src/index.ts', `
+    export { track as uiTrack, SdkBoundary } from '@fixture/sdk';
+    export * from '@fixture/sdk';
+    export * as Sdk from '@fixture/sdk';
+    import { track } from '@fixture/sdk';
+    export { track as viaLocalImport };
+    export { SharedCard } from '@fixture/ui/card';
+  `);
+  write('apps/web/app/barrel/page.tsx', `
+    import { uiTrack, register, Sdk, viaLocalImport, SdkBoundary, SharedCard } from '@fixture/bridge';
+    export function namedCall() { uiTrack(); }
+    export function starCall() { register(() => 1); }
+    export function namespaceCall() { Sdk.track(); }
+    export function localReExport() { viaLocalImport(); }
+    export default function BarrelPage() { return <SdkBoundary><SharedCard/></SdkBoundary>; }
+  `);
+  write('apps/web/app/barrel/layout.tsx', `
+    import { SdkBoundary } from '@fixture/bridge';
+    export default function BarrelLayout({ children }) { return <SdkBoundary>{children}</SdkBoundary>; }
+  `);
+  write('apps/web/app/handler/page.tsx', `
+    import { SharedCard } from '@fixture/bridge';
+    export function onCard() { return 1; }
+    export default function HandlerPage() { return <SharedCard onClick={() => onCard()}/>; }
+  `);
+  const query = (kind, target) => {
+    const result = run(['query', kind, target, '--app', 'web']);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const missing = /# partial: unresolved workspace modules @fixture\/sdk\s*$/;
+  for (const target of ['namedCall', 'starCall', 'namespaceCall', 'localReExport', 'BarrelPage']) {
+    assert.match(query('callees', target), missing);
+  }
+  assert.match(query('callees', 'BarrelPage'), /^d1 render .* SharedCard /m);
+  assert.match(query('wrappers', '/barrel'), missing);
+  assert.match(query('wrappers', '/handler'), /# complete: indexed wrapper chains\s*$/);
+  assert.match(query('callees', 'app/handler/page.tsx#onClick SharedCard'), /^d1 call .* onCard /m);
+  assert.match(query('impact', 'onCard'), /^page \/handler\s/m);
+});
+
 test('workspace discovery orders docs and website with production apps', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });

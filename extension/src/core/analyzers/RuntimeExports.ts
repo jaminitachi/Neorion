@@ -1,9 +1,16 @@
-import { type SourceFile, ts } from 'ts-morph';
+import { Node, type SourceFile, type Symbol, ts } from 'ts-morph';
 import type { RuntimeExports, RuntimeExportState } from '../../mcp/Index';
 
 // The pinned compiler tracks type-only aliases through imports and re-exports
 // separately from the final symbol, which can still have a value declaration.
 type AliasChecker = ts.TypeChecker & { getTypeOnlyAliasDeclaration(symbol: ts.Symbol): ts.Declaration | undefined };
+
+export function isTypeOnlyExport(file: SourceFile, symbol: Symbol) {
+  return symbol.getDeclarations().some(node => Node.isExportSpecifier(node) &&
+    (node.isTypeOnly() || node.getExportDeclaration().isTypeOnly())) ||
+    !!(symbol.getFlags() & ts.SymbolFlags.Alias) &&
+    !!(file.getProject().getTypeChecker().compilerObject as AliasChecker).getTypeOnlyAliasDeclaration(symbol.compilerSymbol);
+}
 
 export function inspectRuntimeExports(files: SourceFile[]) {
   if (!files.length) return new Map<SourceFile, RuntimeExports>();

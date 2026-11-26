@@ -20,7 +20,7 @@ import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper } from './RenderBindings';
-import { bindingOf, importBinding } from './StaticBindings';
+import { bindingOf, importBinding, valueNode } from './StaticBindings';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -55,6 +55,9 @@ function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
 
 function componentValueUse(node: Node, indexedComponent: (node: Node | undefined) => boolean): boolean {
   if (Node.isShorthandPropertyAssignment(node)) return true;
+  if (Node.isExportSpecifier(node)) {
+    return !!node.getAliasNode() && !node.isTypeOnly() && !node.getExportDeclaration().isTypeOnly();
+  }
   let value = node;
   for (let parent = value.getParent(); parent; parent = value.getParent()) {
     if (wrappedExpression(parent) === value ||
@@ -82,7 +85,7 @@ function componentValueUse(node: Node, indexedComponent: (node: Node | undefined
     return Node.isArrayLiteralExpression(parent) || Node.isSpreadElement(parent) || Node.isSpreadAssignment(parent) ||
       ((Node.isPropertyAssignment(parent) || Node.isVariableDeclaration(parent)) && parent.getInitializer() === value) ||
       ((Node.isCallExpression(parent) || Node.isNewExpression(parent)) && parent.getArguments().includes(value)) ||
-      Node.isReturnStatement(parent) || Node.isArrowFunction(parent) && parent.getBody() === value ||
+      Node.isReturnStatement(parent) || Node.isExportAssignment(parent) || Node.isArrowFunction(parent) && parent.getBody() === value ||
       Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getRight() === value;
   }
   return false;
@@ -209,6 +212,12 @@ export class QueryIndexBuilder {
 
   unresolvedRenderLookup(owner: string, tag: Node) {
     if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, tag);
+  }
+
+  private opaqueRenderLookups: { owner: string; tag: Node; sources: Set<Node> }[] = [];
+
+  opaqueRenderLookup(owner: string, tag: Node, sources: Set<Node>) {
+    this.opaqueRenderLookups.push({ owner, tag, sources });
   }
 
   replaceInlineRender(tag: Node, target: string, file: string, component?: string) {
@@ -484,7 +493,13 @@ export class QueryIndexBuilder {
             return;
           }
           const delivery = flow.eventDelivery(site, name);
-          if (!delivery) return;
+          if (!delivery) {
+            if (workspace && /^on[A-Z]/.test(name) && isFunction(value)) {
+              const imported = importBinding(site.getTagNameNode());
+              if (imported && workspace.has(imported.module)) callableId(value, name + ' ' + jsxLabel(site));
+            }
+            return;
+          }
           const targets = callableTargets(value);
           if (!targets.length) {
             if (flow.read(value)) dynamicCallSites.add(node);
@@ -765,10 +780,42 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
-    for (const [owner, tag] of this.renderLookupIssues) {
+    const addLookupIssue = (owner: string, tag: Node) => {
       const id = byGraphId.get(owner);
       if (id !== undefined) {
-        (index.renderLookupIssues ??= {})[id] = `${RENDER_LOOKUP_ISSUE} (${relativePath(tag.getSourceFile())}:${startLine(tag)})`;
+        const file = relativePath(tag.getSourceFile());
+        const reason = `${RENDER_LOOKUP_ISSUE} (${file}:${startLine(tag)})`;
+        (index.renderLookupIssues ??= {})[id] ??= reason;
+        return { file, reason };
+      }
+    };
+    for (const [owner, tag] of this.renderLookupIssues) addLookupIssue(owner, tag);
+    const typedLookupIssues = !!index.renderLookupIssues;
+    type LookupIssue = NonNullable<ReturnType<typeof addLookupIssue>>;
+    const opaqueLookupFiles = new Map<SourceFile, LookupIssue>();
+    const opaqueLookupPackages = new Map<string, LookupIssue>();
+    const addLookupSource = <T>(sources: Map<T, LookupIssue>, source: T, issue: LookupIssue) => {
+      const previous = sources.get(source);
+      if (!previous || isTestFile(previous.file)) sources.set(source, issue);
+    };
+    for (const { owner, tag, sources } of this.opaqueRenderLookups) {
+      const issue = addLookupIssue(owner, tag);
+      if (!issue) continue;
+      addLookupSource(opaqueLookupFiles, tag.getSourceFile(), issue);
+      for (const source of sources) {
+        addLookupSource(opaqueLookupFiles, source.getSourceFile(), issue);
+        if (!Node.isCallExpression(source) && !Node.isElementAccessExpression(source)) continue;
+        const value = Node.isElementAccessExpression(source) ? valueNode(source.getExpression()) : source;
+        const expression = Node.isCallExpression(value) ? value.getExpression() : source.getExpression();
+        const binding = receiver(expression)?.root;
+        const imported = importBinding(binding);
+        const importedFile = imported?.declaration.getModuleSpecifierSourceFile();
+        if (importedFile && projectFiles.has(importedFile)) addLookupSource(opaqueLookupFiles, importedFile, issue);
+        else if (imported && isPackageSpecifier(imported.module)) addLookupSource(opaqueLookupPackages, imported.module, issue);
+        if (binding) for (const declaration of declarationsOf(binding)) {
+          const file = declaration.getSourceFile();
+          if (projectFiles.has(file)) addLookupSource(opaqueLookupFiles, file, issue);
+        }
       }
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
@@ -819,6 +866,7 @@ export class QueryIndexBuilder {
 
     const dynamicBindings = new Map<Node, { id: number; rendered: boolean }>();
     const unresolvedLazyComponents = new Set<number>();
+    const unresolvedDefaultComponents = new Set<number>();
     const opaqueBindings = new Set<Node>();
     const componentValues = new Set<number>();
     const componentProperties = new Map<Node, Set<number>>();
@@ -1078,11 +1126,6 @@ export class QueryIndexBuilder {
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
             const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
-            if (index.renderLookupIssues && !jsx && !typeUse && symbol.kind === 'component' &&
-                !routeComponents.has(id) && componentValueUse(node, indexedComponent)) {
-              const valueUses = (index.renderValueUses ??= {});
-              if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
-            }
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
               recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);
@@ -1093,6 +1136,24 @@ export class QueryIndexBuilder {
             else if (callbackUse) referenceKind = 'callback-argument';
             else if (jsx) referenceKind = 'jsx-use';
             if (typeUse && !sameFile && referenceKind === 'use') referenceKind = 'type-use';
+          }
+          if (index.renderLookupIssues && (kind === 'use' || kind === 're-export') &&
+              index.symbols[id - 1].kind === 'component' && !routeComponents.has(id) &&
+              !node.getAncestors().some(Node.isTypeNode) && componentValueUse(node, indexedComponent)) {
+            if (typedLookupIssues) {
+              const valueUses = (index.renderValueUses ??= {});
+              if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
+            }
+            // A failed opaque lookup only affects value uses that could reach it.
+            const call = node.getFirstAncestor(Node.isCallExpression);
+            const imported = call && importBinding(receiver(call.getExpression())?.root);
+            const issue = opaqueLookupFiles.get(file) ?? (imported && opaqueLookupPackages.get(imported.module));
+            if (issue) {
+              const uses = (index.scopedRenderValueIssues ??= {});
+              if (!uses[id] || isTestFile(uses[id].valueFile) || isTestFile(uses[id].file)) {
+                uses[id] = { ...issue, valueFile: relative };
+              }
+            }
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
@@ -1148,6 +1209,7 @@ export class QueryIndexBuilder {
           return;
         }
         if (found) return;
+        recordWorkspaceDependency(node, owner, workspace?.unresolvedBinding(expression));
         const targets = members.length ? declarationsOf(root).flatMap(target => byNode.get(target) ?? []) : [];
         for (const id of targets) recordGraph(id, startLine(node), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
         if (!targets.length && declaration?.getSourceFile() === file &&
@@ -1287,6 +1349,16 @@ export class QueryIndexBuilder {
             const args = node.getArguments();
             // The first argument supplies the component definition when this call creates its binding.
             for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
+            const assignment = throughWrappers(node).getParent();
+            const first = unwrapValue(args[0]);
+            if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
+                !components.has(assignment) && !aliases.has(assignment) &&
+                (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
+              for (const target of declarationsOf(first)) {
+                const id = byNode.get(target);
+                if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+              }
+            }
           }
           const [owner, graphOwner, possible] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
@@ -1446,6 +1518,7 @@ export class QueryIndexBuilder {
       }
     }
     for (const id of unresolvedLazyComponents) componentValues.add(id);
+    for (const id of unresolvedDefaultComponents) componentValues.add(id);
     if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);

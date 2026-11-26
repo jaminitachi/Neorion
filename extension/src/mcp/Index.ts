@@ -1,10 +1,10 @@
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 9;
+export const WRAPPER_INDEX_REVISION = 10;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 13;
-export const GRAPH_INDEX_REVISION = 19;
+export const QUERY_INDEX_REVISION = 14;
+export const GRAPH_INDEX_REVISION = 20;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -137,6 +137,7 @@ export interface QueryIndex {
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
   renderLookupIssues?: Record<number, string>;
   renderValueUses?: Record<number, string>;
+  scopedRenderValueIssues?: Record<number, { file: string; reason: string; valueFile: string }>;
   dynamicRenderComponents?: number[];
   wrapperRevision?: number;
   queryRevision?: number;

@@ -3,10 +3,8 @@ import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } 
 import { isFunction, packageMember, returnedValues } from './CallableFlow';
 import { constValue, type PropFlow, type RenderSite } from './PropFlow';
 import { functionNode, importBinding, valueNode } from './StaticBindings';
+import { isTypeOnlyExport } from './RuntimeExports';
 
-type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
-  import('ts-morph').ArrowFunction;
-type Target = RenderFunction | import('ts-morph').ClassDeclaration;
 const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
 export type RenderCertainty = { possible: boolean; conditional: boolean };
@@ -20,6 +18,55 @@ export function isComponentWrapper(node: Node | undefined): node is CallExpressi
   const callee = node.getExpression();
   const name = packageMember(callee, 'react');
   return name === 'memo' || name === 'forwardRef' || /(?:^|\.)(?:memo|forwardRef)$/.test(callee.getText());
+}
+
+/** Find a locally implemented HOC that returns or renders its component argument. */
+export function forwardedComponent(call: CallExpression, files: Set<SourceFile>):
+  { argument: Node; sites: { node: Node; conditional: number }[] } | undefined {
+  const factory = functionNode(call.getExpression());
+  const parameter = factory?.getParameters()[0];
+  const argument = call.getArguments()[0];
+  if (!factory || !parameter || !argument || !files.has(factory.getSourceFile())) return;
+  const values = returnedValues(factory);
+  if (values.length !== 1) return;
+  const guarded = conditionalAt(values[0], factory);
+  const returned = valueNode(values[0]);
+  const symbol = parameter.getNameNode().getSymbol();
+  if (!symbol) return;
+  if (Node.isIdentifier(returned) && returned.getSymbol() === symbol) {
+    return { argument, sites: [{ node: argument, conditional: guarded }] };
+  }
+  const component = functionNode(returned);
+  if (!component || !files.has(component.getSourceFile())) return;
+  const returns = returnedValues(component);
+  const sites: { node: Node; conditional: number }[] = [];
+  const inspect = (node: Node, conditional: number) => {
+    const wrapped = wrappedExpression(node);
+    if (wrapped) return inspect(wrapped, conditional);
+    if (Node.isConditionalExpression(node)) {
+      inspect(node.getWhenTrue(), 1);
+      inspect(node.getWhenFalse(), 1);
+      return;
+    }
+    if (Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken) {
+      inspect(node.getRight(), 1);
+      return;
+    }
+    const opening = Node.isJsxElement(node) ? node.getOpeningElement() : node;
+    if (Node.isJsxOpeningElement(opening) || Node.isJsxSelfClosingElement(opening)) {
+      const tag = opening.getTagNameNode();
+      if (tag.getSymbol() === symbol) sites.push({ node: tag, conditional });
+      if (!Node.isIdentifier(tag) || !/^[a-z]/.test(tag.compilerNode.text)) return;
+    }
+    if (Node.isJsxElement(node) || Node.isJsxFragment(node)) {
+      for (const child of node.getJsxChildren()) {
+        const value = Node.isJsxExpression(child) ? child.getExpression() : child;
+        if (value) inspect(value, conditional);
+      }
+    }
+  };
+  for (const value of returns) inspect(value, guarded || Number(returns.length > 1) || conditionalAt(value, component));
+  if (sites.length) return { argument, sites };
 }
 
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
@@ -162,12 +209,22 @@ function externalImport(node: Node, files: Set<SourceFile>): boolean {
 }
 
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
-export function renderBindings(declarations: Node[], files: Set<SourceFile>, flow?: PropFlow) {
+export function renderBindings(declarations: Node[], files: Set<SourceFile>,
+  indexedComponent: (node: Node) => boolean, flow?: PropFlow) {
   const seen = new Map<Node, { step: Step; resolution: Resolution }[]>();
-  const targets = new Map<Supply | undefined, Map<Target, RenderCertainty>>();
+  const targets = new Map<Supply | undefined, Map<Node, RenderCertainty>>();
   const supplies = new Map<RenderSite, Map<string, Supply>>();
   let unresolvedLookup = false;
   let unresolvedProp = false;
+  const opaqueLookups = new Set<Node>();
+  const register = (node: Node, { supply, possible, conditional }: Step) => {
+    let scoped = targets.get(supply);
+    if (!scoped) targets.set(supply, scoped = new Map());
+    const prior = scoped.get(node);
+    const choice = { possible, conditional };
+    if (!prior || preferRenderBinding(choice, prior)) scoped.set(node, choice);
+    return Resolution.Local;
+  };
   const resolve = (node: Node | undefined, step: Step, remaining: number): Resolution => {
     if (!node || remaining <= 0) return Resolution.Unknown;
     const { members, returns, possible, conditional, binding, supply } = step;
@@ -209,11 +266,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
       return;
     }
     if (!returns && !members.length && (isFunction(node) && !Node.isMethodDeclaration(node) || Node.isClassDeclaration(node))) {
-      const scoped = targets.get(supply) ?? new Map<Target, RenderCertainty>();
-      targets.set(supply, scoped);
-      const existing = scoped.get(node);
-      if (!existing || preferRenderBinding(step, existing)) scoped.set(node, { possible, conditional });
-      return Resolution.Local;
+      return register(node, step);
     }
     if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
       return next(Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression());
@@ -351,7 +404,9 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
       if (hook === 'useCallback' || hook === 'useMemo') {
         return next(node.getArguments()[0], { returns: hook === 'useMemo' });
       }
-      next(expression, { returns: true });
+      const resolved = next(expression, { returns: true });
+      if (!resolved && !members.length && !isComponentWrapper(node) && hook !== 'lazy' &&
+          !packageMember(expression, 'next/dynamic')) opaqueLookups.add(node);
       return;
     }
     if (Node.isConditionalExpression(node)) {
@@ -371,10 +426,32 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
     }
     if (Node.isElementAccessExpression(node)) {
       const key = lookupKey(node.getArgumentExpression());
-      return next(node.getExpression(), { members: [key ?? null, ...members] });
+      const resolved = next(node.getExpression(), { members: [key ?? null, ...members] });
+      if (!resolved) opaqueLookups.add(node);
+      return resolved;
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
       if (!returns && !members.length && externalImport(node, files)) return Resolution.External;
+      if (Node.isIdentifier(node) && members.length &&
+          node.getSymbol()?.getDeclarations().some(Node.isNamespaceImport)) {
+        const source = importBinding(node)?.declaration.getModuleSpecifierSourceFile();
+        if (source && files.has(source)) {
+          const [key, ...rest] = members;
+          if (key === allArrayElements) return;
+          const choice = { ...step, members: rest, possible: possible || key === null };
+          let known = false;
+          for (const symbol of source.getExportSymbols()) {
+            if (key !== null && key !== symbol.getName() || isTypeOnlyExport(source, symbol)) continue;
+            for (const declaration of (symbol.getAliasedSymbol() ?? symbol).getDeclarations()) {
+              if (!returns && !rest.length && indexedComponent(declaration)) {
+                register(declaration, choice);
+                known = true;
+              } else next(declaration, choice);
+            }
+          }
+          return known ? Resolution.Local : undefined;
+        }
+      }
       const prop = flow && !supply && members.length ? flow.read(node) : undefined;
       if (flow && prop) {
         const bindings = flow.values(prop);
@@ -426,6 +503,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
   return {
     targets: [...targets].flatMap(([supply, scoped]) =>
       [...scoped].map(([target, certainty]) => ({ target, supply, ...certainty }))),
-    unresolvedLookup: unresolvedLookup || unresolvedProp
+    unresolvedLookup: unresolvedLookup || unresolvedProp,
+    opaqueLookups
   };
 }

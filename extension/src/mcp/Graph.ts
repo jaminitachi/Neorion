@@ -952,7 +952,11 @@ export class DependencyGraph {
     notes.push(graphRow(`# risk: ${quantity(routeCount, 'route')} (${quantity(pageIds.size, 'page')}, ${quantity(apiFiles.size, 'API')}` +
       `${other ? `, ${quantity(other, 'meta or special file')}` : ''}), ${quantity(actions.length, 'server action')}, ` +
       `${quantity(layouts, 'layout')}; ${quantity(symbols, 'symbol')} in ${quantity(files.size, 'file')}; max depth ${used}; ${quantity(trace.tests.size, 'test')}`));
-    const unresolvedLookup = !routeCount && seeds.some(id => {
+    const scopedLookup = !routeCount && seeds.flatMap(id => {
+      const issue = typeof id === 'number' && this.index.scopedRenderValueIssues?.[id];
+      return issue && (includeTests || !isTestFile(issue.valueFile) && !isTestFile(issue.file)) ? [issue.reason] : [];
+    })[0];
+    const unresolvedLookup = scopedLookup || !routeCount && seeds.some(id => {
       const file = typeof id === 'number' && this.index.renderValueUses?.[id];
       return file && (includeTests || !isTestFile(file));
     }) &&

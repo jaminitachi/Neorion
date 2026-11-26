@@ -477,7 +477,7 @@ export class QueryEngine {
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
         (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) ??
-        unresolvedLookup ??
+        (!reached.size ? this.index.scopedRenderValueIssues?.[symbol.id]?.reason : undefined) ?? unresolvedLookup ??
         (this.index.schema === INDEX_SCHEMA && this.index.graphRevision !== GRAPH_INDEX_REVISION ? 'regenerate index for component lookup coverage' : undefined) };
   }
 

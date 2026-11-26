@@ -1574,6 +1574,9 @@ test('an unresolved typed render lookup only affects components used as values',
     import { memo } from 'react';
     export function UnusedIcon() { return <span/>; }
     export function StoredIcon() { return <span/>; }
+    export function DefaultIcon() { return <span/>; }
+    export function RenamedIcon() { return <span/>; }
+    export function TypeOnlyIcon() { return <span/>; }
     export function JsxOnlyIcon() { return <span/>; }
     export function WrappedIcon() { return <span/>; }
     export const MemoIcon = memo(WrappedIcon);
@@ -1581,6 +1584,12 @@ test('an unresolved typed render lookup only affects components used as values',
     export const RenderedMemo = memo(RenderedInner);
     export const icons = [{ icon: StoredIcon }];
     export function Unmounted() { return <JsxOnlyIcon/>; }
+  `);
+  fs.writeFileSync(path.join(root, 'ui/values.ts'), `
+    import { DefaultIcon, RenamedIcon } from './unused';
+    export default (DefaultIcon);
+    export { RenamedIcon as RegistryIcon };
+    export type { TypeOnlyIcon as IconType } from './unused';
   `);
   const other = path.join(root, 'app/other');
   fs.mkdirSync(other);
@@ -1597,19 +1606,143 @@ test('an unresolved typed render lookup only affects components used as values',
   `);
   build();
   for (const [tool, target] of [
-    ['who_renders', 'StoredIcon'], ['callees', 'app/page.tsx#Page']
+    ['who_renders', 'StoredIcon'], ['who_renders', 'DefaultIcon'], ['who_renders', 'RenamedIcon'],
+    ['callees', 'app/page.tsx#Page']
   ]) {
     const output = query(tool, target);
     assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
     assert.doesNotMatch(output, /^(?:page )?\/\s/m);
   }
-  for (const target of ['UnusedIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon', 'app/other/page.tsx#OtherPage']) {
+  for (const target of ['UnusedIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon', 'TypeOnlyIcon', 'app/other/page.tsx#OtherPage']) {
     assert.match(query('who_renders', target), /^# complete:/m);
   }
   for (const target of ['UnusedIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
   const inner = query('who_renders', 'RenderedInner');
   assert.match(inner, /^\/other\s.*depth 2 via RenderedMemo$/m);
   assert.match(inner, /^# complete:/m);
+});
+
+test('opaque element and factory lookups flag only value-used render candidates', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/registry.tsx'), `
+    import { register } from 'registry-package';
+    export { lookup } from 'registry-package';
+    export function RegisteredIcon() { return <span/>; }
+    export function MapIcon() { return <span/>; }
+    export function UnusedIcon() { return <span/>; }
+    export function UnrelatedIcon() { return <span/>; }
+    register('first', RegisteredIcon);
+  `);
+  fs.writeFileSync(path.join(root, 'ui/unrelated.ts'), `
+    import { UnrelatedIcon } from './registry';
+    export const unrelated = [UnrelatedIcon];
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import { getMap } from 'map-package';
+    import { MapIcon } from '../ui/registry';
+    export const icons = [MapIcon];
+    const MAP = getMap();
+    export default function Page({ keyName }) {
+      const Icon = MAP[keyName];
+      return <Icon/>;
+    }
+  `);
+  fs.mkdirSync(path.join(root, 'app/registry'));
+  fs.writeFileSync(path.join(root, 'app/registry/page.tsx'), `
+    import { lookup } from '../../ui/registry';
+    export default function RegistryPage({ keyName }) {
+      const Icon = lookup(keyName);
+      return <Icon/>;
+    }
+  `);
+  build();
+  assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced \(app\/page\.tsx:8\)$/m);
+  assert.match(query('callees', 'RegistryPage'), /^# partial: component lookup key untraced \(app\/registry\/page\.tsx:5\)$/m);
+  for (const target of ['RegisteredIcon', 'MapIcon']) {
+    const output = query('who_renders', target);
+    assert.match(output, target === 'MapIcon' ? /^# partial: component lookup key untraced/m :
+      /^# partial: rendered through a dynamic reference/m);
+    assert.doesNotMatch(output, /^\//m);
+  }
+  for (const target of ['UnusedIcon', 'UnrelatedIcon']) assert.match(query('who_renders', target), /^# complete:/m);
+});
+
+test('computed namespace lookups retain possible render paths to runtime component exports', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/icons.tsx'), `
+    import { memo } from 'react';
+    export function FirstIcon() { return <span/>; }
+    export const MemoIcon = memo(() => <span/>);
+    export default () => <span/>;
+    function PrivateIcon() { return <span/>; }
+    function TypeOnlyIcon() { return <span/>; }
+    export type { TypeOnlyIcon };
+    export const count = 1;
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import * as Icons from '../ui/icons';
+    export default function Page({ keyName }) {
+      const Picked = (Icons as any)[keyName];
+      return <Picked/>;
+    }
+  `);
+  fs.mkdirSync(path.join(root, 'app/exact'));
+  fs.writeFileSync(path.join(root, 'app/exact/page.tsx'), `
+    import * as Icons from '../../ui/icons';
+    export default function ExactPage() {
+      const Picked = (Icons as any)['FirstIcon'];
+      return <Picked/>;
+    }
+  `);
+  build();
+  for (const target of ['FirstIcon', 'MemoIcon', 'ui/icons.tsx#default']) {
+    const output = query('who_renders', target);
+    assert.match(output, /^\/\s.*\[possible\]$/m);
+    assert.match(output, /^# partial: component lookup key untraced/m);
+    if (target === 'FirstIcon') assert.match(output, /^\/exact\s.*depth 1$/m);
+    else assert.doesNotMatch(output, /^\/exact\s/m);
+  }
+  for (const target of ['PrivateIcon', 'TypeOnlyIcon']) {
+    assert.match(query('who_renders', target), /0 results[\s\S]*^# complete:/m);
+  }
+  assert.doesNotMatch(query('callees', 'app/page.tsx#Page'), /d1 render .*count/);
+});
+
+test('default-exported HOCs trace local forwarding and keep opaque factories partial', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/hoc.tsx'), `
+    export function withUi(Component) { return () => <main><Component/></main>; }
+    export const identity = Component => Component;
+  `);
+  fs.writeFileSync(path.join(root, 'ui/wrapped.tsx'), `
+    import { withUi } from './hoc';
+    export function BehindWrapper() { return <span/>; }
+    export function OpaqueInner() { return <span/>; }
+    export default withUi(BehindWrapper);
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import Wrapped, { OpaqueInner } from '../ui/wrapped';
+    import { identity } from '../ui/hoc';
+    function RootInner() { return <><Wrapped/><OpaqueInner/></>; }
+    export default identity(RootInner);
+  `);
+  fs.mkdirSync(path.join(root, 'app/hoc-opaque'));
+  fs.writeFileSync(path.join(root, 'app/hoc-opaque/page.tsx'), `
+    import { withSdk } from 'opaque-package';
+    import { OpaqueInner } from '../../ui/wrapped';
+    export default withSdk(OpaqueInner);
+  `);
+  build();
+  for (const target of ['RootInner', 'BehindWrapper']) {
+    const output = query('who_renders', target);
+    assert.match(output, /^\/\s/m);
+    assert.match(output, /^# complete:/m);
+  }
+  const opaque = query('who_renders', 'OpaqueInner');
+  assert.match(opaque, /^\/\s/m);
+  assert.doesNotMatch(opaque, /^\/hoc-opaque\s/m);
+  assert.match(opaque, /^# partial: rendered through a dynamic reference/m);
+  assert.match(query('impact', 'OpaqueInner'), /^page \/hoc-opaque\s/m);
 });
 
 test('typed render collections of uninstalled package icons resolve externally', t => {
