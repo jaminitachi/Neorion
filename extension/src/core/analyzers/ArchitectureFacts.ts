@@ -39,7 +39,8 @@ type RelativePath = (source: SourceFile) => string;
 export function collectRenameFacts(
   files: SourceFile[], relativePath: RelativePath,
   symbols: Map<Node, string>, facts: DetailFacts,
-  exportsOf = (file: SourceFile) => file.getExportedDeclarations()
+  exportsOf = (file: SourceFile) => file.getExportedDeclarations(),
+  resolveDeclarations = declarationsOf
 ) {
   // The checker follows path aliases and re-exports to the declaration.
   const exported = new Map<string, string>();
@@ -68,12 +69,12 @@ export function collectRenameFacts(
     const namespaces = new Set<Node>();
     for (const declaration of file.getImportDeclarations()) {
       const defaultImport = declaration.getDefaultImport();
-      if (defaultImport) record(declarationsOf(defaultImport));
+      if (defaultImport) record(resolveDeclarations(defaultImport));
       const namespace = declaration.getNamespaceImport();
       if (namespace) for (const binding of namespace.getSymbol()?.getDeclarations() ?? []) namespaces.add(binding);
       for (const specifier of declaration.getNamedImports()) {
         const binding = specifier.getAliasNode() ?? specifier.getNameNode();
-        const imported = declarationsOf(binding);
+        const imported = resolveDeclarations(binding);
         record(imported);
         if (imported.some(Node.isSourceFile)) {
           for (const declaration of binding.getSymbol()?.getDeclarations() ?? []) namespaces.add(declaration);
@@ -83,7 +84,7 @@ export function collectRenameFacts(
     for (const declaration of file.getExportDeclarations()) {
       if (!declaration.getModuleSpecifier()) continue;
       for (const specifier of declaration.getNamedExports()) {
-        record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()), true);
+        record(resolveDeclarations(specifier.getAliasNode() ?? specifier.getNameNode()), true);
       }
     }
     if (namespaces.size) visitKinds(file, namespaceAccessKinds, node => {
@@ -92,7 +93,7 @@ export function collectRenameFacts(
       let root = expression;
       while (Node.isPropertyAccessExpression(root) || Node.isElementAccessExpression(root)) root = root.getExpression();
       if (!root.getSymbol()?.getDeclarations().some(binding => namespaces.has(binding))) return;
-      if (Node.isPropertyAccessExpression(node)) record(declarationsOf(node));
+      if (Node.isPropertyAccessExpression(node)) record(resolveDeclarations(node));
       else {
         const key = node.getArgumentExpression();
         if (!Node.isStringLiteral(key)) return;
@@ -2138,15 +2139,16 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       if (bindings && ts.isNamespaceImport(bindings)) httpImports.add(bindings.name.text);
       if (bindings && ts.isNamedImports(bindings)) for (const specifier of bindings.elements) httpImports.add(specifier.name.text);
     }
+    const httpImportCandidate = (callee: ts.Expression) => {
+      const binding = ts.isPropertyAccessExpression(callee) ? callee.expression : callee;
+      return usesHttpLibrary && (!ts.isIdentifier(binding) || httpImports.has(binding.text));
+    };
     const handledTransports = new Set<Node>();
     const collectRequest = (node: CallExpression | NewExpression) => {
       const isConstructor = Node.isNewExpression(node);
       const expression = node.getExpression();
       const globalFetch = !isConstructor && isGlobalFetch(expression);
-      const callee = expression.compilerNode;
-      const binding = ts.isPropertyAccessExpression(callee) ? callee.expression : callee;
-      const origin = !globalFetch && usesHttpLibrary && (!ts.isIdentifier(binding) || httpImports.has(binding.text)) ?
-        importOrigin(expression) : undefined;
+      const origin = !globalFetch && httpImportCandidate(expression.compilerNode) ? importOrigin(expression) : undefined;
       const isFetch = globalFetch || !isConstructor && (origin?.module === 'node-fetch' && origin.name === 'default' ||
         origin?.module === 'undici' && origin.name === 'fetch');
       const nodeHttp = !isConstructor && origin?.module && /^(?:node:)?https?$/.test(origin.module) &&
@@ -2295,13 +2297,13 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     const constructors: NewExpression[] = [];
     // Exclude impossible literals and request sites before allocating ts-morph wrappers.
     const wrapNode = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && !usesHttpLibrary) {
-        if (config && !excludedRequest) return node.arguments.length > 0;
+      if (ts.isCallExpression(node)) {
+        if (config && !excludedRequest && node.arguments.length || httpImportCandidate(node.expression)) return true;
         const callee = node.expression;
         return ts.isIdentifier(callee) ? callee.text === 'fetch' :
           ts.isPropertyAccessExpression(callee) && callee.name.text === 'fetch';
       }
-      if (ts.isNewExpression(node)) return usesHttpLibrary;
+      if (ts.isNewExpression(node)) return httpImportCandidate(node.expression);
       if (ts.isStringLiteralLike(node)) return !!index && node.text.includes('/api');
       if (ts.isBinaryExpression(node)) return !!index && node.operatorToken.kind === SyntaxKind.PlusToken;
       return !!index || ts.isCallExpression(node);

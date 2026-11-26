@@ -1575,7 +1575,7 @@ export class QueryIndexBuilder {
       } else if (Node.isArrayLiteralExpression(value)) {
         for (const element of value.getElements()) recordComponentValue(element, property);
       } else if (Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) {
-        for (const declaration of declarationsOf(value)) recordComponentDeclaration(declaration, property);
+        for (const declaration of flowDeclarations(value)) recordComponentDeclaration(declaration, property);
       }
     };
     const externalModules = new Map<string, number>();

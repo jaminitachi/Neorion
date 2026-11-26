@@ -797,7 +797,7 @@ export class ComponentAnalyzer {
         const body = targets.map(target => bodies.get(target)).find(Boolean);
         if (body) bodies.set(node, body);
       }
-      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts, exportsOf);
+      if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts, exportsOf, node => flow.declarations(node));
       collectRenderFacts(this.root, routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
       if (!router) collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace, flow, appConfig);
     }

@@ -48,9 +48,9 @@ export class CallableReferences {
     // The general language-service search handles default exports, renamed
     // barrel exports, and ambient script bindings whose names can change.
     const declaration = name.getParent();
+    const named = Node.isFunctionDeclaration(declaration) || Node.isVariableDeclaration(declaration);
     if (!ts.isExternalModule(source.compilerNode) ||
-        !Node.isFunctionDeclaration(declaration) && !Node.isMethodDeclaration(declaration) ||
-        Node.isFunctionDeclaration(declaration) && declaration.isDefaultExport()) return;
+        (named ? declaration.isDefaultExport() : !Node.isMethodDeclaration(declaration))) return;
     const text = name.compilerNode.text;
     if (!this.programFiles) {
       const indexed = new Map([...this.files].map(file => [file.compilerNode, file]));
@@ -62,7 +62,7 @@ export class CallableReferences {
       const content = file.compilerNode.text;
       if (!content.includes(text) && !content.includes('\\u')) continue;
       const names = new Set([text]);
-      if (Node.isFunctionDeclaration(declaration)) {
+      if (named) {
         for (const entry of file.getExportDeclarations()) {
           for (const specifier of entry.getNamedExports()) {
             const alias = specifier.getAliasNode();

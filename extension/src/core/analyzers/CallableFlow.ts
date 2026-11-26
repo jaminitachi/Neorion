@@ -70,6 +70,14 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
 }
 
 const noTargets: Target[] = [];
+const callableValueKinds = new Set([
+  SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.FunctionDeclaration, SyntaxKind.MethodDeclaration,
+  SyntaxKind.VariableDeclaration, SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.BindingElement,
+  SyntaxKind.ArrayLiteralExpression, SyntaxKind.ObjectLiteralExpression, SyntaxKind.ConditionalExpression,
+  SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression, SyntaxKind.ElementAccessExpression, SyntaxKind.CallExpression,
+  SyntaxKind.ParenthesizedExpression, SyntaxKind.AsExpression, SyntaxKind.TypeAssertionExpression,
+  SyntaxKind.SatisfiesExpression, SyntaxKind.NonNullExpression
+]);
 
 type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[]; write?: Node };
 export class CallableFlow {
@@ -140,8 +148,8 @@ export class CallableFlow {
     const seen = new Map<Node, string | number | Set<string | number>>();
     let budget = 64;
     const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], path?: string[], write?: Node): void => {
-      if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return;
-      const key = members.length || path?.length || write ? JSON.stringify([invoke, members, path, !!write]) : invoke;
+      if (!node || budget-- <= 0 || !callableValueKinds.has(node.compilerNode.kind) || !this.files.has(node.getSourceFile())) return;
+      const key = members.length || path?.length ? JSON.stringify([invoke, members, path, !!write]) : write ? -invoke - 1 : invoke;
       const states = seen.get(node);
       if (states === key || states instanceof Set && states.has(key)) return;
       if (states instanceof Set) states.add(key);
