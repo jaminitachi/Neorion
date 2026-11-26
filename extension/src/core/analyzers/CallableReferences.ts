@@ -59,8 +59,10 @@ export class CallableReferences {
     const uses: Node[] = [];
     // Visit the declaration's file first, then follow imports in program order.
     for (const file of [source, ...this.programFiles.filter(file => file !== source)]) {
-      const content = file.compilerNode.text;
-      if (!content.includes(text) && !content.includes('\\u')) continue;
+      // The parser interns identifiers and property names, including escaped spelling.
+      const parsed = file.compilerNode as ts.SourceFile & { identifiers?: ReadonlyMap<string, string> };
+      if (parsed.identifiers ? !parsed.identifiers.has(text) :
+          !parsed.text.includes(text) && !parsed.text.includes('\\u')) continue;
       const names = new Set([text]);
       if (named) {
         for (const entry of file.getExportDeclarations()) {

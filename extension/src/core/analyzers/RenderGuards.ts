@@ -15,6 +15,18 @@ type Value = string | number | boolean | null | undefined | typeof unknown | typ
   ObjectValue | ArrayValue | PropsValue | RestValue;
 const unresolved = [unknown] as Value[];
 const emptyEnv: Env = new Map();
+const returnedSites = new WeakMap<Node, ReturnType<typeof executionSites>['returned']>();
+
+function returnsAt(body: Node | undefined) {
+  if (!body) return [];
+  let returned = returnedSites.get(body);
+  if (!returned) {
+    // Prop supplier chains vary, but the callable's return sites do not.
+    returned = executionSites(body).returned;
+    returnedSites.set(body, returned);
+  }
+  return returned;
+}
 
 function finite(values: Value[]): Value[] {
   return values.length <= 64 ? [...new Set(values)] : unresolved;
@@ -209,7 +221,7 @@ export function evaluateRenderGuards(flow: PropFlow, guards: RenderGuard[], sele
       const callback = functionNode(node.getArguments()[0]);
       const param = callback?.getParameters()[0];
       if (!param || !callback || callback.getSourceFile().isDeclarationFile()) return unresolved;
-      const results = executionSites(callback.getBody()).returned;
+      const results = returnsAt(callback.getBody());
       if (results.length !== 1 || results[0].possible) return unresolved;
       const find = callee.getName() === 'find';
       return finite(evaluate(callee.getExpression(), env).flatMap((value): Value[] => {
@@ -227,7 +239,7 @@ export function evaluateRenderGuards(flow: PropFlow, guards: RenderGuard[], sele
     }
     const fn = functionNode(callee);
     if (!fn || fn.getSourceFile().isDeclarationFile()) return unresolved;
-    const returns = executionSites(fn.getBody()).returned;
+    const returns = returnsAt(fn.getBody());
     if (returns.length !== 1 || returns[0].possible || fn.getParameters().length || fn.isAsync()) return unresolved;
     return evaluate(returns[0].node, env);
   };
