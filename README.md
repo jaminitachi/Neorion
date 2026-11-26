@@ -213,7 +213,9 @@ For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`
 
 ## Cursor
 
-From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to launch a pinned Neorion release from GitHub using `npx`, or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to use the CLI copied into the local workspace cache or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+
+If the cached CLI is missing, a single-app launcher uses a pinned GitHub release. A multi-app launcher asks you to run `neorion setup cursor` again. After upgrading Neorion, rerun setup to refresh the cached CLI. Then restart the MCP server in Cursor.
 
 Run `neorion setup cursor --remove` from the same project to remove the rule block and the MCP entry owned by setup.
 
@@ -240,17 +242,49 @@ npm --prefix extension run build:cli
    in breadth-first alphabetical order. Packages with only a development dependency on Next and
    no routes or Next config are fallback candidates. When stronger candidates exist, the hint lists those.
 3. **Library.** With no Next candidate, Neorion uses the first `tsconfig.json` or `jsconfig.json`,
-   checking the requested directory first. For example, a library with a root `tsconfig.json`
-   and a Next app under `test/` selects the library root. A root that declares `next` and has no
+   checking the requested directory first and preferring publishable source packages over
+   tooling directories and Next.js sandboxes. A library with a root `tsconfig.json` and
+   a Next app under `test/` selects the library root. A root that declares `next` and has no
    routes or project config can still be used as a guess.
 
 The `Project:` line shows the full path of the indexed directory. A guess produces
 `# partial: project root guessed` and a hint with up to five candidates. VS Code also shows the guess
 in its status bar. To confirm a candidate, pass its directory as `--root <dir>` to `query` or `mcp`.
 If the selected directory is the current one, use `--root .`. Passing a workspace to `--root` still
-discovers its apps if the workspace itself is outside the candidate list. `NEORION_ROOT` follows
+discovers its apps when the workspace itself is outside the candidate list. A directory
+without a recognized project or candidate returns a missing-project error. `NEORION_ROOT` follows
 the same rule. The Claude plugin and VS Code MCP connections from guessed roots use
 `mcp --workspace <dir>` to keep the guess visible in query results.
+
+### Monorepos
+
+From a workspace root, `neorion graph` builds a separate index and architecture map for
+each discovered Next.js app in workspaces with up to three apps. Queries search each app
+and label its rows. Query limits apply per app. Use the app's workspace-relative path,
+package name, or unique directory name to select it.
+
+```sh
+neorion graph --app apps/web
+neorion query wrappers / --app apps/web
+neorion query search Button
+neorion query api_consumers post.all --app apps/web
+```
+
+Workspaces with more than three apps list the discovered apps and prompt for `--app`.
+Use `neorion graph --all-apps` to build every listed index sequentially. In the Cal.com
+test checkout, the web app took 32.1 s and peaked at 1,315 MiB RSS. Building all five apps
+sequentially took 82.0 s and peaked at 1,342 MiB. In MCP, pass
+`app` to `neorion_query`. From an app directory, queries use that app's index.
+
+The index follows imported workspace source through package exports, main entries and
+TypeScript path aliases. Queries label workspace components and packages and can trace
+tRPC callers into sibling router packages. Shared files are displayed relative to the
+selected app, for example `../../packages/ui/src/card.tsx#Card`. Sibling source edits
+invalidate the app index.
+
+Use the bundled VS Code server or run `neorion setup cursor` locally for multi-app queries.
+The pinned npm launcher and Cursor release fallback discover projects from the workspace
+directory using the capabilities of the installed release.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,

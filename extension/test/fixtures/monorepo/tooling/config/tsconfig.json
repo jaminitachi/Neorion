@@ -1,0 +1,6 @@
+{
+  "compilerOptions": {
+    "jsx": "preserve",
+    "paths": { "@shared/*": ["../../packages/ui/src/*"] }
+  }
+}

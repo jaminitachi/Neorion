@@ -2,11 +2,10 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { validRange } from 'semver';
 import { Project, ts } from 'ts-morph';
-import { ignoredProjectDirectories, nextConfig, projectConfig } from './FindProject';
-import { routerFramework } from './frameworks/RouterProbe';
+import { hasOwnRoutes, ignoredProjectDirectories, projectConfig, projectRouterFramework, workspaceDirectories } from './FindProject';
 import { projectSnapshot, routerDependencySnapshot } from './ProjectSnapshot';
 import { readNextConfig } from './analyzers/NextConfig';
-import { WorkspaceBindings } from './analyzers/WorkspaceBindings';
+import { WorkspaceBindings, within } from './analyzers/WorkspaceBindings';
 import { RouteAnalyzer } from './analyzers/RouteAnalyzer';
 import { ComponentAnalyzer } from './analyzers/ComponentAnalyzer';
 import { writeGraph } from './serializers/GraphOutput';
@@ -24,9 +23,7 @@ interface GenerateOptions {
 export function generateGraph(projectPath: string, options: GenerateOptions) {
     const packageJsonPath = path.join(projectPath, 'package.json');
     const pkg = fs.existsSync(packageJsonPath) ? JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8')) : undefined;
-    const framework = pkg && !pkg.dependencies?.next && !pkg.devDependencies?.next
-        ? routerFramework(projectPath, pkg, file => fs.statSync(file, { throwIfNoEntry: false })?.isFile())
-        : undefined;
+    const framework = projectRouterFramework(projectPath, pkg);
     const routerDirectory = (name: string) => {
         const root = path.join(projectPath, name);
         return fs.existsSync(root) ? root : path.join(projectPath, 'src', name);
@@ -37,8 +34,12 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     options.onProgress?.("Analyzing project structure...");
 
     const snapshot = options.markdown ? projectSnapshot(projectPath) : undefined;
+    const rootWorkspaceApp = workspaceDirectories(projectPath)?.directories.some(directory => directory !== projectPath) &&
+        (!!framework || hasOwnRoutes(projectPath));
+    const workspace = new WorkspaceBindings(projectPath, rootWorkspaceApp);
+    const workspaceSources = options.markdown ? workspace.snapshot() : undefined;
+    const project = openProject(projectPath, workspace);
     const routerDependencies = framework && options.markdown ? routerDependencySnapshot(projectPath) : undefined;
-    const project = openProject(projectPath);
     if (framework && !project.getCompilerOptions().moduleResolution) {
         // Framework projects are bundled, including source-only checkouts
         // whose package-provided tsconfig could not be loaded.
@@ -46,19 +47,18 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
         project.compilerOptions.set({ module: compiler.module ?? ts.ModuleKind.ESNext,
             moduleResolution: ts.ModuleResolutionKind.Bundler, jsx: compiler.jsx ?? ts.JsxEmit.Preserve });
     }
-    const router = framework && !nextConfig(projectPath)
+    const router = framework
         ? (require('./frameworks/react-router/ReactRouterAdapter') as typeof import('./frameworks/react-router/ReactRouterAdapter'))
             .analyzeRouter(projectPath, project, framework)
         : undefined;
 
     const sourceFiles = project.getSourceFiles().filter(file => {
         const filePath = file.getFilePath();
-        return !file.isDeclarationFile() && isWithin(projectPath, filePath) &&
+        return !file.isDeclarationFile() && (within(projectPath, filePath) || workspace.packageFor(filePath)) &&
             !path.relative(projectPath, filePath).split(path.sep)
                 .some(part => part === 'node_modules' || part === '.next');
     });
     const pagesConfig = !router && fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const workspace = new WorkspaceBindings(projectPath, project);
     const routes = router?.routes ?? new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
@@ -70,11 +70,13 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     if (analysis.index) {
         analysis.index.projectSnapshot = snapshot;
         if (analysis.index.router) analysis.index.router.dependencies = routerDependencies;
+        analysis.index.workspaceSources = workspaceSources;
     }
 
     const directories = new Map<string, DirectoryMetadata>();
     const routeDirectories = (router ? [router.app] : [appDir, pagesDir]).map(dir => path.relative(projectPath, dir).split(path.sep).join('/'));
     for (const file of sourceFiles) {
+        if (!within(projectPath, file.getFilePath())) continue;
         const parts = path.relative(projectPath, file.getFilePath()).split(path.sep).slice(0, -1);
         for (const [index, part] of parts.entries()) {
             const directory = parts.slice(0, index + 1).join('/');
@@ -116,28 +118,33 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
     return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
 }
 
-function openProject(root: string): Project {
+function openProject(root: string, workspace: WorkspaceBindings): Project {
+    const resolutionHost = workspace.resolutionHost();
     const configPath = projectConfig(root);
-    if (configPath && path.basename(configPath) === 'tsconfig.json') {
-        return new Project({ tsConfigFilePath: configPath });
+    const typescript = configPath && path.basename(configPath) === 'tsconfig.json';
+    if (typescript && !resolutionHost) {
+        return new Project({ tsConfigFilePath: configPath, resolutionHost });
     }
 
-    const config = configPath ? ts.readConfigFile(configPath, ts.sys.readFile) : { config: {} };
+    const configHost = resolutionHost ? workspace.configHost() : ts.sys;
+    const config = configPath ? ts.readConfigFile(configPath, configHost.readFile) : { config: {} };
     if (config.error) throw new Error(ts.flattenDiagnosticMessageText(config.error.messageText, '\n'));
     const parse = (host: ts.ParseConfigHost) => ts.parseJsonConfigFileContent({ ...config.config }, host, root,
-        { allowJs: true, checkJs: false }, configPath ?? path.join(root, 'jsconfig.json'));
+        typescript ? undefined : { allowJs: true, checkJs: false }, configPath ?? path.join(root, 'jsconfig.json'));
     // Resolve inherited file selection before applying defaults to wildcard discovery.
-    const selection = config.config.extends ? parse({ ...ts.sys, readDirectory: () => [] }).raw : config.config;
-    const host: ts.ParseConfigHost = selection.files === undefined && selection.include === undefined && selection.exclude === undefined
+    const selection = config.config.extends ? parse({ ...configHost, readDirectory: () => [] }).raw : config.config;
+    const host: ts.ParseConfigHost = selection.files === undefined && selection.include === undefined && selection.exclude === undefined && !typescript
         ? {
-            ...ts.sys,
+            ...configHost,
             readDirectory(directory, extensions, excludes, includes, depth) {
                 return ts.sys.readDirectory(directory, extensions, [...(excludes ?? []), ...ignoredProjectDirectories], includes, depth);
             }
-        } : ts.sys;
+        } : configHost;
     const { options, fileNames } = parse(host);
-    const project = new Project({ compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
-    for (const file of fileNames) project.addSourceFileAtPath(file);
+    const project = new Project({ resolutionHost, compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
+    for (const file of fileNames) {
+        if (!workspace.isRootWorkspace() || !workspace.packageFor(file)) project.addSourceFileAtPath(file);
+    }
     project.resolveSourceFileDependencies();
     return project;
 }
@@ -169,9 +176,4 @@ function safeDependencySpec(value: unknown): string {
     // Accept repository URLs with plain path segments and an optional ref.
     const git = /^(?:git\+)?https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[a-z0-9_-][a-z0-9_.-]*)+\.git(?:#[a-z0-9_-][a-z0-9_.-]*(?:\/[a-z0-9_-][a-z0-9_.-]*)*)?$/i;
     return git.test(spec) ? spec : '[redacted]';
-}
-
-function isWithin(root: string, file: string): boolean {
-    const relative = path.relative(root, file);
-    return relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
 }
