@@ -2,7 +2,7 @@ import { Node, SyntaxKind, ts } from 'ts-morph';
 import type { DetailFact } from '../../mcp/Index';
 import { visitKinds } from './CompilerWalk';
 import { startLine } from './SourceLines';
-import { constInitializer, expressionLabel, literalLabel, objectFields, unwrapFact } from './FactSyntax';
+import { constInitializer, expressionLabel, factValue, literalLabel, objectFields, unwrapFact } from './FactSyntax';
 import { functionNode, importBinding, valueNode } from './StaticBindings';
 
 const handlerKinds = new Set([
@@ -15,16 +15,17 @@ const modelOperations = new Set([
   'updateManyAndReturn', 'upsert'
 ]);
 
-function shape(node: Node | undefined, depth = 4): { text: string; partial?: true } {
+function shape(node: Node | undefined, depth = 4, useAt = node?.getEnd()): { text: string; partial?: true } {
   const literal = literalLabel(node, depth);
   if (literal !== undefined) return { text: literal };
-  const alias = depth > 0 ? constInitializer(node) : undefined;
-  const constant = literalLabel(alias, depth);
+  const { value, opaque } = depth > 0 ? factValue(node, useAt) : {};
+  if (opaque) return { text: '<unresolved keys>', partial: true };
+  const constant = literalLabel(value, depth);
   if (constant !== undefined) return { text: constant };
-  const properties = depth > 0 ? objectFields(node) ?? objectFields(alias) : undefined;
+  const properties = depth > 0 ? objectFields(value) : undefined;
   if (!properties) return { text: expressionLabel(node), partial: true };
   const fields = properties.fields.map(({ key, value }) => {
-    const entry = shape(value, depth - 1);
+    const entry = shape(value, depth - 1, useAt);
     return { text: key + ': ' + entry.text, partial: entry.partial };
   });
   return {
@@ -83,7 +84,7 @@ export function handlerFacts(declaration: Node | undefined, relative: (node: Nod
     if (callee?.getKind() === SyntaxKind.ImportKeyword) return;
     if (isJsonResponse(node)) {
       const [payload, options] = node.getArguments();
-      const result = shape(constInitializer(payload) ?? payload);
+      const result = shape(payload);
       const status = options ? objectFields(options)?.fields.find(field => field.key === 'status')?.value : undefined;
       add(node, 'JSON response ' + (status ? expressionLabel(status) + ' ' : '') + result.text,
         result.partial || options && literalLabel(options) === undefined ? 'response values unresolved' : undefined);
@@ -105,13 +106,18 @@ export function handlerFacts(declaration: Node | undefined, relative: (node: Nod
               entry.getNamedImports().some(binding => binding.getName() === 'PrismaClient')) ||
           Node.isNewExpression(initialized) && prismaImport(importBinding(initialized.getExpression())?.module);
         const args = node.getArguments();
-        const result = args.length ? shape(constInitializer(args[0]) ?? args[0]) : undefined;
+        const result = args.length ? shape(args[0]) : undefined;
         add(node, (prisma ? 'Prisma ' : 'model-shaped call ') + expressionLabel(callee) +
           (result ? '(' + result.text + ')' : '()'),
         !prisma ? 'ORM receiver unresolved' : result?.partial ? 'ORM argument values unresolved' : undefined);
         return;
       }
     }
+    // A fluent chain is one operation, reported at its outermost call.
+    const parent = node.getParent();
+    const outer = parent?.getParent();
+    if ((Node.isPropertyAccessExpression(parent) || Node.isElementAccessExpression(parent)) &&
+        parent.getExpression() === node && Node.isCallExpression(outer) && outer.getExpression() === parent) return;
     if (Node.isIdentifier(callee) || Node.isPropertyAccessExpression(callee)) {
       const base = expressionLabel(callee);
       const literalArgs = Node.isPropertyAccessExpression(callee) && ['get', 'has'].includes(callee.getName())

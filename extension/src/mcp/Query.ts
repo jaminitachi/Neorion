@@ -1099,6 +1099,7 @@ export class QueryEngine {
     append(own.filter(fact => isRender(fact) && isControl(fact)));
     append(own.filter(fact => isRender(fact) && !isControl(fact)));
     append(own.filter(isSetter));
+    if (details.unresolvedJsxHandlers?.includes(symbol.id)) notes.add('JSX callback handoff unresolved');
     if (!rows.length) notes.add('no supported state or prop facts resolved');
     if (this.index.dynamicRenderComponents?.includes(symbol.id) ||
         this.index.renderEdges.some(([, child, , , , possible]) => child === symbol.id && possible)) notes.add('possible render suppliers unresolved');

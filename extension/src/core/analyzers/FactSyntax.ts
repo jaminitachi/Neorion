@@ -1,4 +1,5 @@
-import { Node, SyntaxKind } from 'ts-morph';
+import { Node, SyntaxKind, ts } from 'ts-morph';
+import { visitKinds } from './CompilerWalk';
 import { wrappedExpression } from './ArchitectureFacts';
 import { constValue } from './PropFlow';
 
@@ -61,11 +62,77 @@ export function objectFields(node: Node | undefined) {
   return { fields, opaque };
 }
 
-export function constInitializer(node: Node | undefined) {
-  node = unwrapFact(node);
+function constDeclaration(node: Node | undefined) {
   if (!Node.isIdentifier(node)) return;
   const parent = node.getParent();
   const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
-  const declaration = symbol?.getDeclarations()[0];
+  return symbol?.getDeclarations()[0];
+}
+
+export function constInitializer(node: Node | undefined) {
+  const declaration = constDeclaration(unwrapFact(node));
   return declaration && unwrapFact(constValue(declaration));
+}
+
+const identifierKind = new Set([SyntaxKind.Identifier]);
+const objectChanges = new WeakMap<Node, { assigned: boolean; firstEscape: number }>();
+
+// A const binding preserves identity, but assignments and calls can change its keys.
+export function factValue(node: Node | undefined, useAt?: number): { value?: Node; opaque?: true } {
+  const reference = unwrapFact(node);
+  const declaration = constDeclaration(reference);
+  const value = declaration && unwrapFact(constValue(declaration));
+  if (!reference || !Node.isVariableDeclaration(declaration) || !Node.isObjectLiteralExpression(value)) {
+    return { value: value ?? reference };
+  }
+  let changes = objectChanges.get(declaration);
+  if (!changes) {
+    const scope = declaration.getFirstAncestor(Node.isBlock) ?? declaration.getSourceFile();
+    const name = declaration.getName();
+    changes = { assigned: false, firstEscape: Infinity };
+    const result = changes;
+    visitKinds(scope, identifierKind, use => {
+      if (result.assigned || constDeclaration(use) !== declaration) return;
+      const { assigned, escapedAt } = objectUse(use);
+      result.assigned ||= assigned;
+      result.firstEscape = Math.min(result.firstEscape, escapedAt);
+    }, { filterRaw: use => !result.assigned && ts.isIdentifier(use) && use.text === name });
+    objectChanges.set(declaration, changes);
+  }
+  return changes.assigned || changes.firstEscape <= (useAt ?? reference.getStart()) ? { opaque: true } : { value };
+}
+
+function objectUse(use: Node) {
+  let value = use;
+  let member = false;
+  for (let parent = value.getParent(); parent; parent = value.getParent()) {
+    if (wrappedExpression(parent) === value) {
+      value = parent;
+    } else if ((Node.isPropertyAccessExpression(parent) || Node.isElementAccessExpression(parent)) &&
+        parent.getExpression() === value) {
+      member = true;
+      value = parent;
+    } else if (Node.isBinaryExpression(parent) && parent.getLeft() === value &&
+        parent.getOperatorToken().getKind() >= SyntaxKind.FirstAssignment &&
+        parent.getOperatorToken().getKind() <= SyntaxKind.LastAssignment ||
+        Node.isDeleteExpression(parent) ||
+        (Node.isPrefixUnaryExpression(parent) || Node.isPostfixUnaryExpression(parent)) &&
+          [SyntaxKind.PlusPlusToken, SyntaxKind.MinusMinusToken].includes(parent.getOperatorToken())) {
+      return { assigned: true, escapedAt: Infinity };
+    } else if (Node.isCallExpression(parent) || Node.isNewExpression(parent)) {
+      if (member && parent.getExpression() !== value) break;
+      const callee = parent.getExpression();
+      const assign = Node.isPropertyAccessExpression(callee) && callee.getName() === 'assign' &&
+        callee.getExpression().getText() === 'Object';
+      return { assigned: assign, escapedAt: parent.getEnd() };
+    } else if (!member && (Node.isShorthandPropertyAssignment(parent) ||
+        Node.isPropertyAssignment(parent) && parent.getInitializer() === value ||
+        Node.isArrayLiteralExpression(parent) || Node.isObjectLiteralExpression(parent) ||
+        Node.isConditionalExpression(parent) && parent.getCondition() !== value ||
+        Node.isBinaryExpression(parent) && [SyntaxKind.BarBarToken, SyntaxKind.AmpersandAmpersandToken,
+          SyntaxKind.QuestionQuestionToken].includes(parent.getOperatorToken().getKind()))) {
+      value = parent;
+    } else break;
+  }
+  return { assigned: false, escapedAt: Infinity };
 }

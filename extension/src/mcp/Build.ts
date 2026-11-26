@@ -23,7 +23,7 @@ async function fresh(root: string, indexPath: string) {
   if (index?.schema !== INDEX_SCHEMA || index.generator !== VERSION || !index.files) return false;
   if (index.wrapperRevision !== WRAPPER_INDEX_REVISION || !Array.isArray(index.serverActions)) return false;
   if (index.queryRevision !== QUERY_INDEX_REVISION || index.graphRevision !== GRAPH_INDEX_REVISION) return false;
-  if (!index.detailFacts) return false;
+  if (!Array.isArray(index.detailFacts?.unresolvedJsxHandlers)) return false;
   if (index.router && (index.router.revision !== ROUTER_INDEX_REVISION ||
     index.router.dependencies !== routerDependencySnapshot(root))) return false;
   const inputs = index.pagesWorkspaceInputs;

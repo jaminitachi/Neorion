@@ -169,6 +169,7 @@ export interface DetailFacts {
   symbols: Record<number, DetailFact[]>;
   renders: Record<number, DetailFact[]>;
   requests: Record<string, DetailFact[]>;
+  unresolvedJsxHandlers: number[];
 }
 
 export interface QueryIndex {

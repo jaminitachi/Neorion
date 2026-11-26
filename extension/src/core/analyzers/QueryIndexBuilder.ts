@@ -24,7 +24,7 @@ import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 import { handlerFacts } from './HandlerFacts';
-import { ReactFacts } from './ReactFacts';
+import { ReactFacts, type IndexedRequest } from './ReactFacts';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -2169,7 +2169,9 @@ export class QueryIndexBuilder {
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
     }
     if (!historyOnly) {
-      const details: DetailFacts = index.detailFacts = { handlers: {}, symbols: {}, renders: {}, requests: {} };
+      const details: DetailFacts = index.detailFacts = {
+        handlers: {}, symbols: {}, renders: {}, requests: {}, unresolvedJsxHandlers: []
+      };
       const add = <K extends string | number>(table: Record<K, DetailFact[]>, key: K, row: DetailFact) =>
         (table[key] ??= []).push(row);
       for (const route of index.routes) {
@@ -2183,14 +2185,16 @@ export class QueryIndexBuilder {
         });
         details.handlers[route.id] = Object.fromEntries(methods);
       }
-      const indexedRequests = new Map<Node, FetchEntry[]>();
-      for (const request of this.fetches) {
-        if (request.via !== 'fetch') continue;
-        const { node, ...entry } = request;
-        const matches = indexedRequests.get(node) ?? [];
-        matches.push({ ...entry, route: routeIds.get(request.route)!, fn: null });
-        indexedRequests.set(node, matches);
+      const indexedRequests = new Map<Node, Map<string, IndexedRequest>>();
+      for (const { node, via, route, method, url, partial, propUrlUnknown } of this.fetches) {
+        if (via !== 'fetch') continue;
+        let matches = indexedRequests.get(node);
+        if (!matches) indexedRequests.set(node, matches = new Map());
+        const prior = matches.get(route);
+        const partialUrl = !!(partial || propUrlUnknown);
+        if (!prior || prior.partialUrl && !partialUrl) matches.set(route, { method, url, partialUrl });
       }
+      const jsxFiles = new Set(renderSites.map(site => site.file));
       const react = new Map<SourceFile, ReactFacts>();
       const scope = (node: Node) => {
         for (let parent = node.compilerNode.parent; parent; parent = parent.parent) {
@@ -2201,24 +2205,30 @@ export class QueryIndexBuilder {
         return owners(node)[1];
       };
       for (const [relative, source] of filesByRelative) {
-        if (!ReactFacts.appliesTo(source)) continue;
+        if (!ReactFacts.appliesTo(source, jsxFiles.has(relative))) continue;
         const collector = new ReactFacts(source, relative, flow, scope,
           (owner, fact) => add(details.symbols, owner, fact), indexedRequests,
-          ({ method, url }, fact) => add(details.requests, method + ' ' + url, fact));
+          (method, route, fact) => add(details.requests, method + ' ' + route, fact));
         if (collector.collect()) react.set(source, collector);
       }
+      const untracedHandlers = new Set<number>();
       for (const site of renderSites) {
         const { node, owner, file } = site;
         if (owner === undefined || !Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) continue;
         const supplier = react.get(node.getSourceFile());
         const targets = resolvedRenderSites.get(node);
-        if (!supplier && !targets?.size) continue;
+        if (!supplier && !targets?.size) {
+          if (node.compilerNode.attributes.properties.some(attr => ts.isJsxAttribute(attr) &&
+            ts.isIdentifier(attr.name) && /^on[A-Z]/.test(attr.name.text))) untracedHandlers.add(scope(node) ?? owner);
+          continue;
+        }
         const from = scope(node) ?? owner;
-        const rows = supplier?.render(node, index.symbols[from - 1].name, !!targets?.size) ?? [];
-        if (!supplier && targets?.size) {
+        const rows = supplier?.render(node, from, index.symbols[from - 1].name, !!targets?.size, untracedHandlers) ?? [];
+        if (!supplier) {
           // A matching render in an unsupported state source can still supply an open flag or callback.
           for (const attr of node.getAttributes()) {
             const name = Node.isJsxAttribute(attr) ? attr.getNameNode().getText() : '';
+            if (name === 'onClick') untracedHandlers.add(from);
             if (Node.isJsxSpreadAttribute(attr) || name === 'open' || /^on(?!Click$)[A-Z]/.test(name)) {
               rows.push([file, startLine(attr), '<' + node.getTagNameNode().getText() + '> in ' +
                 index.symbols[from - 1].name + ' ' + attr.getText(), 'prop supplier not traced to React state']);
@@ -2230,6 +2240,7 @@ export class QueryIndexBuilder {
           for (const target of targets ?? []) if (from !== target) add(details.renders, target, fact);
         }
       }
+      details.unresolvedJsxHandlers = [...untracedHandlers];
     }
     return index;
   }

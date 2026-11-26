@@ -1,18 +1,26 @@
 import { Node, SyntaxKind, ts, type CallExpression, type SourceFile } from 'ts-morph';
 import type { DetailFact, FetchEntry } from '../../mcp/Index';
+import { conditionalAt } from './ArchitectureFacts';
 import { visitKinds } from './CompilerWalk';
-import { expressionLabel, constInitializer, literalLabel, objectFields, unwrapFact } from './FactSyntax';
+import { expressionLabel, constInitializer, factValue, literalLabel, objectFields, unwrapFact } from './FactSyntax';
 import { jsxValue, PropFlow, type JsxSite } from './PropFlow';
 import { startLine } from './SourceLines';
 import { functionNode, importBinding } from './StaticBindings';
 import { jsxLabel } from './CallableFlow';
 
-type IndexedRequest = Pick<FetchEntry, 'url' | 'method' | 'via' | 'partial' | 'propUrlUnknown'>;
+export type IndexedRequest = Pick<FetchEntry, 'url' | 'method'> & { partialUrl: boolean };
 type State = { name: string; setter: string; owner: number; writes: Write[]; effects: string[] };
-type Write = { call: CallExpression; fn?: Node; label: string };
+type Write = { call: CallExpression; fn?: Node; label: string; partial?: string };
 type Call = { node: CallExpression; fn?: Node };
-type Request = { call: CallExpression; fn?: Node; method: string; url: string; via: string; body?: Node; partial?: boolean };
+type Request = {
+  call: CallExpression; fn?: Node; method: string; url: string; routes: string[]; via: string;
+  body?: Node; partial?: boolean; partialUrl?: boolean;
+};
 const callKind = new Set([SyntaxKind.CallExpression]);
+const identifierKind = new Set([SyntaxKind.Identifier]);
+const callbackName = /^on[A-Z]/;
+const propCall = /\bon[A-Z]\w*\s*(?:<[^>\n]+>\s*)?(?:\?\.\s*)?\(/;
+const statePropPartial = 'JSX state or setter binding depends on runtime';
 const apiUrl = /^\/api(?:\/|$)/;
 
 function enclosingFunction(node: Node) {
@@ -73,10 +81,10 @@ function earlyExitGuard(node: Node) {
 }
 
 export class ReactFacts {
-  static appliesTo(file: SourceFile) {
+  static appliesTo(file: SourceFile, hasJsx: boolean) {
     const text = file.compilerNode.text;
     return text.includes('useState') || text.includes('useEffect') ||
-      text.includes('useDropzone') || text.includes('XMLHttpRequest');
+      text.includes('useDropzone') || text.includes('XMLHttpRequest') || hasJsx && propCall.test(text);
   }
 
   private states = new Map<Node, State>();
@@ -97,14 +105,16 @@ export class ReactFacts {
   constructor(private file: SourceFile, private relative: string, private flow: PropFlow,
     private ownerOf: (node: Node) => number | undefined,
     private addFact: (owner: number, fact: DetailFact) => void,
-    private indexedRequests: ReadonlyMap<Node, IndexedRequest[]>,
-    private addRequest: (request: Request, fact: DetailFact, owner: number) => void) {}
+    private indexedRequests: ReadonlyMap<Node, ReadonlyMap<string, IndexedRequest>>,
+    private addRequest: (method: string, route: string, fact: DetailFact) => void) {}
 
   collect() {
     const text = this.file.compilerNode.text;
     const hasXhr = text.includes('XMLHttpRequest');
-    const imports = this.file.getImportDeclarations().filter(entry => ['react', 'react-dropzone'].includes(entry.getModuleSpecifierValue()));
-    if (!imports.length && !hasXhr) return false;
+    const imports = /useState|useEffect|useDropzone/.test(text) ?
+      this.file.getImportDeclarations().filter(entry => ['react', 'react-dropzone'].includes(entry.getModuleSpecifierValue())) : [];
+    const scanHooks = imports.length > 0 || hasXhr;
+    if (!scanHooks && !propCall.test(text)) return false;
     const maybeHooks = new Set(['useState', 'useEffect', 'useDropzone']);
     for (const entry of imports) for (const specifier of entry.getNamedImports()) {
       if (maybeHooks.has(specifier.getName())) maybeHooks.add(specifier.getAliasNode()?.getText() ?? specifier.getName());
@@ -114,7 +124,6 @@ export class ReactFacts {
       if (!Node.isCallExpression(node)) return;
       const expression = node.getExpression();
       const name = Node.isIdentifier(expression) ? expression.getText() : Node.isPropertyAccessExpression(expression) ? expression.getName() : '';
-      if (!Node.isIdentifier(expression) && !memberCandidates.has(name) && !/^on[A-Z]/.test(name)) return;
       if (maybeHooks.has(name)) {
         const hook = hookName(expression, 'react');
         if (hook === 'useState') this.state(node);
@@ -122,14 +131,17 @@ export class ReactFacts {
         else if (hookName(expression, 'react-dropzone') === 'useDropzone') this.dropzones.push(node);
       }
       const request = this.indexedRequests.has(node);
-      if (Node.isIdentifier(expression) || /^on[A-Z]/.test(name)) this.directCalls.push(node);
+      if (callbackName.test(name) || scanHooks && Node.isIdentifier(expression)) this.directCalls.push(node);
       if (request || hasXhr && name === 'open') this.requestCandidates.push({ node, fn: enclosingFunction(node) });
       if (hasXhr && name === 'send') this.xhrSends.push({ node, fn: enclosingFunction(node) });
       if (name === 'append' || name === 'set') this.formAppends.push(node);
       if (name === 'filter') this.filters.push(node);
-    }, { filterRaw: node => ts.isCallExpression(node) && (ts.isIdentifier(node.expression) ||
-      ts.isPropertyAccessExpression(node.expression) &&
-        (memberCandidates.has(node.expression.name.text) || /^on[A-Z]/.test(node.expression.name.text))) });
+    }, { filterRaw: node => {
+      if (!ts.isCallExpression(node)) return false;
+      const callee = node.expression;
+      const name = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '';
+      return callbackName.test(name) || scanHooks && (ts.isIdentifier(callee) || memberCandidates.has(name) || name === 'fetch');
+    } });
     for (const call of this.directCalls) this.recordStateAndPropCall(call);
     for (const call of this.requestCandidates) this.recordRequest(call);
     for (const request of this.requests) this.indexRequest(request);
@@ -190,19 +202,21 @@ export class ReactFacts {
     const setter = this.setterOf(callee);
     if (setter) {
       const fn = enclosingFunction(node);
-      const write = { call: node, fn, label: expressionLabel(node) };
+      const conditional = conditionalAt(node, fn) || node.hasQuestionDotToken();
+      const write = { call: node, fn, label: expressionLabel(node) + (conditional ? ' [conditional]' : ''),
+        partial: conditional ? 'setter execution is conditional' :
+          literalLabel(node.getArguments()[0]) === undefined ? 'setter value evaluated at runtime' : undefined };
       setter.writes.push(write);
       if (fn) {
         const writes = this.writesByFunction.get(fn) ?? [];
         writes.push(write);
         this.writesByFunction.set(fn, writes);
       }
-      this.add(setter.owner, node, 'set ' + setter.name + ' in ' + functionName(fn) + ' via ' + write.label,
-        literalLabel(node.getArguments()[0]) === undefined ? 'setter value evaluated at runtime' : undefined);
+      this.add(setter.owner, node, 'set ' + setter.name + ' in ' + functionName(fn) + ' via ' + write.label, write.partial);
       return;
     }
     const name = Node.isIdentifier(callee) ? callee.getText() : Node.isPropertyAccessExpression(callee) ? callee.getName() : '';
-    if (/^on[A-Z]/.test(name) && this.flow.read(callee)) {
+    if (callbackName.test(name) && this.flow.read(callee)) {
       this.add(this.ownerOf(node), node, functionName(enclosingFunction(node)) + ' calls prop ' + expressionLabel(node) + earlyExitGuard(node),
         'callback execution depends on the caller and control flow');
     }
@@ -211,13 +225,24 @@ export class ReactFacts {
   private recordRequest({ node, fn }: Call) {
     const facts = this.indexedRequests.get(node);
     const callee = node.getExpression();
-    if (facts?.length && facts.some(entry => entry.via === 'fetch')) {
-      const options = node.getArguments()[1];
-      const properties = objectFields(constInitializer(options) ?? options);
+    if (facts?.size) {
+      const [argument, options] = node.getArguments();
+      const source = unwrapFact(constInitializer(argument) ?? argument);
+      const url = Node.isStringLiteral(source) || Node.isNoSubstitutionTemplateLiteral(source)
+        ? source.getLiteralText() : expressionLabel(source);
+      const properties = objectFields(factValue(options).value);
       const body = properties?.fields.find(field => field.key === 'body')?.value;
-      for (const { method, url, partial, propUrlUnknown } of facts) {
-        this.requests.push({ call: node, fn, method, url, via: 'fetch', body,
-          partial: !!(method === '?' || partial || propUrlUnknown || properties?.opaque || options && !properties) });
+      const byMatch = new Map<string, Request>();
+      for (const { method, url: route, partialUrl } of facts.values()) {
+        const key = method + ':' + partialUrl;
+        let request = byMatch.get(key);
+        if (!request) {
+          request = { call: node, fn, method, url, routes: [], via: 'fetch', body, partialUrl,
+            partial: method === '?' || partialUrl || properties?.opaque || !!(options && !properties) };
+          byMatch.set(key, request);
+          this.requests.push(request);
+        }
+        request.routes.push(route);
       }
     } else if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'open') {
       const receiver = callee.getExpression();
@@ -234,28 +259,33 @@ export class ReactFacts {
         return enclosing === fn && Node.isPropertyAccessExpression(expression) && binding(expression.getExpression()) === xhr;
       });
       const send = sends.length === 1 && sends[0].node.getStart() > node.getStart() ? sends[0].node : undefined;
-      this.requests.push({ call: node, fn, method: method.getLiteralText().toUpperCase(), url: url.getLiteralText(),
+      const path = url.getLiteralText();
+      this.requests.push({ call: node, fn, method: method.getLiteralText().toUpperCase(), url: path, routes: [path],
         via: send ? 'XMLHttpRequest.open → send' : 'XMLHttpRequest.open', body: send?.getArguments()[0], partial: !send });
     }
   }
 
   private indexRequest(request: Request) {
-    const { call, fn, method, url, via, body } = request;
+    const { call, fn, via, body } = request;
     const name = functionName(fn);
     let text = (name === '<inline>' && fn ? functionName(enclosingFunction(fn)) + ' ' + name : name) +
-      ' → ' + method + ' ' + url + ' via ' + via;
+      ' → ' + requestTarget(request) + ' via ' + via;
     let partial = request.partial ? 'request binding unresolved' : undefined;
     const serialization = unwrapFact(constInitializer(body) ?? body);
     const stringify = Node.isCallExpression(serialization) ? serialization.getExpression() : undefined;
     if (Node.isCallExpression(serialization) && Node.isPropertyAccessExpression(stringify) &&
         stringify.getName() === 'stringify' && isGlobal(stringify.getExpression(), 'JSON')) {
       const payload = serialization.getArguments()[0];
-      const properties = objectFields(constInitializer(payload) ?? payload);
-      if (properties) {
+      const resolved = factValue(payload);
+      const properties = objectFields(resolved.value);
+      if (resolved.opaque) {
+        text += ' JSON fields { <unresolved keys> }';
+        partial = 'request body keys unresolved';
+      } else if (properties) {
         text += ' JSON fields { ' + properties.fields.map(({ key, value }) => {
           const state = this.stateOf(value);
           return key + ': ' + expressionLabel(value) + (state ? ' [state ' + state.name + ']' : '');
-        }).join(', ') + ' }';
+        }).concat(properties.opaque ? ['<unresolved keys>'] : []).join(', ') + ' }';
         if (properties.opaque) partial = 'request body keys unresolved';
         else if (properties.fields.some(({ value }) => literalLabel(value) === undefined)) partial ??= 'request values evaluated at runtime';
       } else partial = 'request body shape unresolved';
@@ -279,7 +309,10 @@ export class ReactFacts {
     }
     const owner = this.ownerOf(call);
     this.add(owner, call, text, partial);
-    if (owner !== undefined) this.addRequest(request, [this.relative, startLine(call), text, partial], owner);
+    if (owner !== undefined) {
+      const fact: DetailFact = [this.relative, startLine(call), text, partial];
+      for (const route of request.routes) this.addRequest(request.method, route, fact);
+    }
   }
 
   private recordEffect(effect: CallExpression) {
@@ -293,19 +326,25 @@ export class ReactFacts {
     const deps = dependencies.getElements();
     const calls = this.callsOf(fn);
     const effects: string[] = [];
+    let partial: string | undefined;
     for (const node of calls) {
+      const write = this.writesByFunction.get(fn)?.find(write => write.call === node);
+      if (write) {
+        effects.push(write.label);
+        partial ??= write.partial;
+        continue;
+      }
       const callee = node.getExpression();
-      if (!Node.isIdentifier(callee) || this.setterOf(callee)) continue;
-      const target = resolveFunction(callee);
-      const requests = this.requests.filter(request => request.fn === fn && request.call === node || target && request.fn === target);
+      const target = Node.isIdentifier(callee) ? resolveFunction(callee) : undefined;
+      const requests = this.requests.filter(request => request.call === node || target && request.fn === target);
       if (target || requests.length) {
-        effects.push(expressionLabel(callee) + (requests.length ? ' → ' +
-          requests.map(({ method, url }) => method + ' ' + url).join(', ') : ''));
+        effects.push(expressionLabel(callee) + (requests.length ? ' → ' + requests.map(requestTarget).join(', ') : ''));
+        if (requests.some(request => request.partial)) partial ??= 'effect request binding unresolved';
       }
     }
     const detail = 'useEffect ' + expressionLabel(dependencies) + (effects.length ? ' → ' + effects.join(', ') : '');
     this.add(owner, effect, detail, calls.length > effects.length || deps.some(Node.isSpreadElement)
-      ? 'effect calls or dependencies unresolved' : undefined);
+      ? 'effect calls or dependencies unresolved' : partial);
     for (const dep of deps) {
       const state = this.stateOf(dep);
       if (state && Node.isIdentifier(dep)) state.effects.push(detail + ' @' + startLine(effect));
@@ -367,9 +406,9 @@ export class ReactFacts {
     });
   }
 
-  render(site: JsxSite, ownerName: string, indexedTarget: boolean) {
+  render(site: JsxSite, owner: number, ownerName: string, indexedTarget: boolean, untracedHandlers: Set<number>) {
     const found: DetailFact[] = [];
-    const stateProps = new Map<State, { attr: Node; props: string[]; computed: boolean }>();
+    const stateProps = new Map<State, { attr: Node; props: string[] }>();
     const tag = site.getTagNameNode().getText();
     const prefix = '<' + tag + '> in ' + ownerName + ' ';
     for (const attr of site.getAttributes()) {
@@ -382,13 +421,13 @@ export class ReactFacts {
       const state = this.stateOf(value);
       const setter = this.setterOf(value);
       if (state) {
-        const entry = stateProps.get(state) ?? { attr, props: [], computed: false };
+        const entry = stateProps.get(state) ?? { attr, props: [] };
         entry.props.push(prop + '={' + expressionLabel(value) + '}');
-        entry.computed ||= !Node.isIdentifier(value);
         stateProps.set(state, entry);
       } else if (setter) {
-        found.push([this.relative, startLine(attr), prefix + prop + '={' + setter.setter + '} → state ' + setter.name]);
-      } else if (prop === 'open' || /^on[A-Z]/.test(prop)) {
+        found.push([this.relative, startLine(attr), prefix + prop + '={' + setter.setter + '} → state ' + setter.name,
+          statePropPartial]);
+      } else if (callbackName.test(prop)) {
         const fn = resolveFunction(value);
         const writes = fn ? this.writesByFunction.get(fn) ?? [] : [];
         const calls = prop === 'onClick' ? this.localCalls(fn) : [];
@@ -402,30 +441,51 @@ export class ReactFacts {
           const trail = (steps.length ? steps : calls).join(' → ');
           const otherCalls = steps.length && calls.length ? ' | calls ' + calls.join(', ') : '';
           found.push([this.relative, startLine(attr), label + prop + '={' + expressionLabel(value) + '} → ' + trail + otherCalls,
-            calls.length || writes.some(({ call }) => literalLabel(call.getArguments()[0]) === undefined)
-            ? 'callback calls or setter values depend on runtime' : undefined]);
-        } else if (indexedTarget && prop !== 'onClick' && (value || prop === 'open')) {
-          const literal = !value && prop === 'open' ? 'true' : literalLabel(value);
-          found.push([this.relative, startLine(attr), prefix + prop + '={' + (literal ?? expressionLabel(value)) + '}',
-            literal === undefined ? 'prop binding or callback handoff unresolved' : undefined]);
+            writes.find(write => write.partial)?.partial ?? 'callback calls or setter values depend on runtime']);
+        } else {
+          if (!untracedHandlers.has(owner) || indexedTarget && prop !== 'onClick' || this.referencesState(value)) {
+            found.push([this.relative, startLine(attr), prefix + prop + '={' + expressionLabel(value) + '}',
+              'JSX callback handoff unresolved']);
+          }
+          untracedHandlers.add(owner);
         }
+      } else if (this.referencesState(value)) {
+        found.push([this.relative, startLine(attr), prefix + prop + '={' + expressionLabel(value) + '}', statePropPartial]);
+      } else if (indexedTarget && prop === 'open') {
+        const literal = value ? literalLabel(value) : 'true';
+        found.push([this.relative, startLine(attr), prefix + prop + '={' + (literal ?? expressionLabel(value)) + '}',
+          literal === undefined ? 'prop binding or callback handoff unresolved' : undefined]);
       }
     }
-    for (const [state, { attr, props, computed }] of stateProps) {
+    for (const [state, { attr, props }] of stateProps) {
       // Keep a bounded witness per render. The owner's query lists additional setters.
       const updates = state.writes.slice(0, 3);
-      const evidence = updates.map(write => functionName(write.fn) + ' → ' + state.setter +
-        '(' + expressionLabel(write.call.getArguments()[0]) + ') @' + startLine(write.call));
+      const evidence = updates.map(write => functionName(write.fn) + ' → ' + write.label + ' @' + startLine(write.call));
       const more = state.writes.length - updates.length;
-      const reason = more ? 'additional setter sites in owner facts' : !updates.length || computed ||
-        updates.some(({ call }) => literalLabel(call.getArguments()[0]) === undefined)
-        ? 'state handoff contains runtime expressions' : undefined;
+      const reason = more ? 'additional setter sites in owner facts' :
+        updates.find(write => write.partial)?.partial ?? statePropPartial;
       found.push([this.relative, startLine(attr), prefix + props.join(' ') + ' ← state ' + state.name +
         (evidence.length ? ' via ' + evidence.join(', ') : '') + (more ? ' (+' + more + ' setter sites)' : ''), reason]);
     }
     found.sort((a, b) => a[1] - b[1]);
     return found;
   }
+
+  private referencesState(value: Node | undefined) {
+    if (!value || !this.states.size) return false;
+    let found = false;
+    visitKinds(value, identifierKind, identifier => {
+      const declaration = binding(identifier);
+      found = !!declaration && (this.states.has(declaration) || this.setters.has(declaration));
+    }, { filterRaw: node => !found && ts.isIdentifier(node) &&
+      (this.stateNames.has(node.text) || this.settersNames.has(node.text)) });
+    return found;
+  }
+
+}
+
+function requestTarget({ method, url, partialUrl }: Request) {
+  return method + ' ' + url + (partialUrl ? ' [partial url]' : '');
 }
 
 function builtInInstance(receiver: Node, name: string) {

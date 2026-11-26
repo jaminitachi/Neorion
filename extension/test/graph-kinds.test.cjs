@@ -94,6 +94,107 @@ test('facts connects handler operations, state handoffs, and request transports'
   assert.match(project.run(['--help']), /facts ItemDialog/);
 });
 
+test('facts handles the review cases', async t => {
+  const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  const index = JSON.parse(fs.readFileSync(project.build(), 'utf8'));
+  const facts = target => project.query('facts', target);
+  const handlerRows = (url, method) => {
+    const route = index.routes.find(route => route.url === url);
+    return index.detailFacts.handlers[route.id][method];
+  };
+
+  await t.test('B1 marks escaped or mutated Prisma and JSON objects opaque', () => {
+    for (const [url, method, operation, shape] of [
+      ['/api/admin/users/[id]', 'PATCH', 'store.user.update', 'data: <unresolved keys>'],
+      ['/api/admin/file-types', 'GET', 'store.fileType.findMany', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.findMany', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.count', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.aggregate', 'where: <unresolved keys>'],
+    ]) {
+      const row = handlerRows(url, method).find(([, , label]) => label.startsWith('Prisma ' + operation + '('));
+      assert.ok(row?.[2].includes(shape), operation);
+      assert.equal(row[3], 'ORM argument values unresolved');
+      assert.match(facts(method + ' ' + url), /# partial: .*ORM argument values unresolved/);
+    }
+    const original = handlerRows('/api/faqs', 'GET').find(([, , text]) => text.startsWith('Prisma store.faq.findFirst('));
+    assert.match(original[2], /where: \{ status: "PUBLISHED" \}/);
+    assert.equal(original[3], null);
+    const bodyRows = index.detailFacts.requests['PATCH /api/admin/users/[id]'].filter(([, , text]) =>
+      text.includes('JSON fields'));
+    assert.equal(bodyRows.length, 2);
+    for (const [, , text, partial] of bodyRows) {
+      assert.match(text, /JSON fields \{ <unresolved keys> \}/);
+      assert.equal(partial, 'request body keys unresolved');
+    }
+  });
+
+  await t.test('B2 shows the source URL and marks non-exact route matches', () => {
+    const output = facts('GET /api/teams/[teamId]/documents/[id]/views/[viewId]/stats');
+    assert.match(output, /client fetchStatus → GET `\/api\/teams\/\$\{teamId\}\/downloads\/\$\{jobId\}` \[partial url\] via fetch/);
+    assert.match(output, /client fetchStatic → GET \/api\/teams\/sample\/documents\/example\/views\/v1\/stats\?format=short via fetch$/m);
+    assert.match(output, /# partial: .*request binding unresolved/);
+  });
+
+  await t.test('B3 reports compound state props and untraced JSX handlers', () => {
+    const output = facts('app/review-cases.tsx#RequestFolderEditAccessButton');
+    for (const prop of ['disabled={isRequested || requestSent}', 'text={isRequested ?', 'visible={!requestSent}',
+      'pending={false === requestSent}', 'onTouchStart={requestSent ? finished : setRequestSent}',
+      'onClick={async () => await executeAsync()}']) {
+      assert.ok(output.includes(prop), prop);
+    }
+    assert.match(output, /# partial: .*JSX callback handoff unresolved/);
+    assert.match(output, /# partial: .*JSX state or setter binding depends on runtime/);
+    assert.doesNotMatch(output, /^# complete:/m);
+    assert.match(facts('EditApprovalButton'), /^# partial:/m);
+  });
+
+  await t.test('F1 deduplicates fetch rows at a route and at the source symbol', () => {
+    for (const target of ['DownloadProgress', 'GET /api/teams/[teamId]/documents/[id]/views/[viewId]/stats',
+      'GET /api/teams/[teamId]/downloads/[jobId]']) {
+      const requestRows = facts(target).split('\n').filter(line => line.includes('fetchStatus → GET'));
+      assert.equal(requestRows.length, 1, target);
+    }
+    const downloads = '/api/teams/[teamId]/downloads/[jobId]';
+    const route = index.routes.find(route => route.url === downloads);
+    const propMatches = index.fetches.filter(match => match.route === route.id && match.via === 'fetch' &&
+      match.fn === 'download' && match.binding?.name === 'url');
+    assert.equal(propMatches.length, 2);
+    assert.equal(propMatches[0].line, propMatches[1].line);
+    assert.equal(facts('GET ' + downloads).split('\n').filter(line => line.includes('client download →')).length, 1);
+    assert.equal(facts('PATCH /api/admin/users/[id]').split('\n').filter(line => line.includes('client save')).length, 2);
+  });
+
+  await t.test('F2 records prop calls in a JSX card without hooks or React imports', () => {
+    assert.match(facts('RecycleCard'), /handleRestore calls prop onRestore\(file.id, file.name\)/);
+  });
+
+  await t.test('F3 marks short-circuited and if-branch setters conditional', () => {
+    const output = facts('PreviewSettings');
+    assert.match(output, /set locked in unlock via setLocked\(false\) \[conditional\]/);
+    assert.match(output, /set locked in unlock via setLocked\(true\) \[conditional\]/);
+    assert.match(output, /^# partial: .*setter execution is conditional/m);
+  });
+
+  await t.test('F4 describes direct effect setters without treating them as unresolved calls', () => {
+    const output = facts('PreviewSettings');
+    assert.match(output, /useEffect \[open, fileId\] → setFileUrl\(url\)/);
+    assert.doesNotMatch(output, /effect calls or dependencies unresolved/);
+  });
+
+  await t.test('F5 displays one row for the outermost fluent call', () => {
+    const rows = handlerRows('/api/faqs', 'POST').filter(([, , label]) => label.startsWith('call db.'));
+    assert.deepEqual(rows.map(([, , label]) => label), ["call db.select().from('faq').where('published').limit"]);
+  });
+
+  await t.test('F6 uses the same setter label in handoffs and handlers', () => {
+    const output = facts('DownloadProgress');
+    const setter = "setStatus('loading')";
+    assert.ok(output.includes('data-status={status} ← state status via <inline> → ' + setter + ' @'));
+    assert.ok(output.includes('via ' + setter + ' @'));
+    assert.ok(output.includes('set status in <inline> via ' + setter));
+  });
+});
+
 function loadAnalyzer(name, compilerWalk) {
   const { outputFiles } = buildSync({
     entryPoints: [path.join(__dirname, '../src/core/analyzers', name + '.ts')],
@@ -243,7 +344,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 11);
+  assert.equal(kindSets.size, 12);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
