@@ -583,6 +583,155 @@ export default function WrappedLayout({ children }) { return <MissingProvider>{c
   assert.match(query('wrappers', '/wrapped'), /# partial: unresolved workspace modules @fixture\/types\/provider\s*$/);
 });
 
+test('workspace barrels keep missing runtime re-exports partial and index inline handler names', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const write = (file, text) => {
+    const absolute = path.join(root, file);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, text);
+  };
+  write('packages/sdk/package.json', '{"name":"@fixture/sdk","main":"dist/index.js"}');
+  write('packages/bridge/package.json', '{"name":"@fixture/bridge","main":"src/index.ts"}');
+  write('packages/bridge/src/index.ts', `
+    export { track as uiTrack, SdkBoundary } from '@fixture/sdk';
+    export * from '@fixture/sdk';
+    export * as Sdk from '@fixture/sdk';
+    import { track } from '@fixture/sdk';
+    export { track as viaLocalImport };
+    export { SharedCard } from '@fixture/ui/card';
+    export { ExplicitCard } from './explicit-card';
+  `);
+  write('packages/bridge/src/explicit-card.tsx', `
+    export function ExplicitCard({ onClick }) {
+      onClick();
+      return <div/>;
+    }
+  `);
+  write('apps/web/app/barrel/page.tsx', `
+    import { uiTrack, register, Sdk, viaLocalImport, SdkBoundary, SharedCard } from '@fixture/bridge';
+    export function namedCall() { uiTrack(); }
+    export function starCall() { register(() => 1); }
+    export function namespaceCall() { Sdk.track(); }
+    export function localReExport() { viaLocalImport(); }
+    export default function BarrelPage() { return <SdkBoundary><SharedCard/></SdkBoundary>; }
+  `);
+  write('apps/web/app/barrel/layout.tsx', `
+    import { SdkBoundary } from '@fixture/bridge';
+    export default function BarrelLayout({ children }) { return <SdkBoundary>{children}</SdkBoundary>; }
+  `);
+  write('apps/web/app/handler/page.tsx', `
+    import { SharedCard } from '@fixture/bridge';
+    export function onCard() { return 1; }
+    export default function HandlerPage() { return <SharedCard onClick={() => onCard()}/>; }
+  `);
+  write('apps/web/app/legacy/page.tsx', `
+    import { ExplicitCard } from '@fixture/bridge';
+    export default function LegacyPage() { return <ExplicitCard onClick={() => 1}/>; }
+  `);
+  write('apps/web/app/collision/page.tsx', `
+    import { ExplicitCard, ExplicitCard as OtherCard } from '@fixture/bridge';
+    function first() {}
+    function second() {}
+    export default function CollisionPage() {
+      return <><ExplicitCard onClick={() => first()}/><OtherCard onClick={() => second()}/></>;
+    }
+  `);
+  const query = (kind, target) => {
+    const result = run(['query', kind, target, '--app', 'web']);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const missing = /# partial: unresolved workspace modules @fixture\/sdk\s*$/;
+  for (const target of ['namedCall', 'starCall', 'namespaceCall', 'localReExport', 'BarrelPage']) {
+    assert.match(query('callees', target), missing);
+  }
+  assert.match(query('callees', 'BarrelPage'), /^d1 render .* SharedCard /m);
+  assert.match(query('wrappers', '/barrel'), missing);
+  assert.match(query('wrappers', '/handler'), /# complete: indexed wrapper chains\s*$/);
+  assert.match(query('callees', 'app/handler/page.tsx#onClick SharedCard'), /^d1 call .* onCard /m);
+  const alias = query('impact', 'app/legacy/page.tsx#onClick');
+  assert.match(alias, /^page \/legacy\s/m);
+  assert.match(alias, /^# complete:/m);
+  const ambiguous = query('impact', 'app/collision/page.tsx#onClick');
+  assert.match(ambiguous, /^# ambiguous impact/m);
+  assert.match(ambiguous, /#onClick ExplicitCard/);
+  assert.match(ambiguous, /#onClick OtherCard/);
+  assert.match(query('impact', 'onCard'), /^page \/handler\s/m);
+});
+
+test('workspace callback names and route impact survive untraced JSX forwarding', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const write = (file, text) => {
+    const absolute = path.join(root, file);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, text);
+  };
+  write('packages/ui/package.json', '{"name":"@fixture/ui","main":"src/index.tsx"}');
+  write('packages/ui/src/index.tsx', `
+    export { ConfirmDialog, ConfirmationDialogContent } from './confirm';
+    export function SharedCard({ onClick }) { return <button onClick={onClick}/>; }
+  `);
+  write('packages/ui/src/confirm.tsx', `
+    export function ConfirmDialog(props) {
+      return <section><ConfirmContent {...props}/></section>;
+    }
+    const ConfirmContent = (props) => {
+      const { onConfirm, children } = props;
+      return <div><button onClick={event => onConfirm && onConfirm(event)}>ok</button>{children}</div>;
+    };
+    export function ConfirmationDialogContent(props) { return <ConfirmContent {...props}/>; }
+  `);
+  write('apps/web/app/g/page.tsx', `
+    'use client';
+    import { ConfirmDialog, SharedCard } from '@fixture/ui';
+    function deleteTeam(id) { return id; }
+    function onCard() {}
+    function Item(props) {
+      return <ConfirmDialog onConfirm={() => props.onActionSelect('disband')}>x</ConfirmDialog>;
+    }
+    export default function GPage() {
+      return <><Item onActionSelect={action => { if (action === 'disband') deleteTeam('1'); }}/>
+        <SharedCard onClick={() => onCard()}/></>;
+    }
+  `);
+  write('apps/web/app/settings/organizations/teams/other/page.tsx', `
+    import { OtherTeamList } from '../../../../../teams';
+    export default function TeamPage() { return <OtherTeamList/>; }
+  `);
+  write('apps/web/teams.tsx', `
+    'use client';
+    import { ConfirmationDialogContent } from '@fixture/ui';
+    function deleteTeam(id) { return id; }
+    function OtherTeamListItem({ id, onActionSelect }) {
+      return <ConfirmationDialogContent onConfirm={() => onActionSelect('disband', id)}>
+        Confirm removal
+      </ConfirmationDialogContent>;
+    }
+    export function OtherTeamList() {
+      return <OtherTeamListItem id="1" onActionSelect={(action, id) => {
+        if (action === 'disband') deleteTeam(id);
+      }}/>;
+    }
+  `);
+  const query = (kind, target) => {
+    const result = run(['query', kind, target, '--app', 'web']);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  assert.match(query('callees', 'app/g/page.tsx#onClick SharedCard'), /^d1 call .* onCard /m);
+  for (const [target, route] of [['app/g/page.tsx#deleteTeam', '/g'], ['teams.tsx#deleteTeam', '/settings/organizations/teams/other']]) {
+    const impact = query('impact', target);
+    assert.ok(impact.split('\n').some(line => line.startsWith(`page ${route} `)), impact);
+    assert.match(impact, /^# partial: .*prop callback untraced/m);
+  }
+});
+
 test('workspace discovery orders docs and website with production apps', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });
@@ -1415,7 +1564,9 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   for (const [input, kind, target] of [
     [component, 'who_renders', 'DashboardShell'],
     [payload('Glob', componentGlob, 'app', '../another/session'), 'who_renders', 'DashboardShell'],
-    [payload('Glob', '**/app/settings/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
+    [payload('Glob', '**/app/(account)/settings/(profile)/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
+    [payload('Glob', 'app/(chat)/page.tsx'), 'wrappers', '/'],
+    [payload('Glob', 'src/app/(chat)/api/(public)/chat/route.ts'), 'api_consumers', '/api/chat'],
     [payload('Grep', '/api/users'), 'api_consumers', '/api/users'],
     [payload('Grep', 'FormError'), 'search', 'FormError'],
     [payload('Glob', '**/ChatSDKError.ts'), 'search', 'ChatSDKError'],
