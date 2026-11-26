@@ -393,6 +393,7 @@ test('who_renders follows React lazy and Next dynamic imports from their JSX sit
   write(root, 'components/barrel.ts', "export { Bar as NamedBar } from './bar';");
   write(root, 'components/baz.tsx', 'export function Baz() { return <i />; }');
   write(root, 'components/unknown.tsx', 'export function Unknown() { return <i />; }');
+  write(root, 'components/indirect.tsx', 'export function Indirect() { return <i />; }');
   write(root, 'components/unrendered.tsx', 'export default function Unrendered() { return <i />; }');
   write(root, 'components/data.tsx', 'export default function Data() { return <i />; }');
   write(root, 'components/mixed.tsx', 'export default function Mixed() { return <i />; }');
@@ -404,11 +405,12 @@ test('who_renders follows React lazy and Next dynamic imports from their JSX sit
     "const DynBar = dynamic(() => import('@/components/barrel').then(m => m.NamedBar));",
     "const LazyBaz = React.lazy(() => import('@/components/baz').then(m => ({ default: m.Baz })));",
     "const Opaque = dynamic(() => import('@/components/unknown').then(m => m[chooseExport()]));",
+    "const Indirect = dynamic(() => import('@/components/indirect').then(() => opaque.Indirect));",
     "const unused = load(() => import('@/components/unrendered'));",
     "const data = import('@/components/data');",
     "const LazyMixed = load(() => import('@/components/mixed'));",
     'register({ component: LazyMixed });',
-    'export default function Page({ show }) { return <><LazyFoo />{show && <DynBar />}<LazyBaz /><Opaque /><LazyMixed /></>; }'
+    'export default function Page({ show }) { return <><LazyFoo />{show && <DynBar />}<LazyBaz /><Opaque /><Indirect /><LazyMixed /></>; }'
   ].join('\n'));
   await generate(root);
   const client = await openMcp(t, root);
@@ -420,6 +422,9 @@ test('who_renders follows React lazy and Next dynamic imports from their JSX sit
     assert.match(output, /# complete: indexed JSX paths$/);
   }
   assert.match(await client.text('who_renders', { component: 'Unknown' }), /# partial: rendered through a dynamic reference$/);
+  const indirect = await client.text('who_renders', { component: 'Indirect' });
+  assert.match(indirect, /: 0 results/);
+  assert.match(indirect, /# partial: rendered through a dynamic reference$/);
   assert.match(await client.text('who_renders', { component: 'Unrendered' }), /# partial: rendered through a dynamic reference$/);
   assert.match(await client.text('who_renders', { component: 'Data' }), /0 results [^\n]*\n# complete: indexed JSX paths$/);
   const mixed = await client.text('who_renders', { component: 'Mixed' });

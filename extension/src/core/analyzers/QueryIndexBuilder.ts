@@ -95,7 +95,8 @@ function dynamicExport(node: Node) {
     const [member] = result.getProperties();
     if (Node.isPropertyAssignment(member) && member.getName() === 'default') result = member.getInitializer();
   }
-  if (Node.isPropertyAccessExpression(result) && bindingOf(result.getExpression()) === callback.getParameters()[0]) {
+  const parameter = callback.getParameters()[0];
+  if (parameter && Node.isPropertyAccessExpression(result) && bindingOf(result.getExpression()) === parameter) {
     return { name: result.getName(), selector: result, expression: throughWrappers(call) };
   }
 }
