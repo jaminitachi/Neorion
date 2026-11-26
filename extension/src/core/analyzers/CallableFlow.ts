@@ -1,5 +1,6 @@
-import { Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import { declarationsOf, wrappedExpression } from './ArchitectureFacts';
+import { isFunctionLikeDeclaration, visitKinds } from './CompilerWalk';
 import { constValue, JsxSite } from './PropFlow';
 
 export type FunctionNode = import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression |
@@ -10,18 +11,19 @@ export function isFunction(node: Node | undefined): node is FunctionNode {
     Node.isFunctionDeclaration(node) || Node.isMethodDeclaration(node);
 }
 
+const returnKinds = new Set([SyntaxKind.ReturnStatement]);
+
 export function returnedValues(fn: FunctionNode): Node[] {
   const body = fn.getBody();
   if (!body) return [];
   if (!Node.isBlock(body)) return [body];
   const values: Node[] = [];
-  body.forEachDescendant((node, traversal) => {
-    if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node)) traversal.skip();
+  visitKinds(body, returnKinds, node => {
     if (Node.isReturnStatement(node)) {
       const expression = node.getExpression();
       if (expression) values.push(expression);
     }
-  });
+  }, { skipNode: node => isFunctionLikeDeclaration(node) || ts.isClassDeclaration(node) });
   return values;
 }
 

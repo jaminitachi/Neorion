@@ -333,6 +333,15 @@ export class QueryIndexBuilder {
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
     const declarationsOf = (node: Node) => flow.declarations(node);
+    const types = new WeakMap<Node, ReturnType<Node['getType']>>();
+    const typeOf = (node: Node) => {
+      let type = types.get(node);
+      if (type === undefined) {
+        type = node.getType();
+        types.set(node, type);
+      }
+      return type;
+    };
     const trpcFacts = new TrpcFacts(files, trpcSources, declarationsOf);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
@@ -1237,7 +1246,7 @@ export class QueryIndexBuilder {
           const initializer = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
           const property = node.getPropertyNameNode() ?? node.getNameNode();
           if (!initializer || !Node.isIdentifier(property) || !Node.isIdentifier(node.getNameNode())) return;
-          const symbol = initializer.getType().getProperty(property.getText());
+          const symbol = typeOf(initializer).getProperty(property.getText());
           const declarations = (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
           const id = declarations.map(target => byNode.get(target)).find(value => value !== undefined);
           if (id !== undefined) {
@@ -1327,7 +1336,7 @@ export class QueryIndexBuilder {
         } else if (Node.isElementAccessExpression(node)) {
           const key = node.getArgumentExpression();
           if (Node.isStringLiteral(key)) {
-            const symbol = node.getExpression().getType().getProperty(key.getLiteralText());
+            const symbol = typeOf(node.getExpression()).getProperty(key.getLiteralText());
             if (symbol) record(key, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
           }
         } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
@@ -1338,7 +1347,7 @@ export class QueryIndexBuilder {
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
       }, {
-        visitRaw: historyOnly ? undefined : scanNodeComments,
+        visitRaw: historyOnly || !/\/[/\*]/.test(content) ? undefined : scanNodeComments,
         filterRaw: node => {
           if (!ts.isIdentifier(node)) return true;
           // Use the source spelling, including Unicode escapes, just as the reference visitor does.

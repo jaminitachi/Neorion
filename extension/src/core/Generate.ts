@@ -21,6 +21,13 @@ interface GenerateOptions {
 }
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
+    const graph = analyzeGraph(projectPath, options);
+    if (!options.markdown) return { graph };
+    options.onProgress?.("Generating Markdown...");
+    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
+}
+
+function analyzeGraph(projectPath: string, options: GenerateOptions): CodebaseGraph {
     const packageJsonPath = path.join(projectPath, 'package.json');
     const pkg = fs.existsSync(packageJsonPath) ? JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8')) : undefined;
     const framework = projectRouterFramework(projectPath, pkg);
@@ -99,31 +106,29 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
         devDependencies = Object.keys(pkg?.devDependencies ?? {}).sort();
     }
 
-    // 4. Construct Graph
-    const graph: CodebaseGraph = {
+    return {
         metadata: {
             name,
             router: router?.framework ?? (hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none')),
             directories: [...directories.values()].sort((a, b) => a.path.localeCompare(b.path))
         },
-        routes,
+        // Keep the compiler nodes used by the router adapter within analysis.
+        routes: router ? router.routes.map(({ source, site, ...route }) => route) : routes,
         sourceFileCount: sourceFiles.length,
         ...analysis,
         libraries,
         devDependencies
     };
-
-    if (!options.markdown) return { graph };
-    options.onProgress?.("Generating Markdown...");
-    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
 }
 
 function openProject(root: string, workspace: WorkspaceBindings): Project {
     const resolutionHost = workspace.resolutionHost();
     const configPath = projectConfig(root);
     const typescript = configPath && path.basename(configPath) === 'tsconfig.json';
+    // Graph extraction uses the checker for symbols and types without requesting diagnostics.
+    const skipLibCheck = true;
     if (typescript && !resolutionHost) {
-        return new Project({ tsConfigFilePath: configPath, resolutionHost });
+        return new Project({ tsConfigFilePath: configPath, compilerOptions: { skipLibCheck } });
     }
 
     const configHost = resolutionHost ? workspace.configHost() : ts.sys;
@@ -141,7 +146,7 @@ function openProject(root: string, workspace: WorkspaceBindings): Project {
             }
         } : configHost;
     const { options, fileNames } = parse(host);
-    const project = new Project({ resolutionHost, compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options } });
+    const project = new Project({ resolutionHost, compilerOptions: { jsx: ts.JsxEmit.Preserve, ...options, skipLibCheck } });
     for (const file of fileNames) {
         if (!workspace.isRootWorkspace() || !workspace.packageFor(file)) project.addSourceFileAtPath(file);
     }
