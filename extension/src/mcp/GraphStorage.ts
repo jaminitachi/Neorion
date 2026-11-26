@@ -65,9 +65,10 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
     return route.pages && methods ? { ...route, methods } : route;
   });
   facts.renderSites = [];
+  const excludedSites = new Set(Object.values(index.renderExclusions ?? {}).flat());
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
-    if (!site) return edge;
+    if (!site || excludedSites.has(site)) return edge;
     facts.renderSites!.push([offset, site]);
     if (edge[8]) {
       const packed: typeof edge = [...edge];

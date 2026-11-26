@@ -4,8 +4,8 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 15;
-export const GRAPH_INDEX_REVISION = 21;
+export const QUERY_INDEX_REVISION = 16;
+export const GRAPH_INDEX_REVISION = 22;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -40,6 +40,7 @@ export interface SymbolEntry {
   localUses?: number[];
   typeOnly?: boolean;
   synthetic?: true;
+  selectorAliases?: string[];
 }
 
 export interface Wrapper {
@@ -180,6 +181,8 @@ export interface QueryIndex {
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
+  renderExclusions?: Record<string, string[]>;
+  contextRenderExclusions?: string[];
   renderLookupIssues?: Record<number, string>;
   opaqueRenderLookupIssues?: Record<number, string>;
   renderValueUses?: Record<number, string>;

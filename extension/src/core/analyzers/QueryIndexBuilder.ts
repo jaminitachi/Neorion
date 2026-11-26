@@ -21,7 +21,7 @@ import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
-import { bindingOf, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -56,9 +56,7 @@ function configuredPaths(source: SourceFile, root: string, specifier: string) {
 
 function componentValueUse(node: Node, indexedComponent: (node: Node | undefined) => boolean): boolean {
   if (Node.isShorthandPropertyAssignment(node)) return true;
-  if (Node.isExportSpecifier(node)) {
-    return !!node.getAliasNode() && !node.isTypeOnly() && !node.getExportDeclaration().isTypeOnly();
-  }
+  if (Node.isExportSpecifier(node)) return false;
   let value = node;
   for (let parent = value.getParent(); parent; parent = value.getParent()) {
     if (wrappedExpression(parent) === value ||
@@ -171,8 +169,10 @@ function dynamicExport(node: Node) {
 
 function simpleReturn(body: Node) {
   if (!Node.isBlock(body)) return body;
-  const [statement, extra] = body.getStatements();
-  if (!extra && Node.isReturnStatement(statement)) return statement.getExpression();
+  const statements = body.getStatements();
+  const last = statements.pop();
+  if (Node.isReturnStatement(last) && statements.every(statement =>
+    Node.isVariableStatement(statement) && statement.getDeclarationKind() === 'const')) return last.getExpression();
 }
 
 function lazyFactory(call: import('ts-morph').CallExpression) {
@@ -190,49 +190,146 @@ function lazyVariable(call: Node) {
     binding.getVariableStatement()?.getDeclarationKind() === 'const' ? binding : undefined;
 }
 
-function lazyLoader(node: Node) {
-  const loader = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
-  if (!Node.isArrowFunction(loader) && !Node.isFunctionExpression(loader)) return;
-  const argument = throughWrappers(loader);
-  const call = argument.getParent();
-  if (!Node.isCallExpression(call) || call.getArguments()[0] !== argument || !lazyFactory(call)) return;
-  const result = simpleReturn(loader.getBody());
-  return { call, variable: lazyVariable(call), result: result && throughWrappers(result) };
-}
+type LoaderTarget = {
+  imported: import('ts-morph').CallExpression;
+  name?: string;
+  selector?: import('ts-morph').PropertyAccessExpression;
+  possible: boolean;
+  partialOnly?: true;
+};
 
-function loaderImports(result: Node | undefined, files: ReadonlySet<SourceFile>) {
-  const imports = new Set<import('ts-morph').CallExpression>();
-  const visited = new Set<Node>();
-  const follow = (value: Node | undefined, remaining: number, helper = false) => {
+function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): LoaderTarget[] {
+  type Selection = Pick<LoaderTarget, 'name' | 'selector'>;
+  type PromiseBinding = { parameter: Node; input: Node; outer?: PromiseBinding };
+  const targets: LoaderTarget[] = [];
+  let budget = 64;
+  const follow = (value: Node | undefined, possible: boolean, selection?: Selection, binding?: PromiseBinding) => {
     const node = unwrapValue(value);
-    if (!node || remaining === 0 || visited.has(node) || visited.size >= 32) return;
-    visited.add(node);
-    if (Node.isAwaitExpression(node)) follow(node.getExpression(), remaining - 1, helper);
-    else if (Node.isConditionalExpression(node)) {
-      follow(node.getWhenTrue(), remaining - 1, helper);
-      follow(node.getWhenFalse(), remaining - 1, helper);
+    if (!node || --budget < 0) return;
+    if (Node.isAwaitExpression(node)) {
+      follow(node.getExpression(), possible, selection, binding);
+    } else if (Node.isConditionalExpression(node)) {
+      const condition = valueNode(node.getCondition());
+      if (!Node.isFalseLiteral(condition)) follow(node.getWhenTrue(), possible || !Node.isTrueLiteral(condition), selection, binding);
+      if (!Node.isTrueLiteral(condition)) follow(node.getWhenFalse(), possible || !Node.isFalseLiteral(condition), selection, binding);
+    } else if (!selection && Node.isPropertyAccessExpression(node)) {
+      follow(node.getExpression(), possible, { name: node.getName(), selector: node }, binding);
+    } else if (!selection && Node.isElementAccessExpression(node)) {
+      const key = valueNode(node.getArgumentExpression());
+      if (Node.isStringLiteral(key) || Node.isNoSubstitutionTemplateLiteral(key)) {
+        follow(node.getExpression(), possible, { name: key.getLiteralText() }, binding);
+      }
+    } else if (Node.isObjectLiteralExpression(node) && (!selection || selection.name === 'default')) {
+      const [member, extra] = node.getProperties();
+      if (!extra && Node.isPropertyAssignment(member) && member.getName() === 'default') {
+        follow(member.getInitializer(), possible, undefined, binding);
+      }
     } else if (Node.isIdentifier(node)) {
       const declaration = bindingOf(node);
-      if (declaration) follow(constValue(declaration), remaining - 1, true);
+      if (binding && declaration === binding.parameter) {
+        follow(binding.input, possible, selection, binding.outer);
+      } else if (!selection && Node.isBindingElement(declaration) && !declaration.getInitializer() && !declaration.getDotDotDotToken()) {
+        const pattern = declaration.getParent();
+        const property = declaration.getPropertyNameNode() ?? declaration.getNameNode();
+        const name = Node.isIdentifier(property) ? property.getText() : Node.isStringLiteral(property) ? property.getLiteralText() : undefined;
+        if (name && Node.isObjectBindingPattern(pattern)) {
+          const owner = pattern.getParent();
+          if (binding && owner === binding.parameter) follow(binding.input, possible, { name }, binding.outer);
+          else follow(constValue(owner), possible, { name }, binding);
+        }
+      } else if (declaration) follow(constValue(declaration), possible, selection, binding);
     } else if (Node.isCallExpression(node)) {
       const callee = node.getExpression();
       if (callee.getKind() === SyntaxKind.ImportKeyword) {
-        if (helper) imports.add(node);
+        targets.push({ imported: node, name: 'default', ...selection, possible });
+      } else if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'then') {
+        const callback = functionNode(node.getArguments()[0]);
+        const parameter = callback?.getParameters()[0];
+        if (callback && files.has(callback.getSourceFile())) {
+          const body = callback.getBody();
+          const result = body && simpleReturn(body);
+          const input = callee.getExpression();
+          for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) {
+            const before = targets.length;
+            follow(returned, possible || !result, selection, parameter ? { parameter, input, outer: binding } : binding);
+            if (targets.length !== before || !Node.isCallExpression(input) ||
+                input.getExpression().getKind() !== SyntaxKind.ImportKeyword) continue;
+            const value = unwrapValue(returned);
+            // An opaque return provides evidence only for a stated member or
+            // an unresolved key read from this particular imported namespace.
+            const computed = parameter && Node.isElementAccessExpression(value) &&
+              bindingOf(unwrapValue(value.getExpression())) === parameter;
+            if (computed || Node.isPropertyAccessExpression(value)) {
+              targets.push({ imported: input, name: Node.isPropertyAccessExpression(value) ? value.getName() : undefined,
+                possible: true, partialOnly: true });
+            }
+          }
+        }
       } else {
         const fn = functionNode(callee);
-        if (!fn || !files.has(fn.getSourceFile())) return;
-        for (const returned of returns(fn.getBody())) follow(returned, remaining - 1, true);
+        if (fn && files.has(fn.getSourceFile())) {
+          for (const { node } of executionSites(fn.getBody()).returned) follow(node, true, selection);
+        }
       }
     }
   };
-  follow(result, 8);
-  return imports;
+  const body = loader.getBody();
+  const result = body && simpleReturn(body);
+  for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) follow(returned, !result);
+  return targets;
+}
+
+function finiteTemplateValues(node: Node, remaining = 8): (string | undefined)[] {
+  if (!remaining) return [undefined];
+  const value = valueNode(node);
+  if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) return [value.getLiteralText()];
+  if (Node.isNumericLiteral(value)) return [String(value.getLiteralValue())];
+  if (Node.isConditionalExpression(value)) {
+    const condition = valueNode(value.getCondition());
+    if (Node.isTrueLiteral(condition)) return finiteTemplateValues(value.getWhenTrue(), remaining - 1);
+    if (Node.isFalseLiteral(condition)) return finiteTemplateValues(value.getWhenFalse(), remaining - 1);
+    return [...new Set([value.getWhenTrue(), value.getWhenFalse()].flatMap(branch => finiteTemplateValues(branch, remaining - 1)))];
+  }
+  return [undefined];
+}
+
+function readsUrlParameter(value: Node) {
+  if (!Node.isCallExpression(value)) return false;
+  const callee = value.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'get' ||
+      !Node.isStringLiteral(value.getArguments()[0])) return false;
+  const seen = new Set<Node>();
+  const fromLocation = (input: Node | undefined): boolean => {
+    const source = valueNode(input);
+    if (!source || seen.size >= 16 || seen.has(source)) return false;
+    seen.add(source);
+    if (Node.isBinaryExpression(source) &&
+        [SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken].includes(source.getOperatorToken().getKind())) {
+      return fromLocation(source.getLeft()) || fromLocation(source.getRight());
+    }
+    if (Node.isNewExpression(source)) {
+      const constructor = source.getExpression();
+      const params = packageMember(constructor, 'next/navigation') === 'ReadonlyURLSearchParams' ||
+        Node.isIdentifier(constructor) && constructor.getText() === 'URLSearchParams' &&
+          declarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+      return params && fromLocation(source.getArguments()[0]);
+    }
+    if (!Node.isCallExpression(source)) return false;
+    const expression = source.getExpression();
+    if (packageMember(expression, 'next/navigation') === 'useSearchParams') return true;
+    if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'toString') {
+      return fromLocation(expression.getExpression());
+    }
+    return returns(functionNode(expression)?.getBody()).some(fromLocation);
+  };
+  return fromLocation(callee.getExpression());
 }
 
 export class QueryIndexBuilder {
   constructor(private readonly exportsOf = (file: SourceFile) => file.getExportedDeclarations()) {}
 
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
+  private contextExcluded = new Set<typeof this.edges[number]>();
   private replacedInlineRenders = new Set<typeof this.edges[number]>();
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
@@ -261,13 +358,15 @@ export class QueryIndexBuilder {
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: RenderSite, file?: string) {
+  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node,
+    detail?: string, site?: RenderSite, file?: string, contextExcluded?: true) {
     const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
       layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
     if (detail) edge[6] = detail;
     if (site) edge[7] = site;
     if (file) edge[8] = file;
     this.edges.push(edge);
+    if (contextExcluded) this.contextExcluded.add(edge);
     if (tag) {
       const entries = this.renderSites.get(tag) ?? [];
       entries.push(edge);
@@ -373,28 +472,26 @@ export class QueryIndexBuilder {
       }
       if (!allowTemplate || !Node.isTemplateExpression(specifier)) return { modules: [], exact: false };
       const placeholder = '\u0000';
-      let pattern = specifier.getHead().getLiteralText();
+      let choices = [specifier.getHead().getLiteralText()];
+      let exact = true;
       for (const span of specifier.getTemplateSpans()) {
-        const value = valueNode(span.getExpression());
-        const text = Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value) ? value.getLiteralText() :
-          Node.isNumericLiteral(value) ? String(value.getLiteralValue()) : placeholder;
-        pattern += text + span.getLiteral().getLiteralText();
+        const values = finiteTemplateValues(span.getExpression());
+        const suffix = span.getLiteral().getLiteralText();
+        const bounded = choices.length * values.length <= 64 ? values : [undefined];
+        exact &&= bounded.length === 1 && bounded[0] !== undefined;
+        choices = [...new Set(choices.flatMap(prefix => bounded.map(value => prefix + (value ?? placeholder) + suffix)))];
       }
-      if (!pattern.includes(placeholder)) {
-        const target = resolve(pattern);
-        return { modules: target ? [target] : [], exact: true };
-      }
-      const prefix = pattern.split(placeholder, 1)[0];
-      if (!prefix.includes('/')) return { modules: [], exact: false };
-      const patterns = configuredPaths(source, root, pattern).map(absolute =>
-        new RegExp('^' + absolute.split(placeholder).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
+      const finite = choices.filter(choice => !choice.includes(placeholder)).flatMap(choice => resolve(choice) ?? []);
+      const patterns = choices.filter(choice => choice.includes(placeholder) && choice.split(placeholder, 1)[0].includes('/'))
+        .flatMap(choice => configuredPaths(source, root, choice)).map(absolute =>
+          new RegExp('^' + absolute.split(placeholder).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
       const modules = patterns.length ? files.filter(file => {
         const absolute = file.getFilePath();
         const stem = absolute.replace(/\.[cm]?[jt]sx?$/, '');
         return patterns.some(regex => regex.test(absolute) || regex.test(stem) ||
           stem.endsWith('/index') && regex.test(stem.slice(0, -6)));
       }) : [];
-      return { modules, exact: false };
+      return { modules: [...new Set([...finite, ...modules])], exact };
     };
     const names = new Set<string>();
     const wrappedOwners = new Set<number>();
@@ -570,13 +667,17 @@ export class QueryIndexBuilder {
       if (!name) return;
       const id = add(binding, name, 'function', null);
       localCallables.set(id, binding);
-      if (returnedCallback || !factoryName && !declaredName) index.symbols[id - 1].synthetic = true;
+      const symbol = index.symbols[id - 1];
+      if (returnedCallback || !factoryName && !declaredName) symbol.synthetic = true;
+      if (symbol.synthetic && !event && workspaceSite && name !== workspaceSite.name) {
+        symbol.selectorAliases = [workspaceSite.name];
+      }
       byNode.set(fn, id);
       return id;
     };
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
       detail: string; gates?: PropGate[]; lookup: boolean }[] = [];
-    const untracedEvents: typeof eventSites = [];
+    const pendingEvents: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; fn: FunctionNode; name: string }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
     const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[] }[]>();
     const dynamicCallSites = new Set<Node>();
@@ -614,9 +715,7 @@ export class QueryIndexBuilder {
           const delivery = flow.eventDelivery(site, name);
           if (!delivery) {
             if (isFunction(value) && workspaceEvent(node)) {
-              const label = jsxLabel(site);
-              const target = callableId(value, name + ' ' + label);
-              if (target !== undefined) untracedEvents.push({ site, attribute: node, target, detail: `${name} <${label}>`, lookup: false });
+              pendingEvents.push({ site, attribute: node, fn: value, name });
             }
             return;
           }
@@ -665,6 +764,13 @@ export class QueryIndexBuilder {
       }, { filterRaw: node => !ts.isJsxAttribute(node) || ts.isIdentifier(node.name) &&
         (node.name.text === 'ref' || /^on[A-Z]/.test(node.name.text)) });
     }
+    // Let existing invocation evidence establish selector aliases before
+    // adding handlers that were previously absent from the index.
+    const untracedEvents = pendingEvents.flatMap(({ site, attribute, fn, name }) => {
+      const label = jsxLabel(site);
+      const target = callableId(fn, name + ' ' + label);
+      return target === undefined ? [] : [{ site, attribute, target, detail: `${name} <${label}>` }];
+    });
 
     type Owners = [legacy?: number, graph?: number, possible?: boolean];
     const graphOwners = new Map([...byNode].filter(([, id]) => index.symbols[id - 1].kind !== 'constant')
@@ -923,8 +1029,7 @@ export class QueryIndexBuilder {
         return { file, reason };
       }
     };
-    for (const [owner, tag] of this.renderLookupIssues) addLookupIssue(owner, tag);
-    const typedLookupIssues = !!index.renderLookupIssues;
+
     type LookupIssue = NonNullable<ReturnType<typeof addLookupIssue>>;
     const opaqueLookupFiles = new Map<SourceFile, LookupIssue>();
     const opaqueLookupPackages = new Map<string, LookupIssue>();
@@ -932,6 +1037,11 @@ export class QueryIndexBuilder {
       const previous = sources.get(source);
       if (!previous || isTestFile(previous.file)) sources.set(source, issue);
     };
+    const typedLookupFiles = new Map<SourceFile, LookupIssue>();
+    for (const [owner, tag] of this.renderLookupIssues) {
+      const issue = addLookupIssue(owner, tag);
+      if (issue) addLookupSource(typedLookupFiles, tag.getSourceFile(), issue);
+    }
     for (const { owner, tag, sources } of this.opaqueRenderLookups) {
       const issue = addLookupIssue(owner, tag, true);
       if (!issue) continue;
@@ -953,12 +1063,25 @@ export class QueryIndexBuilder {
       }
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
+    const renderExclusions = new Map<string, string[]>();
+    const contextExcluded = new Set<string>();
+    const contextAllowed = new Set<string>();
+    const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
     for (const edge of this.edges) {
       if (this.replacedInlineRenders.has(edge)) continue;
       const [from, to, line, conditional, layout, possible, detail, site, file] = edge;
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
+      const definition = definitions.get(from);
+      const tag = Node.isCallExpression(site) ? site.getArguments()[0] : site?.getTagNameNode();
+      const key = renderSiteKey(source, target, line);
+      if (this.contextExcluded.size) (this.contextExcluded.has(edge) ? contextExcluded : contextAllowed).add(key);
+      const previous = renderExclusions.get(key);
+      const excluded = conditional && definition && tag && !layout ?
+        flow.excludedRenderSuppliers(tag, definition).flatMap(supplier => siteKey(supplier) ?? []) : [];
+      if (previous) renderExclusions.set(key, previous.filter(site => excluded.includes(site)));
+      else renderExclusions.set(key, excluded);
       index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
@@ -968,6 +1091,12 @@ export class QueryIndexBuilder {
         targets.add(target);
         resolvedRenderSites.set(site, targets);
       }
+    }
+    if (contextExcluded.size) index.contextRenderExclusions = [...contextExcluded].filter(key => !contextAllowed.has(key));
+    const excludedSites = new Set<string>();
+    for (const [key, sites] of renderExclusions) if (sites.length) {
+      (index.renderExclusions ??= {})[key] = sites;
+      for (const site of sites) excludedSites.add(site);
     }
     for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
@@ -1112,6 +1241,43 @@ export class QueryIndexBuilder {
       ...index.routes.flatMap(route => [route.component, ...route.layouts ?? [], ...Object.values(route.handlers ?? {})]),
       ...Object.values(index.routeFiles!).map(([, , , component]) => component)
     ]);
+    const canSelectLazyMember = (selector: Node, member: string, supplied: RenderSite | undefined) => {
+      let budget = 32;
+      const matchesProp = (prop: NonNullable<ReturnType<PropFlow['read']>>, at?: RenderSite): boolean => {
+        if (--budget < 0) return false;
+        const values = at ? [flow.value(at, prop)] : flow.values(prop);
+        if (!values.length) {
+          const id = byNode.get(prop.component);
+          return id !== undefined && routeComponents.has(id);
+        }
+        return values.every(({ site, value }) => {
+          if (value) return matches(value);
+          if (Node.isCallExpression(site)) return false;
+          return site.getAttributes().some(attribute => {
+            const source = Node.isJsxSpreadAttribute(attribute) && flow.read(attribute.getExpression(), prop.name);
+            return !!source && matchesProp(source);
+          });
+        });
+      };
+      const matches = (input: Node | undefined, at?: RenderSite): boolean => {
+        if (!input || --budget < 0) return false;
+        const prop = flow.read(input);
+        if (prop) return matchesProp(prop, at);
+        const value = valueNode(input);
+        if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) return value.getLiteralText() === member;
+        if (Node.isConditionalExpression(value)) {
+          const condition = valueNode(value.getCondition());
+          return !Node.isFalseLiteral(condition) && matches(value.getWhenTrue(), at) ||
+            !Node.isTrueLiteral(condition) && matches(value.getWhenFalse(), at);
+        }
+        if (!Node.isCallExpression(value)) return false;
+        if (readsUrlParameter(value)) return true;
+        const fn = functionNode(value.getExpression());
+        return !!fn && projectFiles.has(fn.getSourceFile()) &&
+          executionSites(fn.getBody()).returned.some(({ node }) => matches(node, at));
+      };
+      return matches(selector, supplied);
+    };
     const indexedComponent = (node: Node | undefined) => {
       const id = node && byNode.get(node);
       return !!id && index.symbols[id - 1].kind === 'component';
@@ -1276,17 +1442,20 @@ export class QueryIndexBuilder {
             else if (jsx) referenceKind = 'jsx-use';
             if (typeUse && !sameFile && referenceKind === 'use') referenceKind = 'type-use';
           }
-          if ((typedLookupIssues || opaqueLookupFiles.size) && (kind === 'use' || kind === 're-export') &&
+          if ((typedLookupFiles.size || opaqueLookupFiles.size) && (kind === 'use' || kind === 're-export') &&
               index.symbols[id - 1].kind === 'component' && !routeComponents.has(id) &&
               !node.getAncestors().some(Node.isTypeNode) && componentValueUse(node, indexedComponent)) {
-            if (typedLookupIssues) {
+            const topLevelDefault = Node.isIdentifier(node) && Node.isExportAssignment(throughWrappers(node).getParent()) &&
+              importBinding(node);
+            if (typedLookupFiles.size && topLevelDefault) {
               const valueUses = (index.renderValueUses ??= {});
               if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
             }
             // A failed opaque lookup only affects value uses that could reach it.
             const call = node.getFirstAncestor(Node.isCallExpression);
             const imported = call && importBinding(receiver(call.getExpression())?.root);
-            const issue = opaqueLookupFiles.get(file) ?? (imported && opaqueLookupPackages.get(imported.module));
+            const issue = typedLookupFiles.get(file) ?? opaqueLookupFiles.get(file) ??
+              (imported && opaqueLookupPackages.get(imported.module));
             if (issue) {
               const uses = (index.scopedRenderValueIssues ??= {});
               if (!uses[id] || isTestFile(uses[id].valueFile) || isTestFile(uses[id].file)) {
@@ -1363,42 +1532,28 @@ export class QueryIndexBuilder {
           }
         }
       };
+      const selectedImports = new Map<Node, Set<string>>();
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
-        const loader = lazyLoader(node);
-        const { modules, exact } = resolveDynamicModules(specifier, file, !!loader);
-        if (!modules.length) return;
-        const targetExport = dynamicExport(node);
-        const direct = targetExport && loader?.result === targetExport.expression;
+        const selections = selectedImports.get(node);
+        const target = dynamicExport(node);
+        const { modules } = resolveDynamicModules(specifier, file, !!selections);
+        if (selections) {
+          const loader = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+          const call = loader && throughWrappers(loader).getParent();
+          if (Node.isCallExpression(call) && owner === byNode.get(lazyVariable(call)!)) owner = undefined;
+        }
         for (const resolved of modules) {
           const exported = exports.get(resolved);
-          if (!exported) continue;
-          const targets = targetExport && exported.get(targetExport.name);
-          if (loader) {
-            const candidates = direct || targetExport && targetExport.name !== 'default' || targetExport?.selector
-              ? targets ?? [] : [...exported.values()].flat().filter(target => target.getSourceFile() === resolved);
-            const ids = componentIds(candidates);
-            if (loader.variable && ids.length === 1 && targetExport && direct && exact) {
-              if (!historyOnly) dynamicBindings.set(loader.variable, { id: ids[0], rendered: false });
-              // JSX is the render site. Keep the loader's import at module level.
-              if (owner === byNode.get(loader.variable)) owner = undefined;
-              if (targetExport.selector) {
-                dynamicSelectors.add(targetExport.selector.getNameNode());
-                dynamicSelectors.add(throughWrappers(targetExport.selector));
-              }
-            } else if (!historyOnly) {
-              if (direct && exact && ids.length === 1 && Node.isPropertyAssignment(throughWrappers(loader.call).getParent())) {
-                lazyProperties.set(loader.call, ids[0]);
-              }
-              markPossibleLazy(ids, direct && !exact ? loader.variable : undefined);
-            }
-          }
-          if (!targetExport || !targets?.length) continue;
           const moduleId = byGraphId.get(`file:${relativePath(resolved)}`);
-          const { name } = targetExport;
-          if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
-          for (const target of targets) {
-            const id = byNode.get(target);
-            if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
+          const names = selections ?? (target ? [target.name] : []);
+          for (const name of names) {
+            const targets = exported?.get(name);
+            if (!targets?.length) continue;
+            if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
+            for (const target of targets) {
+              const id = byNode.get(target);
+              if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
+            }
           }
         }
       };
@@ -1411,22 +1566,45 @@ export class QueryIndexBuilder {
         return module === 'next/dynamic' || module === 'react' &&
           (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => binding.getName() === 'lazy'));
       });
-      const recordHelperLoader = (node: import('ts-morph').CallExpression) => {
-        const argument = unwrapValue(node.getArguments()[0]);
-        if (!isFunction(argument) || !lazyFactory(node)) return;
-        const body = argument.getBody();
-        if (!body) return;
+      const recordLazyLoader = (node: import('ts-morph').CallExpression) => {
+        if (!lazyFactory(node)) return;
+        const loader = functionNode(node.getArguments()[0]);
+        if (!loader || !projectFiles.has(loader.getSourceFile())) return;
         const binding = lazyVariable(node);
-        for (const imported of loaderImports(simpleReturn(body), projectFiles)) {
-          const target = dynamicExport(imported);
-          const { modules } = resolveDynamicModules(imported.getArguments()[0], imported.getSourceFile(), true);
-          for (const resolved of modules) {
-            const exported = exports.get(resolved);
-            if (!exported) continue;
-            const candidates = target ? exported.get(target.name) ?? [] :
-              [...exported.values()].flat().filter(declaration => declaration.getSourceFile() === resolved);
-            markPossibleLazy(componentIds(candidates), target && binding);
+        const targets = loaderTargets(loader, projectFiles);
+        const ids = new Set<number>();
+        let exact = targets.length > 0;
+        for (const { imported, name, selector, possible, partialOnly } of targets) {
+          const { modules, exact: exactModule } = resolveDynamicModules(imported.getArguments()[0], imported.getSourceFile(), true);
+          exact &&= !possible && exactModule;
+          if (partialOnly) {
+            if (!historyOnly) for (const resolved of modules) {
+              const declarations = exports.get(resolved);
+              const candidates = name === undefined ? [...declarations?.values() ?? []].flat() : declarations?.get(name) ?? [];
+              const local = componentIds(candidates.filter(candidate => candidate.getSourceFile() === resolved));
+              if (name !== undefined || local.length === 1) markPossibleLazy(local);
+            }
+            continue;
           }
+          if (name === undefined) continue;
+          const names = selectedImports.get(imported) ?? new Set<string>();
+          names.add(name);
+          selectedImports.set(imported, names);
+          for (const resolved of modules) {
+            for (const id of componentIds(exports.get(resolved)?.get(name) ?? [])) ids.add(id);
+          }
+          if (selector) {
+            dynamicSelectors.add(selector.getNameNode());
+            dynamicSelectors.add(throughWrappers(selector));
+          }
+        }
+        if (historyOnly) return;
+        const [id] = ids;
+        if (exact && ids.size === 1 && binding) {
+          dynamicBindings.set(binding, { id, rendered: false });
+        } else {
+          if (exact && ids.size === 1 && Node.isPropertyAssignment(throughWrappers(node).getParent())) lazyProperties.set(node, id);
+          markPossibleLazy([...ids], binding);
         }
       };
       const scanComment = (range: ts.CommentRange) => {
@@ -1528,7 +1706,7 @@ export class QueryIndexBuilder {
             }
           }
           const [owner, graphOwner, possible] = owners(node);
-          if (!historyOnly && hasLazyImport && Node.isCallExpression(node)) recordHelperLoader(node);
+          if (hasLazyImport && Node.isCallExpression(node)) recordLazyLoader(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             const specifier = node.getArguments()[0];
             recordDynamic(node, specifier, graphOwner);
@@ -1655,6 +1833,10 @@ export class QueryIndexBuilder {
           const caller = choice.supply ? renderByNode.get(choice.supply.site) : site;
           const owner = caller?.owner;
           if (id === undefined || !caller || owner === undefined || owner === id || index.symbols[owner - 1].kind !== 'component') continue;
+          // The registry's members bound its outputs. An opaque selector can
+          // further restrict its inputs, so require evidence for this member.
+          if (choice.lookup && (choice.lookup.member === undefined ||
+              !canSelectLazyMember(choice.lookup.selector, choice.lookup.member, choice.supply?.site))) continue;
           const conditional = Number(choice.conditional || !!conditionalAt(site.node));
           const detail = `imported via ${tag.getText()}` + (choice.supply ? ` (prop ${choice.supply.name})` : '');
           wrapperEdges.push([owner, id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail]);
@@ -1726,7 +1908,7 @@ export class QueryIndexBuilder {
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) {
+      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7] && !excludedSites.has(edge[7])) {
         if (edge[8]) edge[7] = undefined;
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }

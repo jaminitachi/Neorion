@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
@@ -203,6 +203,7 @@ export class QueryEngine {
   private symbols: Map<number, SymbolEntry>;
   private names: Map<string, SymbolEntry[]>;
   private incoming: Map<number, Edge[]>;
+  private contextRenderExclusions: Set<string>;
   private dynamicRenderComponents: Set<number>;
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
@@ -213,7 +214,13 @@ export class QueryEngine {
     this.root = realpathSync(root);
     this.symbols = new Map(index.symbols.map(symbol => [symbol.id, symbol]));
     this.names = group(index.symbols, symbol => symbol.name);
+    for (const symbol of index.symbols) for (const alias of symbol.selectorAliases ?? []) {
+      const matches = this.names.get(alias) ?? [];
+      matches.push(symbol);
+      this.names.set(alias, matches);
+    }
     this.incoming = group(index.renderEdges, edge => edge[1]);
+    this.contextRenderExclusions = new Set(index.contextRenderExclusions);
     this.dynamicRenderComponents = new Set(index.dynamicRenderComponents);
     for (const edges of this.incoming.values()) edges.sort((a, b) => {
       const left = this.symbols.get(a[0]);
@@ -425,35 +432,53 @@ export class QueryEngine {
       return entry?.renderName ?? entry?.name;
     };
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
-      possible: boolean; depth: number; slots: string[]; issue?: string }>();
+      possible: boolean; depth: number; slots: string[]; issue?: string; excluded: boolean }>();
     let directIssue: string | undefined;
     let dynamicReference = false;
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
-        depth: 0, slots: [] as string[], issue: undefined as string | undefined }];
-      const visited = new Set<number>();
+        depth: 0, slots: [] as string[], issue: undefined as string | undefined, excluded: false, lazy: false, guards: '',
+        context: false, lookup: false }];
+      const visited = new Set<string | number>();
       for (let i = 0; i < pending.length && !expired(); i++) {
         const entry = pending[i];
-        if (visited.has(entry.id)) continue;
-        visited.add(entry.id);
+        const key = entry.excluded || entry.lazy || entry.guards || entry.context || entry.lookup ?
+          `${entry.id}:${Number(entry.excluded)}:${Number(entry.lazy)}:${Number(entry.context)}:${Number(entry.lookup)}:${entry.guards}` : entry.id;
+        if (visited.has(key)) continue;
+        visited.add(key);
         dynamicReference ||= this.dynamicRenderComponents.has(entry.id);
         for (const { route, layout, conditional, possible } of this.pageRoots.get(entry.id) ?? []) {
           if ((!entry.depth && !route.router) || only && route !== only) continue;
           const previous = reached.get(route.id);
-          if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper,
-            conditional: entry.conditional || !!conditional, possible: entry.possible || !!possible });
+          const excluded = entry.excluded || entry.context;
+          if (!previous || (previous.excluded !== excluded ? !excluded : previous.layout && !layout)) {
+            reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper, excluded,
+              conditional: entry.conditional || !!conditional, possible: entry.possible || !!possible });
+          }
         }
-        for (const [from, to, line, conditional, wrapper, possible, detail, , file] of this.incoming.get(entry.id) ?? []) {
+        for (const [from, to, line, conditional, wrapper, possible, detail, site, file] of this.incoming.get(entry.id) ?? []) {
           if (expired()) break;
-          if (visited.has(from)) continue;
-          const decision = conditions?.[renderSiteKey(from, to, line)];
+          const edge = renderSiteKey(from, to, line);
+          const decision = conditions?.[edge];
           if (decision === 'excluded') continue;
+          const excluded = entry.excluded || !!site && !!this.index.renderExclusions?.[entry.guards]?.includes(site);
+          const lazy = entry.lazy || !!detail?.startsWith('imported via ');
+          const contextExcluded = this.contextRenderExclusions.has(edge);
+          const context = entry.context || contextExcluded;
+          const lookup = entry.lookup || !!this.contextRenderExclusions.size && !contextExcluded &&
+            !!possible && !!detail?.startsWith(RENDER_LOOKUP_ISSUE);
+          // Keep existing conditional JSX matches. An excluded supplier cannot
+          // extend them through a recovered lazy import.
+          if (excluded && lazy || context && (lazy || lookup)) continue;
+          const guards = this.index.renderExclusions?.[edge] ? edge : '';
+          if (!excluded && !lazy && !guards && !context && !lookup && visited.has(from)) continue;
           const parent = this.symbols.get(from);
           const name = renderName(from);
           pending.push({
             id: from, chain: name ? [name, ...entry.chain].slice(-8) : entry.chain,
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
+            excluded, lazy, guards, context, lookup,
             conditional: entry.conditional || !!conditional || decision === 'conditional',
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,

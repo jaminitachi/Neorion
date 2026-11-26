@@ -496,7 +496,8 @@ test('lazy selectors resolve specific barrel exports and the module default', as
     import dynamic from 'next/dynamic';
     import { Picker } from '@/ui/picker';
     const componentMap = { setup: dynamic(() => import('@/ui/setup')) };
-    export default function SetupPage({ slug }) { return <Picker componentMap={componentMap} slug={slug}/>; }
+    function SetupWrapper(props) { return <Picker componentMap={componentMap} {...props}/>; }
+    export default function SetupPage({ slug }) { return <SetupWrapper slug={slug}/>; }
   `);
   await generate(root);
   const client = await openMcp(t, root);
@@ -542,6 +543,148 @@ test('lazy helper branches and interpolated imports identify candidate routes', 
   assert.match(exact, /^\/ .* \[imported via Known\]$/m);
   assert.match(exact, /# complete: indexed JSX paths$/);
   assert.match(await client.text('who_renders', { component: 'SplashScreen' }), /0 results[^\n]*\n# complete:/);
+});
+
+test('lazy loaders trace the returned export and enumerate finite import templates', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'ui/controls.tsx', `
+    export function TimezonePicker() { return <select/>; }
+    export function FieldHeading() { return <h2>Location</h2>; }
+  `);
+  write(root, 'app/settings/page.tsx', `
+    "use client";
+    import dynamic from "next/dynamic";
+    const TimezonePicker = dynamic(async () => {
+      const { TimezonePicker } = await import("../../ui/controls");
+      return TimezonePicker;
+    }, { ssr: false });
+    export default function Settings() { return <TimezonePicker/>; }
+  `);
+  write(root, 'app/profile/page.tsx', `
+    import { FieldHeading } from "../../ui/controls";
+    export default function Profile() { return <FieldHeading/>; }
+  `);
+  for (const name of ['First', 'Second', 'Unchosen']) {
+    write(root, `ui/${name}.tsx`, `export default function ${name}() { return <div/>; }`);
+  }
+  write(root, 'app/template/page.tsx', `
+    import { lazy, Suspense } from "react";
+    const filename = location.search.includes("first") ? "First" : "Second";
+    const Choice = lazy(() => import(\`../../ui/\${filename}\`));
+    export default function Template() { return <Suspense><Choice/></Suspense>; }
+  `);
+  write(root, 'app/helper/panel.tsx', 'export function Panel() { return <p/>; }');
+  write(root, 'app/helper/page.tsx', `
+    import { lazy, Suspense } from "react";
+    const load = () => import("./panel").then(m => ({default: m.Panel}));
+    const Lazy = lazy(() => load());
+    export default function Helper() { return <Suspense><Lazy/></Suspense>; }
+  `);
+  write(root, 'app/registry/page.tsx', `
+    import dynamic from 'next/dynamic';
+    const controls = {
+      first: dynamic(() => import('../../ui/First')),
+      second: dynamic(() => import('../../ui/Second')),
+    };
+    const getSection = () => 'second';
+    const Selected = controls[getSection()];
+    export default function RegistryPage() { return <Selected/>; }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const renders = component => client.text('who_renders', { component });
+  const heading = await renders('ui/controls.tsx#FieldHeading');
+  assert.match(heading, /^\/profile\s.*depth 1$/m);
+  assert.match(heading, /^# complete:/m);
+  const picker = await renders('ui/controls.tsx#TimezonePicker');
+  assert.match(picker, /^\/settings\s.*\[imported via TimezonePicker\]$/m);
+  assert.match(picker, /^# complete:/m);
+  for (const name of ['First', 'Second']) {
+    assert.match(await renders(`ui/${name}.tsx#${name}`), /^\/template\s.*\[possible\]$/m);
+  }
+  assert.doesNotMatch(await renders('ui/First.tsx#First'), /^\/registry\s/m);
+  assert.match(await renders('ui/Second.tsx#Second'), /^\/registry\s.*\[possible\]$/m);
+  assert.match(await renders('ui/Unchosen.tsx#Unchosen'), /0 results[^\n]*\n# complete:/);
+  const panel = await renders('app/helper/panel.tsx#Panel');
+  assert.match(panel, /^\/helper\s.*\[imported via Lazy\] \[possible\]$/m);
+  assert.match(panel, /^# partial: rendered through a dynamic reference/m);
+});
+
+test('render paths through lazy views respect props and prefer feasible JSX chains', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'ui/controls.tsx', `
+    import { createContext, useContext, useMemo } from 'react';
+    export function Clear() { return <button/>; }
+    export function Input({showClear = false}) { return <div>{showClear && <Clear/>}</div>; }
+    export function Picker({disabled, ...aria}) { return <Input {...aria}/>; }
+    export function Image() { return <img/>; }
+    function Icon({ type, display }) {
+      if (type === 'devices') return <i/>;
+      else if (type === 'browsers') {
+        if (display === 'Chrome' || display === 'Safari') return <i/>;
+        else return <Image/>;
+      } else if (type === 'os') {
+        if (display === 'iOS') return <i/>;
+        else return <Image/>;
+      } else return <Image/>;
+    }
+    function APlaceholder() {
+      return <><Icon type="devices" display="Mobile"/><Icon type="browsers" display="Chrome"/>
+        <Icon type="os" display="iOS"/></>;
+    }
+    function ActualVisitor({ display }) { return <Icon type="browsers" display={display}/>; }
+    function ZVisitor({ display }) { return <ActualVisitor display={display}/>; }
+    export function Editor() { return <textarea/>; }
+    function Advanced() { return <Editor/>; }
+    function AppView() { return <Advanced/>; }
+    function PagesView() { return <Advanced/>; }
+    function Switch({ isAppDir }) { return isAppDir ? <AppView/> : <PagesView/>; }
+    const Context = createContext({ clientId: '' });
+    const useSettings = () => useContext(Context);
+    function useEmbedded() {
+      const settings = useSettings();
+      return Boolean(settings?.clientId);
+    }
+    function EmbeddedWidget() { return <i/>; }
+    function WebWidget() { return <i/>; }
+    function Widget() {
+      const embedded = useEmbedded();
+      const Selected = useMemo(() => embedded ? EmbeddedWidget : WebWidget, [embedded]);
+      return <Selected/>;
+    }
+    export default function Panel({ display }) {
+      return <><Picker disabled/><APlaceholder/><ZVisitor display={display}/><Switch isAppDir={false}/><Widget/></>;
+    }
+  `);
+  write(root, 'app/page.tsx', `
+    import dynamic from 'next/dynamic';
+    const Lazy = dynamic(() => import('../ui/controls'));
+    export default function Page({ display }) { return <Lazy display={display}/>; }
+  `);
+  write(root, 'app/enabled/page.tsx', `
+    import { Input } from '../../ui/controls';
+    export default function Page() { return <Input showClear/>; }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const renders = component => client.text('who_renders', { component });
+  const clear = await renders('Clear');
+  assert.match(clear, /^\/enabled\s.*\[cond\]$/m);
+  assert.doesNotMatch(clear, /^\/\s/m);
+  const impact = await client.text('query', { kind: 'impact', target: 'Clear' });
+  assert.match(impact, /^page \/enabled\s.*\[cond\]$/m);
+  const lazyImpact = impact.split('\n').find(line => line.startsWith('page /  '));
+  if (lazyImpact) assert.match(lazyImpact, /\[cond\]$/);
+  const image = await renders('Image');
+  assert.match(image, /^\/\s.*via .*ZVisitor > ActualVisitor > Icon/m);
+  assert.doesNotMatch(image, /APlaceholder/);
+  const editor = await renders('Editor');
+  assert.match(editor, /^\/\s.*via .*Switch > PagesView > Advanced/m);
+  assert.doesNotMatch(editor, /AppView/);
+  assert.match(await renders('WebWidget'), /^\/\s.*\[cond\]$/m);
+  assert.doesNotMatch(await renders('EmbeddedWidget'), /^\/\s/m);
 });
 
 test('wrappers list rendered providers in chain order for each branch', async t => {

@@ -1576,6 +1576,7 @@ test('an unresolved typed render lookup only affects components used as values',
     export function StoredIcon() { return <span/>; }
     export function DefaultIcon() { return <span/>; }
     export function RenamedIcon() { return <span/>; }
+    export function BarrelOnlyIcon() { return <span/>; }
     export function TypeOnlyIcon() { return <span/>; }
     export function JsxOnlyIcon() { return <span/>; }
     export function WrappedIcon() { return <span/>; }
@@ -1589,6 +1590,7 @@ test('an unresolved typed render lookup only affects components used as values',
     import { DefaultIcon, RenamedIcon } from './unused';
     export default (DefaultIcon);
     export { RenamedIcon as RegistryIcon };
+    export { BarrelOnlyIcon as BarrelIcon } from './unused';
     export type { TypeOnlyIcon as IconType } from './unused';
   `);
   const other = path.join(root, 'app/other');
@@ -1606,17 +1608,19 @@ test('an unresolved typed render lookup only affects components used as values',
   `);
   build();
   for (const [tool, target] of [
-    ['who_renders', 'StoredIcon'], ['who_renders', 'DefaultIcon'], ['who_renders', 'RenamedIcon'],
+    ['who_renders', 'DefaultIcon'],
     ['callees', 'app/page.tsx#Page']
   ]) {
     const output = query(tool, target);
     assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
     assert.doesNotMatch(output, /^(?:page )?\/\s/m);
   }
-  for (const target of ['UnusedIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon', 'TypeOnlyIcon', 'app/other/page.tsx#OtherPage']) {
+  for (const target of ['UnusedIcon', 'RenamedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon',
+    'TypeOnlyIcon', 'app/other/page.tsx#OtherPage']) {
     assert.match(query('who_renders', target), /^# complete:/m);
   }
-  for (const target of ['UnusedIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  for (const target of ['UnusedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  assert.match(query('who_renders', 'StoredIcon'), /^# partial: rendered through a dynamic reference/m);
   const inner = query('who_renders', 'RenderedInner');
   assert.match(inner, /^\/other\s.*depth 2 via RenderedMemo$/m);
   assert.match(inner, /^# complete:/m);
@@ -1729,6 +1733,20 @@ test('default-exported HOCs trace local forwarding and keep opaque factories par
     function IdentityInner() { return <span/>; }
     export default identity(IdentityInner);
   `);
+  fs.writeFileSync(path.join(root, 'ui/paywall.tsx'), `
+    function BillingPanel() { return <p>Billing</p>; }
+    function DemoPanel() { return <p>Demo</p>; }
+    function withDemoMode(View: typeof BillingPanel) {
+      if (process.env.NEXT_PUBLIC_DEMO_MODE === "1") View = DemoPanel;
+      return View;
+    }
+    export default withDemoMode(BillingPanel);
+  `);
+  fs.mkdirSync(path.join(root, 'app/billing'));
+  fs.writeFileSync(path.join(root, 'app/billing/page.tsx'), `
+    import Billing from '../../ui/paywall';
+    export default function BillingPage() { return <Billing/>; }
+  `);
   fs.writeFileSync(path.join(root, 'app/page.tsx'), `
     import Wrapped, { OpaqueInner } from '../ui/wrapped';
     import Identity from '../ui/identity';
@@ -1749,6 +1767,9 @@ test('default-exported HOCs trace local forwarding and keep opaque factories par
     assert.match(output, /^# complete:/m);
   }
   assert.match(query('who_renders', 'IdentityInner'), /^\/ .* via .*identity\(IdentityInner\)/m);
+  const billing = query('who_renders', 'ui/paywall.tsx#BillingPanel');
+  assert.doesNotMatch(billing, /^\/billing\s/m);
+  assert.match(billing, /^# partial: rendered through a dynamic reference/m);
   const opaque = query('who_renders', 'OpaqueInner');
   assert.match(opaque, /^\/\s/m);
   assert.doesNotMatch(opaque, /^\/hoc-opaque\s/m);

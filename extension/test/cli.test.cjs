@@ -602,6 +602,13 @@ test('workspace barrels keep missing runtime re-exports partial and index inline
     import { track } from '@fixture/sdk';
     export { track as viaLocalImport };
     export { SharedCard } from '@fixture/ui/card';
+    export { ExplicitCard } from './explicit-card';
+  `);
+  write('packages/bridge/src/explicit-card.tsx', `
+    export function ExplicitCard({ onClick }) {
+      onClick();
+      return <div/>;
+    }
   `);
   write('apps/web/app/barrel/page.tsx', `
     import { uiTrack, register, Sdk, viaLocalImport, SdkBoundary, SharedCard } from '@fixture/bridge';
@@ -620,6 +627,18 @@ test('workspace barrels keep missing runtime re-exports partial and index inline
     export function onCard() { return 1; }
     export default function HandlerPage() { return <SharedCard onClick={() => onCard()}/>; }
   `);
+  write('apps/web/app/legacy/page.tsx', `
+    import { ExplicitCard } from '@fixture/bridge';
+    export default function LegacyPage() { return <ExplicitCard onClick={() => 1}/>; }
+  `);
+  write('apps/web/app/collision/page.tsx', `
+    import { ExplicitCard, ExplicitCard as OtherCard } from '@fixture/bridge';
+    function first() {}
+    function second() {}
+    export default function CollisionPage() {
+      return <><ExplicitCard onClick={() => first()}/><OtherCard onClick={() => second()}/></>;
+    }
+  `);
   const query = (kind, target) => {
     const result = run(['query', kind, target, '--app', 'web']);
     assert.equal(result.status, 0, result.stderr);
@@ -633,6 +652,13 @@ test('workspace barrels keep missing runtime re-exports partial and index inline
   assert.match(query('wrappers', '/barrel'), missing);
   assert.match(query('wrappers', '/handler'), /# complete: indexed wrapper chains\s*$/);
   assert.match(query('callees', 'app/handler/page.tsx#onClick SharedCard'), /^d1 call .* onCard /m);
+  const alias = query('impact', 'app/legacy/page.tsx#onClick');
+  assert.match(alias, /^page \/legacy\s/m);
+  assert.match(alias, /^# complete:/m);
+  const ambiguous = query('impact', 'app/collision/page.tsx#onClick');
+  assert.match(ambiguous, /^# ambiguous impact/m);
+  assert.match(ambiguous, /#onClick ExplicitCard/);
+  assert.match(ambiguous, /#onClick OtherCard/);
   assert.match(query('impact', 'onCard'), /^page \/handler\s/m);
 });
 

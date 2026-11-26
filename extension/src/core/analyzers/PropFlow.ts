@@ -2,6 +2,7 @@ import { Node, SourceFile, SyntaxKind, ts, type Symbol } from 'ts-morph';
 import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
 import { conditionalAt, wrappedExpression } from './ArchitectureFacts';
 import { startLine } from './SourceLines';
+import { valueNode } from './StaticBindings';
 
 export type JsxSite = import('ts-morph').JsxOpeningElement | import('ts-morph').JsxSelfClosingElement;
 export type RenderSite = JsxSite | import('ts-morph').CallExpression;
@@ -223,6 +224,53 @@ export class PropFlow {
     return (this.sites.get(prop.component) ?? []).map(site => this.value(site, prop));
   }
 
+  excludedRenderSuppliers(node: Node, component: Node): RenderSite[] {
+    const sites = this.sites.get(component);
+    const body = this.bodies.get(component);
+    if (!sites?.length || !body) return [];
+    type Test = (site: RenderSite) => Literal | undefined;
+    const compile = (input: Node): Test | undefined => {
+      const expression = wrappedExpression(input) ?? input;
+      if (expression !== input) return compile(expression);
+      const prop = this.read(expression);
+      if (prop?.component === component) return site => {
+        const { value, unknown } = this.value(site, prop);
+        if (!unknown) return Node.isJsxAttribute(value) ? true : literal(valueNode(value));
+      };
+      const constant = literal(expression);
+      if (constant !== undefined) return () => constant;
+      if (Node.isPrefixUnaryExpression(expression) && expression.getOperatorToken() === SyntaxKind.ExclamationToken) {
+        const operand = compile(expression.getOperand());
+        return site => {
+          const value = operand?.(site);
+          return value === undefined ? undefined : !value;
+        };
+      }
+      if (!Node.isBinaryExpression(expression)) return;
+      const operator = expression.getOperatorToken().getKind();
+      if (operator !== SyntaxKind.EqualsEqualsEqualsToken && operator !== SyntaxKind.ExclamationEqualsEqualsToken &&
+          operator !== SyntaxKind.AmpersandAmpersandToken && operator !== SyntaxKind.BarBarToken) return;
+      const left = compile(expression.getLeft());
+      const right = compile(expression.getRight());
+      if (!left && !right) return;
+      return site => {
+        const a = left?.(site);
+        const b = right?.(site);
+        if (operator === SyntaxKind.AmpersandAmpersandToken) return a === undefined ? undefined : a ? b : a;
+        if (operator === SyntaxKind.BarBarToken) return a === undefined ? undefined : a || b;
+        if (a !== undefined && b !== undefined) return (a === b) === (operator === SyntaxKind.EqualsEqualsEqualsToken);
+      };
+    };
+    const tests = [...this.branchConditions(node, body)].flatMap(({ expression, positive }) => {
+      const test = compile(expression);
+      return test ? [{ test, positive }] : [];
+    });
+    return tests.length ? sites.filter(site => tests.some(({ test, positive }) => {
+      const value = test(site);
+      return value !== undefined && Boolean(value) !== positive;
+    })) : [];
+  }
+
   bindings(prop: Prop): BoundValue[] {
     let names = this.resolvedBindings.get(prop.component);
     if (!names) this.resolvedBindings.set(prop.component, names = new Map());
@@ -253,10 +301,8 @@ export class PropFlow {
     });
   }
 
-  constraints(node: Node): PropConstraint[] {
-    const result: PropConstraint[] = [];
-    if (!this.parameterFiles.has(node.getSourceFile())) return result;
-    for (let child = node, parent = node.getParent(); parent; child = parent, parent = parent.getParent()) {
+  private *branchConditions(node: Node, boundary?: Node) {
+    for (let child = node, parent = node.getParent(); parent && child !== boundary; child = parent, parent = parent.getParent()) {
       let condition: Node | undefined;
       let positive = true;
       if (Node.isIfStatement(parent) && parent.getExpression() !== child) {
@@ -272,8 +318,16 @@ export class PropFlow {
           positive = operator === SyntaxKind.AmpersandAmpersandToken;
         }
       }
-      if (!condition) continue;
-      let expression = condition;
+      if (condition) yield { expression: condition, positive };
+    }
+  }
+
+  constraints(node: Node): PropConstraint[] {
+    const result: PropConstraint[] = [];
+    if (!this.parameterFiles.has(node.getSourceFile())) return result;
+    for (const branch of this.branchConditions(node)) {
+      const { positive } = branch;
+      let expression = branch.expression;
       while (wrappedExpression(expression)) expression = wrappedExpression(expression)!;
       if (!Node.isBinaryExpression(expression)) continue;
       const operator = expression.getOperatorToken().getKind();

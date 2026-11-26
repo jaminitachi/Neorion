@@ -7,10 +7,12 @@ import { isTypeOnlyExport } from './RuntimeExports';
 
 const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
-export type RenderCertainty = { possible: boolean; conditional: boolean };
+export type RenderCertainty = { possible: boolean; conditional: boolean; contextExcluded?: true };
 type ArrayBinding = { parameter: ParameterDeclaration; receiver: Node; outer?: ArrayBinding };
 type Supply = { site: RenderSite; name: string };
-type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
+type Lookup = { selector: Node; member?: string };
+type RenderChoice = RenderCertainty & { lookup?: Lookup };
+type Step = RenderChoice & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
 enum Resolution { Unknown, Empty, External, Local }
 
 export function isComponentWrapper(node: Node | undefined): node is CallExpression {
@@ -31,8 +33,11 @@ export function forwardedComponent(call: CallExpression, files: Set<SourceFile>)
   if (values.length !== 1) return;
   const guarded = conditionalAt(values[0], factory);
   const returned = valueNode(values[0]);
-  const symbol = parameter.getNameNode().getSymbol();
+  const name = parameter.getNameNode();
+  const symbol = name.getSymbol();
   if (!symbol) return;
+  if (Node.isIdentifier(name) && name.findReferences().some(reference =>
+    reference.getReferences().some(use => use.isWriteAccess() && use.getNode() !== name))) return;
   if (Node.isIdentifier(returned) && returned.getSymbol() === symbol) {
     return { argument, sites: [{ node: argument, conditional: guarded }] };
   }
@@ -70,6 +75,7 @@ export function forwardedComponent(call: CallExpression, files: Set<SourceFile>)
 }
 
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
+  if (candidate.contextExcluded !== existing.contextExcluded) return !candidate.contextExcluded;
   if (candidate.possible !== existing.possible) return !candidate.possible;
   return !candidate.conditional && existing.conditional;
 }
@@ -101,6 +107,73 @@ const isReducer = (method: string) => method === 'reduce' || method === 'reduceR
 function builtin(node: Node, name: string) {
   return Node.isIdentifier(node) && node.compilerNode.text === name &&
     declarationsOf(node).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+}
+
+/** Resolve a context predicate when its provider has no consumer in this app. */
+export function unprovidedContextTruth(files: Set<SourceFile>, isAppSource: (file: SourceFile) => boolean) {
+  const checked = new Map<Node, boolean>();
+  const references = (node: import('ts-morph').Identifier) => node.findReferencesAsNodes().filter(use => {
+    const parent = use.getParent();
+    return use !== node && files.has(use.getSourceFile()) && !Node.isImportSpecifier(parent) && !Node.isImportClause(parent) &&
+      !Node.isExportSpecifier(parent) && !use.getAncestors().some(Node.isTypeNode);
+  });
+  const mountedProvider = (node: Node, seen: Set<Node>): boolean => {
+    if (isAppSource(node.getSourceFile()) || seen.size >= 8) return true;
+    const owner = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+    const name = Node.isFunctionDeclaration(owner) && owner.getNameNode();
+    if (!name || !Node.isIdentifier(name)) return true;
+    if (seen.has(name)) return false;
+    const pending = new Set(seen).add(name);
+    return references(name).some(use => mountedProvider(use, pending));
+  };
+  const isUnprovided = (name: import('ts-morph').Identifier) => {
+    const cached = checked.get(name);
+    if (cached !== undefined) return cached;
+    const result = references(name).every(use => {
+      const parent = use.getParent();
+      if (Node.isCallExpression(parent) && packageMember(parent.getExpression(), 'react') === 'useContext') return true;
+      const provider = Node.isPropertyAccessExpression(parent) && parent.getName() === 'Provider' ? parent : use;
+      const tag = provider.getParent();
+      if (Node.isJsxOpeningElement(tag) || Node.isJsxSelfClosingElement(tag) || Node.isJsxClosingElement(tag)) {
+        return tag.getTagNameNode() === provider && !mountedProvider(use, new Set());
+      }
+      return false;
+    });
+    checked.set(name, result);
+    return result;
+  };
+  const returned = (call: Node | undefined) => {
+    if (!Node.isCallExpression(call)) return;
+    const fn = functionNode(call.getExpression());
+    if (!fn || !files.has(fn.getSourceFile())) return;
+    const [value, extra] = returnedValues(fn);
+    return !extra && value && !conditionalAt(value, fn) ? valueNode(value) : undefined;
+  };
+  return (condition: Node): boolean | undefined => {
+    const test = returned(valueNode(condition));
+    if (!Node.isCallExpression(test) || !builtin(test.getExpression(), 'Boolean')) return;
+    const [member] = test.getArguments();
+    if (!Node.isPropertyAccessExpression(member)) return;
+    const source = valueNode(member.getExpression());
+    const context = Node.isCallExpression(source) && packageMember(source.getExpression(), 'react') === 'useContext'
+      ? source : returned(source);
+    if (!Node.isCallExpression(context) || packageMember(context.getExpression(), 'react') !== 'useContext') return;
+    const [argument] = context.getArguments();
+    if (!argument) return;
+    const [binding] = declarationsOf(argument);
+    if (!Node.isVariableDeclaration(binding) || !files.has(binding.getSourceFile())) return;
+    const name = binding.getNameNode();
+    const initializer = valueNode(binding.getInitializer());
+    if (!Node.isIdentifier(name) || !Node.isCallExpression(initializer) ||
+        packageMember(initializer.getExpression(), 'react') !== 'createContext') return;
+    const defaults = valueNode(initializer.getArguments()[0]);
+    if (!Node.isObjectLiteralExpression(defaults) || defaults.getProperties().some(Node.isSpreadAssignment)) return;
+    const property = defaults.getProperty(member.getName());
+    const value = Node.isPropertyAssignment(property) ? valueNode(property.getInitializer()) : undefined;
+    const truth = Node.isStringLiteral(value) || Node.isNumericLiteral(value) ? Boolean(value.getLiteralValue()) :
+      Node.isTrueLiteral(value) ? true : Node.isFalseLiteral(value) || Node.isNullLiteral(value) ? false : undefined;
+    if (truth !== undefined && isUnprovided(name)) return truth;
+  };
 }
 
 function stateCall(node: Node | undefined): node is CallExpression {
@@ -210,24 +283,25 @@ function externalImport(node: Node, files: Set<SourceFile>): boolean {
 
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
 export function renderBindings(declarations: Node[], files: Set<SourceFile>,
-  indexedComponent: (node: Node) => boolean, flow?: PropFlow, indexedLoader?: (node: Node) => boolean) {
+  indexedComponent: (node: Node) => boolean, flow?: PropFlow, indexedLoader?: (node: Node) => boolean,
+  contextTruth?: (condition: Node) => boolean | undefined) {
   const seen = new Map<Node, { step: Step; resolution: Resolution }[]>();
-  const targets = new Map<Supply | undefined, Map<Node, RenderCertainty>>();
+  const targets = new Map<Supply | undefined, Map<Node, RenderChoice>>();
   const supplies = new Map<RenderSite, Map<string, Supply>>();
   let unresolvedLookup = false;
   let unresolvedProp = false;
   const opaqueLookups = new Set<Node>();
-  const register = (node: Node, { supply, possible, conditional }: Step) => {
+  const register = (node: Node, { supply, possible, conditional, lookup, contextExcluded }: Step) => {
     let scoped = targets.get(supply);
     if (!scoped) targets.set(supply, scoped = new Map());
     const prior = scoped.get(node);
-    const choice = { possible, conditional };
+    const choice = { possible, conditional, lookup, contextExcluded };
     if (!prior || preferRenderBinding(choice, prior)) scoped.set(node, choice);
     return Resolution.Local;
   };
   const resolve = (node: Node | undefined, step: Step, remaining: number): Resolution => {
     if (!node || remaining <= 0) return Resolution.Unknown;
-    const { members, returns, possible, conditional, binding, supply } = step;
+    const { members, returns, possible, conditional, binding, supply, lookup, contextExcluded } = step;
     if (!files.has(node.getSourceFile())) {
       return !returns && !members.length && node.getSourceFile().isInNodeModules() &&
         (Node.isVariableDeclaration(node) || Node.isClassDeclaration(node) || isFunction(node)) ?
@@ -236,7 +310,9 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
     const steps = seen.get(node) ?? [];
     const prior = steps.find(({ step: previous }) => previous.binding === binding && previous.supply === supply &&
         previous.returns === returns && previous.possible === possible &&
-        previous.conditional === conditional && previous.members.length === members.length &&
+        previous.conditional === conditional && previous.contextExcluded === contextExcluded &&
+        previous.lookup?.selector === lookup?.selector &&
+        previous.lookup?.member === lookup?.member && previous.members.length === members.length &&
         previous.members.every((member, i) => member === members[i]));
     if (prior) return prior.resolution;
     const current = { step, resolution: Resolution.Unknown };
@@ -257,7 +333,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
     return current.resolution;
   };
   const trace = (node: Node, step: Step, next: (value: Node | undefined, change?: Partial<Step>) => boolean): Resolution | boolean | void => {
-    const { members, returns, possible, conditional, binding, supply } = step;
+    const { members, returns, possible, conditional, binding, supply, lookup } = step;
     if (isFunction(node) && returns) {
       const values = returnedValues(node);
       for (const value of values) {
@@ -335,7 +411,8 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
         const member = Node.isIdentifier(name) ? name.compilerNode.text :
           lookupKey(Node.isComputedPropertyName(name) ? name.getExpression() : name);
         if (member !== undefined && (covered.has(member) || key !== null && member !== key)) continue;
-        next(property, { members: rest, possible: uncertain || member === undefined });
+        next(property, { members: rest, possible: uncertain || member === undefined,
+          lookup: lookup && key === null && lookup.member === undefined ? { ...lookup, member } : lookup });
         if (member === undefined) uncertain = true;
         else if (key !== null) return;
         else covered.add(member);
@@ -411,8 +488,11 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
       return;
     }
     if (Node.isConditionalExpression(node)) {
-      next(node.getWhenTrue(), { conditional: true });
-      next(node.getWhenFalse(), { conditional: true });
+      const choice = contextTruth?.(node.getCondition());
+      const yes = step.contextExcluded || (choice === false ? true : undefined);
+      const no = step.contextExcluded || (choice === true ? true : undefined);
+      next(node.getWhenTrue(), { conditional: true, contextExcluded: yes });
+      next(node.getWhenFalse(), { conditional: true, contextExcluded: no });
       return;
     }
     if (Node.isBinaryExpression(node)) {
@@ -426,8 +506,10 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
       }
     }
     if (Node.isElementAccessExpression(node)) {
-      const key = lookupKey(node.getArgumentExpression());
-      const resolved = next(node.getExpression(), { members: [key ?? null, ...members] });
+      const selector = node.getArgumentExpression();
+      const key = lookupKey(selector);
+      const resolved = next(node.getExpression(), { members: [key ?? null, ...members],
+        lookup: indexedLoader && key === undefined && selector ? { selector } : lookup });
       if (!resolved) opaqueLookups.add(node);
       return resolved;
     }
