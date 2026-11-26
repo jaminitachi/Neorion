@@ -6,7 +6,7 @@ import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
   isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
-  type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  type DetailFact, type DetailFacts, type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
@@ -23,6 +23,8 @@ import { TrpcFacts } from './TrpcFacts';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
+import { handlerFacts } from './HandlerFacts';
+import { ReactFacts } from './ReactFacts';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -2165,6 +2167,69 @@ export class QueryIndexBuilder {
       });
       if (packages.length) index.workspacePackages = Object.fromEntries(packages);
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
+    }
+    if (!historyOnly) {
+      const details: DetailFacts = index.detailFacts = { handlers: {}, symbols: {}, renders: {}, requests: {} };
+      const add = <K extends string | number>(table: Record<K, DetailFact[]>, key: K, row: DetailFact) =>
+        (table[key] ??= []).push(row);
+      for (const route of index.routes) {
+        if (route.kind !== 'api' || route.pages || route.router) continue;
+        const source = filesByRelative.get(route.file);
+        const entries = source && exports.get(source);
+        const methods = (route.methods ?? []).map(method => {
+          const declarations = entries?.get(method);
+          return [method, handlerFacts(declarations?.length === 1 ? declarations[0] : undefined,
+            node => relativePath(node.getSourceFile()))] as const;
+        });
+        details.handlers[route.id] = Object.fromEntries(methods);
+      }
+      const indexedRequests = new Map<Node, FetchEntry[]>();
+      for (const request of this.fetches) {
+        if (request.via !== 'fetch') continue;
+        const { node, ...entry } = request;
+        const matches = indexedRequests.get(node) ?? [];
+        matches.push({ ...entry, route: routeIds.get(request.route)!, fn: null });
+        indexedRequests.set(node, matches);
+      }
+      const react = new Map<SourceFile, ReactFacts>();
+      const scope = (node: Node) => {
+        for (let parent = node.compilerNode.parent; parent; parent = parent.parent) {
+          const id = graphOwners.get(parent);
+          const kind = id === undefined ? undefined : index.symbols[id - 1].kind;
+          if (kind === 'component' || kind === 'hook') return id;
+        }
+        return owners(node)[1];
+      };
+      for (const [relative, source] of filesByRelative) {
+        if (!ReactFacts.appliesTo(source)) continue;
+        const collector = new ReactFacts(source, relative, flow, scope,
+          (owner, fact) => add(details.symbols, owner, fact), indexedRequests,
+          ({ method, url }, fact) => add(details.requests, method + ' ' + url, fact));
+        if (collector.collect()) react.set(source, collector);
+      }
+      for (const site of renderSites) {
+        const { node, owner, file } = site;
+        if (owner === undefined || !Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) continue;
+        const supplier = react.get(node.getSourceFile());
+        const targets = resolvedRenderSites.get(node);
+        if (!supplier && !targets?.size) continue;
+        const from = scope(node) ?? owner;
+        const rows = supplier?.render(node, index.symbols[from - 1].name, !!targets?.size) ?? [];
+        if (!supplier && targets?.size) {
+          // A matching render in an unsupported state source can still supply an open flag or callback.
+          for (const attr of node.getAttributes()) {
+            const name = Node.isJsxAttribute(attr) ? attr.getNameNode().getText() : '';
+            if (Node.isJsxSpreadAttribute(attr) || name === 'open' || /^on(?!Click$)[A-Z]/.test(name)) {
+              rows.push([file, startLine(attr), '<' + node.getTagNameNode().getText() + '> in ' +
+                index.symbols[from - 1].name + ' ' + attr.getText(), 'prop supplier not traced to React state']);
+            }
+          }
+        }
+        for (const fact of rows) {
+          add(details.symbols, from, fact);
+          for (const target of targets ?? []) if (from !== target) add(details.renders, target, fact);
+        }
+      }
     }
     return index;
   }

@@ -163,6 +163,14 @@ export type RouterIssue =
 
 export type RouterRegistryIssue = { reason: string; registration?: { url: string; file: string; id: string } };
 
+export type DetailFact = [file: string, line: number, evidence: string, partial?: string | null];
+export interface DetailFacts {
+  handlers: Record<number, Record<string, DetailFact[]>>;
+  symbols: Record<number, DetailFact[]>;
+  renders: Record<number, DetailFact[]>;
+  requests: Record<string, DetailFact[]>;
+}
+
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
@@ -191,6 +199,7 @@ export interface QueryIndex {
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
+  detailFacts?: DetailFacts;
   renderExclusions?: Record<string, string[]>;
   renderGuardPaths?: Record<string, string[][]>;
   renderConditionalPaths?: Record<string, string[][]>;

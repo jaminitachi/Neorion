@@ -50,6 +50,50 @@ function fixture(t, reverse = false, fixtureSource = source) {
 const stable = output => output.replace(/^Project: [^\n]+\n/, '')
   .replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
 
+test('facts connects handler operations, state handoffs, and request transports', t => {
+  const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  project.build();
+  const facts = target => project.query('facts', target);
+  const patch = facts('PATCH /api/media/[slug]');
+  assert.match(patch, /^# facts PATCH \/api\/media\/\[slug\] : \d+ results/m);
+  assert.match(patch, /PATCH await params destructures slug/);
+  assert.match(patch, /PATCH Prisma store\.asset\.update\(\{ where: \{ slug: slug \}, data: \{ archivedOn: null, visible: true \} \}\)/);
+  assert.match(patch, /PATCH call signalChange/);
+  assert.match(patch, /PATCH JSON response \{ asset: asset, ok: true \}/);
+  assert.doesNotMatch(patch, /DELETE exported handler|asset\.delete/);
+  assert.match(patch, /# partial: .*callee bodies not inspected/);
+  assert.match(facts('GET /api/media'), /# complete: direct handler and indexed request syntax$/);
+
+  const dialog = facts('MediaDialog');
+  assert.match(dialog, /open=\{drawerOpen\} ← state drawerOpen via pickAsset → setDrawerOpen\(true\)/);
+  assert.match(dialog, /onDismiss=\{closeDialog\} → drawerOpen via setDrawerOpen\(false\)/);
+  assert.match(dialog, /slug=\{active\.slug\} ← state active via pickAsset → setActive\(\{ slug: 'picked' \}\)/);
+  assert.doesNotMatch(dialog, /shadowed → setDrawerOpen/);
+  assert.match(dialog, /onSuccess=\{saveFinished\} → revision via setRevision\(value => value \+ 1\) @\d+ → useEffect \[revision\] → refreshLibrary → GET \/api\/media/);
+  assert.match(dialog, /save calls prop onSuccess\(\) after guard !response\.ok exits/);
+  assert.match(dialog, /state retention ← useState\("3w"\)/);
+  assert.match(dialog, /JSON fields \{ retention: retention \[state retention\] \}/);
+  assert.match(dialog, /# partial: /);
+
+  const native = facts('NativeUploader');
+  assert.match(native, /onDrop=\{enqueue\} → setJobs.*status: "waiting"/);
+  assert.match(native, /onClick=\{flush\} → send\(job\.source\)/);
+  assert.match(native, /flush reads state via jobs\.filter\(job => job\.status === 'waiting'\)/);
+  assert.match(native, /PUT \/api\/imports via XMLHttpRequest\.open → send FormData \{ "source": source \}/);
+  const immediate = facts('ImmediateUploader');
+  assert.match(immediate, /onDrop=\{receive\} → setBusy\(true\) → send\(files\)/);
+  assert.match(immediate, /PUT \/api\/imports via fetch FormData \{ "source": file, "directory": directory if directory \}/);
+  const put = facts('PUT /api/imports');
+  assert.match(put, /client .*via XMLHttpRequest/);
+  assert.match(put, /client .*via fetch/);
+  assert.match(put, /<unresolved keys>/);
+  assert.match(put, /# partial: .*ORM argument values unresolved/);
+  assert.match(facts('GET /api/imports'), /# partial: request binding unresolved/);
+  assert.match(facts('POST /api/imports'), /# partial: POST handler unresolved/);
+  assert.match(facts('GET app/api/media/route.ts'), /# facts GET \/api\/media : /);
+  assert.match(project.run(['--help']), /facts ItemDialog/);
+});
+
 function loadAnalyzer(name, compilerWalk) {
   const { outputFiles } = buildSync({
     entryPoints: [path.join(__dirname, '../src/core/analyzers', name + '.ts')],
@@ -137,6 +181,7 @@ test('graph callbacks give the same results with and without their kind filters'
   });
   fs.writeFileSync(path.join(root, '__tests__/kind-walk.test.tsx'), `
     import { html } from 'lit';
+    import { useEffect, useState } from 'react';
     import * as UI from '../components/providers';
     import * as helpers from '../lib/normalize';
     import { normalize } from '../lib/normalize';
@@ -159,8 +204,11 @@ test('graph callbacks give the same results with and without their kind filters'
       return <button onClick={() => actions.act('test')}>Fetch item</button>;
     }
     export function InlineButton() {
+      const [visible, setVisible] = useState(false);
+      useEffect(() => { console.log(visible); }, [visible]);
       const trim = helpers['normalize'];
       return <UI.Providers>
+        <button onClick={() => setVisible(true)}>Show</button>
         <button onClick={() => InlineAction(trim('test'))}>Send</button>
         <ActionButton actions={{ act }} />
       </UI.Providers>;
@@ -195,7 +243,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 9);
+  assert.equal(kindSets.size, 11);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);

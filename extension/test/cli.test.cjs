@@ -105,8 +105,9 @@ function assertQueryHint(hint) {
   for (const kind of ['wrappers', 'who_renders', 'rename_impact', 'api_consumers', 'search', 'impact', 'callees']) {
     assert.ok(block.includes(`\x60${kind} <`), kind);
   }
-  assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`\./);
+  assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`, `facts <METHOD and API route or Component>`\./);
   assert.match(block, /For `path`, pass `target` and `to` in MCP\. For `changes`, omit `target`\./);
+  assert.match(block, /Use `facts` with a single target.*handler writes.*state initializers/);
   assertMonorepoGuidance(block);
   assert.match(block, /# complete` covers the indexed static matches in the stated scope/);
   assert.match(block, /# partial: <reason>.*verify against the source/);
