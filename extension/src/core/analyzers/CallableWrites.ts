@@ -39,6 +39,10 @@ export function bindingSelection<T extends Member>(binding: import('ts-morph').B
 type Member = string | undefined;
 type Write = { site: Node; path: Member[] };
 type Parameter = import('ts-morph').ParameterDeclaration;
+type ParameterWrite = Write & { parameter: Parameter; order: number };
+type ProjectedWrite = Write & { depth: number; order: number };
+type WriteSink = (binding: Node, path: Member[], site: Node) => void;
+type ParameterSink = (parameter: Parameter, path: Member[], site: Node) => void;
 const writeKinds = new Set([
   SyntaxKind.BinaryExpression, SyntaxKind.PrefixUnaryExpression, SyntaxKind.PostfixUnaryExpression,
   SyntaxKind.DeleteExpression, SyntaxKind.ForInStatement, SyntaxKind.ForOfStatement, SyntaxKind.CallExpression
@@ -50,6 +54,11 @@ const arrayMutators = new Set(['copyWithin', 'fill', 'pop', 'push', 'reverse', '
 function matchingPath(write: Member[], read: readonly Member[]) {
   return write.length <= read.length && write.every((member, index) =>
     member === undefined || read[index] === undefined || member === read[index]);
+}
+
+function sameWrite(write: Write, path: Member[], site: Node) {
+  return write.site === site && write.path.length === path.length &&
+    write.path.every((member, index) => member === path[index]);
 }
 
 function isWriteOperation(node: ts.Node) {
@@ -90,30 +99,102 @@ export function staticallyUnreachable(site: Node) {
 
 /** Writes are keyed by the declaration of the receiver, including aliases to the same object. */
 export class CallableWrites {
-  private writes = new Map<Node, Write[]>();
-  private parameterWrites: [Parameter, Write][] = [];
-  private parameterArguments = new Map<Parameter, Node[]>();
+  private writes?: WeakMap<Node, Write[]>;
+  private parameterWrites = new Map<Member, ParameterWrite[]>();
+  private projected = new Map<Member, WeakMap<Node, ProjectedWrite[]>>();
+  private parameterArguments = new WeakMap<Parameter, Node[]>();
   private readWrites = new WeakMap<Node, Node | null>();
   private arrayReceivers = new WeakMap<Node, Node>();
   private arrayWrites = new WeakMap<Node, boolean>();
 
-  constructor(private files: Set<SourceFile>, private declarations: (node: Node) => Node[], private references: CallableReferences) {
-    for (const file of files) visitKinds(file, writeKinds, node => {
-      if (!isWriteOperation(node.compilerNode) || staticallyUnreachable(node)) return;
-      if (Node.isBinaryExpression(node)) this.record(node.getLeft(), [], node);
-      else if (Node.isForInStatement(node) || Node.isForOfStatement(node)) this.record(node.getInitializer(), [], node);
-      else if (Node.isCallExpression(node)) this.mutatingCall(node);
-      else if (Node.isDeleteExpression(node)) this.record(node.getExpression(), [], node);
-      else if (Node.isPrefixUnaryExpression(node) || Node.isPostfixUnaryExpression(node)) this.record(node.getOperand(), [], node);
+  constructor(private files: Set<SourceFile>, private declarations: (node: Node) => Node[], private references: CallableReferences) {}
+
+  private collect() {
+    const writes = new WeakMap<Node, Write[]>();
+    let order = 0;
+    const addParameter: ParameterSink = (parameter, path, site) => {
+      const member = path[path.length - 1];
+      const entries = this.parameterWrites.get(member) ?? [];
+      entries.push({ parameter, path, site, order: order++ });
+      this.parameterWrites.set(member, entries);
+    };
+    const addWrite: WriteSink = (binding, path, site) => {
+      const entries = writes.get(binding) ?? [];
+      if (entries.some(entry => sameWrite(entry, path, site))) return;
+      entries.push({ path, site });
+      writes.set(binding, entries);
+      if (path.length && Node.isParameterDeclaration(binding)) addParameter(binding, path, site);
+    };
+    const record = (target: Node, path: Member[], site: Node) => this.record(target, path, site, addWrite, addParameter);
+    for (const file of this.files) visitKinds(file, writeKinds, node => {
+      if (staticallyUnreachable(node)) return;
+      if (Node.isBinaryExpression(node)) record(node.getLeft(), [], node);
+      else if (Node.isForInStatement(node) || Node.isForOfStatement(node)) record(node.getInitializer(), [], node);
+      else if (Node.isCallExpression(node)) this.mutatingCall(node, record);
+      else if (Node.isDeleteExpression(node)) record(node.getExpression(), [], node);
+      else if (Node.isPrefixUnaryExpression(node) || Node.isPostfixUnaryExpression(node)) record(node.getOperand(), [], node);
     }, { filterRaw: isWriteOperation });
-    for (const [parameter, { path, site }] of this.parameterWrites) {
-      if (!this.isWrite(site)) continue;
-      for (const argument of this.argumentsAt(parameter)) this.record(argument, path, site);
-    }
+    return writes;
   }
 
   forBinding(binding: Node, members: readonly Member[]) {
-    return this.writes.get(binding)?.find(write => matchingPath(write.path, members) && this.isWrite(write.site))?.site;
+    const direct = (this.writes ??= this.collect()).get(binding)
+      ?.find(write => matchingPath(write.path, members) && this.isWrite(write.site));
+    if (direct || !members.length) return direct?.site;
+    const keys = members.includes(undefined) ?
+      new Set([...this.parameterWrites.keys(), ...this.projected.keys()]) : new Set([undefined, ...members]);
+    let first: ProjectedWrite | undefined;
+    for (const key of keys) {
+      if (!this.parameterWrites.has(key) && !this.projected.has(key)) continue;
+      for (const write of this.project(key).get(binding) ?? []) {
+        if (!matchingPath(write.path, members) || !this.isWrite(write.site)) continue;
+        if (!first || write.depth < first.depth || write.depth === first.depth && write.order < first.order) first = write;
+      }
+    }
+    return first?.site;
+  }
+
+  private project(member: Member) {
+    const cached = this.projected.get(member);
+    if (cached) return cached;
+    const writes = new WeakMap<Node, ProjectedWrite[]>();
+    const seeds = this.parameterWrites.get(member) ?? [];
+    let current = seeds.map(write => ({ ...write, depth: 0 }));
+    const seen = new Map<Parameter, Write[]>();
+    for (const { parameter, path, site } of seeds) {
+      const entries = seen.get(parameter) ?? [];
+      entries.push({ path, site });
+      seen.set(parameter, entries);
+    }
+    // The terminal member survives argument projection, even through destructuring.
+    // Resolve only groups that could change a callable read.
+    for (let depth = 1; current.length; depth++) {
+      const next: (ParameterWrite & ProjectedWrite)[] = [];
+      for (const { parameter, path, site, order } of current) {
+        const addParameter: ParameterSink = (target, projectedPath, origin) => {
+          const entries = seen.get(target) ?? [];
+          if (entries.some(entry => sameWrite(entry, projectedPath, origin))) return;
+          // A recursive projection can keep adding prefixes to the same write.
+          // Callable value resolution has a finite member budget.
+          if (projectedPath.length > 64) return;
+          entries.push({ path: projectedPath, site: origin });
+          seen.set(target, entries);
+          next.push({ parameter: target, path: projectedPath, site: origin, depth, order });
+        };
+        const addWrite: WriteSink = (binding, projectedPath, origin) => {
+          const entries = writes.get(binding) ?? [];
+          if (entries.some(entry => sameWrite(entry, projectedPath, origin))) return;
+          entries.push({ path: projectedPath, site: origin, depth, order });
+          writes.set(binding, entries);
+          if (Node.isParameterDeclaration(binding)) addParameter(binding, projectedPath, origin);
+        };
+        for (const argument of this.argumentsAt(parameter)) this.record(argument, path, site, addWrite, addParameter);
+      }
+      current = next;
+    }
+    this.projected.set(member, writes);
+    this.parameterWrites.delete(member);
+    return writes;
   }
 
   private isWrite(site: Node) {
@@ -129,6 +210,13 @@ export class CallableWrites {
   }
 
   forRead(node: Node) {
+    if (Node.isIdentifier(node)) {
+      for (const binding of this.declarations(node)) {
+        const write = this.forBinding(binding, []);
+        if (write) return write;
+      }
+      return;
+    }
     const cached = this.readWrites.get(node);
     if (cached !== undefined) return cached ?? undefined;
     const write = this.readWrite(node);
@@ -137,13 +225,6 @@ export class CallableWrites {
   }
 
   private readWrite(node: Node) {
-    if (Node.isIdentifier(node)) {
-      for (const binding of this.declarations(node)) {
-        const write = this.forBinding(binding, []);
-        if (write) return write;
-      }
-      return;
-    }
     if (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node) && !wrappedExpression(node)) return;
     const path: Member[] = [];
     let root = node;
@@ -162,30 +243,21 @@ export class CallableWrites {
     }
   }
 
-  private addWrite(binding: Node, path: Member[], site: Node) {
-    const writes = this.writes.get(binding) ?? [];
-    if (writes.some(write => write.site === site && write.path.length === path.length &&
-        write.path.every((member, index) => member === path[index]))) return;
-    const write = { site, path };
-    writes.push(write);
-    this.writes.set(binding, writes);
-    if (path.length && Node.isParameterDeclaration(binding)) this.parameterWrites.push([binding, write]);
-  }
-
-  private record(target: Node, path: Member[], site: Node, seen = new Set<Node>()): void {
+  private record(target: Node, path: Member[], site: Node, addWrite: WriteSink, addParameter: ParameterSink,
+    seen = new Set<Node>()): void {
     if (seen.has(target)) return;
     seen.add(target);
     const inner = wrappedExpression(target);
-    if (inner) return this.record(inner, path, site, seen);
+    if (inner) return this.record(inner, path, site, addWrite, addParameter, seen);
     if (Node.isPropertyAccessExpression(target) || Node.isElementAccessExpression(target)) {
       const member = Node.isPropertyAccessExpression(target) ? target.getName() : staticMember(target.getArgumentExpression(), false);
-      return this.record(target.getExpression(), [member, ...path], site, seen);
+      return this.record(target.getExpression(), [member, ...path], site, addWrite, addParameter, seen);
     }
     if (target.getKind() === SyntaxKind.ThisKeyword && path.length) {
       const method = target.getFirstAncestor(node => Node.isFunctionLikeDeclaration(node) && !Node.isArrowFunction(node));
       const parent = method?.getParent();
       const receiver = Node.isPropertyAssignment(parent) ? parent.getParent() : parent;
-      if (Node.isObjectLiteralExpression(receiver)) this.addWrite(receiver, path, site);
+      if (Node.isObjectLiteralExpression(receiver)) addWrite(receiver, path, site);
       return;
     }
     if (Node.isIdentifier(target)) {
@@ -193,27 +265,27 @@ export class CallableWrites {
       const declarations = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol()?.getDeclarations() ?? [] :
         this.declarations(target);
       for (const binding of declarations) {
-        this.addWrite(binding, path, site);
+        addWrite(binding, path, site);
         if (path.length && Node.isVariableDeclaration(binding)) {
           const value = binding.getInitializer();
-          if (value) this.record(value, path, site, seen);
+          if (value) this.record(value, path, site, addWrite, addParameter, seen);
         }
         if (path.length && Node.isBindingElement(binding)) {
           const declaration = binding.getParent().getParent();
           const value = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
           const selection = bindingSelection(binding, path);
           if (!selection || binding.getDotDotDotToken() && path.length < 2) continue;
-          if (value) this.record(value, selection, site, seen);
+          if (value) this.record(value, selection, site, addWrite, addParameter, seen);
           else if (Node.isParameterDeclaration(declaration)) {
-            this.parameterWrites.push([declaration, { path: selection, site }]);
+            addParameter(declaration, selection, site);
           }
         }
       }
       return;
     }
     if (Node.isConditionalExpression(target)) {
-      this.record(target.getWhenTrue(), path, site, new Set(seen));
-      this.record(target.getWhenFalse(), path, site, seen);
+      this.record(target.getWhenTrue(), path, site, addWrite, addParameter, new Set(seen));
+      this.record(target.getWhenFalse(), path, site, addWrite, addParameter, seen);
     } else if (Node.isObjectLiteralExpression(target) || Node.isArrayLiteralExpression(target)) {
       const [member, ...rest] = path;
       if (Node.isObjectLiteralExpression(target)) for (const property of target.getProperties()) {
@@ -222,19 +294,19 @@ export class CallableWrites {
           Node.isShorthandPropertyAssignment(property) ? property.getNameNode() :
           Node.isSpreadAssignment(property) ? property.getExpression() : undefined;
         if (!value) continue;
-        if (!path.length) this.record(value, [], site, new Set(seen));
-        else if (Node.isSpreadAssignment(property) && rest.length) this.record(value, path, site, new Set(seen));
-        else if (rest.length && (member === undefined || name === member)) this.record(value, rest, site, new Set(seen));
+        if (!path.length) this.record(value, [], site, addWrite, addParameter, new Set(seen));
+        else if (Node.isSpreadAssignment(property) && rest.length) this.record(value, path, site, addWrite, addParameter, new Set(seen));
+        else if (rest.length && (member === undefined || name === member)) this.record(value, rest, site, addWrite, addParameter, new Set(seen));
       }
       else target.getElements().forEach((element, index) => {
         if (!path.length || rest.length && (member === undefined || member === String(index))) {
-          this.record(element, rest, site, new Set(seen));
+          this.record(element, rest, site, addWrite, addParameter, new Set(seen));
         }
       });
     } else if (!path.length && Node.isSpreadElement(target)) {
-      this.record(target.getExpression(), [], site, seen);
+      this.record(target.getExpression(), [], site, addWrite, addParameter, seen);
     } else if (!path.length && Node.isBinaryExpression(target) && target.getOperatorToken().getKind() === SyntaxKind.EqualsToken) {
-      this.record(target.getLeft(), [], site, seen);
+      this.record(target.getLeft(), [], site, addWrite, addParameter, seen);
     }
   }
 
@@ -250,7 +322,7 @@ export class CallableWrites {
     if (!Node.isIdentifier(name) || !Node.isFunctionLikeDeclaration(fn)) return args;
     const index = fn.getParameters().indexOf(parameter);
     if (index < 0 || parameter.isRestParameter()) return args;
-    for (const ref of this.references.uses(name)) {
+    for (const ref of this.references.calls(name)) {
       if (!this.files.has(ref.getSourceFile())) continue;
       const member = ref.getParent();
       const value = Node.isPropertyAccessExpression(member) && member.getNameNode() === ref ? member : ref;
@@ -262,7 +334,7 @@ export class CallableWrites {
     return args;
   }
 
-  private mutatingCall(call: import('ts-morph').CallExpression) {
+  private mutatingCall(call: import('ts-morph').CallExpression, record: WriteSink) {
     const callee = call.getExpression();
     if (!Node.isPropertyAccessExpression(callee)) return;
     const name = callee.getName();
@@ -275,21 +347,21 @@ export class CallableWrites {
           decl.getSourceFile().isDeclarationFile())) return;
       if (name === 'assign' || name === 'defineProperties') {
         for (const source of call.getArguments().slice(1)) {
-          if (!Node.isObjectLiteralExpression(source)) this.record(target, [undefined], call);
+          if (!Node.isObjectLiteralExpression(source)) record(target, [undefined], call);
           else for (const property of source.getProperties()) {
             const member = Node.isSpreadAssignment(property) ? undefined : staticMember(property.getNameNode());
-            this.record(target, [member], call);
+            record(target, [member], call);
           }
         }
       } else {
         const member = name === 'setPrototypeOf' ? undefined : staticMember(key, false);
-        this.record(target, [member], call);
+        record(target, [member], call);
       }
     } else if (arrayMutators.has(name)) {
       // A method name alone does not establish an array write. Only ask the
-      // checker when the path could affect a read or propagate to an argument.
+      // checker when a direct or projected path could affect a read.
       this.arrayReceivers.set(call, receiver);
-      this.record(receiver, [undefined], call);
+      record(receiver, [undefined], call);
     }
   }
 }

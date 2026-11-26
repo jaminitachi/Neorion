@@ -2965,7 +2965,9 @@ test('an expanded API consumer window reaches test callers beyond the normal row
     'request();'
   ].join('\n'));
   build();
-  assert.doesNotMatch(query('api_consumers', '/api/expanded', '--include-tests', '--limit', '100'), /late-caller/);
+  const limited = query('api_consumers', '/api/expanded', '--include-tests', '--limit', '100');
+  assert.doesNotMatch(limited, /late-caller/);
+  assert.match(limited, /^# more: .*--include-tests --limit 161\b/m);
   const assertCaller = result => assert.match(result, /^call1 +late-caller[.]test[.]ts:2 request \[test\]$/m);
   assertCaller(query('api_consumers', '/api/expanded', '--include-tests', '--limit', '200'));
   const mcp = await openMcp(t, root, {

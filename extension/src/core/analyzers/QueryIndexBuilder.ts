@@ -1036,9 +1036,8 @@ export class QueryIndexBuilder {
         case SyntaxKind.TrueKeyword:
         case SyntaxKind.FalseKeyword:
         case SyntaxKind.NullKeyword:
+        case SyntaxKind.NumericLiteral:
           return true;
-        default:
-          if (ts.isLiteralExpression(arg)) return true;
         }
       }
       return false;
@@ -2062,15 +2061,23 @@ export class QueryIndexBuilder {
         }
       };
       const commentBoundaries = /\/[/\*]/.test(content) ? new Uint8Array(content.length + 1) : undefined;
+      const mayStartComment = (pos: number) => {
+        const code = content.charCodeAt(pos);
+        return pos === 0 || code <= 32 || code === 47 || code >= 127;
+      };
       const scanNodeComments = (node: ts.Node) => {
         if (!commentBoundaries) return;
         if (!(commentBoundaries[node.pos] & 1)) {
           commentBoundaries[node.pos] |= 1;
-          for (const comment of ts.getLeadingCommentRanges(content, node.pos) ?? []) scanComment(comment);
+          if (mayStartComment(node.pos)) {
+            for (const comment of ts.getLeadingCommentRanges(content, node.pos) ?? []) scanComment(comment);
+          }
         }
         if (!(commentBoundaries[node.end] & 2)) {
           commentBoundaries[node.end] |= 2;
-          for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+          if (mayStartComment(node.end)) {
+            for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+          }
         }
       };
       const recordNamespaceUse = (node: Node) => {

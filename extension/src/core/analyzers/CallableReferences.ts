@@ -5,6 +5,12 @@ const identifiers = new Set([SyntaxKind.Identifier]);
 const memberNames = new Set([SyntaxKind.Identifier, SyntaxKind.StringLiteral, SyntaxKind.NoSubstitutionTemplateLiteral]);
 type MemberSites = Map<string, (ts.Identifier | ts.StringLiteralLike)[]>;
 
+function isCallName(node: ts.Node) {
+  const parent = node.parent;
+  const value = ts.isPropertyAccessExpression(parent) && parent.name === node ? parent : node;
+  return ts.isCallExpression(value.parent) && value.parent.expression === value;
+}
+
 /** Reuse checker symbols when a binding's references can be found by their spelling. */
 export class CallableReferences {
   private cache = new WeakMap<Identifier, Node[]>();
@@ -14,6 +20,7 @@ export class CallableReferences {
     renamedExports: Set<string>;
   }>();
   private memberSites = new WeakMap<SourceFile, MemberSites>();
+  private callSites = new WeakMap<SourceFile, MemberSites>();
 
   constructor(private files: ReadonlySet<SourceFile>, private symbol: (node: Node) => Symbol | undefined,
     private exported: ReadonlySet<Node>) {}
@@ -21,6 +28,16 @@ export class CallableReferences {
   uses(name: Identifier): Node[] {
     const cached = this.cache.get(name);
     if (cached) return cached;
+    const uses = this.findUses(name, false);
+    this.cache.set(name, uses);
+    return uses;
+  }
+
+  calls(name: Identifier): Node[] {
+    return this.findUses(name, true);
+  }
+
+  private findUses(name: Identifier, callsOnly: boolean) {
     const declaration = name.getParent();
     const source = declaration.getSourceFile();
     const symbol = this.symbol(name);
@@ -30,21 +47,24 @@ export class CallableReferences {
     const module = ts.isExternalModule(source.compilerNode);
     const privateBinding = lexical && module && symbol?.getDeclarations().every(node => !this.exported.has(node));
     const text = name.compilerNode.text;
-    const uses = !symbol ? [] :
-      enclosing || privateBinding ? this.walk(enclosing && lexical ? enclosing : source, name, symbol, new Set([text])) :
-      this.moduleUses(source, name, symbol) ?? name.findReferencesAsNodes();
-    this.cache.set(name, uses);
-    return uses;
+    if (!symbol) return [];
+    if (enclosing || privateBinding) {
+      return this.walk(enclosing && lexical ? enclosing : source, name, symbol, new Set([text]), false, undefined, callsOnly);
+    }
+    return this.moduleUses(source, name, symbol, callsOnly) ??
+      (callsOnly ? this.uses(name).filter(site => isCallName(site.compilerNode)) : name.findReferencesAsNodes());
   }
 
-  private walk(scope: Node, name: Identifier, symbol: Symbol, names: ReadonlySet<string>, members = false, sites?: MemberSites) {
+  private walk(scope: Node, name: Identifier, symbol: Symbol, names: ReadonlySet<string>, members = false,
+    sites?: MemberSites, callsOnly = false) {
     const uses: Node[] = [];
     visitKinds(scope, members ? memberNames : identifiers, candidate => {
       if (candidate !== name && this.matches(candidate, symbol, members)) uses.push(candidate);
     }, {
-      filterRaw: candidate => (ts.isIdentifier(candidate) || ts.isStringLiteralLike(candidate)) && names.has(candidate.text),
+      filterRaw: candidate => (ts.isIdentifier(candidate) || ts.isStringLiteralLike(candidate)) &&
+        names.has(candidate.text) && (!callsOnly || isCallName(candidate)),
       visitRaw: sites && (node => {
-        if (ts.isIdentifier(node) || ts.isStringLiteralLike(node)) {
+        if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && (!callsOnly || isCallName(node))) {
           let entries = sites.get(node.text);
           if (!entries) sites.set(node.text, entries = []);
           entries.push(node);
@@ -60,7 +80,7 @@ export class CallableReferences {
     return target === symbol || members && target?.getAliasedSymbol() === symbol;
   }
 
-  private moduleUses(source: SourceFile, name: Identifier, symbol: Symbol) {
+  private moduleUses(source: SourceFile, name: Identifier, symbol: Symbol, callsOnly: boolean) {
     // The general language-service search handles default exports, renamed
     // barrel exports, and ambient script bindings whose names can change.
     const declaration = name.getParent();
@@ -84,19 +104,21 @@ export class CallableReferences {
         if (!names) {
           const imports = new Map<string, string[]>();
           const renamedExports = new Set<string>();
-          for (const entry of file.getExportDeclarations()) {
-            for (const specifier of entry.getNamedExports()) {
-              if (specifier.getAliasNode()) renamedExports.add(specifier.getName());
-            }
-          }
-          for (const entry of file.getImportDeclarations()) {
-            for (const specifier of entry.getNamedImports()) {
-              const alias = specifier.getAliasNode();
-              if (!alias) continue;
-              const name = specifier.getName();
-              const entries = imports.get(name) ?? [];
-              entries.push(alias.compilerNode.text);
-              imports.set(name, entries);
+          for (const statement of parsed.statements) {
+            if (ts.isExportDeclaration(statement) && statement.exportClause && ts.isNamedExports(statement.exportClause)) {
+              for (const specifier of statement.exportClause.elements) {
+                if (specifier.propertyName) renamedExports.add(specifier.propertyName.getText(parsed));
+              }
+            } else if (ts.isImportDeclaration(statement)) {
+              const bindings = statement.importClause?.namedBindings;
+              if (!bindings || !ts.isNamedImports(bindings)) continue;
+              for (const specifier of bindings.elements) {
+                if (!specifier.propertyName) continue;
+                const name = specifier.propertyName.getText(parsed);
+                const entries = imports.get(name) ?? [];
+                entries.push(specifier.name.text);
+                imports.set(name, entries);
+              }
             }
           }
           this.moduleNames.set(file, names = { imports, renamedExports });
@@ -104,7 +126,7 @@ export class CallableReferences {
         if (names.renamedExports.has(text)) return false;
         aliases = names.imports.get(text);
       }
-      uses.push(...this.moduleReferences(file, name, symbol, aliases));
+      uses.push(...this.moduleReferences(file, name, symbol, callsOnly, aliases));
       return true;
     };
     // Visit the declaration's file first, then follow imports in program order.
@@ -115,16 +137,19 @@ export class CallableReferences {
     return uses;
   }
 
-  private moduleReferences(file: SourceFile, name: Identifier, symbol: Symbol, aliases?: string[]) {
+  private moduleReferences(file: SourceFile, name: Identifier, symbol: Symbol, callsOnly: boolean, aliases?: string[]) {
     const text = name.compilerNode.text;
     // Use ts-morph's existing context so symbols and wrapped nodes retain their identity.
     const wrap = (file as Node & { _getNodeFromCompilerNode?(node: ts.Node): Node })._getNodeFromCompilerNode;
-    if (!wrap || aliases?.length) return this.walk(file, name, symbol, new Set([text, ...(aliases ?? [])]), true);
-    const sites = this.memberSites.get(file);
+    if (!wrap || aliases?.length) {
+      return this.walk(file, name, symbol, new Set([text, ...(aliases ?? [])]), true, undefined, callsOnly);
+    }
+    const cache = callsOnly ? this.callSites : this.memberSites;
+    const sites = cache.get(file);
     if (!sites) {
       const entries: MemberSites = new Map();
-      const uses = this.walk(file, name, symbol, new Set([text]), true, entries);
-      this.memberSites.set(file, entries);
+      const uses = this.walk(file, name, symbol, new Set([text]), true, entries, callsOnly);
+      cache.set(file, entries);
       return uses;
     }
     const uses: Node[] = [];

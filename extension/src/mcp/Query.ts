@@ -137,13 +137,13 @@ function validate(name: string, value: unknown) {
   for (const key of ['direct', 'includeExternal', 'includeTests', 'uses']) {
     if (input[key] !== undefined && typeof input[key] !== 'boolean') throw new Error(`Invalid argument ${key}.`);
   }
-  return { tool, target, to, limit, direct, includeExternal, includeTests, filter: String(filter), depth,
+  return { tool, target, to, limit, maxLimit, direct, includeExternal, includeTests, filter: String(filter), depth,
     uses: !!uses, scope: scope as ChangeScope, base };
 }
 
 function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter', suggestedFilter?: string) {
   const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
-  const limit = Math.min(count, args.limit > 100 ? expandedApiLimit : tool === 'search' ? 50 : 100);
+  const limit = Math.min(count, args.maxLimit);
   let narrow = '';
   if (tool === 'search') {
     narrow = 'narrow the text';
