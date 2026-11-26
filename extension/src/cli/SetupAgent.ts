@@ -56,8 +56,22 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
   const skill = join(directory, 'SKILL.md');
   const stateFile = join(directory, '.neorion-setup.json');
   const lock = join(directory, '.neorion-setup.lock');
+  let firstCreated: string | undefined;
+  const pruneEmpty = () => {
+    for (let target = directory;; target = dirname(target)) {
+      try {
+        fs.rmdirSync(target);
+      } catch (error) {
+        const code = errorCode(error);
+        if (code === 'ENOTEMPTY' || code === 'EEXIST') break;
+        if (code !== 'ENOENT') throw error;
+      }
+      if (!firstCreated || target === firstCreated) break;
+    }
+  };
   const acquire = () => {
-    fs.mkdirSync(directory, { recursive: true });
+    const created = fs.mkdirSync(directory, { recursive: true });
+    firstCreated ??= created;
     fs.mkdirSync(lock);
   };
   try {
@@ -69,6 +83,7 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
       acquire();
     }
   } catch (error) {
+    if (agent === 'codex' && firstCreated) pruneEmpty();
     if (errorCode(error) !== 'EEXIST') throw error;
     throw new Error(`Neorion setup is locked. If no setup process is running, delete the lock directory and rerun setup: ${lock}`);
   }
@@ -181,12 +196,6 @@ export function setupAgent(agent: Agent, entry: string, command: Command, remove
     }
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
-    if (remove || agent === 'codex') {
-      try {
-        fs.rmdirSync(directory);
-      } catch (error) {
-        if (!['ENOENT', 'ENOTEMPTY', 'EEXIST'].includes(errorCode(error) ?? '')) throw error;
-      }
-    }
+    if (remove || agent === 'codex') pruneEmpty();
   }
 }

@@ -20,6 +20,7 @@ import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
+import { isComponentWrapper } from './RenderBindings';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -29,7 +30,7 @@ type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gat
 const REFERENCE_KINDS = new Set([
   SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
   SyntaxKind.ExportSpecifier, SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.TaggedTemplateExpression,
-  SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.ShorthandPropertyAssignment,
+  SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment,
   SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier
 ]);
 const FLOW_KINDS = new Set([SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
@@ -95,6 +96,7 @@ export class QueryIndexBuilder {
   constructor(private readonly exportsOf = (file: SourceFile) => file.getExportedDeclarations()) {}
 
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
+  private replacedInlineRenders = new Set<typeof this.edges[number]>();
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
@@ -139,9 +141,20 @@ export class QueryIndexBuilder {
     }
   }
 
+  replaceInlineRender(tag: Node, target: string, file: string, component?: string) {
+    for (const edge of this.renderSites.get(tag) ?? []) {
+      if (edge[1] === target && (edge[0] === file || edge[0] === component)) this.replacedInlineRenders.add(edge);
+    }
+  }
+
+  hasRenderAt(tag: Node, from: string, to: string) {
+    return this.renderSites.get(tag)?.some(edge => edge[0] === from && edge[1] === to);
+  }
+
   pageRenderCondition(route: string, tag: Node, decision: PageRenderCondition) {
     for (const edge of this.renderSites.get(tag) ?? []) {
       const conditions = this.pageConditions.get(route) ?? new Map();
+      if (decision === 'conditional' && conditions.has(edge)) continue;
       conditions.set(edge, decision);
       this.pageConditions.set(route, conditions);
     }
@@ -269,7 +282,8 @@ export class QueryIndexBuilder {
     for (const [file, body] of this.shells) {
       const parent = body?.getParent();
       if (!parent) continue;
-      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ?? parent;
+      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ??
+        parent.getParentIfKind(SyntaxKind.ClassDeclaration) ?? parent;
       const id = byNode.get(declaration);
       if (id !== undefined) index.routeFiles![file][3] = id;
     }
@@ -634,14 +648,16 @@ export class QueryIndexBuilder {
           if (id === undefined) continue;
           const entries: Record<string, PageRenderCondition> = {};
           for (const [edge, decision] of conditions) {
+            if (this.replacedInlineRenders.has(edge)) continue;
             const [from, to, line] = edge;
             const source = byGraphId.get(from);
             const target = byGraphId.get(to);
             if (source === undefined || target === undefined) continue;
-            const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line)
+            const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line && !this.replacedInlineRenders.has(other))
               .map(other => conditions.get(other));
             if (combined?.includes(undefined)) continue;
-            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' : decision;
+            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' :
+              combined?.includes('conditional') ? 'conditional' : decision;
           }
           index.pagesRenderConditions[id] = entries;
         }
@@ -668,7 +684,10 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
-    for (const [from, to, line, conditional, layout, possible, detail, site, file] of this.edges) {
+    const resolvedRenderSites = new Map<Node, Set<number>>();
+    for (const edge of this.edges) {
+      if (this.replacedInlineRenders.has(edge)) continue;
+      const [from, to, line, conditional, layout, possible, detail, site, file] = edge;
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
@@ -676,6 +695,11 @@ export class QueryIndexBuilder {
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
+      if (site && !possible && !historyOnly) {
+        const targets = resolvedRenderSites.get(site) ?? new Set<number>();
+        targets.add(target);
+        resolvedRenderSites.set(site, targets);
+      }
     }
     for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
@@ -707,6 +731,63 @@ export class QueryIndexBuilder {
     }
 
     const dynamicBindings = new Map<Node, number>();
+    const componentValues = new Set<number>();
+    const componentProperties = new Map<Node, Set<number>>();
+    const componentFactories = new Set<Node>();
+    const wrapperEdges: QueryIndex['renderEdges'] = [];
+    const unwrapValue = (node: Node | undefined) => {
+      let inner: Node | undefined;
+      while (node && (inner = wrappedExpression(node))) node = inner;
+      return node;
+    };
+    if (!historyOnly) for (const [binding, component] of components) {
+      let value = unwrapValue(Node.isVariableDeclaration(binding) ? binding.getInitializer() :
+        Node.isExportAssignment(binding) ? binding.getExpression() : undefined);
+      if (!Node.isCallExpression(value)) continue;
+      componentFactories.add(value);
+      if (!isComponentWrapper(value)) continue;
+      const line = startLine(value);
+      do {
+        componentFactories.add(value);
+        value = unwrapValue(value.getArguments()[0]);
+      } while (isComponentWrapper(value));
+      if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+      for (const target of declarationsOf(value)) {
+        const inner = components.get(target);
+        if (inner && inner !== component) wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+      }
+    }
+    if (!historyOnly) for (const [binding] of aliases) {
+      if (!Node.isExportAssignment(binding)) continue;
+      let value = unwrapValue(binding.getExpression());
+      while (isComponentWrapper(value)) {
+        componentFactories.add(value);
+        value = unwrapValue(value.getArguments()[0]);
+      }
+    }
+    const recordComponentDeclaration = (node: Node, property?: Node) => {
+      const id = byNode.get(node);
+      if (id === undefined || index.symbols[id - 1].kind !== 'component') return;
+      componentValues.add(id);
+      if (property) {
+        const values = componentProperties.get(property) ?? new Set<number>();
+        values.add(id);
+        componentProperties.set(property, values);
+      }
+    };
+    const recordComponentValue = (value: Node | undefined, property?: Node) => {
+      if (!value) return;
+      const wrapped = wrappedExpression(value);
+      if (wrapped) recordComponentValue(wrapped, property);
+      else if (Node.isConditionalExpression(value)) {
+        recordComponentValue(value.getWhenTrue(), property);
+        recordComponentValue(value.getWhenFalse(), property);
+      } else if (Node.isArrayLiteralExpression(value)) {
+        for (const element of value.getElements()) recordComponentValue(element, property);
+      } else if (Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) {
+        for (const declaration of declarationsOf(value)) recordComponentDeclaration(declaration, property);
+      }
+    };
     const externalModules = new Map<string, number>();
     const graphNames = new Map<string, number>();
     const graphName = (name: string) => {
@@ -1055,6 +1136,13 @@ export class QueryIndexBuilder {
         } else if (Node.isCallExpression(node) || Node.isNewExpression(node) || Node.isTaggedTemplateExpression(node)) {
           if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return;
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
+          if (!historyOnly && !Node.isTaggedTemplateExpression(node)) {
+            const parent = node.getParent();
+            const property = Node.isPropertyAssignment(parent) && parent.getInitializer() === node ? parent : undefined;
+            const args = node.getArguments();
+            // The first argument supplies the component definition when this call creates its binding.
+            for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
+          }
           const [owner, graphOwner, possible] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             recordDynamic(node, node.getArguments()[0], graphOwner);
@@ -1100,9 +1188,15 @@ export class QueryIndexBuilder {
         } else if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) &&
           (Node.isIdentifier(node.getTagNameNode()) || Node.isPropertyAccessExpression(node.getTagNameNode()))) {
           renderSites.push({ node, owner: owners(node)[1], line: startLine(node), file: relative });
+        } else if (Node.isPropertyAssignment(node)) {
+          if (!historyOnly) recordComponentValue(node.getInitializer(), node);
         } else if (Node.isShorthandPropertyAssignment(node)) {
           const symbol = node.getValueSymbol();
-          if (symbol) record(node, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
+          if (symbol) {
+            const declarations = (symbol.getAliasedSymbol() ?? symbol).getDeclarations();
+            if (!historyOnly) for (const declaration of declarations) recordComponentDeclaration(declaration, node);
+            record(node, declarations, 'use');
+          }
         } else if (Node.isElementAccessExpression(node)) {
           const key = node.getArgumentExpression();
           if (Node.isStringLiteral(key)) {
@@ -1154,6 +1248,7 @@ export class QueryIndexBuilder {
       const declarations = declarationsOf(site.node.getTagNameNode());
       const binding = declarations.find(node => dynamicBindings.has(node));
       if (binding) {
+        componentValues.delete(dynamicBindings.get(binding)!);
         const owner = site.owner;
         const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
         const conditional = conditionalAt(site.node, body);
@@ -1161,6 +1256,36 @@ export class QueryIndexBuilder {
         refs.push([dynamicBindings.get(binding)!, site.line, GraphReferenceKind.Render, owner, conditional]);
       }
     }
+    if (componentValues.size) {
+      // Value references without a resolved render site can hide JSX behind a registry or callback.
+      for (const [, target, , , , possible] of index.renderEdges) if (!possible) componentValues.delete(target);
+      for (const route of index.routes) {
+        if (route.component !== undefined) componentValues.delete(route.component);
+        for (const layout of route.layouts ?? []) componentValues.delete(layout);
+      }
+      // A component can have both an indexed JSX path and an unresolved property-based render.
+      if (componentProperties.size) for (const { node } of renderSites) {
+        if (!Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) continue;
+        const tag = node.getTagNameNode();
+        const reads = Node.isIdentifier(tag) ? declarationsOf(tag).flatMap(declaration => {
+          let value = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+          while (value) {
+            const wrapped = wrappedExpression(value);
+            if (!wrapped) break;
+            value = wrapped;
+          }
+          return Node.isPropertyAccessExpression(value) ? [value] : [];
+        }) : [tag];
+        for (const read of reads) for (const property of declarationsOf(read)) {
+          for (const id of componentProperties.get(property) ?? []) {
+            if (!resolvedRenderSites.get(node)?.has(id)) componentValues.add(id);
+          }
+        }
+      }
+      if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
+    }
+    // A wrapper definition does not resolve a separate opaque use of its inner component.
+    index.renderEdges.push(...wrapperEdges);
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const scopes = new Set([

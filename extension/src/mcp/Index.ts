@@ -1,9 +1,10 @@
 import type { RouterPattern } from '../core/frameworks/RouterMatch';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 7;
-export const QUERY_INDEX_REVISION = 10;
-export const GRAPH_INDEX_REVISION = 13;
+export const WRAPPER_INDEX_REVISION = 8;
+export const TRANSPORT_QUERY_REVISION = 9;
+export const QUERY_INDEX_REVISION = 12;
+export const GRAPH_INDEX_REVISION = 15;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -97,7 +98,7 @@ export interface ServerAction {
   callers: [file: string, line: number, owner?: number][];
 }
 
-export type PageRenderCondition = 'excluded' | 'possible';
+export type PageRenderCondition = 'excluded' | 'possible' | 'conditional';
 export const renderSiteKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
 
 export interface PagesEdge {
@@ -164,6 +165,7 @@ export interface QueryIndex {
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
+  dynamicRenderComponents?: number[];
   wrapperRevision?: number;
   queryRevision?: number;
   wrapChains: Record<string, Wrapper[]>;
