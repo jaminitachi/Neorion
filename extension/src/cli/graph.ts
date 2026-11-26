@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { generateGraph } from '../core/Generate';
 export { inspectChangeSource } from '../core/analyzers/ChangeSource';
+export { collectExcludedRequests } from '../core/analyzers/ExcludedHttp';
 import { appMode, missingProject, selectedApp, selectProject, type ProjectSelection } from '../core/FindProject';
 import { mcpCommand } from '../core/McpCommand';
 import { appList, projectLabel, projectRootNotice } from '../mcp/Build';

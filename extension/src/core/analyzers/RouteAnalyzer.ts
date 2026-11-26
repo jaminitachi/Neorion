@@ -24,7 +24,7 @@ export function hasDirective(statements: Node[], directive: string): boolean {
 
 export class RouteAnalyzer {
   constructor(private readonly appDir: string, private readonly pagesDir: string, private readonly root: string,
-    private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings) {}
+    private readonly config?: NextConfig, private readonly workspace?: WorkspaceBindings, private readonly appConfig?: NextConfig) {}
 
   public analyze(files: SourceFile[], staticMetadata: string[]): RouteNode[] {
     const routes = [
@@ -69,7 +69,10 @@ export class RouteAnalyzer {
         parts[0] === '..' || parts.some(part => part.startsWith('_'))) return;
 
     const filename = parts.pop()!;
-    const match = /^(page|layout|loading|error|not-found|route|robots|sitemap|opengraph-image|template|default|global-error)\.[jt]sx?$/.exec(filename)
+    const pageExtension = (this.appConfig?.extensions ?? ['js', 'jsx', 'ts', 'tsx'])
+      .some(ext => filename === 'page.' + ext);
+    const match = (pageExtension ? [filename, 'page'] : null)
+      ?? /^(layout|loading|error|not-found|route|robots|sitemap|opengraph-image|template|default|global-error)\.[jt]sx?$/.exec(filename)
       ?? /^(opengraph-image)\.(?:png|jpg|jpeg|gif)$/.exec(filename)
       ?? /^(sitemap)\.xml$/.exec(filename)
       ?? (parts.length === 0 ? /^(robots)\.txt$/.exec(filename) : null);

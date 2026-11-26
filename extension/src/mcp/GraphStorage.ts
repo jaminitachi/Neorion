@@ -5,7 +5,7 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
   'pagesEdges' | 'pagesIssues' | 'pagesObservedCalls' | 'pagesOwnerIssues' |
   'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues' |
-  'flowCalls' | 'callableOwners' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels'> & {
+  'flowCalls' | 'callableOwners' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callLiterals' | 'returnLiterals' | 'unresolvedCallLiterals'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -19,12 +19,14 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callableOwners, callGates, flowIssues, callIssues, refEvidence, renderLabels, ...rest } = index;
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callableOwners, callGates, flowIssues, callIssues, refEvidence, renderLabels,
+    callLiterals, returnLiterals, unresolvedCallLiterals, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callableOwners, callGates, flowIssues, callIssues, refEvidence, renderLabels
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels,
+    callLiterals, returnLiterals, unresolvedCallLiterals
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 
@@ -76,7 +78,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   }
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
-    if (!site || excludedSites.has(site)) return edge;
+    if (!site || index.renderEvidence?.[site] || excludedSites.has(site)) return edge;
     facts.renderSites!.push([offset, site]);
     if (edge[8]) {
       const packed: typeof edge = [...edge];
@@ -86,15 +88,30 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
     return edge.slice(0, edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4) as typeof edge;
   });
   return {
-    ...rest, symbols, references, routes, renderEdges, hasFlowCalls: !!flowCalls?.length || undefined,
+    // API callers use lexical owners without opening the packed graph.
+    ...rest, callableOwners: callableOwners ?? {}, symbols, references, routes, renderEdges, hasFlowCalls: !!flowCalls?.length || undefined,
     packedGraph: deflateRawSync(JSON.stringify(facts), { level: 6 }).toString('base64')
   };
 }
 
+function unpackFacts(packedGraph: string): PackedFacts {
+  const bytes = inflateRawSync(Buffer.from(packedGraph, 'base64'), { maxOutputLength: 32 * 1024 * 1024 });
+  return JSON.parse(bytes.toString('utf8')) as PackedFacts;
+}
+
+export function readCallableOwners(index: QueryIndex) {
+  if (index.callableOwners || typeof index.packedGraph !== 'string') return index.callableOwners;
+  try {
+    return unpackFacts(index.packedGraph).callableOwners;
+  } catch {
+    // API consumers can still use the base references when packed facts are unreadable.
+    return undefined;
+  }
+}
+
 export function unpackGraph(index: QueryIndex): QueryIndex {
   if (typeof index.packedGraph !== 'string') return index;
-  const bytes = inflateRawSync(Buffer.from(index.packedGraph, 'base64'), { maxOutputLength: 32 * 1024 * 1024 });
-  const { ends, types, useSites, callOwners, routeDetails, renderSites, ...facts } = JSON.parse(bytes.toString('utf8')) as PackedFacts;
+  const { ends, types, useSites, callOwners, routeDetails, renderSites, ...facts } = unpackFacts(index.packedGraph);
   const ranges = new Map(ends);
   const typeIds = new Set(types);
   const symbols = index.symbols.map(symbol => {
