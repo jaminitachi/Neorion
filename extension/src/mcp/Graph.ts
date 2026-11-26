@@ -1,5 +1,5 @@
 import { compileMiddlewareMatcher, middlewareMatcher } from '../core/analyzers/NextRouteMatch';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, renderIssue, renderSiteKey,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, renderIssue, renderSiteKey,
   type ExternalCall, type FetchEntry, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
   type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
@@ -286,16 +286,13 @@ export class DependencyGraph {
       for (const alias of index.trpcAliases?.[edge.from] ?? []) addEdge({ ...edge, from: alias });
     };
     const calls = new Set<string>();
-    const lexicalOwner = (id: NodeId) => {
-      while (typeof id === 'number' && index.callableOwners?.[id] !== undefined) id = index.callableOwners[id];
-      return id;
-    };
     const callSite = (to: NodeId, from: NodeId, line: number) => JSON.stringify([to, from, line]);
     const keyOf = (from: NodeId, to: NodeId, line: number) => `${from}:${to}:${line}`;
     const invocation = (from: NodeId, to: number, file: string, line: number, detail?: string, gates?: FlowGate[], possible?: true) => {
       const key = keyOf(from, to, line);
       add({ from, to, label: this.actions.has(to) ? 'action' : isEvent(detail) ? 'event' : 'call', file, line,
-        local: index.callableOwners?.[to] !== undefined && lexicalOwner(to) === lexicalOwner(from),
+        local: typeof from === 'number' && index.callableOwners?.[to] !== undefined &&
+          lexicalOwner(index.callableOwners, to) === lexicalOwner(index.callableOwners, from),
         partial: possible || !!index.callIssues?.[key],
         uncertainty: index.callIssues?.[key] ?? (possible ? this.coverageIssue(from) : undefined),
         detail: detail || index.refEvidence?.[key], args: index.callLiterals?.[key], gates: gates ?? index.callGates?.[key] });
@@ -694,12 +691,13 @@ export class DependencyGraph {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const renderSites = new Set<string>();
     const visited = new Map<NodeId, Visit[]>();
-    type State = { id: NodeId; gates: FlowGate[]; visit: Visit; steps: number };
+    type State = { id: NodeId; gates: FlowGate[]; visit: Visit; steps: number; deferredEdge?: Edge };
     const levels: State[][] = [];
     const states = new Map<string, number[]>();
     const reachedEdges = new Set<Edge>();
     const tests = new Set<string>();
     const boundary = new Set<string>();
+    const deferredCallbacks = new Map<string, State[]>();
     const hubs: QueryRow[] = [];
     const hidden = new Set<NodeId>();
     const terminals = new Map<string, Reached>();
@@ -725,11 +723,15 @@ export class DependencyGraph {
       depths[flags] = steps;
       states.set(key, depths);
       (levels[steps] ??= []).push({ id, gates, visit: value, steps });
+      if (steps <= depth) {
+        for (const state of deferredCallbacks.get(key) ?? []) levels[state.steps].push(state);
+        deferredCallbacks.delete(key);
+      }
       return true;
     };
     for (const seed of seeds) visit(seed, { depth: 0 }, initialGates, 0);
     for (let level = 0; level < levels.length && !expired(); level++) {
-      for (const { id, gates, visit: current, steps } of levels[level]) {
+      for (const { id, gates, visit: current, steps, deferredEdge } of levels[level]) {
         if (expired()) break;
         if (coversVisit(states.get(stateKey(id, gates)), certaintyFlags(current), steps, true)) continue;
         const visits = visited.get(id);
@@ -764,7 +766,7 @@ export class DependencyGraph {
             }
           }
         }
-        const edges = this.predecessors(id);
+        const edges = deferredEdge ? [deferredEdge] : this.predecessors(id);
         const additions = new Map<string, { gates: FlowGate[]; visits: (Visit & { edge: Edge; steps: number })[]; depths: number[] }>();
         let hasCaller = false;
         for (let edge of edges) {
@@ -785,10 +787,22 @@ export class DependencyGraph {
           // Keep the memoized callback hop visible while allowing it within the caller budget.
           const memoized = (edge.label === 'call' || edge.label === 'event') &&
             typeof edge.to === 'number' && this.memoizedCallbacks.has(edge.to) && this.file(edge.to) === edge.file;
-          const cost = memoized ? 0 : impactCost(edge, gates);
+          let cost = memoized ? 0 : impactCost(edge, gates);
+          let reachedOwner = false;
           if (steps >= depth && cost && edge.label !== 'render' && edge.label !== 'event' && edge.label !== 'fetch') {
-            boundary.add(key);
-            continue;
+            const owners = this.index.callableOwners;
+            const owner = typeof edge.from === 'number' ? owners?.[edge.from] : undefined;
+            if (owner !== undefined) {
+              const ownerKey = stateKey(lexicalOwner(owners, owner), awaiting);
+              reachedOwner = !!states.get(ownerKey)?.some(steps => steps <= depth);
+              // An owner can be reached through another edge at this level.
+              if (!reachedOwner) append(deferredCallbacks, ownerKey, { id, gates, visit: current, steps, deferredEdge: edge });
+            }
+            if (!reachedOwner) {
+              boundary.add(key);
+              continue;
+            }
+            cost = 0;
           }
           edge = this.describe(edge);
           flowIssue ??= gateIssue(edge) ?? (uncertainEntry(edge, gates) ? propValueIssue : undefined);
@@ -796,7 +810,7 @@ export class DependencyGraph {
           if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
           const nextSteps = steps + cost;
-          const next = { depth: current.depth + (memoized ? 1 : cost), steps: nextSteps, edge,
+          const next = { depth: current.depth + (memoized || reachedOwner ? 1 : cost), steps: nextSteps, edge,
             conditional: current.conditional || edge.conditional, possible: current.possible || edge.label === 'render' && edge.partial };
           const flags = certaintyFlags(next);
           if (coversVisit(states.get(key), flags, nextSteps)) continue;
@@ -805,7 +819,7 @@ export class DependencyGraph {
           pending.visits[flags] = next;
           pending.depths[flags] = nextSteps;
           additions.set(key, pending);
-          localCallbackUsed ||= memoized;
+          localCallbackUsed ||= memoized || reachedOwner;
         }
         trpc ??= this.trpcIssue(id, includeTests);
         if (!hasCaller) {

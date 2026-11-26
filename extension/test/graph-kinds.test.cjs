@@ -2164,6 +2164,94 @@ test('impact retains callers beyond resolved in-file callback hops', t => {
   assert.match(output, /^# complete:/m);
 });
 
+test('impact follows a boundary callback inside an already reached owner', t => {
+  const { build, query, root } = fixture(t);
+  const directory = path.join(root, 'app/callback-boundary');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'calls.ts'), `
+    export function boundaryTarget() {}
+    function firstHop() { boundaryTarget(); }
+    function secondHop() { firstHop(); }
+    export function thirdHop() { secondHop(); }
+    function firstRelay() { boundaryTarget(); }
+    export function secondRelay() { firstRelay(); }
+    export function otherTarget() {}
+    function otherFirstHop() { otherTarget(); }
+    function otherSecondHop() { otherFirstHop(); }
+    export function otherThirdHop() { otherSecondHop(); }
+  `);
+  fs.writeFileSync(path.join(directory, 'page.tsx'), `
+    import { useCallback } from 'react';
+    import { thirdHop, secondRelay, otherThirdHop } from './calls';
+    export default function BoundaryPage() {
+      const refresh = useCallback(() => thirdHop(), []);
+      const relay = useCallback(() => secondRelay(), []);
+      const other = useCallback(() => otherThirdHop(), []);
+      return <><button onClick={refresh} /><button onClick={relay} /><button onClick={other} /></>;
+    }
+  `);
+  build();
+  const output = query('impact', 'boundaryTarget');
+  assert.match(output, /^page \/callback-boundary /m);
+  assert.match(output, /^d\d call .*refresh < thirdHop/m);
+  assert.match(output, /^# complete:/m);
+  assert.match(query('impact', 'otherTarget'), /^# partial: depth limit \(1 unexplored caller/m);
+  assert.match(query('impact', 'otherTarget', '--depth', '4'), /^# complete:/m);
+});
+
+test('API caller depth reaches components through a hook’s local callbacks', async t => {
+  const { build, query, root, env } = fixture(t);
+  for (const route of ['status', 'session']) {
+    const directory = path.join(root, 'app/api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({ ok: true }); }');
+  }
+  fs.writeFileSync(path.join(root, 'a-use-status.ts'), `
+    import { useCallback, useEffect } from 'react';
+    export function useStatus() {
+      const fetchStatus = useCallback(() => fetch('/api/status'), []);
+      const refresh = useCallback(() => fetchStatus(), [fetchStatus]);
+      useEffect(() => { refresh(); }, [refresh]);
+    }
+  `);
+  for (const [file, name] of [['status-banner.tsx', 'StatusBanner'], ['status-card.tsx', 'StatusCard']]) {
+    fs.writeFileSync(path.join(root, file), `
+      import { useStatus } from './a-use-status';
+      export function ${name}() { useStatus(); return <p />; }
+    `);
+  }
+  fs.writeFileSync(path.join(root, 'Session.tsx'), `
+    import { useCallback } from 'react';
+    export function Session() {
+      const createSession = useCallback(() => fetch('/api/session'), []);
+      const ensureSession = useCallback(() => createSession(), [createSession]);
+      const startSession = useCallback(() => ensureSession(), [ensureSession]);
+      return <button onClick={startSession} />;
+    }
+  `);
+  const indexFile = build();
+  const status = query('api_consumers', '/api/status');
+  assert.match(status, /^call1 +status-banner\.tsx:\d+ useStatus$/m);
+  assert.match(status, /^call1 +status-card\.tsx:\d+ useStatus$/m);
+  assert.match(status, /^  call1 +a-use-status\.ts:\d+ fetchStatus$/m);
+  assert.match(status, /^# complete:/m);
+  assert.equal(query('api_consumers', '/api/status', '--limit', '3'), status);
+  const session = query('api_consumers', '/api/session');
+  assert.match(session, /^  call1 +Session\.tsx:\d+ ensureSession$/m);
+  assert.match(session, /^# complete:/m);
+  const { packGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  const packed = packGraph(index, 0);
+  assert.equal(typeof packed.packedGraph, 'string');
+  fs.writeFileSync(indexFile, JSON.stringify(packed));
+  assert.equal(query('api_consumers', '/api/status'), status);
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assert.equal(await mcp.text('query', { kind: 'api_consumers', target: '/api/status' }), status);
+  assert.doesNotMatch(await mcp.text('query', { kind: 'api_consumers', target: '/api/status', callers: 0 }), /^ *call\d/m);
+});
+
 test('API route callers can be traced past the default depth in CLI and MCP', async t => {
   const { build, query, root, env } = fixture(t);
   fs.mkdirSync(path.join(root, 'app/api/depth'), { recursive: true });

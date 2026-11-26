@@ -205,3 +205,8 @@ export interface QueryIndex {
   pagesOwnerIssues?: Record<number, string[]>;
   trpcModuleUses?: Record<number, [target: number, line: number][]>;
 }
+
+export function lexicalOwner(owners: QueryIndex['callableOwners'], id: number): number {
+  while (owners?.[id] !== undefined) id = owners[id];
+  return id;
+}

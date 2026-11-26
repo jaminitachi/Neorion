@@ -84,10 +84,24 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   };
 }
 
+function unpackFacts(packedGraph: string): PackedFacts {
+  const bytes = inflateRawSync(Buffer.from(packedGraph, 'base64'), { maxOutputLength: 32 * 1024 * 1024 });
+  return JSON.parse(bytes.toString('utf8')) as PackedFacts;
+}
+
+export function readCallableOwners(index: QueryIndex) {
+  if (index.callableOwners || typeof index.packedGraph !== 'string') return index.callableOwners;
+  try {
+    return unpackFacts(index.packedGraph).callableOwners;
+  } catch {
+    // API consumers can still use the base references when packed facts are unreadable.
+    return undefined;
+  }
+}
+
 export function unpackGraph(index: QueryIndex): QueryIndex {
   if (typeof index.packedGraph !== 'string') return index;
-  const bytes = inflateRawSync(Buffer.from(index.packedGraph, 'base64'), { maxOutputLength: 32 * 1024 * 1024 });
-  const { ends, types, useSites, callOwners, routeDetails, renderSites, ...facts } = JSON.parse(bytes.toString('utf8')) as PackedFacts;
+  const { ends, types, useSites, callOwners, routeDetails, renderSites, ...facts } = unpackFacts(index.packedGraph);
   const ranges = new Map(ends);
   const typeIds = new Set(types);
   const symbols = index.symbols.map(symbol => {
