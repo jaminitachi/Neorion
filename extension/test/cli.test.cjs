@@ -955,7 +955,7 @@ test('Claude installs the hook only in projects and skips the user settings dire
   }
 });
 
-test('Claude cleans up created settings and prunes empty containers in legacy settings', t => {
+test('Claude cleans up created settings and prunes its empty containers', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
   const env = { PATH: home };
@@ -1003,6 +1003,35 @@ test('Claude cleans up created settings and prunes empty containers in legacy se
   assert.deepEqual(readJson(file), {});
 });
 
+test('Claude prunes containers from the master hook with or without an intervening setup', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const file = path.join(root, '.claude/settings.json');
+  fs.mkdirSync(path.dirname(file));
+  const setup = (...args) => {
+    const result = run(['setup', 'claude', '--no-hint', ...args], { PATH: home });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const permissions = { allow: [] };
+  const legacyGroup = { matcher: 'Grep|Glob', hooks: [{ type: 'command', command: 'node',
+    args: ['-e', 'const ignored = /^[A-Z]\\w*(?:Props|Type)$/;', '--', 'neorion-query-advisory'],
+    timeout: 1, onFailure: 'continue' }] };
+  for (const upgrade of [false, true]) {
+    fs.writeFileSync(file, JSON.stringify({ permissions, hooks: { PreToolUse: [legacyGroup] } }, null, 2) + '\n');
+    if (upgrade) {
+      setup();
+      assert.doesNotMatch(setup(), /Neorion hook installed/);
+    }
+    setup('--remove');
+    assert.deepEqual(readJson(file), { permissions });
+  }
+  const PostToolUse = [{ matcher: 'Read', hooks: [{ type: 'command', command: 'user-read' }] }];
+  fs.writeFileSync(file, JSON.stringify({ permissions, hooks: { PreToolUse: [legacyGroup], PostToolUse } }));
+  setup('--remove');
+  assert.deepEqual(readJson(file), { permissions, hooks: { PostToolUse } });
+});
+
 test('Claude hook setup preserves compact user groups and adjacent JSONC comments', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
@@ -1040,7 +1069,11 @@ test('Claude hook repeat setup preserves the installed settings byte for byte', 
     ['empty array with comment', '{\n  "hooks": {\n    "PreToolUse": [ /* none */ ]\n  }\n}\n',
       /\n {6}\/\* none \*\/\n {4}\]/],
     ['empty array with permissions', '{"permissions":{},"hooks":{"PreToolUse":[]}}'],
-    ['existing empty hooks', '{"permissions":{},"hooks":{}}']
+    ['existing empty hooks', '{"permissions":{},"hooks":{}}'],
+    ['existing empty hooks in multiline settings', '{\n  "permissions": {},\n  "hooks": {}\n}\n',
+      /"hooks": \{\n {4}"PreToolUse": \[/],
+    ['inline hooks with a comment', '{\r\n\t"permissions": {},\r\n\t"hooks": { /* keep */ },\r\n}\r\n',
+      /\r\n\t\t\/\* keep \*\/\r\n\t\},/]
   ]) {
     await t.test(layout, t => {
       const { home, root, run } = fixture(t);
@@ -1266,9 +1299,13 @@ test('Cursor reuses user and extension MCP entries and gives guidance for confli
   for (const neorion of [...registryEntries,
     { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}'] },
     { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}/apps/web'] },
+    { command: 'neorion', args: ['mcp', '--workspace', '${workspaceFolder}'] },
     { command: '/usr/local/bin/neorion', args: ['mcp', '--root', '${workspaceFolder}'] },
     { type: 'stdio', command: 'C:\\npm\\neorion.cmd', args: ['mcp', '--root', '${workspaceFolder}/apps/web'] },
     { command: 'npx', args: ['-y', 'neorion', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'npx', args: ['--yes', 'neorion', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'npx', args: ['-y', 'neorion@^0.6.0', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'pnpm', args: ['dlx', 'neorion', 'mcp', '--workspace', '${workspaceFolder}/apps/web'] },
     { type: 'stdio', command: 'npx', args: ['neorion@latest', 'mcp', '--root', '${workspaceFolder}'],
       env: { NEORION_AUTOBUILD: '0' } },
     { command: 'npx', args: ['neorion@0.5.2', 'mcp', '--root', '${workspaceFolder}'] }
@@ -1279,6 +1316,10 @@ test('Cursor reuses user and extension MCP entries and gives guidance for confli
     assert.equal(added.status, 0, added.stderr);
     assert.ok(added.stdout.split(/\r?\n/).includes(`${config} (existing Neorion entry kept)`));
     assertQueryHint(fs.readFileSync(rule, 'utf8'));
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    const repeated = run(['setup', 'cursor']);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.ok(repeated.stdout.split(/\r?\n/).includes(`${config} (existing Neorion entry kept)`));
     assert.equal(fs.readFileSync(config, 'utf8'), original);
     const removed = run(['setup', 'cursor', '--remove']);
     assert.equal(removed.status, 0, removed.stderr);
@@ -1307,6 +1348,7 @@ test('Cursor requires an explicit workspace root for hand-written Neorion entrie
     { command: 'npx', args: ['-y', 'neorion', 'mcp'] },
     { command: '/usr/local/bin/neorion', args: ['mcp'] },
     { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}/../outside'] },
+    { command: 'pnpm', args: ['dlx', 'neorion', 'mcp', '--workspace', '${workspaceFolder}/../outside'] },
     ...(process.platform === 'win32' ? [] : [
       { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}\\outside'] }
     ]),
@@ -1317,7 +1359,7 @@ test('Cursor requires an explicit workspace root for hand-written Neorion entrie
     fs.writeFileSync(config, original);
     const failed = run(['setup', 'cursor']);
     assert.equal(failed.status, 1);
-    if (!neorion.args.includes('--root')) assert.match(failed.stderr, /add --root \$\{workspaceFolder\}/);
+    if (neorion.args.at(-1) === 'mcp') assert.match(failed.stderr, /add --root \$\{workspaceFolder\}/);
     assert.equal(fs.readFileSync(config, 'utf8'), original);
     assert.ok(!fs.existsSync(rule));
   }

@@ -15,6 +15,7 @@ const createdDirectory = 'created-directory';
 const createdHooks = 'created-hooks';
 const createdArray = 'created-array';
 const inlineTail = 'inline-array-tail:';
+const inlineHooksTail = 'inline-hooks-tail:';
 const settingsPath = '.claude/settings.json';
 const eventPath = ['hooks', 'PreToolUse'];
 
@@ -211,14 +212,14 @@ function appendGroup(source: string, array: Node, group: unknown) {
 }
 
 function restoreInlineTail(source: string, node: Node, tail: string) {
-  const array = node.parent!;
-  if (array.children?.at(-1) !== node) return;
-  const previous = array.children.at(-2);
-  const start = previous ? afterLastGroup(array, previous) : array.offset + 1;
-  const end = array.offset + array.length - 1;
+  const container = node.parent!;
+  if (container.children?.at(-1) !== node) return;
+  const previous = container.children.at(-2);
+  const start = previous ? previous.offset + previous.length : container.offset + 1;
+  const end = container.offset + container.length - 1;
   const rendered = source.slice(node.offset, node.offset + node.length);
-  const expected = expandInlineTail(tail, !!previous, rendered, lineEnding(source), lineIndent(source, array.offset));
-  // Fall back to removing only the owned group if the surrounding trivia was edited.
+  const expected = expandInlineTail(tail, !!previous, rendered, lineEnding(source), lineIndent(source, container.offset));
+  // Preserve the current trivia if the user edited the generated layout.
   if (source.slice(start, end) !== expected) return;
   const restored = source.slice(0, start) + tail + source.slice(end);
   const errors: ParseError[] = [];
@@ -291,13 +292,19 @@ function editClaudeSettings(root: string, install: boolean) {
   const ownedHooks = groups.flatMap(group => isEntry(group) && Array.isArray(group.hooks)
     ? group.hooks.filter(ownsHook) : []);
   const hasMarker = (marker: string) => ownedHooks.some(hook => hook.args.slice(4).includes(marker));
+  // Older setup used the Props/Type-only exclusion and did not record container ownership.
+  const legacyGroup = groups[0];
+  const legacyContainers = groups.length === 1 && ownedHooks.length === 1 &&
+    typeof ownedHooks[0].args[1] === 'string' && ownedHooks[0].args[1].includes('(?:Props|Type)$') &&
+    isEntry(legacyGroup) && legacyGroup.matcher === matcher && Object.keys(legacyGroup).length === 2 &&
+    Array.isArray(legacyGroup.hooks) && legacyGroup.hooks.length === 1;
   const created = original === undefined || hasMarker(createdSettings);
   const madeDirectory = install && fs.mkdirSync(directory, { recursive: true }) !== undefined;
   const ownsDirectory = madeDirectory || hasMarker(createdDirectory);
-  const ownsHooks = !hooks || hasMarker(createdHooks) || created;
-  const ownsArray = !events || hasMarker(createdArray) || created;
-  const recordedTail = (args: unknown[]) => args.slice(4).find((arg): arg is string =>
-    typeof arg === 'string' && arg.startsWith(inlineTail));
+  const ownsHooks = !hooks || hasMarker(createdHooks) || created || legacyContainers && hooks.children?.length === 1;
+  const ownsArray = !events || hasMarker(createdArray) || created || legacyContainers;
+  const recordedTails = (args: unknown[]) => args.slice(4).filter((arg): arg is string =>
+    typeof arg === 'string' && (arg.startsWith(inlineTail) || arg.startsWith(inlineHooksTail)));
   const jsonc = hasComments(source);
   const edit = (path: (string | number)[], value: unknown) => {
     if (value === undefined && jsonc) {
@@ -333,7 +340,19 @@ function editClaudeSettings(root: string, install: boolean) {
       const node = findNodeAtLocation(parseTree(source)!, path)!;
       if (!jsonc || !hasComments(source.slice(node.offset, node.offset + node.length))) {
         const hook = group.hooks[0];
-        const tail = group.hooks.length === 1 && ownsHook(hook) ? recordedTail(hook.args) : undefined;
+        const tails = group.hooks.length === 1 && ownsHook(hook) ? recordedTails(hook.args) : [];
+        const objectTail = tails.find(arg => arg.startsWith(inlineHooksTail));
+        const events = node.parent!;
+        const eventProperty = events.parent!;
+        if (!install && objectTail && events.children?.length === 1 && eventProperty.parent?.children?.length === 1 &&
+            !hasComments(source.slice(eventProperty.offset, eventProperty.offset + eventProperty.length))) {
+          const restored = restoreInlineTail(source, eventProperty, objectTail.slice(inlineHooksTail.length));
+          if (restored !== undefined) {
+            source = restored;
+            continue;
+          }
+        }
+        const tail = tails.find(arg => arg.startsWith(inlineTail));
         source = (tail && restoreInlineTail(source, node, tail.slice(inlineTail.length))) ?? removeSetting(source, path, true);
         continue;
       }
@@ -342,8 +361,7 @@ function editClaudeSettings(root: string, install: boolean) {
       if (command && !installed && group.matcher === matcher) {
         // jsonc-parser gives parsed objects a null prototype.
         const current = JSON.parse(JSON.stringify(group.hooks[j]));
-        const tail = recordedTail(current.args);
-        const updated = tail ? { ...command, args: [...command.args, tail] } : command;
+        const updated = { ...command, args: [...command.args, ...recordedTails(current.args)] };
         if (!isDeepStrictEqual(current, updated)) edit([...eventPath, i, 'hooks', j], updated);
         installed = true;
       } else {
@@ -352,14 +370,26 @@ function editClaudeSettings(root: string, install: boolean) {
     }
   }
   if (command && !installed) {
-    const array = findNodeAtLocation(parseTree(source)!, eventPath);
+    const current = parseTree(source)!;
+    const array = findNodeAtLocation(current, eventPath);
     if (array && !singleLine(source)) {
       const tail = source.slice(afterLastGroup(array), array.offset + array.length - 1);
       if (!closingLine(tail)) command.args.push(inlineTail + tail);
     }
     const group = { matcher, hooks: [command] };
+    const object = findNodeAtLocation(current, ['hooks']);
+    const objectTail = object && !object.children?.length && !singleLine(source)
+      ? source.slice(object.offset + 1, object.offset + object.length - 1) : undefined;
     if (array) source = appendGroup(source, array, group);
-    else edit(eventPath, [group]);
+    else if (object && objectTail !== undefined && !closingLine(objectTail)) {
+      command.args.push(inlineHooksTail + objectTail);
+      const indent = lineIndent(source, object.offset);
+      const unit = indentUnit(indent);
+      const eol = lineEnding(source);
+      const rendered = `"PreToolUse": ${renderJson([group], unit, eol, indent + unit)}`;
+      source = source.slice(0, object.offset + 1) + expandInlineTail(objectTail, false, rendered, eol, indent) +
+        source.slice(object.offset + object.length - 1);
+    } else edit(eventPath, [group]);
   }
   if (!install && bom + source !== original) {
     for (const path of [...(ownsArray ? [eventPath] : []), ...(ownsHooks ? [['hooks']] : [])]) {

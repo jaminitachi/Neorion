@@ -981,6 +981,8 @@ export class QueryEngine {
     }
     let shown = renderedRows.length;
     let noteCount = notes.length;
+    const truncation = 'output truncated';
+    const truncationWithReason = result.partial ? `${truncation}; ${result.partial}` : truncation;
     for (;;) {
       const visible = renderedRows.slice(0, shown);
       const extras = notes.slice(0, noteCount);
@@ -995,8 +997,7 @@ export class QueryEngine {
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : truncated ?
-          ['output truncated', result.partial].filter(Boolean).join('; ') :
+        staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {
@@ -1006,9 +1007,14 @@ export class QueryEngine {
         path: 'indexed directed edges', changes: 'git diff and indexed impacts'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
-      const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
-        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), coverage].join('\n');
+      const body = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
+        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : [])].join('\n');
+      const output = `${body}\n${coverage}`;
       if (bytes(output) <= 6000) return output;
+      if (tool === 'who_renders' && result.partial && reason === truncationWithReason) {
+        const compact = `${body}\n# partial: ${truncation}`;
+        if (bytes(compact) <= 6000) return compact;
+      }
       if (noteCount) noteCount--;
       else shown--;
     }

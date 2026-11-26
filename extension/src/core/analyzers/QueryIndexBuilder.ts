@@ -19,6 +19,7 @@ import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
+import { isComponentWrapper } from './RenderBindings';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -710,6 +711,38 @@ export class QueryIndexBuilder {
     const dynamicBindings = new Map<Node, number>();
     const componentValues = new Set<number>();
     const componentProperties = new Map<Node, Set<number>>();
+    const componentFactories = new Set<Node>();
+    const wrapperEdges: QueryIndex['renderEdges'] = [];
+    const unwrapValue = (node: Node | undefined) => {
+      let inner: Node | undefined;
+      while (node && (inner = wrappedExpression(node))) node = inner;
+      return node;
+    };
+    if (!historyOnly) for (const [binding, component] of components) {
+      let value = unwrapValue(Node.isVariableDeclaration(binding) ? binding.getInitializer() :
+        Node.isExportAssignment(binding) ? binding.getExpression() : undefined);
+      if (!Node.isCallExpression(value)) continue;
+      componentFactories.add(value);
+      if (!isComponentWrapper(value)) continue;
+      const line = startLine(value);
+      do {
+        componentFactories.add(value);
+        value = unwrapValue(value.getArguments()[0]);
+      } while (isComponentWrapper(value));
+      if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+      for (const target of declarationsOf(value)) {
+        const inner = components.get(target);
+        if (inner && inner !== component) wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+      }
+    }
+    if (!historyOnly) for (const [binding] of aliases) {
+      if (!Node.isExportAssignment(binding)) continue;
+      let value = unwrapValue(binding.getExpression());
+      while (isComponentWrapper(value)) {
+        componentFactories.add(value);
+        value = unwrapValue(value.getArguments()[0]);
+      }
+    }
     const recordComponentDeclaration = (node: Node, property?: Node) => {
       const id = byNode.get(node);
       if (id === undefined || index.symbols[id - 1].kind !== 'component') return;
@@ -1084,7 +1117,9 @@ export class QueryIndexBuilder {
           if (!historyOnly && !Node.isTaggedTemplateExpression(node)) {
             const parent = node.getParent();
             const property = Node.isPropertyAssignment(parent) && parent.getInitializer() === node ? parent : undefined;
-            for (const argument of node.getArguments()) recordComponentValue(argument, property);
+            const args = node.getArguments();
+            // The first argument supplies the component definition when this call creates its binding.
+            for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
           }
           const [owner, graphOwner, possible] = owners(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
@@ -1227,6 +1262,8 @@ export class QueryIndexBuilder {
       }
       if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     }
+    // A wrapper definition does not resolve a separate opaque use of its inner component.
+    index.renderEdges.push(...wrapperEdges);
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const scopes = new Set([

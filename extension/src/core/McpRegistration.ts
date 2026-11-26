@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { valid } from 'semver';
+import { valid, validRange } from 'semver';
 import { applyEdits, findNodeAtLocation, modify, parseTree, getNodeValue, type ParseError, type Node } from 'jsonc-parser';
 import { workspaceCache } from './WorkspaceCache';
 import { mcpCommand } from './McpCommand';
@@ -132,14 +132,16 @@ function cursorNeorionEntry(value: unknown, localEntry: string): 'scoped' | 'mis
   const executable = path.win32.basename(command);
   let manual: string[] | undefined;
   if (/^neorion(?:\.cmd)?$/.test(executable)) manual = args;
-  if (/^npx(?:\.cmd)?$/.test(executable)) {
-    const [spec, ...invocation] = args[0] === '-y' ? args.slice(1) : args;
+  const npx = /^npx(?:\.cmd)?$/.test(executable);
+  const pnpmDlx = /^pnpm(?:\.cmd)?$/.test(executable) && args[0] === 'dlx';
+  if (npx || pnpmDlx) {
+    const [spec, ...invocation] = pnpmDlx || ['-y', '--yes'].includes(args[0]) ? args.slice(1) : args;
     const version = /^neorion@(.+)$/.exec(spec ?? '')?.[1];
-    if (spec === 'neorion' || version === 'latest' || (version && valid(version))) manual = invocation;
+    if (spec === 'neorion' || version === 'latest' || (version?.trim() && validRange(version))) manual = invocation;
   }
   if (manual?.[0] === 'mcp') {
     if (manual.length === 1) return 'missing-root';
-    if (manual.length === 3 && manual[1] === '--root' && inWorkspace(manual[2])) return 'scoped';
+    if (manual.length === 3 && ['--root', '--workspace'].includes(manual[1]) && inWorkspace(manual[2])) return 'scoped';
   }
   const root = args.at(-1);
   if (!root || !inWorkspace(root)) return;

@@ -1,10 +1,17 @@
-import { Node, SourceFile } from 'ts-morph';
+import { CallExpression, Node, SourceFile } from 'ts-morph';
 import { declarationsOf } from './ArchitectureFacts';
 import { packageMember, returnedValues } from './CallableFlow';
 
 type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
   import('ts-morph').ArrowFunction;
 type Step = { members: string[]; returns: boolean };
+
+export function isComponentWrapper(node: Node | undefined): node is CallExpression {
+  if (!Node.isCallExpression(node)) return false;
+  const callee = node.getExpression();
+  const name = packageMember(callee, 'react');
+  return name === 'memo' || name === 'forwardRef' || /(?:^|\.)(?:memo|forwardRef)$/.test(callee.getText());
+}
 
 /** Follow the value behind a JSX binding through local factories and React memoization. */
 export function renderBindings(declarations: Node[], files: Set<SourceFile>): RenderFunction[] {
