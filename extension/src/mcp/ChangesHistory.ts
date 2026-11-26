@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { historicalInput, type HistoryEdit } from '../core/HistoryInputs';
+import { historicalInput, historyEnvironmentSupported, listHistoryInputs, type HistoryEdit } from '../core/HistoryInputs';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { compare, DependencyGraph, graphRow, hasGraph, type ChangeOrigin, type QueryRow } from './Graph';
 import { GRAPH_INDEX_REVISION, INDEX_SCHEMA, isTestFile, VERSION, type QueryIndex } from './Index';
@@ -24,13 +24,28 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
   const treeId = stagedTree ? createHash('sha256').update(stagedTree).digest('hex') :
     git(['rev-parse', '--verify', ref! + '^{tree}']).toString('utf8').trim();
   const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
-  const incrementalKey = live?.projectSnapshot && JSON.stringify([key, live.projectSnapshot, edits]);
+  let incrementalKey: string | undefined;
+  if (live?.projectSnapshot && !live.pagesWorkspaceInputs && !live.routes.some(route => route.pages)) {
+    try {
+      const inputs = historyEnvironmentSupported(root) && listHistoryInputs(root);
+      if (inputs) {
+        const signature = createHash('sha256').update(JSON.stringify([key, live.projectSnapshot, edits]));
+        for (const file of [...inputs].sort()) {
+          const info = lstatSync(join(root, file));
+          if (!info.isFile()) throw new Error('Comparison input changed during discovery');
+          signature.update(JSON.stringify([file, info.size, info.mtimeMs, info.ctimeMs]));
+        }
+        incrementalKey = signature.digest('hex');
+      }
+    } catch {
+      // The full base graph remains available when live inputs cannot be verified.
+    }
+  }
   if (warmHistory?.root === root && (warmHistory.key === key || warmHistory.key === incrementalKey)) return warmHistory;
-  const remember = (index: QueryIndex, cacheKey = key) => warmHistory = {
+  const remember = (index: QueryIndex, cacheKey: string) => warmHistory = {
     root, key: cacheKey, index, graph: new DependencyGraph(index, new Map(index.symbols.map(symbol => [symbol.id, symbol])))
   };
   let directory: string | undefined;
-  let cached: string | undefined;
   try {
     const gitDir = git(['rev-parse', '--git-common-dir']).toString('utf8').replace(/\r?\n$/, '');
     const cache = workspaceCache(root, resolve(root, gitDir));
@@ -40,13 +55,19 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
       if (!lstatSync(path).isDirectory()) throw new Error('Invalid comparison cache directory');
     }
     directory = history;
-    cached = join(history, key + '.json');
-    if (lstatSync(cached).isFile()) {
-      const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
-      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return remember(index);
+    for (const cacheKey of incrementalKey ? [key, incrementalKey] : [key]) {
+      try {
+        const cached = join(history, cacheKey + '.json');
+        if (!lstatSync(cached).isFile()) continue;
+        const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
+        if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index) &&
+          (cacheKey === key ? !index.projectSnapshot : index.projectSnapshot === live?.projectSnapshot)) return remember(index, cacheKey);
+      } catch {
+        // A missing or invalid entry can be rebuilt from Git.
+      }
     }
   } catch {
-    // A missing, invalid or unwritable cache is recoverable from Git.
+    // An unwritable cache is recoverable from Git.
   }
   const snapshot = mkdtempSync(join(tmpdir(), 'neorion-base-'));
   try {
@@ -100,14 +121,14 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
     const index = JSON.parse(json) as QueryIndex;
     if (!hasGraph(index)) throw new Error('Could not index comparison tree');
     // A scoped comparison is valid only against the verified live snapshot.
-    if (incrementalKey && index.projectSnapshot) return remember(index, incrementalKey);
-    if (directory && cached) {
+    const cacheKey = incrementalKey && index.projectSnapshot ? incrementalKey : key;
+    if (directory) {
       try {
         const staging = mkdtempSync(join(directory, 'write-'));
         try {
           const file = join(staging, 'index.json');
           writeFileSync(file, json, { mode: 0o600 });
-          renameSync(file, cached);
+          renameSync(file, join(directory, cacheKey + '.json'));
         } finally {
           rmSync(staging, { recursive: true, force: true });
         }
@@ -115,7 +136,7 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
         // Cache publication is optional. The newly built index is usable.
       }
     }
-    return remember(index);
+    return remember(index, cacheKey);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
   }

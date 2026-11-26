@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, relative, sep } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, relative, sep } from 'node:path';
 import { Node, Project, ts, type CallExpression } from 'ts-morph';
-import { historicalInput, sourceFile, type HistoryEdit } from '../HistoryInputs';
+import { historyEnvironmentSupported, listHistoryInputs, sourceFile, type HistoryEdit } from '../HistoryInputs';
 import { projectSnapshot } from '../ProjectSnapshot';
 import { isTestFile, type IndexedReference, type QueryIndex } from '../../mcp/Index';
 import { startLine } from './SourceLines';
@@ -42,29 +42,15 @@ export function incrementalHistory(base: string, { root, edits, live }: HistoryP
   const sources = new Map<string, string>();
   const config = join(base, 'tsconfig.json');
   if (!existsSync(config) || live.pagesWorkspaceInputs || live.routes.some(route => route.pages)) return;
-  // A historical checkout has no installed modules or framework-generated types.
-  for (let directory = root; directory !== dirname(directory); directory = dirname(directory)) {
-    if (existsSync(join(directory, 'node_modules')) || existsSync(join(directory, 'pnpm-workspace.yaml'))) return;
-  }
+  if (!historyEnvironmentSupported(root)) return;
   const readConfig = ts.readConfigFile(config, ts.sys.readFile);
   if (readConfig.error || readConfig.config.extends || readConfig.config.references) return;
   const settings = ts.parseJsonConfigFileContent(readConfig.config, ts.sys, base, undefined, config);
   if (settings.errors.length || [ts.ModuleResolutionKind.Node16, ts.ModuleResolutionKind.NodeNext]
     .includes(settings.options.moduleResolution!)) return;
 
-  const list = (directory: string, prefix = '', files = new Set<string>()): Set<string> | undefined => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
-      if (entry.name === '.git' || entry.name === '.neorion') continue;
-      if (entry.isSymbolicLink() || entry.name === '.next' || entry.name === 'node_modules') return;
-      const file = prefix + entry.name;
-      if (entry.isDirectory()) {
-        if (!list(join(directory, entry.name), file + '/', files)) return;
-      } else if (entry.isFile() && historicalInput(file)) files.add(file);
-    }
-    return files;
-  };
-  const beforeFiles = list(base);
-  const afterFiles = list(root);
+  const beforeFiles = listHistoryInputs(base);
+  const afterFiles = listHistoryInputs(root);
   if (!beforeFiles || !afterFiles || beforeFiles.size !== afterFiles.size) return;
   for (const file of beforeFiles) {
     if (!afterFiles.has(file)) return;
