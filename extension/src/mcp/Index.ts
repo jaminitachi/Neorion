@@ -4,8 +4,8 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 16;
-export const GRAPH_INDEX_REVISION = 22;
+export const QUERY_INDEX_REVISION = 17;
+export const GRAPH_INDEX_REVISION = 23;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -14,8 +14,10 @@ export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
 export const DYNAMIC_RENDER_ISSUE = 'rendered through a dynamic reference';
+export const isLazyRender = (detail: string | undefined) => !!detail &&
+  (detail.startsWith('imported via ') || detail.startsWith('loaded via '));
 export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE :
-  detail.startsWith('imported via ') ? DYNAMIC_RENDER_ISSUE : 'JSX prop render untraced';
+  isLazyRender(detail) ? DYNAMIC_RENDER_ISSUE : 'JSX prop render untraced';
 export const AI_SDK_URL_UNCERTAIN = 'uncertain AI SDK URL matches';
 
 export function transportIssue(override?: boolean) {

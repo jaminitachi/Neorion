@@ -190,16 +190,37 @@ function lazyVariable(call: Node) {
     binding.getVariableStatement()?.getDeclarationKind() === 'const' ? binding : undefined;
 }
 
-type LoaderTarget = {
+function stableComponentBinding(node: Node) {
+  if (Node.isVariableDeclaration(node)) return !!constValue(node);
+  if (!Node.isFunctionDeclaration(node)) return false;
+  const name = node.getNameNode();
+  return !name?.findReferences().some(symbol => symbol.getReferences().some(reference =>
+    reference.isWriteAccess() && !reference.isDefinition() && reference.getNode() !== name &&
+    !reference.getNode().getFirstAncestorByKind(SyntaxKind.ImportDeclaration)));
+}
+
+function resolvedPromiseValue(call: import('ts-morph').CallExpression) {
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'resolve') return;
+  const promise = callee.getExpression();
+  if (!Node.isIdentifier(promise) || promise.getText() !== 'Promise' ||
+      declarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
+  const value = unwrapValue(call.getArguments()[0]);
+  if (Node.isIdentifier(value)) return value;
+}
+
+type LoaderImport = {
   imported: import('ts-morph').CallExpression;
   name?: string;
   selector?: import('ts-morph').PropertyAccessExpression;
   possible: boolean;
-  partialOnly?: true;
+  partialOnly?: 'namespace' | 'opaque';
 };
 
+type LoaderTarget = LoaderImport | { value: Node; promise: import('ts-morph').CallExpression; possible: boolean };
+
 function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): LoaderTarget[] {
-  type Selection = Pick<LoaderTarget, 'name' | 'selector'>;
+  type Selection = Pick<LoaderImport, 'name' | 'selector'>;
   type PromiseBinding = { parameter: Node; input: Node; outer?: PromiseBinding };
   const targets: LoaderTarget[] = [];
   let budget = 64;
@@ -240,8 +261,11 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
       } else if (declaration) follow(constValue(declaration), possible, selection, binding);
     } else if (Node.isCallExpression(node)) {
       const callee = node.getExpression();
+      const resolved = !selection ? resolvedPromiseValue(node) : undefined;
       if (callee.getKind() === SyntaxKind.ImportKeyword) {
         targets.push({ imported: node, name: 'default', ...selection, possible });
+      } else if (resolved) {
+        targets.push({ value: resolved, promise: node, possible });
       } else if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'then') {
         const callback = functionNode(node.getArguments()[0]);
         const parameter = callback?.getParameters()[0];
@@ -255,14 +279,14 @@ function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): Lo
             if (targets.length !== before || !Node.isCallExpression(input) ||
                 input.getExpression().getKind() !== SyntaxKind.ImportKeyword) continue;
             const value = unwrapValue(returned);
-            // An opaque return provides evidence only for a stated member or
-            // an unresolved key read from this particular imported namespace.
-            const computed = parameter && Node.isElementAccessExpression(value) &&
-              bindingOf(unwrapValue(value.getExpression())) === parameter;
-            if (computed || Node.isPropertyAccessExpression(value)) {
-              targets.push({ imported: input, name: Node.isPropertyAccessExpression(value) ? value.getName() : undefined,
-                possible: true, partialOnly: true });
-            }
+            if (!Node.isElementAccessExpression(value) && !Node.isPropertyAccessExpression(value)) continue;
+            const receiver = unwrapValue(value.getExpression());
+            const declaration = bindingOf(receiver);
+            const namespace = parameter && declaration === parameter;
+            const opaque = Node.isPropertyAccessExpression(value) && Node.isIdentifier(receiver) && !declaration;
+            if (namespace || opaque) targets.push({ imported: input,
+              name: Node.isPropertyAccessExpression(value) ? value.getName() : undefined,
+              possible: true, partialOnly: namespace ? 'namespace' : 'opaque' });
           }
         }
       } else {
@@ -1127,9 +1151,10 @@ export class QueryIndexBuilder {
       });
     }
 
-    const dynamicBindings = new Map<Node, { id: number; rendered: boolean }>();
-    const lazyProperties = new Map<Node, number>();
-    const possibleLazyBindings = new Map<Node, Set<number>>();
+    type LazyTarget = { id: number; origin: 'imported' | 'loaded' };
+    const dynamicBindings = new Map<Node, LazyTarget & { rendered: boolean }>();
+    const lazyProperties = new Map<Node, LazyTarget>();
+    const possibleLazyBindings = new Map<Node, Map<number, LazyTarget>>();
     const unresolvedLazyComponents = new Set<number>();
     const unresolvedDefaultComponents = new Set<number>();
     const opaqueBindings = new Set<Node>();
@@ -1137,29 +1162,36 @@ export class QueryIndexBuilder {
     const componentProperties = new Map<Node, Set<number>>();
     const componentFactories = new Set<Node>();
     const wrapperEdges: QueryIndex['renderEdges'] = [];
-    const markPossibleLazy = (ids: number[], binding?: Node) => {
-      if (binding && ids.length) {
-        const targets = possibleLazyBindings.get(binding) ?? new Set<number>();
-        for (const id of ids) targets.add(id);
+    const markPossibleLazy = (choices: LazyTarget[], binding?: Node) => {
+      if (binding && choices.length) {
+        const targets = possibleLazyBindings.get(binding) ?? new Map<number, LazyTarget>();
+        for (const choice of choices) targets.set(choice.id, choice);
         possibleLazyBindings.set(binding, targets);
       }
-      for (const id of ids) unresolvedLazyComponents.add(id);
+      for (const { id } of choices) unresolvedLazyComponents.add(id);
     };
     if (!historyOnly) for (const [binding, component] of components) {
       let value = unwrapValue(Node.isVariableDeclaration(binding) ? binding.getInitializer() :
         Node.isExportAssignment(binding) ? binding.getExpression() : undefined);
-      if (!Node.isCallExpression(value)) continue;
-      componentFactories.add(value);
-      if (!isComponentWrapper(value)) continue;
+      if (!value) continue;
       const line = startLine(value);
-      do {
+      const wrapper = Node.isCallExpression(value);
+      if (wrapper) {
         componentFactories.add(value);
-        value = unwrapValue(value.getArguments()[0]);
-      } while (isComponentWrapper(value));
-      if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+        if (!isComponentWrapper(value)) continue;
+        do {
+          componentFactories.add(value);
+          value = unwrapValue(value.getArguments()[0]);
+        } while (isComponentWrapper(value));
+        if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+      } else if (!Node.isIdentifier(value) || constValue(binding) === undefined) {
+        continue;
+      }
       for (const target of declarationsOf(value)) {
         const inner = components.get(target);
-        if (inner && inner !== component) wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+        if (inner && inner !== component && (wrapper || stableComponentBinding(target))) {
+          wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+        }
       }
     }
     if (!historyOnly) for (const [binding] of aliases) {
@@ -1572,17 +1604,34 @@ export class QueryIndexBuilder {
         if (!loader || !projectFiles.has(loader.getSourceFile())) return;
         const binding = lazyVariable(node);
         const targets = loaderTargets(loader, projectFiles);
-        const ids = new Set<number>();
+        const choices = new Map<number, LazyTarget>();
         let exact = targets.length > 0;
-        for (const { imported, name, selector, possible, partialOnly } of targets) {
+        for (const target of targets) {
+          exact &&= !target.possible;
+          if ('value' in target) {
+            const declarations = declarationsOf(target.value);
+            const ids = componentIds(declarations);
+            for (const id of ids) choices.set(id, { id, origin: 'loaded' });
+            const stable = declarations.length === 1 && stableComponentBinding(declarations[0]);
+            if (ids.length && stable) componentFactories.add(target.promise);
+            exact &&= stable;
+            continue;
+          }
+          const { imported, name, selector, partialOnly } = target;
           const { modules, exact: exactModule } = resolveDynamicModules(imported.getArguments()[0], imported.getSourceFile(), true);
-          exact &&= !possible && exactModule;
+          exact &&= exactModule;
           if (partialOnly) {
             if (!historyOnly) for (const resolved of modules) {
               const declarations = exports.get(resolved);
-              const candidates = name === undefined ? [...declarations?.values() ?? []].flat() : declarations?.get(name) ?? [];
+              const all = [...declarations?.values() ?? []].flat();
+              const candidates = name === undefined ? all : declarations?.get(name) ?? [];
               const local = componentIds(candidates.filter(candidate => candidate.getSourceFile() === resolved));
-              if (name !== undefined || local.length === 1) markPossibleLazy(local);
+              // An unbound receiver preserves a diagnostic for a sole named
+              // candidate. Namespace reads can identify a member directly.
+              if (partialOnly === 'opaque' && componentIds(all.filter(candidate => candidate.getSourceFile() === resolved)).length !== 1) continue;
+              if (name !== undefined || local.length === 1) {
+                markPossibleLazy(local.map(id => ({ id, origin: 'imported' })));
+              }
             }
             continue;
           }
@@ -1591,7 +1640,7 @@ export class QueryIndexBuilder {
           names.add(name);
           selectedImports.set(imported, names);
           for (const resolved of modules) {
-            for (const id of componentIds(exports.get(resolved)?.get(name) ?? [])) ids.add(id);
+            for (const id of componentIds(exports.get(resolved)?.get(name) ?? [])) choices.set(id, { id, origin: 'imported' });
           }
           if (selector) {
             dynamicSelectors.add(selector.getNameNode());
@@ -1599,12 +1648,14 @@ export class QueryIndexBuilder {
           }
         }
         if (historyOnly) return;
-        const [id] = ids;
-        if (exact && ids.size === 1 && binding) {
-          dynamicBindings.set(binding, { id, rendered: false });
+        const [choice] = choices.values();
+        if (exact && choices.size === 1 && binding) {
+          dynamicBindings.set(binding, { ...choice, rendered: false });
         } else {
-          if (exact && ids.size === 1 && Node.isPropertyAssignment(throughWrappers(node).getParent())) lazyProperties.set(node, id);
-          markPossibleLazy([...ids], binding);
+          if (exact && choices.size === 1 && Node.isPropertyAssignment(throughWrappers(node).getParent())) {
+            lazyProperties.set(node, choice);
+          }
+          markPossibleLazy([...choices.values()], binding);
         }
       };
       const scanComment = (range: ts.CommentRange) => {
@@ -1821,7 +1872,7 @@ export class QueryIndexBuilder {
       const tag = site.node.getTagNameNode();
       const declarations = declarationsOf(tag);
       const binding = declarations.map(node => dynamicBindings.get(node)).find(Boolean);
-      const possible = declarations.flatMap(node => [...possibleLazyBindings.get(node) ?? []]);
+      const possible = new Map(declarations.flatMap(node => [...possibleLazyBindings.get(node) ?? []]));
       if (renderByNode && (Node.isPropertyAccessExpression(tag) || declarations.some(node => {
         const initializer = Node.isVariableDeclaration(node) && unwrapValue(node.getInitializer());
         return !!initializer && (Node.isElementAccessExpression(initializer) || Node.isPropertyAccessExpression(initializer));
@@ -1829,32 +1880,32 @@ export class QueryIndexBuilder {
         const traced = renderBindings(Node.isIdentifier(tag) ? declarations : [tag], projectFiles, indexedComponent, flow,
           node => lazyProperties.has(node));
         for (const choice of traced.targets) {
-          const id = lazyProperties.get(choice.target);
+          const loader = lazyProperties.get(choice.target);
           const caller = choice.supply ? renderByNode.get(choice.supply.site) : site;
           const owner = caller?.owner;
-          if (id === undefined || !caller || owner === undefined || owner === id || index.symbols[owner - 1].kind !== 'component') continue;
+          if (!loader || !caller || owner === undefined || owner === loader.id || index.symbols[owner - 1].kind !== 'component') continue;
           // The registry's members bound its outputs. An opaque selector can
           // further restrict its inputs, so require evidence for this member.
           if (choice.lookup && (choice.lookup.member === undefined ||
               !canSelectLazyMember(choice.lookup.selector, choice.lookup.member, choice.supply?.site))) continue;
           const conditional = Number(choice.conditional || !!conditionalAt(site.node));
-          const detail = `imported via ${tag.getText()}` + (choice.supply ? ` (prop ${choice.supply.name})` : '');
-          wrapperEdges.push([owner, id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail]);
+          const detail = `${loader.origin} via ${tag.getText()}` + (choice.supply ? ` (prop ${choice.supply.name})` : '');
+          wrapperEdges.push([owner, loader.id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail]);
         }
       }
-      if (!binding && !possible.length) continue;
+      if (!binding && !possible.size) continue;
       const owner = site.owner;
       const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
       const conditional = conditionalAt(site.node, body);
       if (owner !== undefined && index.symbols[owner - 1].kind === 'component') {
-        for (const id of new Set(possible)) {
-          if (owner !== id) wrapperEdges.push([owner, id, site.line, conditional, undefined, true, `imported via ${tag.getText()}`]);
+        for (const { id, origin } of possible.values()) {
+          if (owner !== id) wrapperEdges.push([owner, id, site.line, conditional, undefined, true, `${origin} via ${tag.getText()}`]);
         }
       }
       if (!binding) continue;
-      const { id } = binding;
+      const { id, origin } = binding;
       if (owner !== undefined && index.symbols[owner - 1].kind === 'component' && owner !== id) {
-        wrapperEdges.push([owner, id, site.line, conditional, undefined, undefined, `imported via ${tag.getText()}`]);
+        wrapperEdges.push([owner, id, site.line, conditional, undefined, undefined, `${origin} via ${tag.getText()}`]);
         binding.rendered = true;
       } else {
         unresolvedLazyComponents.add(id);

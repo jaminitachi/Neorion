@@ -561,6 +561,13 @@ test('lazy loaders trace the returned export and enumerate finite import templat
     }, { ssr: false });
     export default function Settings() { return <TimezonePicker/>; }
   `);
+  write(root, 'app/unrelated/page.tsx', `
+    import dynamic from 'next/dynamic';
+    declare function readRegistry(): { FieldHeading: () => JSX.Element };
+    const Heading = dynamic(() => import('../../ui/controls').then(() => readRegistry().FieldHeading));
+    const OpaqueHeading = dynamic(() => import('../../ui/controls').then(() => opaque.FieldHeading));
+    export default function OtherPage() { return <><Heading/><OpaqueHeading/></>; }
+  `);
   write(root, 'app/profile/page.tsx', `
     import { FieldHeading } from "../../ui/controls";
     export default function Profile() { return <FieldHeading/>; }
@@ -591,11 +598,23 @@ test('lazy loaders trace the returned export and enumerate finite import templat
     const Selected = controls[getSection()];
     export default function RegistryPage() { return <Selected/>; }
   `);
+  write(root, 'ui/local.tsx', `
+    import dynamic from 'next/dynamic';
+    function LocalView() { return <p/>; }
+    export const Local = dynamic(() => Promise.resolve(LocalView), { ssr: false });
+    function InnerView() { return <section/>; }
+    export const Alias = InnerView;
+  `);
+  write(root, 'app/local/page.tsx', `
+    import { Alias, Local } from '../../ui/local';
+    export default function LocalPage({ enabled }) { return <><Alias/>{enabled && <Local/>}</>; }
+  `);
   await generate(root);
   const client = await openMcp(t, root);
   const renders = component => client.text('who_renders', { component });
   const heading = await renders('ui/controls.tsx#FieldHeading');
   assert.match(heading, /^\/profile\s.*depth 1$/m);
+  assert.doesNotMatch(heading, /^\/unrelated\s/m);
   assert.match(heading, /^# complete:/m);
   const picker = await renders('ui/controls.tsx#TimezonePicker');
   assert.match(picker, /^\/settings\s.*\[imported via TimezonePicker\]$/m);
@@ -609,6 +628,14 @@ test('lazy loaders trace the returned export and enumerate finite import templat
   const panel = await renders('app/helper/panel.tsx#Panel');
   assert.match(panel, /^\/helper\s.*\[imported via Lazy\] \[possible\]$/m);
   assert.match(panel, /^# partial: rendered through a dynamic reference/m);
+  const localView = await renders('ui/local.tsx#LocalView');
+  assert.match(localView, /^\/local\s.*\[loaded via Local\] \[cond\]$/m);
+  assert.match(localView, /^# complete:/m);
+  const impact = await client.text('query', { kind: 'impact', target: 'ui/local.tsx#LocalView' });
+  assert.match(impact, /^page \/local\s.*\[cond\]$/m);
+  const alias = await renders('ui/local.tsx#InnerView');
+  assert.match(alias, /^\/local\s.*via Alias$/m);
+  assert.match(alias, /^# complete:/m);
 });
 
 test('render paths through lazy views respect props and prefer feasible JSX chains', async t => {

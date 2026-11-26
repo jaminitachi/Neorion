@@ -5,7 +5,7 @@ import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
-  isTestFile as testFile, renderIssue, renderSiteKey,
+  isLazyRender, isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -463,7 +463,7 @@ export class QueryEngine {
           const decision = conditions?.[edge];
           if (decision === 'excluded') continue;
           const excluded = entry.excluded || !!site && !!this.index.renderExclusions?.[entry.guards]?.includes(site);
-          const lazy = entry.lazy || !!detail?.startsWith('imported via ');
+          const lazy = entry.lazy || isLazyRender(detail);
           const contextExcluded = this.contextRenderExclusions.has(edge);
           const context = entry.context || contextExcluded;
           const lookup = entry.lookup || !!this.contextRenderExclusions.size && !contextExcluded &&
