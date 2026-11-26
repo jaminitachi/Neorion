@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
@@ -36,7 +36,6 @@ const shellArg = (value: string) => /^[\w./:-]+$/.test(value) ? value : process.
   ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'";
 type CliReplay = { invocation: string[]; root: string };
 export type QueryAnswer = { text: string; targetResolved?: true };
-const dynamicRenderReason = 'rendered through a dynamic reference';
 
 function queryCommand(cli: CliReplay, kind: QueryKind, targets: string[], options: string[]) {
   const flags = [...options, '--root', cli.root].map(shellArg);
@@ -387,6 +386,10 @@ export class QueryEngine {
   }
 
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
+    const renderName = (id: number) => {
+      const entry = this.symbols.get(id);
+      return entry?.renderName ?? entry?.name;
+    };
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
       possible: boolean; depth: number; slots: string[]; issue?: string }>();
     let directIssue: string | undefined;
@@ -412,8 +415,9 @@ export class QueryEngine {
           const decision = conditions?.[renderSiteKey(from, to, line)];
           if (decision === 'excluded') continue;
           const parent = this.symbols.get(from);
+          const name = renderName(from);
           pending.push({
-            id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
+            id: from, chain: name ? [name, ...entry.chain].slice(-8) : entry.chain,
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
             conditional: entry.conditional || !!conditional || decision === 'conditional',
             possible: entry.possible || !!possible || decision === 'possible',
@@ -435,8 +439,8 @@ export class QueryEngine {
       const fileLabel = location(route.file, route.line ?? 1);
       const url = shorten(route.url, 0, Math.max(16, 340 - bytes(fileLabel))) ?? '...';
       const label = `${url}  ${fileLabel}`;
-      const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
-        chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
+      const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => renderName(id) === chain[0])) ||
+        chain[0] === renderName(route.component ?? 0)) ? chain.slice(1) : chain;
       return {
         ...row(`${label}  depth ${depth}`, route.file),
         pathEnd: label.length,
@@ -455,7 +459,7 @@ export class QueryEngine {
         const route = this.pageRoots.get(from)?.[0]?.route;
         const file = site ?? parent?.file ?? route?.file;
         if (possible && detail && file) directIssue ??= `${renderIssue(detail)} (${location(file, line)})`;
-        if (file && (!prior || line < prior.line)) parents.set(from, { name: parent?.name ?? symbol.name, file, line, conditional, possible });
+        if (file && (!prior || line < prior.line)) parents.set(from, { name: renderName(from) ?? symbol.name, file, line, conditional, possible });
       }
       for (const { name, file, line, conditional, possible } of [...parents.values()].sort((a, b) =>
         compare(a.file, b.file) || a.line - b.line)) {
@@ -472,7 +476,7 @@ export class QueryEngine {
       Object.values(this.index.renderLookupIssues ?? {})[0] : undefined;
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
-        (dynamicReference ? unresolvedLookup ?? dynamicRenderReason : undefined) ??
+        (dynamicReference ? unresolvedLookup ?? DYNAMIC_RENDER_ISSUE : undefined) ??
         (this.index.queryRevision !== undefined && this.index.queryRevision < QUERY_INDEX_REVISION ? 'regenerate legacy index' : undefined) ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
@@ -1056,7 +1060,7 @@ export class QueryEngine {
       const targetResolved = result.targets ? true : undefined;
       if (bytes(output) <= 6000) return { text: output, targetResolved };
       if (tool === 'who_renders' && result.partial && reason === truncationWithReason) {
-        const compactReason = [truncation, result.partial === dynamicRenderReason ? 'dynamic ref' : undefined, workspaceIssue].filter(Boolean).join('; ');
+        const compactReason = [truncation, result.partial === DYNAMIC_RENDER_ISSUE ? 'dynamic ref' : undefined, workspaceIssue].filter(Boolean).join('; ');
         const compact = `${body}\n# partial: ${compactReason}`;
         if (bytes(compact) <= 6000) return { text: compact, targetResolved };
       }

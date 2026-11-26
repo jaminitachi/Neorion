@@ -432,6 +432,118 @@ test('who_renders follows React lazy and Next dynamic imports from their JSX sit
   assert.match(mixed, /# partial: rendered through a dynamic reference$/);
 });
 
+test('an untraced lookup does not make a local default export a render value use', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'app/r70/page.tsx', `
+    'use client';
+    import { useConfig } from 'somepkg';
+    type Opt = { component: React.ComponentType };
+    export default function Page() { const cfg: Opt = useConfig(); const View = cfg.component; return <View/>; }
+  `);
+  write(root, 'emails/welcome.tsx', `
+    function WelcomeEmail({ name }) { return <p>Hi {name}</p>; }
+    export default WelcomeEmail;
+    export async function sendWelcome(name) { return render(<WelcomeEmail name={name}/>); }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  const component = 'emails/welcome.tsx#WelcomeEmail';
+  assert.match(await client.text('who_renders', { component }), /0 results[^\n]*\n# complete: indexed JSX paths$/);
+  assert.match(await client.text('query', { kind: 'impact', target: component }), /0 routes[\s\S]*\n# complete:/);
+});
+
+test('lazy selectors resolve specific barrel exports and the module default', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve","baseUrl":".","paths":{"@/*":["./*"]}}}');
+  write(root, 'ui/sel.tsx', 'export function Sel() { return <select/>; }');
+  write(root, 'ui/heading.tsx', 'export function Heading() { return <h2/>; }');
+  write(root, 'ui/index.ts', 'export * from "./sel"; export * from "./heading";');
+  write(root, 'ui/wrap.tsx', `
+    export function Panel() { return <div/>; }
+    export function Unused() { return <aside/>; }
+    export default function Wrap() { return <Panel/>; }
+  `);
+  write(root, 'app/a/page.tsx', `
+    'use client';
+    import dynamic from 'next/dynamic';
+    const LazySel = dynamic(async () => (await import('@/ui')).Sel);
+    export default function A() { return <LazySel/>; }
+  `);
+  write(root, 'app/b/page.tsx', `
+    import { Heading } from '@/ui'; import { Panel } from '@/ui/wrap';
+    export default function B() { return <><Heading/><Panel/></>; }
+  `);
+  write(root, 'app/c/page.tsx', `
+    import dynamic from 'next/dynamic';
+    const W = dynamic(() => import('@/ui/wrap').then(mod => mod));
+    export default function C() { return <W/>; }
+  `);
+  write(root, 'app/d/page.tsx', `
+    import dynamic from 'next/dynamic';
+    const Pick = dynamic(() => import('@/ui').then(({ Sel: Chosen }) => Chosen));
+    const Opaque = dynamic(() => import('@/ui').then(mod => mod[chooseExport()]));
+    export default function D() { return <><Pick/><Opaque/></>; }
+  `);
+  write(root, 'ui/setup.tsx', 'export default function Setup() { return <input/>; }');
+  write(root, 'ui/picker.tsx', `
+    export function Picker({ componentMap, slug }) {
+      const Selected = componentMap[slug];
+      return <Selected/>;
+    }
+  `);
+  write(root, 'app/setup/page.tsx', `
+    import dynamic from 'next/dynamic';
+    import { Picker } from '@/ui/picker';
+    const componentMap = { setup: dynamic(() => import('@/ui/setup')) };
+    export default function SetupPage({ slug }) { return <Picker componentMap={componentMap} slug={slug}/>; }
+  `);
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const [component, routes] of [['Heading', ['/b']], ['Panel', ['/b', '/c']], ['Sel', ['/a', '/d']], ['Unused', []]]) {
+    const output = await client.text('who_renders', { component });
+    assert.deepEqual([...output.matchAll(/^(\/\w+)\s/gm)].map(match => match[1]), routes);
+    assert.match(output, /# complete: indexed JSX paths$/);
+  }
+  const setup = await client.text('who_renders', { component: 'Setup' });
+  assert.match(setup, /^\/setup .* \[imported via Selected \(prop componentMap\)\] \[possible\]$/m);
+  assert.match(setup, /^# partial: rendered through a dynamic reference/m);
+});
+
+test('lazy helper branches and interpolated imports identify candidate routes', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve","baseUrl":".","paths":{"@/*":["./*"]}}}');
+  write(root, 'ui/a.tsx', 'export default function First() { return <i/>; }');
+  write(root, 'ui/b.tsx', 'export default function Second() { return <i/>; }');
+  write(root, 'widgets/widget-east.tsx', 'export default function East() { return <i/>; }');
+  write(root, 'widgets/widget-west.tsx', 'export default function West() { return <i/>; }');
+  write(root, 'widgets/splash.tsx', 'export default function Splash() { return <i/>; }');
+  write(root, 'widgets/splashscreen.tsx', 'export default function SplashScreen() { return <i/>; }');
+  write(root, 'app/page.tsx', [
+    "import dynamic from 'next/dynamic';",
+    "const pick = flag => flag ? import('../ui/a') : import('../ui/b');",
+    'const ViaHelper = dynamic(() => pick(flag));',
+    "const splash = 'splash';",
+    'const Known = dynamic(() => import(`@/widgets/${splash}`));',
+    'const Unknown = dynamic(() => import(`@/widgets/widget-${region}`));',
+    'export default function Page() { return <><ViaHelper/><Known/><Unknown/></>; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const component of ['First', 'Second', 'East', 'West']) {
+    const output = await client.text('who_renders', { component });
+    assert.match(output, /^\/ .* \[possible\]$/m);
+    assert.match(output, /# partial: rendered through a dynamic reference \(app\/page\.tsx:\d+\)$/);
+    const impact = await client.text('query', { kind: 'impact', target: component });
+    assert.match(impact, /^page \/ /m);
+    assert.match(impact, /# partial: .*rendered through a dynamic reference/);
+  }
+  const exact = await client.text('who_renders', { component: 'Splash' });
+  assert.match(exact, /^\/ .* \[imported via Known\]$/m);
+  assert.match(exact, /# complete: indexed JSX paths$/);
+  assert.match(await client.text('who_renders', { component: 'SplashScreen' }), /0 results[^\n]*\n# complete:/);
+});
+
 test('wrappers list rendered providers in chain order for each branch', async t => {
   const root = temporary(t);
   write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');

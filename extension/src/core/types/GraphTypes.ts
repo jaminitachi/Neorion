@@ -32,6 +32,7 @@ export interface ComponentNode {
   hooks: string[];
   description?: string;
   aliasOf?: string;
+  renderName?: string;
 }
 
 export interface HookNode {

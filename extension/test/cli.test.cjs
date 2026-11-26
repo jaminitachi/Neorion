@@ -582,6 +582,76 @@ test('workspace barrels keep missing runtime re-exports partial and index inline
   assert.match(query('impact', 'onCard'), /^page \/handler\s/m);
 });
 
+test('workspace callback names and route impact survive untraced JSX forwarding', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const write = (file, text) => {
+    const absolute = path.join(root, file);
+    fs.mkdirSync(path.dirname(absolute), { recursive: true });
+    fs.writeFileSync(absolute, text);
+  };
+  write('packages/ui/package.json', '{"name":"@fixture/ui","main":"src/index.tsx"}');
+  write('packages/ui/src/index.tsx', `
+    export { ConfirmDialog, ConfirmationDialogContent } from './confirm';
+    export function SharedCard({ onClick }) { return <button onClick={onClick}/>; }
+  `);
+  write('packages/ui/src/confirm.tsx', `
+    export function ConfirmDialog(props) {
+      return <section><ConfirmContent {...props}/></section>;
+    }
+    const ConfirmContent = (props) => {
+      const { onConfirm, children } = props;
+      return <div><button onClick={event => onConfirm && onConfirm(event)}>ok</button>{children}</div>;
+    };
+    export function ConfirmationDialogContent(props) { return <ConfirmContent {...props}/>; }
+  `);
+  write('apps/web/app/g/page.tsx', `
+    'use client';
+    import { ConfirmDialog, SharedCard } from '@fixture/ui';
+    function deleteTeam(id) { return id; }
+    function onCard() {}
+    function Item(props) {
+      return <ConfirmDialog onConfirm={() => props.onActionSelect('disband')}>x</ConfirmDialog>;
+    }
+    export default function GPage() {
+      return <><Item onActionSelect={action => { if (action === 'disband') deleteTeam('1'); }}/>
+        <SharedCard onClick={() => onCard()}/></>;
+    }
+  `);
+  write('apps/web/app/settings/organizations/teams/other/page.tsx', `
+    import { OtherTeamList } from '../../../../../teams';
+    export default function TeamPage() { return <OtherTeamList/>; }
+  `);
+  write('apps/web/teams.tsx', `
+    'use client';
+    import { ConfirmationDialogContent } from '@fixture/ui';
+    function deleteTeam(id) { return id; }
+    function OtherTeamListItem({ id, onActionSelect }) {
+      return <ConfirmationDialogContent onConfirm={() => onActionSelect('disband', id)}>
+        Confirm removal
+      </ConfirmationDialogContent>;
+    }
+    export function OtherTeamList() {
+      return <OtherTeamListItem id="1" onActionSelect={(action, id) => {
+        if (action === 'disband') deleteTeam(id);
+      }}/>;
+    }
+  `);
+  const query = (kind, target) => {
+    const result = run(['query', kind, target, '--app', 'web']);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  assert.match(query('callees', 'app/g/page.tsx#onClick SharedCard'), /^d1 call .* onCard /m);
+  for (const [target, route] of [['app/g/page.tsx#deleteTeam', '/g'], ['teams.tsx#deleteTeam', '/settings/organizations/teams/other']]) {
+    const impact = query('impact', target);
+    assert.ok(impact.split('\n').some(line => line.startsWith(`page ${route} `)), impact);
+    assert.match(impact, /^# partial: .*prop callback untraced/m);
+  }
+});
+
 test('workspace discovery orders docs and website with production apps', t => {
   const { root, run } = fixture(t);
   fs.rmSync(path.join(root, 'app'), { recursive: true });
@@ -1414,7 +1484,9 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   for (const [input, kind, target] of [
     [component, 'who_renders', 'DashboardShell'],
     [payload('Glob', componentGlob, 'app', '../another/session'), 'who_renders', 'DashboardShell'],
-    [payload('Glob', '**/app/settings/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
+    [payload('Glob', '**/app/(account)/settings/(profile)/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
+    [payload('Glob', 'app/(chat)/page.tsx'), 'wrappers', '/'],
+    [payload('Glob', 'src/app/(chat)/api/(public)/chat/route.ts'), 'api_consumers', '/api/chat'],
     [payload('Grep', '/api/users'), 'api_consumers', '/api/users'],
     [payload('Grep', 'FormError'), 'search', 'FormError'],
     [payload('Glob', '**/ChatSDKError.ts'), 'search', 'ChatSDKError'],

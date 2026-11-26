@@ -672,7 +672,8 @@ export class DependencyGraph {
         if (!visits || terminalCertainty(current) < terminalCertainty(visits[visits.length - 1])) {
           append(visited, id, current);
         }
-        if (current.edge?.label !== 'middleware') pagesIssue ??= this.coverageIssue(id);
+        // An opaque JSX lookup describes a callee of this owner, not a caller.
+        if (current.edge?.label !== 'middleware') pagesIssue ??= this.coverageIssue(id, false, false);
         if (gates.some(gate => gate.partial)) flowIssue ??= propValueIssue;
         const endpoints = this.terminals(id).filter(terminal =>
           !gates.length || terminal.kind === 'action' || terminal.route?.component === id && gates.every(gate => gate.scope === id && gate.unscoped));
@@ -726,7 +727,7 @@ export class DependencyGraph {
           if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
           const next = { depth: level + cost, edge, conditional: current.conditional || edge.conditional,
-            possible: current.possible || edge.label === 'render' && edge.partial };
+            possible: current.possible || (edge.label === 'render' || edge.label === 'event') && edge.partial };
           const flags = certaintyFlags(next);
           if (coversVisit(states.get(key), flags, next.depth)) continue;
           const pending = additions.get(key) ?? { gates: awaiting, visits: [], depths: [] };
@@ -1134,9 +1135,10 @@ export class DependencyGraph {
       ...Object.values(route.handlers ?? {}), ...(route.pages && route.fileSymbol !== undefined ? [route.fileSymbol] : [])];
   }
 
-  private coverageIssue(id: NodeId, includeRoute = false) {
+  private coverageIssue(id: NodeId, includeRoute = false, includeOpaqueLookup = true) {
     const route = this.pagesByFileId.get(id);
-    return (typeof id === 'number' ? this.index.renderLookupIssues?.[id] ?? this.index.pagesOwnerIssues?.[id]?.[0] : undefined) ??
+    return (typeof id === 'number' ? this.index.renderLookupIssues?.[id] ??
+      (includeOpaqueLookup ? this.index.opaqueRenderLookupIssues?.[id] : undefined) ?? this.index.pagesOwnerIssues?.[id]?.[0] : undefined) ??
       (route ? this.index.pagesWrapperIssues?.[route.id]?.[0] ??
         (includeRoute ? this.index.pagesIssues?.[route.id]?.[0] ?? this.index.pagesApiIssues?.[route.id]?.[0] : undefined) : undefined);
   }

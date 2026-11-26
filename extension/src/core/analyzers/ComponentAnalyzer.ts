@@ -415,7 +415,8 @@ export class ComponentAnalyzer {
         const target = inner && declarationsOf(inner).map(node => resolveComponent(node)).find(Boolean);
         if (!target) continue;
         const id = `cmp:${relative}#default`;
-        components.set(assignment, { id, name: 'default', path: relative, isClient: isClientFile(file),
+        components.set(assignment, { id, name: 'default', renderName: `${call.getExpression().getText()}(${target.name})`,
+          path: relative, isClient: isClientFile(file),
           domain: DomainExtractor.extract('/' + relative), props: [], hooks: [] });
         bodies.set(assignment, call);
         if (route) route.componentId = id;

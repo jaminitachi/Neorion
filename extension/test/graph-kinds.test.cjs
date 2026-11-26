@@ -1650,14 +1650,18 @@ test('opaque element and factory lookups flag only value-used render candidates'
   fs.mkdirSync(path.join(root, 'app/registry'));
   fs.writeFileSync(path.join(root, 'app/registry/page.tsx'), `
     import { lookup } from '../../ui/registry';
+    export function registryKey(keyName) { return keyName; }
     export default function RegistryPage({ keyName }) {
-      const Icon = lookup(keyName);
+      const Icon = lookup(registryKey(keyName));
       return <Icon/>;
     }
   `);
   build();
   assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced \(app\/page\.tsx:8\)$/m);
-  assert.match(query('callees', 'RegistryPage'), /^# partial: component lookup key untraced \(app\/registry\/page\.tsx:5\)$/m);
+  assert.match(query('callees', 'RegistryPage'), /^# partial: component lookup key untraced \(app\/registry\/page\.tsx:6\)$/m);
+  const reverse = query('impact', 'registryKey');
+  assert.match(reverse, /^page \/registry\s/m);
+  assert.match(reverse, /^# complete:/m);
   for (const target of ['RegisteredIcon', 'MapIcon']) {
     const output = query('who_renders', target);
     assert.match(output, target === 'MapIcon' ? /^# partial: component lookup key untraced/m :
@@ -1720,10 +1724,16 @@ test('default-exported HOCs trace local forwarding and keep opaque factories par
     export function OpaqueInner() { return <span/>; }
     export default withUi(BehindWrapper);
   `);
+  fs.writeFileSync(path.join(root, 'ui/identity.tsx'), `
+    import { identity } from './hoc';
+    function IdentityInner() { return <span/>; }
+    export default identity(IdentityInner);
+  `);
   fs.writeFileSync(path.join(root, 'app/page.tsx'), `
     import Wrapped, { OpaqueInner } from '../ui/wrapped';
+    import Identity from '../ui/identity';
     import { identity } from '../ui/hoc';
-    function RootInner() { return <><Wrapped/><OpaqueInner/></>; }
+    function RootInner() { return <><Wrapped/><OpaqueInner/><Identity/></>; }
     export default identity(RootInner);
   `);
   fs.mkdirSync(path.join(root, 'app/hoc-opaque'));
@@ -1738,6 +1748,7 @@ test('default-exported HOCs trace local forwarding and keep opaque factories par
     assert.match(output, /^\/\s/m);
     assert.match(output, /^# complete:/m);
   }
+  assert.match(query('who_renders', 'IdentityInner'), /^\/ .* via .*identity\(IdentityInner\)/m);
   const opaque = query('who_renders', 'OpaqueInner');
   assert.match(opaque, /^\/\s/m);
   assert.doesNotMatch(opaque, /^\/hoc-opaque\s/m);
@@ -2495,13 +2506,14 @@ for (const [flow, setup] of [
   });
 }
 
-test('Pages labels an anonymous class App layout at its fallback site', t => {
+test('Pages resolves a casted class App layout and labels its anonymous fallback', t => {
   const query = pagesReviewFixture(t, {
     ...reviewedLayouts,
+    'pages/review-admin.page.tsx': reviewAdmin + 'Admin.Layout = AdminLayout;',
     'pages/_app.page.tsx': `export default class MyApp {
       render() {
         const { Component } = this.props;
-        const Layout = Component.Layout || (({ children }) => <>{children}</>);
+        const Layout = (Component as any).Layout || (({ children }) => <>{children}</>);
         return <Layout><Component /></Layout>;
       }
     }`
@@ -2509,6 +2521,9 @@ test('Pages labels an anonymous class App layout at its fallback site', t => {
   const wrappers = query('wrappers', '/review-plain');
   assert.match(wrappers, /Layout \(inline\) \[Layout fallback at pages\/_app\.page\.tsx:5\]/);
   assert.match(wrappers, /^# complete:/m);
+  const admin = query('wrappers', '/review-admin');
+  assert.match(admin, /AdminLayout/);
+  assert.match(admin, /^# complete:/m);
 });
 
 for (const [form, setup] of [

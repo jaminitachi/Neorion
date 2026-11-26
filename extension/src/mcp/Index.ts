@@ -1,17 +1,19 @@
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 10;
+export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 14;
-export const GRAPH_INDEX_REVISION = 20;
+export const QUERY_INDEX_REVISION = 15;
+export const GRAPH_INDEX_REVISION = 21;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
-export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE : 'JSX prop render untraced';
+export const DYNAMIC_RENDER_ISSUE = 'rendered through a dynamic reference';
+export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE :
+  detail.startsWith('imported via ') ? DYNAMIC_RENDER_ISSUE : 'JSX prop render untraced';
 export const AI_SDK_URL_UNCERTAIN = 'uncertain AI SDK URL matches';
 
 export function transportIssue(override?: boolean) {
@@ -32,6 +34,7 @@ export interface SymbolEntry {
   end?: number;
   exported?: boolean;
   aliasOf?: string | null;
+  renderName?: string;
   localUses?: number[];
   typeOnly?: boolean;
   synthetic?: true;
@@ -136,6 +139,7 @@ export interface QueryIndex {
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
   renderLookupIssues?: Record<number, string>;
+  opaqueRenderLookupIssues?: Record<number, string>;
   renderValueUses?: Record<number, string>;
   scopedRenderValueIssues?: Record<number, { file: string; reason: string; valueFile: string }>;
   dynamicRenderComponents?: number[];

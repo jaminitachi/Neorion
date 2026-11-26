@@ -299,6 +299,7 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
   };
   const isSlot = (node: Node | undefined): boolean => {
     if (!node) return false;
+    node = unwrapSyntax(node);
     if (!pagesScope) {
       if (Node.isPropertyAccessExpression(node)) return slots.has(node.getName());
       return slots.has(node.getText());
@@ -315,7 +316,8 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
     if (Node.isPropertyAccessExpression(node)) {
       return node.getName() === slotName && isProps(node.getExpression());
     }
-    const value = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+    const initializer = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
+    const value = initializer && unwrapSyntax(initializer);
     if (!value || value === node || !Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value) ||
       node.getSourceFile() === value.getSourceFile() && value.getStart() >= node.getStart()) return false;
     return isSlot(value);

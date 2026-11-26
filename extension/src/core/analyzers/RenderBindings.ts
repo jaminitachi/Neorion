@@ -210,7 +210,7 @@ function externalImport(node: Node, files: Set<SourceFile>): boolean {
 
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
 export function renderBindings(declarations: Node[], files: Set<SourceFile>,
-  indexedComponent: (node: Node) => boolean, flow?: PropFlow) {
+  indexedComponent: (node: Node) => boolean, flow?: PropFlow, indexedLoader?: (node: Node) => boolean) {
   const seen = new Map<Node, { step: Step; resolution: Resolution }[]>();
   const targets = new Map<Supply | undefined, Map<Node, RenderCertainty>>();
   const supplies = new Map<RenderSite, Map<string, Supply>>();
@@ -349,6 +349,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>,
     }
     if (Node.isCallExpression(node) && !returns) {
       const expression = node.getExpression();
+      if (!members.length && indexedLoader?.(node)) return register(node, step);
       const collection = collectionCall(node);
       if (collection?.kind === 'element') {
         const key = collection.method === 'at' ? tupleAt(collection.receiver, node.getArguments()[0]) : undefined;
