@@ -2,7 +2,8 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { Node, ts, type ResolutionHostFactory, type SourceFile } from 'ts-morph';
 import { projectConfig, workspaceDirectories } from '../FindProject';
-import { workspaceSourcesHash } from '../ProjectSnapshot';
+import { parse } from 'yaml';
+import { workspaceInputsHash, workspaceSourcesHash } from '../ProjectSnapshot';
 import { importBinding } from './StaticBindings';
 
 function json(file: string) {
@@ -46,6 +47,22 @@ function packageEntries(pkg: Package, subpath: string) {
   return match ? exportTargets(exports[match.pattern], key.slice(match.prefix.length, key.length - match.suffix.length)) : [];
 }
 
+type PnpmWorkspace = { packages?: unknown; catalog?: unknown; catalogs?: unknown };
+
+function pnpmWorkspace(file: string): PnpmWorkspace | undefined {
+  try {
+    const value: unknown = parse(readFileSync(file, 'utf8'), { maxAliasCount: 32, logLevel: 'silent' });
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  } catch {
+    // Missing or malformed workspace settings cannot select a dependency version.
+  }
+}
+
+function own(value: unknown, key: string): unknown {
+  return value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key)
+    ? (value as Record<string, unknown>)[key] : undefined;
+}
+
 export class WorkspaceBindings {
   private workspaceRoot?: string;
   private readonly self?: Package;
@@ -56,12 +73,19 @@ export class WorkspaceBindings {
   private readonly names = new Map<string, Package | undefined>();
   private readonly entryFiles = new Map<string, string | undefined>();
   private readonly unresolved = new Map<string, Set<string>>();
+  private pnpmDirectory?: string;
+  private pnpm?: PnpmWorkspace;
 
   constructor(private readonly root: string, includeRoot = false) {
     this.discoveryLimited = false;
     const manifest = json(path.join(root, 'package.json'));
     if (typeof manifest?.name === 'string') this.self = { directory: root, name: manifest.name, manifest };
     for (let directory = root, depth = 0; directory !== path.dirname(directory) && depth <= 8; directory = path.dirname(directory), depth++) {
+      const pnpm = pnpmWorkspace(path.join(directory, 'pnpm-workspace.yaml'));
+      if (pnpm && !this.pnpm) {
+        this.pnpm = pnpm;
+        this.pnpmDirectory = directory;
+      }
       const workspace = directory === root && !includeRoot ? undefined : workspaceDirectories(directory);
       if (workspace) {
         this.discoveryLimited = workspace.limited;
@@ -93,6 +117,18 @@ export class WorkspaceBindings {
 
   manifestBoundary() {
     return this.workspaceRoot ?? this.root;
+  }
+
+  catalogVersion(name: string, spec: string): unknown {
+    const catalog = spec.slice('catalog:'.length);
+    return own(!catalog || catalog === 'default' ? this.pnpm?.catalog : own(this.pnpm?.catalogs, catalog), name);
+  }
+
+  catalogSnapshot() {
+    if (!this.pnpmDirectory) return;
+    const offset = path.relative(this.root, this.pnpmDirectory).split(path.sep).join('/');
+    const files = ['package.json', 'pnpm-workspace.yaml'];
+    return { offset, files, hash: workspaceInputsHash(this.root, offset, files) };
   }
 
   has(module: string) {

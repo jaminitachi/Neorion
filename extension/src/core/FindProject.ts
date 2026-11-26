@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { parse } from 'yaml';
 
 export const ignoredProjectDirectories = ['node_modules', 'vendor', 'dist', 'build', 'out', 'coverage', 'public'] as const;
 const excluded = new Set<string>(ignoredProjectDirectories);
@@ -75,9 +76,8 @@ function workspacePatterns(directory: string): string[] {
   if (Array.isArray(workspace)) return workspace;
   if (Array.isArray(workspace?.packages)) return workspace.packages;
   try {
-    const yaml = readFileSync(join(directory, 'pnpm-workspace.yaml'), 'utf8');
-    const packages = /^packages:[^\S\r\n]*(?:#.*)?\r?\n((?:[ \t]+[^\r\n]*\r?\n|\r?\n)*)/m.exec(yaml)?.[1] ?? '';
-    return [...(packages + '\n').matchAll(/^\s*-\s+['"]?([!\w./*?-]+)['"]?\s*(?:#.*)?$/gm)].map(match => match[1]);
+    const yaml = parse(readFileSync(join(directory, 'pnpm-workspace.yaml'), 'utf8'), { maxAliasCount: 32, logLevel: 'silent' });
+    return Array.isArray(yaml?.packages) ? yaml.packages : [];
   } catch { return []; }
 }
 

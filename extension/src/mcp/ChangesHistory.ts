@@ -3,12 +3,11 @@ import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { historicalInput, historyEnvironmentSupported, listHistoryInputs, type HistoryEdit } from '../core/HistoryInputs';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { compare, DependencyGraph, graphRow, hasGraph, type ChangeOrigin, type QueryRow } from './Graph';
 import { GRAPH_INDEX_REVISION, INDEX_SCHEMA, isTestFile, VERSION, type QueryIndex } from './Index';
 
-export const sourceFile = /\.[cm]?[jt]sx?$/;
-export const routeAsset = /(?:\.css|(?:^|\/)(?:robots\.txt|sitemap\.xml|opengraph-image\.(?:png|jpe?g|gif)))$/;
 export const historyBudgetMs = 20_000;
 type Git = (args: string[], input?: Buffer, maxBuffer?: number) => Buffer;
 export type ImportEdit = { before: ReadonlyMap<number, string>; after: ReadonlyMap<number, string> };
@@ -19,17 +18,34 @@ export type Removal = { file: string; names?: string[]; uncertainNames?: Readonl
 // committed tree signature is rechecked for every request.
 let warmHistory: { root: string; key: string; index: QueryIndex; graph: DependencyGraph } | undefined;
 
-function historicalGraph(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number) {
+function historicalGraph(root: string, git: Git, ref: string | undefined, prefix: string, deadline: number,
+  edits: HistoryEdit[], live?: QueryIndex) {
   const stagedTree = ref ? undefined : git(['ls-files', '--stage', '--full-name', '-z', '--', ':/']);
   const treeId = stagedTree ? createHash('sha256').update(stagedTree).digest('hex') :
     git(['rev-parse', '--verify', ref! + '^{tree}']).toString('utf8').trim();
   const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
-  if (warmHistory?.root === root && warmHistory.key === key) return warmHistory;
-  const remember = (index: QueryIndex) => warmHistory = {
-    root, key, index, graph: new DependencyGraph(index, new Map(index.symbols.map(symbol => [symbol.id, symbol])))
+  let incrementalKey: string | undefined;
+  if (live?.projectSnapshot && !live.pagesWorkspaceInputs && !live.routes.some(route => route.pages)) {
+    try {
+      const inputs = historyEnvironmentSupported(root) && listHistoryInputs(root);
+      if (inputs) {
+        const signature = createHash('sha256').update(JSON.stringify([key, live.projectSnapshot, edits]));
+        for (const file of [...inputs].sort()) {
+          const info = lstatSync(join(root, file));
+          if (!info.isFile()) throw new Error('Comparison input changed during discovery');
+          signature.update(JSON.stringify([file, info.size, info.mtimeMs, info.ctimeMs]));
+        }
+        incrementalKey = signature.digest('hex');
+      }
+    } catch {
+      // The full base graph remains available when live inputs cannot be verified.
+    }
+  }
+  if (warmHistory?.root === root && (warmHistory.key === key || warmHistory.key === incrementalKey)) return warmHistory;
+  const remember = (index: QueryIndex, cacheKey: string) => warmHistory = {
+    root, key: cacheKey, index, graph: new DependencyGraph(index, new Map(index.symbols.map(symbol => [symbol.id, symbol])))
   };
   let directory: string | undefined;
-  let cached: string | undefined;
   try {
     const gitDir = git(['rev-parse', '--git-common-dir']).toString('utf8').replace(/\r?\n$/, '');
     const cache = workspaceCache(root, resolve(root, gitDir));
@@ -39,13 +55,19 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
       if (!lstatSync(path).isDirectory()) throw new Error('Invalid comparison cache directory');
     }
     directory = history;
-    cached = join(history, key + '.json');
-    if (lstatSync(cached).isFile()) {
-      const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
-      if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index)) return remember(index);
+    for (const cacheKey of incrementalKey ? [key, incrementalKey] : [key]) {
+      try {
+        const cached = join(history, cacheKey + '.json');
+        if (!lstatSync(cached).isFile()) continue;
+        const index = JSON.parse(readFileSync(cached, 'utf8')) as QueryIndex;
+        if (index.schema === INDEX_SCHEMA && index.generator === VERSION && hasGraph(index) &&
+          (cacheKey === key ? !index.projectSnapshot : index.projectSnapshot === live?.projectSnapshot)) return remember(index, cacheKey);
+      } catch {
+        // A missing or invalid entry can be rebuilt from Git.
+      }
     }
   } catch {
-    // A missing, invalid or unwritable cache is recoverable from Git.
+    // An unwritable cache is recoverable from Git.
   }
   const snapshot = mkdtempSync(join(tmpdir(), 'neorion-base-'));
   try {
@@ -57,7 +79,7 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
       const file = record.slice(tab + 1);
       if (file.split('/').some(part => !part || part === '.' || part === '..' || part === '.git') ||
           /[\\:\x00-\x1f\ufffd]/.test(file)) continue;
-      if (!sourceFile.test(file) && !file.endsWith('.json') && !file.endsWith('pnpm-workspace.yaml') && !routeAsset.test(file)) continue;
+      if (!historicalInput(file)) continue;
       const blob = /^100(?:644|755) (?:blob )?([a-f0-9]{40,64})(?: 0)?$/.exec(record.slice(0, tab))?.[1];
       if (!blob) continue;
       const aliases = paths.get(blob) ?? [];
@@ -86,19 +108,27 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
       offset += length + 1;
     }
     const result = join(snapshot, '.neorion-history.json');
-    execFileSync(process.execPath, [join(__dirname, 'graph.cjs'), '--history-index', join(sourceRoot, prefix), result], {
+    const args = [join(__dirname, 'graph.cjs'), '--history-index', join(sourceRoot, prefix), result];
+    if (incrementalKey && live) {
+      const plan = join(snapshot, 'incremental.json');
+      writeFileSync(plan, JSON.stringify({ root, edits, live }), { mode: 0o600 });
+      args.push(plan);
+    }
+    execFileSync(process.execPath, args, {
       stdio: 'ignore', timeout: Math.max(1, Math.floor(deadline - performance.now() - 100))
     });
     const json = readFileSync(result, 'utf8');
     const index = JSON.parse(json) as QueryIndex;
     if (!hasGraph(index)) throw new Error('Could not index comparison tree');
-    if (directory && cached) {
+    // A scoped comparison is valid only against the verified live snapshot.
+    const cacheKey = incrementalKey && index.projectSnapshot ? incrementalKey : key;
+    if (directory) {
       try {
         const staging = mkdtempSync(join(directory, 'write-'));
         try {
           const file = join(staging, 'index.json');
           writeFileSync(file, json, { mode: 0o600 });
-          renameSync(file, cached);
+          renameSync(file, join(directory, cacheKey + '.json'));
         } finally {
           rmSync(staging, { recursive: true, force: true });
         }
@@ -106,7 +136,7 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
         // Cache publication is optional. The newly built index is usable.
       }
     }
-    return remember(index);
+    return remember(index, cacheKey);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
   }
@@ -142,8 +172,9 @@ function updatedImport(base: DependencyGraph, current: DependencyGraph, importer
 
 export function traceHistory(root: string, removals: Removal[], middleware: ReadonlyMap<string, string>,
   current: DependencyGraph, renamed: ReadonlyMap<string, string>, importEdit: (file: string) => ImportEdit | undefined,
-  git: Git, ref: string | undefined, prefix: string, depth: number, deadline: number) {
-  const { index: historical, graph: base } = historicalGraph(root, git, ref, prefix, deadline);
+  git: Git, ref: string | undefined, prefix: string, depth: number, deadline: number, liveIndex?: QueryIndex) {
+  const edits = liveIndex ? removals.map(({ file, names }) => ({ file, names: names! })) : [];
+  const { index: historical, graph: base } = historicalGraph(root, git, ref, prefix, deadline, edits, liveIndex);
   const origins: ChangeOrigin[] = [];
   const live: ChangeOrigin[] = [];
   const rows: QueryRow[] = [];

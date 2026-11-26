@@ -3,7 +3,8 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { posix } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { compare, graphRow, moduleStops, quantity, type ChangeOrigin, type DependencyGraph, type QueryResult, type QueryRow } from './Graph';
-import { routeAsset, sourceFile, traceHistory, type ImportEdit, type Removal } from './ChangesHistory';
+import { routeAsset, sourceFile } from '../core/HistoryInputs';
+import { traceHistory, type ImportEdit, type Removal } from './ChangesHistory';
 import { isMiddlewareFile, type QueryIndex, type SymbolEntry } from './Index';
 
 export type ChangeScope = 'all' | 'staged' | 'unstaged';
@@ -484,8 +485,11 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       return edit;
     };
     try {
+      const incremental = !prefix && !outside && !stagedDrift && !middlewareFiles.size && files.length === removals.length &&
+        files.length <= maxSeeds && files.every(({ status, file }) => status === 'M' && !config.test(file)) &&
+        removals.every(removal => removal.names?.length && !removal.compareExports && !removal.uncertainNames?.size);
       history = traceHistory(root, removals.slice(0, maxSeeds), middlewareFiles, graph, renamed, importEdit, gitBytes,
-        comparison, prefix, depth, deadline);
+        comparison, prefix, depth, deadline, incremental ? index : undefined);
       changes.push(...history.rows);
     } catch {
       for (const { file, names, compareExports, renamed } of removals) {
