@@ -399,7 +399,8 @@ export class QueryEngine {
           const parent = this.symbols.get(from);
           pending.push({
             id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
-            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional,
+            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
+            conditional: entry.conditional || !!conditional || decision === 'conditional',
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
             issue: entry.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
@@ -446,7 +447,7 @@ export class QueryEngine {
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
-      issue === 'custom App page slot unresolved' || issue.startsWith('unresolved page property ') &&
+      issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: dynamicReference ? 'rendered through a dynamic reference' :

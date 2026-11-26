@@ -93,6 +93,7 @@ function dynamicExport(node: Node) {
 
 export class QueryIndexBuilder {
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
+  private replacedInlineRenders = new Set<typeof this.edges[number]>();
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
@@ -137,9 +138,20 @@ export class QueryIndexBuilder {
     }
   }
 
+  replaceInlineRender(tag: Node, target: string, file: string, component?: string) {
+    for (const edge of this.renderSites.get(tag) ?? []) {
+      if (edge[1] === target && (edge[0] === file || edge[0] === component)) this.replacedInlineRenders.add(edge);
+    }
+  }
+
+  hasRenderAt(tag: Node, from: string, to: string) {
+    return this.renderSites.get(tag)?.some(edge => edge[0] === from && edge[1] === to);
+  }
+
   pageRenderCondition(route: string, tag: Node, decision: PageRenderCondition) {
     for (const edge of this.renderSites.get(tag) ?? []) {
       const conditions = this.pageConditions.get(route) ?? new Map();
+      if (decision === 'conditional' && conditions.has(edge)) continue;
       conditions.set(edge, decision);
       this.pageConditions.set(route, conditions);
     }
@@ -267,7 +279,8 @@ export class QueryIndexBuilder {
     for (const [file, body] of this.shells) {
       const parent = body?.getParent();
       if (!parent) continue;
-      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ?? parent;
+      const declaration = parent.getParentIfKind(SyntaxKind.VariableDeclaration) ??
+        parent.getParentIfKind(SyntaxKind.ClassDeclaration) ?? parent;
       const id = byNode.get(declaration);
       if (id !== undefined) index.routeFiles![file][3] = id;
     }
@@ -630,14 +643,16 @@ export class QueryIndexBuilder {
           if (id === undefined) continue;
           const entries: Record<string, PageRenderCondition> = {};
           for (const [edge, decision] of conditions) {
+            if (this.replacedInlineRenders.has(edge)) continue;
             const [from, to, line] = edge;
             const source = byGraphId.get(from);
             const target = byGraphId.get(to);
             if (source === undefined || target === undefined) continue;
-            const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line)
+            const combined = this.renderPairs.get(from + '\0' + to)?.filter(other => other[2] === line && !this.replacedInlineRenders.has(other))
               .map(other => conditions.get(other));
             if (combined?.includes(undefined)) continue;
-            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' : decision;
+            entries[renderSiteKey(source, target, line)] = combined?.includes('possible') ? 'possible' :
+              combined?.includes('conditional') ? 'conditional' : decision;
           }
           index.pagesRenderConditions[id] = entries;
         }
@@ -665,7 +680,9 @@ export class QueryIndexBuilder {
       }
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
-    for (const [from, to, line, conditional, layout, possible, detail, site, file] of this.edges) {
+    for (const edge of this.edges) {
+      if (this.replacedInlineRenders.has(edge)) continue;
+      const [from, to, line, conditional, layout, possible, detail, site, file] = edge;
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
