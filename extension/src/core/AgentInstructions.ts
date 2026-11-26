@@ -23,6 +23,7 @@ export function queryHint(cli?: string) {
     'To find which pages render a component, what wraps a route, who calls an API or action, what a rename affects, where a symbol is used, or how dependencies and Git changes affect a route, ask Neorion with the `neorion_query` tool before grepping.',
     `Query kinds are ${kinds.map(kind => `\`${kind}${queryArguments[kind]}\``).join(', ')}.`,
     'For `path`, pass `target` and `to` in MCP. For `changes`, omit `target`.',
+    'In a monorepo, select an app with MCP `app` or CLI `--app <name>`. Combined answers use `App:` sections and `[app]` row prefixes. If Neorion only lists apps, rerun the query with one of the listed app names.',
     'Include this rule in prompts you give subagents.',
     '`# complete` covers the indexed static matches in the stated scope. For `# partial: <reason>`, read the reason and verify against the source.',
     ...(cli ? [`If MCP is unavailable, run \`${cli} query <kind> <target>\` for single-target queries. Use \`${cli} query path <from> <to>\` to trace a path and \`${cli} query changes\` to inspect a Git diff.`] : [])

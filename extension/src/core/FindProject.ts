@@ -256,7 +256,8 @@ function discoverProject(start: string): ProjectSelection | undefined {
     inheritedNext.set(directory, dependency || canInherit);
     const id = relative(start, directory).split(sep).join('/');
     const sandbox = id.split('/').some(part => part === 'dev' || part === 'sandbox' || part === 'sandboxes' ||
-      excludedNextDirectory(part) || /^(?:dev|sandbox)-/.test(part) || /^example-apps?$/.test(part));
+      (part !== 'docs' && part !== 'website' && excludedNextDirectory(part)) ||
+      /^(?:dev|sandbox)-/.test(part) || /^example-apps?$/.test(part));
     const config = nextConfig(directory);
     const manifest = dependency || canInherit || config ? projectManifest(directory) : undefined;
     const hoistedApp = id.startsWith('apps/') && !id.split('/').slice(1).some(part => ['app', 'pages', 'src'].includes(part));

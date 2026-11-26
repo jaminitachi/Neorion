@@ -600,7 +600,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     trace.partial, baseTrace?.partial, stops ? 'module-level importers not traced' : undefined,
     unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined].filter(Boolean))].join('; ') || undefined;
   return {
-    title, rows: [...rows, ...changes.slice(0, 500)], notes, targets: [...touched],
+    title, rows: [...rows, ...changes.slice(0, 500)], notes, targets: [...touched], traversed: trace.traversed,
     count: `${quantity(totalFiles, 'file')}, ${quantity(changedSymbols.size, 'symbol')}, ${quantity(routes, 'route')}, ${quantity(wrappers.size, 'wrapper')}`,
     partial,
     scope: `git diff ${diffScope}, indexed edges, impact depth ${depth} plus render closure`

@@ -785,7 +785,7 @@ export class QueryIndexBuilder {
       const packageBindings = new Map<string, { module: string; name: string; binding: Node }>();
       for (const entry of imports) {
         const module = entry.getModuleSpecifierValue();
-        if (!isPackageSpecifier(module) || workspace?.has(module) || entry.isTypeOnly() || exports.has(entry.getModuleSpecifierSourceFile()!)) continue;
+        if (!isPackageSpecifier(module) || entry.isTypeOnly() || exports.has(entry.getModuleSpecifierSourceFile()!)) continue;
         for (const binding of [entry.getDefaultImport(), entry.getNamespaceImport()]) {
           if (!binding) continue;
           const name = binding.getText();
@@ -1172,8 +1172,11 @@ export class QueryIndexBuilder {
         return pkg ? [[relativePath(file), pkg.name] as const] : [];
       });
       if (packages.length) index.workspacePackages = Object.fromEntries(packages);
-      const unresolved = workspace.unresolvedFor(files.map(file => file.getFilePath()));
-      if (unresolved.length) index.workspaceUnresolved = unresolved;
+      const unresolved = files.flatMap(file => {
+        const modules = workspace.unresolvedFor(file);
+        return modules.length ? [[relativePath(file), modules] as const] : [];
+      });
+      if (unresolved.length) index.workspaceUnresolved = Object.fromEntries(unresolved);
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
     }
     return index;

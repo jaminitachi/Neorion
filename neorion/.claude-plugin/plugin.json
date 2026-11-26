@@ -1,6 +1,6 @@
 {
   "name": "neorion",
-  "version": "0.7.0",
+  "version": "0.6.0",
   "description": "Architecture queries for Next.js and React TypeScript projects.",
   "repository": "https://github.com/jaminitachi/Neorion",
   "author": { "name": "jaminitachi" },

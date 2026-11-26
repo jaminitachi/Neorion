@@ -201,7 +201,7 @@ For a plugin-only session, launch `claude --plugin-dir "$(npm root -g)/neorion"`
 
 ## Cursor
 
-From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to launch a pinned Neorion release from GitHub using `npx`, or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
+From the project root, run `neorion setup cursor`. It configures `.cursor/mcp.json` to use the CLI copied into the local workspace cache, with a pinned GitHub release as a fallback, or reuses an existing Neorion MCP entry. If the VS Code extension has already installed an active Neorion rule, Cursor uses that rule. Otherwise, setup writes the same query guidance as the Claude block to `.cursor/rules/neorion-query.mdc`. Cursor applies the rule to every chat in the project. [Cursor MCP configuration](https://cursor.com/docs/mcp#configuration-locations) · [Cursor project rules](https://cursor.com/docs/rules#project-rules)
 
 Run `neorion setup cursor --remove` from the same project to remove the rule block and the MCP entry owned by setup.
 
@@ -268,9 +268,9 @@ tRPC callers into sibling router packages. Shared files are displayed relative t
 selected app, for example `../../packages/ui/src/card.tsx#Card`. Sibling source edits
 invalidate the app index.
 
-Workspace launchers use discovery in Neorion 0.7.0 and later. The VS Code pinned npm
-launcher requires the matching npm release, and `neorion setup cursor` uses the matching
-GitHub release tarball. Use the bundled VS Code server when testing an unpublished build.
+Use the bundled VS Code server or run `neorion setup cursor` locally for multi-app queries.
+The pinned npm launcher and Cursor release fallback discover projects from the workspace
+directory using the capabilities of the installed release.
 
 When indexing JavaScript through `jsconfig.json` or a configless Next.js package,
 Neorion uses `allowJs: true` and `checkJs: false`. With default file selection, it skips `node_modules`,

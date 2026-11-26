@@ -6,14 +6,14 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { INDEX_PATH, INDEX_SCHEMA, LEGACY_INDEX_PATH, VERSION, type QueryIndex } from './Index';
-import { QueryEngine } from './Query';
+import { QueryEngine, type QueryAnswer } from './Query';
 import { appMode, missingProject, selectedApp, selectProject } from '../core/FindProject';
 import { appList, appQueryText, ensureFresh, projectText, waitForBuild } from './Build';
 import { historyBudgetMs } from './ChangesHistory';
 import { legacyKind, queryName, tools } from './Tools';
 
 type Call = { id: number; name: string; args: unknown };
-type Response = { id: number; text: string; isError?: true };
+type Response = QueryAnswer & { id: number; isError?: true };
 const missing = 'Neorion index missing or invalid. Run "Neorion: Generate Architecture Map" in VS Code.';
 
 export function indexReader(root: string) {
@@ -58,7 +58,7 @@ export function runQueries(root: string) {
     try {
       const query = readIndex();
       if (!query) throw new Error(missing);
-      response = { id, text: query.query(name, args) };
+      response = { id, ...query.query(name, args) };
     } catch (error) {
       response = { id, isError: true, text: String((error as Error).message).replace(/[\r\n]/g, ' ').slice(0, 120) };
     }
@@ -113,17 +113,49 @@ function queryWorker(project: string | undefined, autoBuild: boolean, budget: nu
   return { start, ask, stop, unref: () => worker?.unref() };
 }
 
+function appWorkers(project: string, autoBuild: boolean) {
+  const interactive = queryWorker(project, autoBuild, 2000);
+  const history = queryWorker(project, autoBuild, historyBudgetMs + 1000);
+  let changesQueue = Promise.resolve();
+  let stopped = false;
+  return {
+    interactive,
+    ask(name: string, args: Record<string, unknown>) {
+      if (stopped) return Promise.resolve(undefined);
+      if (name !== queryName || args.kind !== 'changes') return interactive.ask(name, args);
+      // Give each history request its own budget and reuse the comparison graph.
+      const response = changesQueue.then(() => stopped ? undefined : history.ask(name, args));
+      changesQueue = response.then(() => undefined, () => undefined);
+      return response;
+    },
+    stop() {
+      stopped = true;
+      interactive.stop();
+      history.stop();
+    },
+    unref() {
+      interactive.unref();
+      history.unref();
+    }
+  };
+}
+
 export async function serve(root: string, { autoBuild, confirm, discover = autoBuild }:
   { autoBuild: boolean; confirm?: boolean; discover?: boolean }) {
   const selection = discover ? selectProject(root, confirm) : { directory: root };
   const project = selection?.directory;
-  const interactive = queryWorker(project, autoBuild, 2000);
-  const history = queryWorker(project, autoBuild, historyBudgetMs + 1000);
-  let changesQueue = Promise.resolve();
+  const mode = selection && appMode(selection);
+  const workers = new Map<string, ReturnType<typeof appWorkers>>();
+  if (mode === 'all') {
+    for (const app of selection!.apps!) workers.set(app.directory, appWorkers(app.directory, autoBuild));
+  } else if (project && mode === 'single') {
+    workers.set(project, appWorkers(project, autoBuild));
+  }
+  const temporaryWorkers = new Set<ReturnType<typeof appWorkers>>();
   let appsQueue = Promise.resolve();
   let closed = false;
-  if (project && selection && appMode(selection) === 'single') {
-    const initial = interactive.start();
+  if (project && mode === 'single') {
+    const initial = workers.get(project)!.interactive.start();
     // Include initial index loading in initialize latency.
     await new Promise<void>((ready, reject) => {
       initial.once('message', () => ready());
@@ -134,34 +166,32 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
   const server = new Server({ name: 'neorion-mcp', version: VERSION }, { capabilities: { tools: {} } });
   server.onclose = () => {
     closed = true;
-    interactive.stop();
-    history.stop();
+    for (const pool of workers.values()) pool.stop();
+    for (const pool of temporaryWorkers) pool.stop();
   };
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   const reply = (text: string, isError?: boolean) =>
     ({ ...(isError === undefined ? {} : { isError }), content: [{ type: 'text' as const, text }] });
 
-  function askChanges(args: unknown) {
-    // Serialize history builds so simultaneous requests can reuse the same
-    // comparison graph and each gets its own budget once it starts.
-    const response = changesQueue.then(() => closed ? undefined : history.ask(queryName, args));
-    changesQueue = response.then(() => undefined, () => undefined);
-    return response;
-  }
-
-  async function queryApp(project: string, name: string, args: Record<string, unknown>) {
+  async function queryApp(project: string, name: string, args: Record<string, unknown>):
+    Promise<QueryAnswer & { error: boolean; building: boolean }> {
     if (autoBuild) {
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return { text: build.error, error: !build.building, building: !!build.building };
     }
     if (closed) return { text: '# partial: MCP server closed', error: true, building: false };
-    const changes = name === queryName && args.kind === 'changes';
-    const worker = queryWorker(project, autoBuild, changes ? historyBudgetMs + 1000 : 2000);
+    const cached = workers.get(project);
+    const pool = cached ?? appWorkers(project, autoBuild);
+    if (!cached) temporaryWorkers.add(pool);
     try {
-      const response = await worker.ask(name, args);
-      return { text: response?.text ?? '# partial: timed out', error: !!response?.isError, building: false };
+      const response = await pool.ask(name, args);
+      return { text: response?.text ?? '# partial: timed out', targetResolved: response?.targetResolved,
+        error: !!response?.isError, building: false };
     } finally {
-      worker.stop();
+      if (!cached) {
+        pool.stop();
+        temporaryWorkers.delete(pool);
+      }
     }
   }
 
@@ -179,7 +209,6 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
         return reply((error as Error).message, true);
       }
     }
-    const mode = appMode(selection);
     if (mode === 'list') return reply(appList(selection));
     if (mode === 'all') {
       const response = appsQueue.then(async () => {
@@ -200,7 +229,7 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
       const build = await waitForBuild(project, ensureFresh(project));
       if (build.error) return reply(build.error, !build.building);
     }
-    const response = await (name === queryName && args.kind === 'changes' ? askChanges(args) : interactive.ask(name, args));
+    const response = await workers.get(project)!.ask(name, args);
     const target = args.target ?? args.component ?? args.symbol ?? args.route ?? args.text;
     const label = typeof target === 'string' ? target.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80) : '';
     const kind = legacyKind(name) ?? args.kind ?? 'query';
@@ -210,8 +239,8 @@ export async function serve(root: string, { autoBuild, confirm, discover = autoB
   process.stdin.once('end', () => {
     // Let a piped CLI request finish even after its input reaches EOF.
     if (autoBuild) {
-      interactive.unref();
-      history.unref();
+      for (const pool of workers.values()) pool.unref();
+      for (const pool of temporaryWorkers) pool.unref();
     }
     else void server.close();
   });

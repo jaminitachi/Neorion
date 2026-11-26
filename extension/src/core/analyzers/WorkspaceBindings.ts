@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { Node, ts, type ResolutionHostFactory } from 'ts-morph';
+import { Node, ts, type ResolutionHostFactory, type SourceFile } from 'ts-morph';
 import { projectConfig, workspaceDirectories } from '../FindProject';
 import { workspaceSourcesHash } from '../ProjectSnapshot';
 import { importBinding } from './StaticBindings';
@@ -222,21 +222,38 @@ export class WorkspaceBindings {
             this.entryFiles.set(name, sourceEntry ?? typeEntry);
           }
           const file = this.entryFiles.get(name);
-          if (file) return { resolvedFileName: file.split(path.sep).join('/'), extension: extensions[/\.d\.[cm]?ts$/.exec(file)?.[0] ?? path.extname(file)], isExternalLibraryImport: false };
-          if (resolved && this.packageFor(resolved.resolvedFileName) && declarationFile.test(resolved.resolvedFileName)) return resolved;
-          if (!/\.(?:css|scss|sass|less|json|svg|png|jpe?g|woff2?|mdx?)$/i.test(name)) {
+          if ((!file || declarationFile.test(file)) &&
+              !/\.(?:css|scss|sass|less|json|svg|png|jpe?g|woff2?|mdx?)$/i.test(name)) {
             const missing = this.unresolved.get(containing) ?? new Set<string>();
             missing.add(name);
             this.unresolved.set(containing, missing);
           }
+          if (file) return { resolvedFileName: file.split(path.sep).join('/'), extension: extensions[/\.d\.[cm]?ts$/.exec(file)?.[0] ?? path.extname(file)], isExternalLibraryImport: false };
           return resolved;
         })
       };
     };
   }
 
-  unresolvedFor(files: string[]) {
-    return [...new Set(files.flatMap(file => [...this.unresolved.get(file) ?? []]))].sort();
+  unresolvedFor(file: SourceFile) {
+    const missing = this.unresolved.get(file.getFilePath());
+    if (!missing) return [];
+    const runtime = new Set<string>();
+    for (const literal of file.getImportStringLiterals()) {
+      const name = literal.getLiteralValue();
+      if (!missing.has(name)) continue;
+      const parent = literal.getParent();
+      if (Node.isImportDeclaration(parent)) {
+        const bindings = parent.getNamedImports();
+        if (parent.isTypeOnly() || (!parent.getDefaultImport() && bindings.length && bindings.every(binding => binding.isTypeOnly()))) continue;
+      } else if (Node.isExportDeclaration(parent)) {
+        const bindings = parent.getNamedExports();
+        if (parent.isTypeOnly() || (bindings.length && bindings.every(binding => binding.isTypeOnly()))) continue;
+      } else if (Node.isLiteralTypeNode(parent) || (Node.isExternalModuleReference(parent) &&
+          parent.getParentIfKind(ts.SyntaxKind.ImportEqualsDeclaration)?.isTypeOnly())) continue;
+      runtime.add(name);
+    }
+    return [...runtime].sort();
   }
 
   resolve(expression: Node | undefined) {

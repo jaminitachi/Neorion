@@ -17,7 +17,7 @@ export const COPY_MCP = 'Other tools: copy configuration snippet';
 const STATE = '.neorion/connect-state.json';
 const CURSOR_SETUP_STATE = '.neorion/cursor-setup-state.json';
 const BUNDLE = '.neorion/mcp/server.cjs';
-const GRAPH_BUNDLE = '.neorion/mcp/graph.cjs';
+export const CURSOR_WORKSPACE_CLI = '.neorion/cursor-setup/neorion.cjs';
 
 type Command = { command: string; args: string[]; type?: 'stdio' };
 interface ConfigState {
@@ -132,7 +132,8 @@ function isCursorNeorionEntry(value: unknown, localEntry: string) {
   const version = valid(releaseVersion ?? spec.split('@').at(-1) ?? '');
   const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
   return !!version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
-    matches(mcpCommand({ ...options, discover, platform: 'win32' })));
+    matches(mcpCommand({ ...options, discover, platform: 'win32' })) ||
+    !!releaseVersion && matches(mcpCommand({ ...options, discover, workspaceCli: CURSOR_WORKSPACE_CLI })));
 }
 
 function isExtensionCursorEntry(cache: string, entry: unknown) {
@@ -170,12 +171,15 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     state.legacyBundle = state.bundle;
     delete state.bundle;
   }
-  const bundle = checked(cache, BUNDLE);
+  const bundlePath = cursorSetup ? CURSOR_WORKSPACE_CLI : BUNDLE;
+  const bundle = checked(cache, bundlePath);
+  const graphBundlePath = path.posix.join(path.posix.dirname(bundlePath), 'graph.cjs');
   const relativeProject = discover ? '' : path.relative(root, project).split(path.sep).join('/');
   const projectArgument = relativeProject || '.';
   const updated = new Set<McpTarget>();
 
   let preserveLegacyBundle = false;
+  let installCursorBundle = false;
   for (const target of connect ? targets : Object.keys(state.configs) as McpTarget[]) {
     const { file: configFile, key, type, variable } = MCP_TARGETS[target];
     const file = checked(root, configFile);
@@ -217,14 +221,19 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     const entry: Command = bundled
       ? { command: 'node', args: ['-e', launchBundle(discover ? '--workspace' : '--root'), '--',
           variable ? '${workspaceFolder}' : '.', projectArgument] }
-      : mcpCommand({ root: scopedProject, discover, useRelease: !!cursorSetup });
+      : mcpCommand({ root: scopedProject, discover, useRelease: !!cursorSetup,
+          workspaceCli: cursorSetup && CURSOR_WORKSPACE_CLI });
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
-    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
-        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });
+    if (cursorSetup) {
+      installCursorBundle = !parsed.entry || equal(current, entry) || implicitStdio ||
+        !!(previous && !previous.hadNeorion && equal(current, previous.entry));
+      if (!installCursorBundle && parsed.entry &&
+          (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
+    }
     const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
     if (parsed.entry && !equal(current, entry) && !implicitStdio) {
       if (!previous || previous.hadNeorion || !equal(getNodeValue(parsed.entry), previous.entry)) {
@@ -258,8 +267,9 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     updated.add(target);
   }
 
-  if (connect && bundled && targets.length) {
-    const graphBundle = checked(cache, GRAPH_BUNDLE);
+  const source = cursorSetup?.legacyLocalEntry ?? bundleSource;
+  if (connect && (bundled && targets.length || installCursorBundle)) {
+    const graphBundle = checked(cache, graphBundlePath);
     const update = (source: string, file: string, owned: string | undefined) => {
       const content = fs.readFileSync(source);
       const next = hash(content);
@@ -270,8 +280,8 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
       if (previous !== next) changes.unshift({ file, content });
       return previous === next ? owned : next;
     };
-    const serverHash = update(bundleSource, bundle, state.bundle?.hash);
-    const graphHash = update(path.join(path.dirname(bundleSource), 'graph.cjs'), graphBundle, state.bundle?.graphHash);
+    const serverHash = update(source, bundle, state.bundle?.hash);
+    const graphHash = update(path.join(path.dirname(source), 'graph.cjs'), graphBundle, state.bundle?.graphHash);
     if (serverHash || graphHash) {
       state.bundle = {
         hash: serverHash, graphHash, createdDirectory: state.bundle?.createdDirectory ?? !exists(path.dirname(bundle))
@@ -280,7 +290,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   } else if (!connect && state.bundle) {
     if (exists(bundle) && hash(fs.readFileSync(bundle)) === state.bundle.hash) changes.push({ file: bundle, content: null });
     if (state.bundle.graphHash) {
-      const graphBundle = checked(cache, GRAPH_BUNDLE);
+      const graphBundle = checked(cache, graphBundlePath);
       if (exists(graphBundle) && hash(fs.readFileSync(graphBundle)) === state.bundle.graphHash) {
         changes.push({ file: graphBundle, content: null });
       }

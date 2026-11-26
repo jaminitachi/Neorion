@@ -1,6 +1,6 @@
 {
   "name": "neorion",
-  "version": "0.7.0",
+  "version": "0.6.0",
   "description": "Architecture queries for Next.js projects written in TypeScript or JavaScript.",
   "repository": {
     "type": "git",

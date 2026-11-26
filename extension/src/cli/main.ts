@@ -234,14 +234,14 @@ async function main([command, ...args]: string[]) {
     const results = [];
     for (const app of selection.apps!) {
       try {
-        results.push({ app: app.id, text: await queryProject(app.directory) });
+        results.push({ app: app.id, ...await queryProject(app.directory) });
       } catch (error) {
         results.push({ app: app.id, text: (error as Error).message, error: true });
       }
     }
     console.log(appQueryText(results));
     if (results.every(result => result.error)) process.exitCode = 1;
-  } else console.log(projectText(selection, root, await queryProject(selection.directory)));
+  } else console.log(projectText(selection, root, (await queryProject(selection.directory)).text));
 
 }
 

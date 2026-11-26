@@ -2,7 +2,7 @@ import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 6;
-export const QUERY_INDEX_REVISION = 9;
+export const QUERY_INDEX_REVISION = 10;
 export const GRAPH_INDEX_REVISION = 13;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -170,7 +170,7 @@ export interface QueryIndex {
   trpcFiles?: string[];
   workspaceSources?: WorkspaceSources;
   workspacePackages?: Record<string, string>;
-  workspaceUnresolved?: string[];
+  workspaceUnresolved?: Record<string, string[]>;
   workspaceDiscoveryLimited?: true;
   // Legacy index inputs used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };

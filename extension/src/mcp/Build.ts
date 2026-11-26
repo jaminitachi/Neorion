@@ -6,6 +6,7 @@ import { workspaceCache } from '../core/WorkspaceCache';
 import { formatProjectCandidates, type ProjectSelection } from '../core/FindProject';
 import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
 import { projectSnapshot, workspaceInputsHash, workspaceSourcesHash } from '../core/ProjectSnapshot';
+import type { QueryAnswer } from './Query';
 
 type BuildResult = { error?: string; building?: boolean };
 const builds = new Map<string, Promise<BuildResult>>();
@@ -155,10 +156,15 @@ export function appList(selection: ProjectSelection) {
     '# hint: Use --app <name> on the CLI or set app in the MCP query.'].join('\n');
 }
 
-export function appQueryText(results: { app: string; text: string; error?: boolean }[]) {
+export function appQueryText(results: (QueryAnswer & { app: string; error?: boolean })[]) {
   let partial = false;
+  const resolved = results.some(result => result.targetResolved);
   const sections = results.map(({ app, text, error }) => {
     const label = '[' + JSON.stringify(app) + ']';
+    const heading = `App: ${JSON.stringify(app)}\n`;
+    if (resolved && !error && text.endsWith('\n# partial: target unresolved')) {
+      return heading + label + ' # not present in this app';
+    }
     let coverage = false;
     const lines = text.trimEnd().split('\n').flatMap(line => {
       if (line.startsWith('# complete:')) {
@@ -169,7 +175,7 @@ export function appQueryText(results: { app: string; text: string; error?: boole
       return line ? [label + ' ' + line] : [];
     });
     partial ||= !coverage || !!error;
-    return `App: ${JSON.stringify(app)}\n` + lines.join('\n');
+    return heading + lines.join('\n');
   });
   return sections.join('\n\n') + (partial ? '\n# partial: see app results' : '\n# complete: all listed apps');
 }

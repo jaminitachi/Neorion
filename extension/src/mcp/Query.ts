@@ -34,6 +34,7 @@ const apiEvidence = new Map([
 const shellArg = (value: string) => /^[\w./:-]+$/.test(value) ? value : process.platform === 'win32'
   ? "'" + value.replace(/'/g, "''") + "'" : "'" + value.replace(/'/g, "'\\''") + "'";
 type CliReplay = { invocation: string[]; root: string };
+export type QueryAnswer = { text: string; targetResolved?: true };
 
 function queryCommand(cli: CliReplay, kind: QueryKind, targets: string[], options: string[]) {
   const flags = [...options, '--root', cli.root].map(shellArg);
@@ -376,7 +377,8 @@ export class QueryEngine {
     const neighbors = !expired() && single?.name.toLowerCase() === needle ? this.graph()?.neighbors(single.id, expired) : undefined;
     return {
       title: `${JSON.stringify(text)} kind=${kind}`, rows: hits.map(hit => hit.row), suggestedFilter,
-      notes: neighbors ? [neighbors] : hits.length || expired() ? [] :
+      traversed: neighbors?.files,
+      notes: neighbors ? [{ ...neighbors, files: [] }] : hits.length || expired() ? [] :
         this.suggestions(text, kind === 'any' ? undefined : kind === 'route' ? 'page' : kind, expired, undefined, kind !== 'any')
     };
   }
@@ -385,6 +387,7 @@ export class QueryEngine {
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
       possible: boolean; depth: number; slots: string[]; issue?: string }>();
     let directIssue: string | undefined;
+    const traversed = new Set<string>();
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
@@ -394,6 +397,8 @@ export class QueryEngine {
         const entry = pending[i];
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
+        const file = this.symbols.get(entry.id)?.file;
+        if (file) traversed.add(file);
         for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
           if (!entry.depth || only && route !== only) continue;
           const previous = reached.get(route.id);
@@ -456,7 +461,7 @@ export class QueryEngine {
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
       issue === 'custom App page slot unresolved' || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
-    return { rows, count: rows.length ? count + directLabel : undefined,
+    return { rows, traversed, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
@@ -466,6 +471,7 @@ export class QueryEngine {
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
+    const traversed = new Set<string>();
     const notes: Row[] = [];
     if (!includeExternal) notes.push(row('# external non-provider wrappers excluded'));
     const isProvider = (item: QueryIndex['wrapChains'][string][number]) =>
@@ -473,7 +479,12 @@ export class QueryEngine {
     const rows = chains.flatMap((id, branch) => {
       if (expired()) return [];
       const sites = new Map(this.index.pagesWrapSites?.[route.id]?.[id]);
-      const items = (this.index.wrapChains[id] ?? []).map((item, index) =>
+      const chain = this.index.wrapChains[id] ?? [];
+      for (const { file, definitionFile } of chain) {
+        traversed.add(file);
+        if (definitionFile) traversed.add(definitionFile);
+      }
+      const items = chain.map((item, index) =>
         sites.has(index) ? { ...item, evidence: sites.get(index) } : item)
         .filter(item => includeExternal || isProvider(item) || !item.external);
       const document = items.find(item => item.phase === 'document');
@@ -534,7 +545,7 @@ export class QueryEngine {
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
       ...[route.file, ...(reexport ? [page.file] : [])]), pathEnd: locations.length });
     return { rows, title: route.url, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}, 1 page`, targets: [route.file],
-      notes, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
+      notes, traversed, partial: this.index.pagesWrapperIssues?.[route.id]?.join('; ') };
   }
 
   private rename(symbol: SymbolEntry, includeTests: boolean, expired: () => boolean): Result {
@@ -846,7 +857,7 @@ export class QueryEngine {
     return { result: { ...result, title, targets: [source.file!, destination.file!] } };
   }
 
-  query(name: string, value: unknown, cli?: CliReplay) {
+  query(name: string, value: unknown, cli?: CliReplay): QueryAnswer {
     const args = validate(name, value);
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
@@ -974,6 +985,24 @@ export class QueryEngine {
       if (resultBytes >= 6000) break;
     }
     const notes = (result.notes ?? []).flatMap(renderRow);
+    const unresolved = new Set<string>();
+    const byImporter = this.index.workspaceUnresolved;
+    if (byImporter && !Array.isArray(byImporter)) {
+      const collect = (file: string) => {
+        const modules = byImporter[file];
+        if (Array.isArray(modules)) for (const module of modules) unresolved.add(module);
+      };
+      for (const file of result.traversed ?? []) collect(file);
+      for (const file of result.targets ?? []) collect(file);
+      for (const entry of result.rows) for (const file of entry.files) collect(file);
+    }
+    const modules = [...unresolved].sort();
+    const workspaceIssue = [
+      this.index.workspaceDiscoveryLimited ? 'workspace package scan limit reached' : '',
+      Array.isArray(byImporter) ? 'regenerate legacy workspace index' : '',
+      modules.length ? 'unresolved workspace modules ' + modules.slice(0, 3).join(', ') +
+        (modules.length > 3 ? ` and ${modules.length - 3} more` : '') : ''
+    ].filter(Boolean).join('; ');
     let snapshotStale = false;
     if (this.index.coverage && !ambiguous && !result.partial && !shortened &&
         renderedRows.length === result.rows.length && (tool === 'search' || result.targets)) {
@@ -1003,12 +1032,6 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
-      const unresolved = this.index.workspaceUnresolved ?? [];
-      const workspaceIssue = [
-        this.index.workspaceDiscoveryLimited ? 'workspace package scan limit reached' : '',
-        unresolved.length ? 'unresolved workspace modules ' + unresolved.slice(0, 3).join(', ') +
-          (unresolved.length > 3 ? ` and ${unresolved.length - 3} more` : '') : ''
-      ].filter(Boolean).join('; ');
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ?
           ['output truncated', result.partial, workspaceIssue].filter(Boolean).join('; ') :
@@ -1024,7 +1047,7 @@ export class QueryEngine {
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
         ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), coverage].join('\n');
-      if (bytes(output) <= 6000) return output;
+      if (bytes(output) <= 6000) return { text: output, targetResolved: result.targets ? true : undefined };
       if (noteCount) noteCount--;
       else shown--;
     }
