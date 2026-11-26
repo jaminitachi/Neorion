@@ -8,7 +8,7 @@ import {
   isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
-import { conditionalAt, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
@@ -180,7 +180,7 @@ function resolvedPromiseValue(call: import('ts-morph').CallExpression) {
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'resolve') return;
   const promise = callee.getExpression();
   if (!Node.isIdentifier(promise) || promise.getText() !== 'Promise' ||
-      declarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
+      uncachedDeclarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
   const value = unwrapValue(call.getArguments()[0]);
   if (Node.isIdentifier(value)) return value;
 }
@@ -370,7 +370,7 @@ function readsUrlParameter(value: Node) {
       const constructor = source.getExpression();
       const params = packageMember(constructor, 'next/navigation') === 'ReadonlyURLSearchParams' ||
         Node.isIdentifier(constructor) && constructor.getText() === 'URLSearchParams' &&
-          declarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+          uncachedDeclarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
       return params && fromLocation(source.getArguments()[0]);
     }
     if (!Node.isCallExpression(source)) return false;
@@ -507,6 +507,7 @@ export class QueryIndexBuilder {
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false, router?: RouterProject): QueryIndex {
+    const declarationsOf = (node: Node) => flow.declarations(node);
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -644,7 +645,6 @@ export class QueryIndexBuilder {
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
-    const declarationsOf = (node: Node) => flow.declarations(node);
     const types = new WeakMap<Node, ReturnType<Node['getType']>>();
     const typeOf = (node: Node) => {
       let type = types.get(node);
