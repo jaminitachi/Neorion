@@ -1,3 +1,4 @@
+import type { RouterPattern } from '../core/frameworks/RouterMatch';
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
@@ -5,6 +6,7 @@ export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
 export const QUERY_INDEX_REVISION = 15;
 export const GRAPH_INDEX_REVISION = 21;
+export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -120,6 +122,36 @@ export interface PagesEdge {
   matcher?: { source: string; conditional?: boolean; overlap?: boolean };
 }
 
+export type RouterEntry = {
+  role: string;
+  symbol: number;
+  file: string;
+  line: number;
+  method?: string;
+};
+
+export type RouterEdge = {
+  from?: number;
+  source?: number;
+  destination?: number;
+  to?: number;
+  kind: 'data' | 'render' | 'wrap' | 'navigate' | 'redirect' | 'load' | 'submit';
+  file: string;
+  line: number;
+  detail: string;
+  method?: string;
+  conditional?: boolean;
+  possible?: boolean;
+};
+
+export type RouterIssue =
+  | { kind: 'import' | 'module' | 'wrapper'; reason: string; file: string; route?: number }
+  | { kind: 'navigation'; reason: string; file: string; route?: number; owner: number; request: boolean; destinations?: number[] }
+  | { kind: 'missing-action'; reason: string; file: string; route?: number; owner: number }
+  | { kind: 'registry'; reason: string; file: string; route?: number; owner: number; destinations: number[] };
+
+export type RouterRegistryIssue = { reason: string; registration?: { url: string; file: string; id: string } };
+
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
@@ -133,6 +165,16 @@ export interface QueryIndex {
     id: number; url: string; file: string; kind: string; line?: number;
     component?: number; fileSymbol?: number; layouts?: number[];
     pages?: boolean;
+    router?: RouterPattern & {
+      site: { file: string; line: number };
+      entries?: RouterEntry[];
+      boundaries?: RouterEntry[];
+      renderable?: false;
+      conditionalRender?: true;
+      possibleRender?: true;
+      conditionalLayouts?: number[];
+      possibleLayouts?: number[];
+    };
     methods?: string[];
     methodBasis?: 'enforced' | 'observed';
     observedMethods?: string[]; handlers?: Record<string, number>;
@@ -187,6 +229,16 @@ export interface QueryIndex {
   workspaceDiscoveryLimited?: true;
   // Legacy index inputs used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
+  router?: {
+    framework: 'react-router' | 'remix';
+    basename: string;
+    revision: number;
+    dependencies?: string;
+    registryIssues: RouterRegistryIssue[];
+    registryFiles: string[];
+    issues: RouterIssue[];
+    edges: RouterEdge[];
+  };
   pagesUrlConfig?: NextUrlConfig;
   pagesEdges?: PagesEdge[];
   pagesIssues?: Record<number, string[]>;

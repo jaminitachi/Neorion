@@ -1,9 +1,10 @@
+import { matchRouterRoutes, routerAncestry } from '../core/frameworks/RouterMatch';
 import { matchNextRoutes, normalizeNextUrl, routeSegments, segmentRank } from '../core/analyzers/NextRouteMatch';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
@@ -205,7 +206,7 @@ export class QueryEngine {
   private dynamicRenderComponents: Set<number>;
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
-  private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
+  private pageRoots = new Map<number, { route: Route; layout: boolean; conditional?: boolean; possible?: boolean }[]>();
   private dependencyGraph?: DependencyGraph | null;
 
   constructor(root: string, private index: QueryIndex) {
@@ -229,11 +230,13 @@ export class QueryEngine {
     this.references = group(references, reference => reference[0]);
     this.fetches = group(index.fetches, fetch => fetch.route);
     for (const route of index.routes) {
-      if (route.kind !== 'page') continue;
+      if (route.kind !== 'page' || route.router?.renderable === false) continue;
       const add = (id: number | undefined, layout: boolean) => {
         if (id === undefined) return;
         const entries = this.pageRoots.get(id) ?? [];
-        entries.push({ route, layout });
+        entries.push({ route, layout,
+          conditional: layout ? route.router?.conditionalLayouts?.includes(id) : route.router?.conditionalRender,
+          possible: layout ? route.router?.possibleLayouts?.includes(id) : route.router?.possibleRender });
         this.pageRoots.set(id, entries);
       };
       add(route.component, false);
@@ -284,6 +287,7 @@ export class QueryEngine {
   }
 
   private matchRoute(text: string, kind?: string, concrete = !!this.index.pagesUrlConfig) {
+    if (this.index.router) return this.matchFrameworkRoute(text, kind);
     const routes = this.index.routes.filter(route => !kind || route.kind === kind);
     if (/^route:(?:src\/)?(?:app|pages)\//.test(text)) text = text.slice(6);
     if (!text.startsWith('/')) {
@@ -295,6 +299,34 @@ export class QueryEngine {
     if (exact.length) return exact.sort(byRoute);
     if (/\.[cm]?[jt]sx?$/.test(text) && !concrete) throw new Error('Use an app-relative route file path.');
     return concrete ? matchNextRoutes(text, routes, route => route.url, this.index.pagesUrlConfig).sort(byRoute) : [];
+  }
+
+  private matchFrameworkRoute(text: string, kind?: string) {
+    const routes = this.index.routes;
+    const eligible = (route: Route) => !kind || route.kind === kind || kind === 'api' &&
+      route.router?.entries?.some(entry => entry.method || entry.role === 'client-loader' || entry.role === 'client-action');
+    if (text.startsWith('route:')) {
+      text = text.slice(6);
+      const byId = routes.filter(route => route.router?.id === text && eligible(route));
+      if (byId.length) return byId;
+    }
+    if (!text.startsWith('/')) {
+      this.checkPath(text);
+      return routes.filter(route => route.file === path.posix.normalize(text) && eligible(route)).sort(byRoute);
+    }
+    if (/^\/\/|^\/(?:[^/]+\/)*\.\.(?:\/|$)|\\/.test(text)) throw new Error('Invalid route URL pattern.');
+    const pattern = (text.replace(/\/$/, '') || '/');
+    if (/[:*]|\?$/.test(pattern)) {
+      const exact = routes.filter(route => route.url === pattern && eligible(route) &&
+        (route.router?.pattern !== undefined || route.router?.index));
+      if (exact.length) return exact.sort(byRoute);
+    }
+    return matchRouterRoutes(text, routes, this.index.router!.basename).filter(eligible).sort(byRoute);
+  }
+
+  private routeLabel(route: Route) {
+    const label = `${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`;
+    return route.router ? `${label} (route:${route.router.id})` : label;
   }
 
   private suggestions(text: string, kind: string | undefined, expired: () => boolean, file?: string, includeSynthetic = true): Row[] {
@@ -360,17 +392,19 @@ export class QueryEngine {
         pathEnd: label.length
       } });
     }
-    const resolvedRoutes = this.index.pagesUrlConfig && text.startsWith('/') && (kind === 'any' || kind === 'route' || kind === 'api')
+    const resolvedRoutes = (this.index.pagesUrlConfig || this.index.router) && text.startsWith('/') && (kind === 'any' || kind === 'route' || kind === 'api')
       ? new Set(this.matchRoute(text, kind === 'route' ? 'page' : kind === 'api' ? 'api' : undefined).map(route => route.id)) : undefined;
     for (const route of this.index.routes) {
       if (expired()) break;
-      const routeKind = route.kind === 'page' ? 'route' : 'api';
+      if (route.router && route.kind === 'layout' && kind === 'api') continue;
+      const routeKind = route.kind === 'api' ? 'api' : 'route';
       if (kind !== 'any' && kind !== routeKind) continue;
-      const score = resolvedRoutes?.has(route.id) ? 0 : Math.min(match(route.url), match(route.file));
+      const score = resolvedRoutes?.has(route.id) ? 0 : Math.min(match(route.url), match(route.file),
+        route.router ? match(route.router.id) : Infinity);
       if (score === 3) continue;
       const label = `${routeKind} ${location(route.file, route.line ?? 1)}`;
       hits.push({ score, references: this.fetches.get(route.id)?.length ?? 0, file: route.file, kind: routeKind,
-        row: { ...row(`${label} ${route.url}`, route.file), pathEnd: label.length } });
+        row: { ...row(`${label} ${route.url}${route.router ? ` (route:${route.router.id})` : ''}`, route.file), pathEnd: label.length } });
     }
     hits.sort((a, b) => a.score - b.score || b.references - a.references ||
       compare(a.file, b.file) || compare(a.row.text, b.row.text));
@@ -404,10 +438,11 @@ export class QueryEngine {
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
         dynamicReference ||= this.dynamicRenderComponents.has(entry.id);
-        for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
-          if (!entry.depth || only && route !== only) continue;
+        for (const { route, layout, conditional, possible } of this.pageRoots.get(entry.id) ?? []) {
+          if ((!entry.depth && !route.router) || only && route !== only) continue;
           const previous = reached.get(route.id);
-          if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
+          if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper,
+            conditional: entry.conditional || !!conditional, possible: entry.possible || !!possible });
         }
         for (const [from, to, line, conditional, wrapper, possible, detail, , file] of this.incoming.get(entry.id) ?? []) {
           if (expired()) break;
@@ -486,6 +521,7 @@ export class QueryEngine {
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
+    const ordered = route.pages || route.router;
     const chains = this.index.branches?.[route.id] ?? [this.index.routeWrap[route.id]];
     const files = new Set<string>();
     const unresolvedWorkspace = new Set<string>();
@@ -508,9 +544,9 @@ export class QueryEngine {
       const groups = new Map<string, typeof items>();
       for (const item of client) {
         const previous = [...groups.values()].at(-1);
-        if (previous?.[0].file === item.file || !route.pages && groups.has(item.file)) {
-          (route.pages ? previous : groups.get(item.file))!.push(item);
-        } else groups.set(route.pages ? String(groups.size) : item.file, [item]);
+        if (previous?.[0].file === item.file || !ordered && groups.has(item.file)) {
+          (ordered ? previous : groups.get(item.file))!.push(item);
+        } else groups.set(ordered ? String(groups.size) : item.file, [item]);
       }
       const name = (item: typeof items[number]) => item.external ? `${item.symbol} (external: ${item.external})` : item.workspacePackage ? `${item.symbol} (workspace package: ${item.workspacePackage})` : item.symbol;
       const providers = items.filter(isProvider);
@@ -544,9 +580,9 @@ export class QueryEngine {
         const label = `${++order} ${location(file, (components[0] ?? items[0]).line)}`;
         files.add(file);
         const symbols = [...new Set(components.map(item => name(item) +
-          (route.pages && item.evidence ? ` [${item.evidence}]` : '')))];
+          (ordered && item.evidence ? ` [${item.evidence}]` : '')))];
         const providerNames = [...new Set(providers.map(item => name(item) +
-          (route.pages && item.evidence ? ` [${item.evidence}]` : '')))];
+          (ordered && item.evidence ? ` [${item.evidence}]` : '')))];
         entries.push({ ...row(label + (symbols.length ? ` ${symbols.join(', ')}` : '') +
           (providerNames.length ? ` providers: ${providerNames.join(', ')}` : '') +
           (items.some(item => item.conditional) ? ' [cond]' : '') +
@@ -555,7 +591,12 @@ export class QueryEngine {
       return entries;
     });
     const page = this.symbols.get(route.component ?? 0);
-    const label = `page ${location(route.file, route.line ?? 1)}`;
+    const label = `${route.router && route.kind === 'layout' ? 'layout' : 'page'} ${location(route.file, route.line ?? 1)}`;
+    if (route.router) for (const entry of route.router.boundaries ?? []) {
+      if (entry.role === 'error-boundary' || entry.role === 'hydrate-fallback') {
+        notes.push(row(`# ${entry.role} branch ${location(entry.file, entry.line)}`, entry.file));
+      }
+    }
     const reexport = page && page.file !== route.file;
     const locations = label + (reexport ? ` -> ${location(page.file, page.line)}` : '');
     rows.push({ ...row(locations + (reexport ? ' (re-export)' : ''),
@@ -623,6 +664,132 @@ export class QueryEngine {
       if (!uses.has(file)) notes.push(row(`# pass-through ${location(file, line)} (no edit)`, file));
     }
     return { rows, count: `${files.size} ${files.size === 1 ? 'file' : 'files'}`, notes };
+  }
+
+  private frameworkConsumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
+    const rows: Row[] = [];
+    const seen = new Set<string>();
+    const owners = new Set<number>();
+    const references = this.index.router!.edges.filter(edge => edge.destination === route.id &&
+      ['load', 'submit'].includes(edge.kind) && (includeTests || !testFile(edge.file)));
+    for (const edge of references.sort((a, b) => compare(a.file, b.file) || a.line - b.line)) {
+      if (expired()) break;
+      const text = `${edge.kind} ${location(edge.file, edge.line)} ${edge.method ?? '?'} ${edge.detail}` +
+        (edge.conditional ? ' [cond]' : '') + (edge.possible ? ' [possible]' : '');
+      if (!seen.has(text)) rows.push(row(text, edge.file));
+      seen.add(text);
+      if (edge.from !== undefined) owners.add(edge.from);
+    }
+    let partial: string | undefined;
+    if (levels) for (const owner of owners) {
+      if (expired()) break;
+      const evidence = this.graph()?.consumerEvidence(owner, includeTests, expired);
+      partial ??= evidence?.partial;
+      for (const entry of evidence?.rows ?? []) {
+        if (!seen.has(entry.text)) rows.push(entry);
+        seen.add(entry.text);
+      }
+    }
+    return {
+      rows, scope: 'indexed router data requests', partial,
+      title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, targets: [route.file]
+    };
+  }
+
+  private frameworkCoverage(args: ReturnType<typeof validate>, result: Result) {
+    const { tool, target, to, filter, includeTests } = args;
+    const router = this.index.router!;
+    if (router.revision !== ROUTER_INDEX_REVISION) return 'regenerate legacy router index';
+    const files = new Set([...(result.targets ?? []), ...result.rows.flatMap(row => row.files)]);
+    const named = ['wrappers', 'path', 'callees', 'api_consumers', 'impact'].includes(tool)
+      ? [target, to].filter(text => text.startsWith('/') || text.startsWith('route:') ||
+        !text.includes('#') && /\.[cm]?[jt]sx?$/.test(text)) : [];
+    const routes = this.index.routes;
+    const matched = named.flatMap(text => this.matchFrameworkRoute(text, tool === 'api_consumers' ? 'api' : undefined));
+    const ids = new Set((named.length ? matched : routes.filter(route => files.has(route.file))).map(route => route.id));
+    const byRouteId = new Map(routes.flatMap(route => route.router ? [[route.router.id, route] as const] : []));
+    const ancestry = new Set(matched.flatMap(route => routerAncestry(route, byRouteId).map(parent => parent.id)));
+    const paths = Object.keys(this.index.files);
+    const fileIds = new Map(this.index.fileSymbols?.map((id, i) => [paths[i], id]));
+    const reachable = (roots: Iterable<string>) => {
+      const reached = new Set(roots);
+      const pending = [...reached];
+      for (let i = 0; i < pending.length; i++) {
+        const id = fileIds.get(pending[i]);
+        for (const [to, , kind] of id === undefined ? [] : this.index.moduleImports?.[id] ?? []) {
+          const file = this.symbols.get(to)?.file;
+          if (!file || kind === 'type' || reached.has(file)) continue;
+          reached.add(file);
+          pending.push(file);
+        }
+      }
+      return reached;
+    };
+    const traversed = result.routerTraversal;
+    const traversalFiles = [...traversed ?? []].flatMap(id => this.symbols.get(id)?.file ?? []);
+    const related = tool === 'rename_impact' || tool === 'search' ? files : reachable([...files, ...traversalFiles]);
+    const forward = tool === 'callees' || tool === 'path';
+    const inverse = tool === 'who_renders' || tool === 'impact' || tool === 'changes' && files.size > 0;
+    const routeSearch = tool === 'search' && ['any', 'route', 'api'].includes(filter);
+    // Path's destination does not determine the source registration's context.
+    const origin = forward && named.includes(target) ? this.matchFrameworkRoute(target) : [];
+    const origins = new Set(origin.flatMap(route => routerAncestry(route, byRouteId).map(parent => parent.id)));
+    const inTraversal = (owner: number, route?: number) => traversed?.has(owner) &&
+      (route === undefined || !origins.size || origins.has(route));
+    // Route callees puts its registration's navigation edges at depth one, independent of owner depth.
+    const flattenedRoute = tool === 'callees' && origin.length === 1 ? origin[0].id : undefined;
+    const fromFlattenedRoute = (route?: number) => route !== undefined && route === flattenedRoute;
+    const inForwardScope = (owner: number, route?: number) => fromFlattenedRoute(route) || inTraversal(owner, route);
+    const navigation = forward && (router.edges.some(edge => edge.from !== undefined && inTraversal(edge.from, edge.source)) ||
+      router.issues.some(issue => issue.kind === 'navigation' && inForwardScope(issue.owner, issue.route)));
+    const routeScope = named.length > 0 || !!navigation || inverse || routeSearch;
+    const targetFiles = new Set(result.targets ?? []);
+    const root = byRouteId.get('root');
+    const reasons = router.registryIssues.filter(({ registration }) => {
+      if (!registration) return routeScope;
+      const { url, file, id } = registration;
+      const candidate = { router: { id, pattern: url, parentId: 'root' } };
+      if (named.some(text => text === 'route:' + id || !text.startsWith('/') && text === file ||
+        text.startsWith('/') && matchRouterRoutes(text, [candidate], router.basename).length)) return true;
+      if (routeSearch) {
+        const needle = target.toLowerCase();
+        return [url, file, id].some(value => value.toLowerCase().includes(needle)) ||
+          target.startsWith('/') && matchRouterRoutes(target, [candidate], router.basename).length > 0;
+      }
+      if (!inverse) return false;
+      if (files.has(file) || root && (ids.has(root.id) ||
+        [...reachable([root.file])].some(dependency => targetFiles.has(dependency)))) return true;
+      if (!fileIds.has(file)) return targetFiles.size > 0 || tool === 'changes';
+      return [...reachable([file])].some(dependency => targetFiles.has(dependency) || tool === 'changes' && files.has(dependency));
+    }).map(issue => issue.reason);
+
+    const relevant = router.issues.filter(issue => {
+      if (issue.kind === 'missing-action') return false;
+      if ((issue.kind === 'navigation' || issue.kind === 'registry') && fromFlattenedRoute(issue.route)) return true;
+      if (!includeTests && testFile(issue.file) && !files.has(issue.file)) return false;
+      if (issue.kind === 'import') return related.has(issue.file);
+      if (issue.kind === 'navigation') return tool === 'api_consumers' && matched.length > 0 && issue.request &&
+        (!issue.destinations || issue.destinations.some(id => ids.has(id))) || forward && inForwardScope(issue.owner, issue.route);
+      if (issue.kind === 'registry') return forward && inForwardScope(issue.owner, issue.route) ||
+        tool === 'api_consumers' && issue.destinations.some(id => ids.has(id));
+      if (issue.route === undefined) return related.has(issue.file);
+      if (issue.kind === 'module') return ids.has(issue.route) || ancestry.has(issue.route) || related.has(issue.file);
+      if (tool === 'wrappers' || tool === 'path' || tool === 'callees' && named.length) return ids.has(issue.route);
+      if (!inverse) return false;
+      if (ids.has(issue.route)) return true;
+      const affected = routes.find(route => route.id === issue.route);
+      return !!affected && [...reachable([affected.file])].some(file => targetFiles.has(file));
+    });
+    if (tool === 'callees') {
+      const notes = new Map(router.issues.flatMap(issue => issue.kind === 'missing-action' && inForwardScope(issue.owner, issue.route)
+        ? [[issue.reason, row(`# ${issue.reason}`, issue.file)] as const] : []));
+      if (notes.size) (result.notes ??= []).push(...notes.values());
+    }
+    relevant.sort((a, b) => Number(!files.has(a.file)) - Number(!files.has(b.file)));
+    reasons.push(...relevant.map(issue => issue.reason));
+    if (result.partial) reasons.unshift(result.partial);
+    const unique = [...new Set(reasons)];
+    return unique.length ? unique.slice(0, 3).join('; ') + (unique.length > 3 ? `; ${unique.length - 3} more unresolved sites` : '') : undefined;
   }
 
   private consumers(route: Route, levels: number, includeTests: boolean, expired: () => boolean): Result {
@@ -812,10 +979,11 @@ export class QueryEngine {
     if (tool === 'changes') return {
       result: changes(this.root, this.index, graph, args.scope, args.base, depth, deadline, file => this.checkPath(file, true))
     };
-    if (target.startsWith('/') && this.index.pagesUrlConfig) {
+    if (target.startsWith('/') && (this.index.pagesUrlConfig || this.index.router) || this.index.router &&
+        (target.startsWith('route:') || tool === 'callees' && /\.[cm]?[jt]sx?$/.test(target) && !target.includes('#'))) {
       const routes = this.matchRoute(target);
       if (routes.length > 1) return { ambiguous: true, result: { rows: routes.map(route =>
-        row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)) } };
+        row(this.routeLabel(route), route.file)) } };
       const [route] = routes;
       if (route) {
         const seeds = route.kind === 'api' ? graph.apiTargets(route) : graph.routeStarts(route);
@@ -849,9 +1017,9 @@ export class QueryEngine {
         const exact = this.matchRoute(target, kind, true);
         const routes = exact.length || target.startsWith('/') ? exact : [];
         const [route] = routes;
-        return { route, ids: route ? route.kind === 'page' ? graph.routeStarts(route) : graph.apiTargets(route) : [],
+        return { route, ids: route ? route.kind === 'api' ? graph.apiTargets(route) : graph.routeStarts(route) : [],
           label: route?.url ?? target, file: route?.file,
-          candidates: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)),
+          candidates: routes.map(route => row(this.routeLabel(route), route.file)),
           notes: () => this.suggestions(target, kind, expired) };
       }
       const matches = this.matchGraphSymbol(target, graph);
@@ -860,8 +1028,9 @@ export class QueryEngine {
         candidates: matches.map(symbol => row(`${declaration(symbol)} ${symbol.kind}${flagTest(symbol.file)}`, symbol.file)),
         notes: () => this.suggestions(target.split('#').pop()!, undefined, expired) };
     };
-    const source = resolve(from, this.index.pagesUrlConfig ? undefined : 'page');
-    const destination = resolve(to, this.index.pagesUrlConfig ? undefined : 'api');
+    const routeEndpoints = this.index.pagesUrlConfig || this.index.router;
+    const source = resolve(from, routeEndpoints ? undefined : 'page');
+    const destination = resolve(to, routeEndpoints ? undefined : 'api');
     const title = `${source.label} -> ${destination.label}`;
     for (const endpoint of [source, destination]) {
       if (endpoint.candidates.length > 1) return { ambiguous: true, result: { title, rows: endpoint.candidates, limit: 10 } };
@@ -911,15 +1080,16 @@ export class QueryEngine {
         }
       }
     } else {
-      const kind = tool === 'wrappers' ? 'page' : 'api';
+      const kind = tool === 'wrappers' ? this.index.router ? undefined : 'page' : 'api';
       const actionPath = tool === 'api_consumers' && target.includes('#') && !target.startsWith('/');
-      const routes = actionPath ? [] : this.matchRoute(target, kind);
+      const routes = actionPath ? [] : this.matchRoute(target, kind).filter(route => tool !== 'wrappers' || route.kind !== 'api');
       if (routes.length > 1) {
         ambiguous = true;
-        result = { rows: routes.map(route => row(`${location(route.file, route.line ?? 1)}#${route.url} ${route.kind}`, route.file)), limit: 10 };
+        result = { rows: routes.map(route => row(this.routeLabel(route), route.file)), limit: 10 };
       } else if (routes.length) result = tool === 'wrappers'
         ? this.wrappers(routes[0], !!args.includeExternal, expired)
-        : this.consumers(routes[0], args.callers, !!args.includeTests, expired);
+        : routes[0].router ? this.frameworkConsumers(routes[0], args.callers, !!args.includeTests, expired)
+          : this.consumers(routes[0], args.callers, !!args.includeTests, expired);
       else if (tool === 'api_consumers' && (actionPath || !/[\\/]/.test(target))) {
         const { file, name } = this.symbolTarget(target);
         const procedures = this.matchSymbol(target).filter(symbol => symbol.kind === 'procedure');
@@ -965,6 +1135,8 @@ export class QueryEngine {
         }
       }
     }
+    if (this.index.router) result.partial = this.frameworkCoverage(args, result);
+
     const timestamp = this.index.generatedAt.slice(0, 16) + 'Z';
     const status = new Map<string, boolean>();
     const stale = (file: string) => {

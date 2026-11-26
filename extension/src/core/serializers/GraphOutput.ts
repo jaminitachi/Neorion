@@ -76,7 +76,7 @@ export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = t
   const legacyOverview = path.join(root, 'codebase_graph.md');
   if (fs.lstatSync(legacyOverview, { throwIfNoEntry: false })?.isFile()) {
     const content = fs.readFileSync(legacyOverview, 'utf8');
-    if (/^# .* architecture \((?:app|pages|mixed|none) router\)$/m.test(content) &&
+    if (/^# .* architecture \((?:app|pages|mixed|none|react-router|remix) router\)$/m.test(content) &&
         content.includes('Detail headings name source areas. Numbered parts continue the same area.') &&
         content.includes('Fact prefixes: rendered (including layout reachability)')) fs.unlinkSync(legacyOverview);
   }

@@ -1,3 +1,4 @@
+import type { RouterPattern } from '../frameworks/RouterMatch';
 import type { QueryIndex } from '../../mcp/Index';
 
 export interface DirectoryMetadata {
@@ -14,6 +15,7 @@ export interface RouteNode {
   methodBasis?: 'enforced' | 'observed';
   observedMethods?: string[];
   pages?: boolean;
+  router?: RouterPattern;
   issue?: string;
   scope?: string;
   wraps?: string[];
@@ -64,7 +66,7 @@ export type DetailFacts = Map<string, Map<string, FactValue>>;
 export interface CodebaseGraph {
   metadata: {
     name: string;
-    router: 'app' | 'pages' | 'mixed' | 'none';
+    router: 'app' | 'pages' | 'mixed' | 'none' | 'react-router' | 'remix';
     directories: DirectoryMetadata[];
   };
   routes: RouteNode[];

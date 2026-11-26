@@ -36,12 +36,13 @@ type RelativePath = (source: SourceFile) => string;
 
 export function collectRenameFacts(
   files: SourceFile[], relativePath: RelativePath,
-  symbols: Map<Node, string>, facts: DetailFacts
+  symbols: Map<Node, string>, facts: DetailFacts,
+  exportsOf = (file: SourceFile) => file.getExportedDeclarations()
 ) {
   // The checker follows path aliases and re-exports to the declaration.
   const exported = new Map<string, string>();
   for (const file of files) {
-    for (const declarations of file.getExportedDeclarations().values()) {
+    for (const declarations of exportsOf(file).values()) {
       for (const declaration of declarations) {
         const id = symbols.get(declaration);
         if (id && !UI_TARGET.test(id)) exported.set(id, id.slice(0, id.lastIndexOf('#')));
@@ -1902,7 +1903,7 @@ function playwrightRequest(node: Node) {
   return origin?.module === '@playwright/test' && origin.name === 'test';
 }
 
-function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
+export function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
   const expression = call.getExpression();
   const origin = importBinding(expression);
   const [url, options] = call.getArguments();

@@ -1,6 +1,6 @@
 # Neorion
 
-Neorion maps Next.js projects written in TypeScript or JavaScript and answers App Router and Pages Router questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
+Neorion maps Next.js App Router and Pages Router projects written in TypeScript or JavaScript. Source builds also support React Router v7 Framework Mode and Remix v2. Neorion answers architecture questions deterministically and offline. It shows which layouts and providers wrap a route, which pages render a component, and who calls a server action.
 
 ![Neorion demo: install, graph and query on shadcn-ui/taxonomy](docs/demo.gif)
 
@@ -115,6 +115,40 @@ Graphify 0.9.115 used one AST-only run per app and different file-selection rule
 
 Later tRPC tracing (#18) and query fixes (#23) add build time. A fresh ShareTab index build on `master` (`c6f5fb1`) took a median of 7.71 s across three runs in a separate session, so it is not directly comparable to the table.
 
+## Framework support
+
+The table compares route ID, module file, parent, index flag and path against each framework's manifest. The query sample uses one question per query kind on each app.
+
+| App | Framework | Registration matches | Complete without dependencies | Complete with dependencies |
+| --- | --- | ---: | ---: | ---: |
+| [Indie Stack](https://github.com/remix-run/indie-stack/tree/56abb93bf81f635b574d9ca23eed05602699458a) | Remix v2 | 10/10 | 2/9 | 7/9 |
+| [Epic Stack](https://github.com/epicweb-dev/epic-stack/tree/893610db76127fb5a5f1ffa786bee6b050637429) | React Router 7.16 | 49/49 | 0/9 | 5/9 |
+| [React Router docs](https://github.com/remix-run/react-router-website/tree/5f1b6fb9016192acfa2d24edfcb2666efd234ff7) | React Router 7.15 | 15/15 | 0/9 | 7/9 |
+
+Run these arguments after `neorion query` from the pinned app's root.
+
+| Indie Stack | Epic Stack | React Router docs |
+| --- | --- | --- |
+| `search routes/notes.new` | `search routes/_auth/login` | `search color-scheme` |
+| `wrappers /notes/new` | `wrappers /login` | `wrappers /home` |
+| `who_renders NotesPage` | `who_renders ThemeSwitch` | `who_renders V7` |
+| `rename_impact getNoteListItems` | `rename_impact ThemeSwitch` | `rename_impact ColorSchemeToggle` |
+| `api_consumers /logout` | `api_consumers /resources/theme-switch` | `api_consumers /color-scheme` |
+| `impact NotesPage` | `impact ThemeSwitch` | `impact app/pages/docs-home.tsx#headers` |
+| `callees NotesPage` | `callees /login` | `callees /home` |
+| `path /notes/new /logout` | `path /login /resources/theme-switch` | `path /home /color-scheme` |
+| `changes --unstaged` | `changes --unstaged` | `changes --unstaged` |
+
+For `changes --unstaged`, add `void 0;` as the first statement in `NotesPage` in
+`app/routes/notes.tsx`, `action` in `app/routes/resources/theme-switch.tsx`, or `headers`
+in `app/pages/docs-home.tsx`, respectively. The installed runs used `npm install --ignore-scripts`
+for Indie and Epic and `pnpm install --ignore-scripts` for the docs site.
+
+Missing packages can make source-only results partial. With dependencies installed, runtime form
+props, links and redirects still produce partial results. The Epic diff reports `possible router dependency`
+for a possible submission to the theme action. Querying the docs site's dev-only playground registration
+reports the runtime route addition.
+
 ## Install
 
 Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.
@@ -219,21 +253,18 @@ npm --prefix extension ci
 npm --prefix extension run build:cli
 ```
 
-1. **App.** Neorion uses the requested directory if it has a `next.config.{js,mjs,ts,cjs}` file
-   or declares `next` and has its own routes under `app/`, `pages/`, `src/app/`, or `src/pages/`.
-   For example, a root with `next` and `pages/index.jsx` stays at the root.
-2. **Monorepo.** A bounded search looks for nested apps with a Next config, a Next dependency, or
-   routes and a Next dependency inherited within the checkout. It skips tooling and non-product
-   directories such as `test/`, `playgrounds/`, `docs/`, and `website/`. For example, a workspace
-   whose sole app is `apps/web` selects that app. With several candidates, Neorion prefers the
-   requested directory's TS/JS config, then a candidate's TS/JS config, then a Next dependency,
-   in breadth-first alphabetical order. Packages with only a development dependency on Next and
-   no routes or Next config are fallback candidates. When stronger candidates exist, the hint lists those.
-3. **Library.** With no Next candidate, Neorion uses the first `tsconfig.json` or `jsconfig.json`,
-   checking the requested directory first and preferring publishable source packages over
-   tooling directories and Next.js sandboxes. A library with a root `tsconfig.json` and
-   a Next app under `test/` selects the library root. A root that declares `next` and has no
-   routes or project config can still be used as a guess.
+1. **App.** Neorion recognizes Next.js from `next.config.{js,mjs,ts,cjs}` or a `next` dependency
+   together with routes under `app/`, `pages/`, `src/app/`, or `src/pages/`. React Router Framework
+   Mode uses `@react-router/dev` and a `react-router.config.*` file or its Vite plugin. Remix v2 uses
+   `@remix-run/dev` and a `remix.config.*` file or its Vite plugin.
+2. **Monorepo.** Neorion checks declared workspace packages or uses a bounded search of nested
+   directories, skipping tooling directories such as `test/` during the fallback search. The same
+   workspace can contain Next.js, React Router and Remix apps. A nested Next.js app can inherit `next`
+   from the workspace. When discovery has to guess, it shows candidates from the checkout.
+3. **Library.** When discovery finds no app candidate, Neorion checks for `tsconfig.json` or
+   `jsconfig.json`, starting in the requested directory. It can also suggest a publishable source
+   package as the project root. A root that declares `next` without routes or a project config can
+   still be used as a guess.
 
 The `Project:` line shows the full path of the indexed directory. A guess produces
 `# partial: project root guessed` and a hint with up to five candidates. VS Code also shows the guess
@@ -247,7 +278,7 @@ the same rule. The Claude plugin and VS Code MCP connections from guessed roots 
 ### Monorepos
 
 From a workspace root, `neorion graph` builds a separate index and architecture map for
-each discovered Next.js app in workspaces with up to three apps. Queries search each app
+each discovered app in workspaces with up to three apps. Queries search each app
 and label its rows. Query limits apply per app. Use the app's workspace-relative path,
 package name, or unique directory name to select it.
 

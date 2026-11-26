@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { generateGraph } from './core/Generate';
-import { appMode, formatProjectCandidates, missingProject, selectProject, type ProjectSelection } from './core/FindProject';
+import { appMode, formatProjectCandidates, missingProject, projectAppsLabel, selectProject, type ProjectSelection } from './core/FindProject';
 import { AGENT_FILES, CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, updateAgentFiles } from './core/AgentInstructions';
 import { COPY_MCP, MCP_TARGETS, REGISTER_MCP, mcpSnippet, planMcp, type McpTarget } from './core/McpRegistration';
 import { GraphVisualizer } from './core/visualizers/GraphVisualizer';
@@ -134,7 +134,7 @@ async function runAnalysis(context: vscode.ExtensionContext, options: AnalysisOp
     }
     const mode = appMode(selection);
     if (mode === 'list') {
-        if (!silent) vscode.window.showInformationMessage(`Next.js apps: ${selection.apps!.map(app => app.id).join(', ')}. Open an app folder to generate its map.`);
+        if (!silent) vscode.window.showInformationMessage(`${projectAppsLabel(selection.apps!)}: ${selection.apps!.map(app => app.id).join(', ')}. Open an app folder to generate its map.`);
         return;
     }
     const projectPath = selection.directory;
