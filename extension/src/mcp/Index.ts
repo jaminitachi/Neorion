@@ -1,3 +1,4 @@
+import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 9;
@@ -46,7 +47,8 @@ export interface Wrapper {
   site?: { file: string; line: number };
   phase?: 'document' | 'application';
   evidence?: string;
-  guardSite?: [file: string, offset: number];
+  guard?: RenderEvidence;
+  guardFile?: string;
 }
 
 export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true };
@@ -81,7 +83,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse }
-export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number, argsOffset?: number, transport?: string, transportIssue?: string];
+export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number, args?: string, transport?: string, transportIssue?: string];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
 export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export' | 'type',
@@ -154,9 +156,11 @@ export interface QueryIndex {
   callIssues?: Record<string, string>;
   refEvidence?: Record<string, string>;
   sourceEvidence?: true;
-  callSites?: Record<string, number[]>;
-  unresolvedCallSites?: Record<number, [line: number, offset: number][]>;
-  returnSites?: Record<number, [line: number, offset: number][]>;
+  callLiterals?: Record<string, string[]>;
+  unresolvedCallLiterals?: Record<number, [line: number, callee: string, args: string][]>;
+  returnLiterals?: Record<number, [line: number, value: string][]>;
+  renderEvidence?: Record<string, RenderEvidence>;
+  memoizedCallbacks?: number[];
   renderLabels?: Record<string, string>;
   uncertainPropRequests?: { file: string; owner: number; method?: string; gates?: FlowGate[] }[];
   unresolvedCalls?: Record<number, number>;

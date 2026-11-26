@@ -19,6 +19,8 @@ import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
+import { literalArgs, literalReturn } from './LiteralEvidence';
+import { renderEvidence } from './RenderEvidence';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -354,9 +356,11 @@ export class QueryIndexBuilder {
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
       let parent: Node | undefined = fn.getParent();
+      let memoized = false;
       while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned ||
           Node.isCallExpression(parent) && parent.getArguments()[0] === returned &&
           packageMember(parent.getExpression(), 'react') === 'useCallback')) {
+        if (Node.isCallExpression(parent)) memoized = true;
         returned = parent;
         parent = parent.getParent();
       }
@@ -377,6 +381,7 @@ export class QueryIndexBuilder {
         (attribute && Node.isJsxAttribute(attribute) ? attribute.getNameNode().getText() : undefined);
       if (!name) return;
       const id = add(binding, name, 'function', null);
+      if (memoized) (index.memoizedCallbacks ??= []).push(id);
       if (returnedCallback || !factoryName && !declaredName) index.symbols[id - 1].synthetic = true;
       byNode.set(fn, id);
       return id;
@@ -509,11 +514,16 @@ export class QueryIndexBuilder {
       ts.isNonNullExpression(argument) || ts.isAwaitExpression(argument) || ts.isTypeAssertionExpression(argument) ||
       argument.kind === SyntaxKind.TrueKeyword || argument.kind === SyntaxKind.FalseKeyword || argument.kind === SyntaxKind.NullKeyword
     );
+    const callEvidence = new WeakMap<CallExpression, string | undefined>();
+    const argsFor = (call: CallExpression) => {
+      if (!callEvidence.has(call)) callEvidence.set(call, mayHaveLiterals(call) ? literalArgs(call) : undefined);
+      return callEvidence.get(call);
+    };
     const recordCallSite = (key: string, call: CallExpression) => {
-      if (!mayHaveLiterals(call)) return;
-      const offset = call.getEnd();
-      const sites = ((index.callSites ??= {})[key] ??= []);
-      if (!sites.includes(offset)) sites.push(offset);
+      const args = argsFor(call);
+      if (!args) return;
+      const sites = ((index.callLiterals ??= {})[key] ??= []);
+      if (!sites.includes(args)) sites.push(args);
     };
     const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
       const line = startLine(node);
@@ -703,12 +713,22 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
+    const checkedRenderSites = new Set<string>();
     for (const edge of this.edges) {
       if (this.replacedInlineRenders.has(edge)) continue;
       const [from, to, line, conditional, layout, possible, detail, site, file] = edge;
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
+      if (site && !historyOnly) {
+        const key = siteKey(site);
+        if (!checkedRenderSites.has(key)) {
+          checkedRenderSites.add(key);
+          const tag = Node.isCallExpression(site) ? site.getArguments()[0] : site.getTagNameNode();
+          const evidence = tag && renderEvidence(tag);
+          if (evidence) (index.renderEvidence ??= {})[key] = evidence;
+        }
+      }
       index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
@@ -845,7 +865,7 @@ export class QueryIndexBuilder {
       const recordTrpcUse = (use: NonNullable<ReturnType<TrpcFacts['uses']>>[number], owner?: number) => {
         const line = startLine(use.site);
         const operation = use.cache ? 'cache:' + use.operation : use.operation;
-        const offset = !use.cache && use.operation !== 'useMutation' && mayHaveLiterals(use.site) ? use.site.getEnd() : undefined;
+        const args = !use.cache && use.operation !== 'useMutation' ? argsFor(use.site) : undefined;
         const transport = use.transport;
         const link = transport && [...new Set(transport.links.map(site =>
           `${relativePath(site.getSourceFile())}:${startLine(site)}`))].join(', ');
@@ -861,7 +881,7 @@ export class QueryIndexBuilder {
           if (trpcUseKeys.has(key)) continue;
           trpcUseKeys.add(key);
           const entry: import('../../mcp/Index').TrpcUse = [id, line, operation, owner];
-          if (offset !== undefined || destination || use.transportIssue) entry[4] = offset;
+          if (args !== undefined || destination || use.transportIssue) entry[4] = args;
           if (destination || use.transportIssue) entry[5] = destination;
           if (use.transportIssue) entry[6] = use.transportIssue;
           ((index.trpcUses ??= {})[fileId] ??= []).push(entry);
@@ -995,8 +1015,12 @@ export class QueryIndexBuilder {
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
-          if (Node.isCallExpression(node) && mayHaveLiterals(node)) {
-            ((index.unresolvedCallSites ??= {})[owner] ??= []).push([startLine(node), node.getEnd()]);
+          if (Node.isCallExpression(node) && !historyOnly) {
+            const args = argsFor(node);
+            const callee = args && expression.getText();
+            if (callee && args && /^[$\w]+(?:\.[$\w]+){0,6}$/.test(callee) && callee.length <= 120) {
+              ((index.unresolvedCallLiterals ??= {})[owner] ??= []).push([startLine(node), callee, args]);
+            }
           }
           if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
             const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
@@ -1107,7 +1131,8 @@ export class QueryIndexBuilder {
           const owner = fn && (byNode.get(fn) ?? (container && (Node.isVariableDeclaration(container) ||
             procedureResolvers.get(container) === fn) ? byNode.get(container) : undefined));
           if (owner === undefined) return;
-          if (!historyOnly) ((index.returnSites ??= {})[owner] ??= []).push([startLine(node), node.getStart()]);
+          const evidence = !historyOnly && literalReturn(value);
+          if (evidence) ((index.returnLiterals ??= {})[owner] ??= []).push([startLine(node), evidence]);
         } else if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);

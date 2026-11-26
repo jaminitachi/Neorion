@@ -48,9 +48,7 @@ export function renderEvidence(site: Node): RenderEvidence | undefined {
   let issue: string | undefined;
   const text = (node: Node) => {
     const value = node.getText().replace(/\s+/g, ' ');
-    if (value.length <= 120) return value;
-    issue ??= 'render guard expression shortened';
-    return value.slice(0, 117) + '...';
+    return value.length <= 120 ? value : value.slice(0, 117) + '...';
   };
   const when = (node: Node, sense: 'truthy' | 'falsy' | 'nullish' = 'truthy') => {
     if (conditions.length >= 12) {

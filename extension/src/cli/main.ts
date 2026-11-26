@@ -21,6 +21,7 @@ const help = `Usage:
   neorion query search <text> [--kind filter] [--limit n]
   neorion query wrappers <route> [--no-external | --include-external]
   neorion query who_renders <component> [--direct]
+  neorion query api_consumers <route> [--depth n]
   neorion query impact <symbol|file> [--depth n] [--include-tests]
   neorion query callees <symbol> [--depth n] [--uses]
   neorion query path <from> <to>

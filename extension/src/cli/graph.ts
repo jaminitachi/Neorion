@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { generateGraph } from '../core/Generate';
 export { inspectChangeSource } from '../core/analyzers/ChangeSource';
-export { SourceEvidence } from '../core/analyzers/SourceEvidence';
+export { collectExcludedRequests } from '../core/analyzers/ExcludedHttp';
 import { missingProject, selectProject } from '../core/FindProject';
 import { mcpCommand } from '../core/McpCommand';
 import { projectLabel, projectRootNotice } from '../mcp/Build';

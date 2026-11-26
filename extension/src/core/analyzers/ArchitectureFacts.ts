@@ -13,6 +13,7 @@ import { property, textValue, type NextConfig } from './NextConfig';
 import { matchNextRoutes, normalizeNextUrl, patternRank, routeSegments } from './NextRouteMatch';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { startLine } from './SourceLines';
+import { renderEvidence } from './RenderEvidence';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
@@ -671,11 +672,12 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
           const source = providerTag ? tag : definition ?? tag;
           const evidenceSite = assignment?.site ?? (property ? tag : undefined);
           const site = evidenceSite && { file: relativePath(evidenceSite.getSourceFile()), line: startLine(evidenceSite) };
+          const guard = pagesScope ? undefined : renderEvidence(tag);
           const location: ChainWrapper = {
             file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
             inlineRender: scope?.inlineLayout ? { tag, owner: scope.renderOwner } : undefined,
             line: startLine(source), conditional: branchConditional, provider, providerTag, external,
-            guardSite: pagesScope ? undefined : [relativePath(tag.getSourceFile()), tag.getStart()],
+            guard, guardFile: guard ? relativePath(tag.getSourceFile()) : undefined,
             site, evidence: property && site && (assignment?.site ? `${property} assigned at ${site.file}:${site.line}` :
               `${property} fallback at ${site.file}:${site.line}`) || undefined,
             definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()

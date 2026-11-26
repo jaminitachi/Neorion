@@ -27,12 +27,13 @@ neorion query wrappers /
 
 If your app has no `/` route, search for part of a route name with a command such as `neorion query search login`.
 In the Pages Router, `wrappers` shows the custom `_app` when present. For dynamic routes, quote
-the indexed pattern, such as `'/blog/[slug]'`. Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap.
+the indexed pattern, such as `'/blog/[slug]'`. Add `--limit <n>` to ask for more rows. Graph rows have a 6,000-byte budget. Query output is capped at 8,000 bytes and can include up to 2,000 bytes of site evidence.
 
 `wrappers` includes third-party components on the page’s wrapper chain and labels
 them with their package. Pass `--no-external` in the CLI or set `includeExternal: false`
 in MCP to hide third-party non-provider wrappers. Providers stay visible.
 
+`api_consumers --depth <n>` traces up to six caller levels for API routes (default one).
 `api_consumers` lists caller files and lines for API routes, server actions, and
 tRPC procedures. Pass a route URL, `signOut`, or a dotted procedure path such as
 `post.create`. Replace examples such as `signOut` with names from your app.

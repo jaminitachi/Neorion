@@ -51,7 +51,7 @@ Use `who_renders --direct` to list individual JSX render sites, including source
 
 Use `neorion query changes --base <ref>` to compare the worktree against the merge base of `HEAD` and that ref. This includes committed differences and uncommitted edits to tracked files and excludes untracked files. Use `--staged` to compare the index against `HEAD` or `--unstaged` to compare the worktree against the index. The default and `--unstaged` include untracked files and list ignored project-root `.env*` overrides by path as potential configuration changes. Removed files and exports are marked in the result, with importer and route evidence from the comparison side where available.
 
-Add `--limit <n>` to ask for more rows. Output still has a 6,000-byte cap. See the [source-build examples](#build-from-source) for a filtered search and a deeper downstream trace.
+Add `--limit <n>` to ask for more rows. Graph rows have a 6,000-byte budget. Query output is capped at 8,000 bytes and can include up to 2,000 bytes of site evidence. See the [source-build examples](#build-from-source) for a filtered search and a deeper downstream trace.
 
 In source builds, `api_consumers` uses `[mention]` to mark a reference such as a route literal. `[possible URL override]` marks a transport whose request URL may change at runtime.
 

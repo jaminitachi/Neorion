@@ -1,6 +1,6 @@
 import { Node, SyntaxKind } from 'ts-morph';
 import { wrappedExpression } from './ArchitectureFacts';
-import { valueNode } from './StaticBindings';
+import { bindingOf, valueNode } from './StaticBindings';
 
 const sensitive = /secret|password|token|authorization|credential|private.?key|api.?key/i;
 
@@ -20,7 +20,10 @@ function literal(node: Node | undefined, depth: number, named = false): string |
     return;
   }
   if (Node.isIdentifier(node)) {
-    const value = valueNode(node);
+    const binding = bindingOf(node);
+    if (!Node.isVariableDeclaration(binding) || binding.getSourceFile() !== node.getSourceFile()) return;
+    const value = valueNode(binding);
+    if (value?.getSourceFile() !== node.getSourceFile()) return;
     // Only follow primitive const bindings. A referenced object can be mutated.
     if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value) || Node.isNumericLiteral(value) ||
         Node.isTrueLiteral(value) || Node.isFalseLiteral(value) || Node.isNullLiteral(value)) return literal(value, depth, named);
@@ -30,7 +33,7 @@ function literal(node: Node | undefined, depth: number, named = false): string |
     const condition = node.getCondition().getText().replace(/\s+/g, ' ');
     const yes = literal(node.getWhenTrue(), depth + 1, named);
     const no = literal(node.getWhenFalse(), depth + 1, named);
-    if (yes && no && /^!?[$\w.]{1,48}$/.test(condition) && !sensitive.test(condition)) return `${condition} ? ${yes} : ${no}`;
+    if (yes && no && (yes !== '[redacted string]' || no !== yes) && /^!?[$\w.]{1,48}$/.test(condition) && !sensitive.test(condition)) return `${condition} ? ${yes} : ${no}`;
     return;
   }
   if (Node.isArrayLiteralExpression(node)) {
@@ -67,7 +70,7 @@ function literal(node: Node | undefined, depth: number, named = false): string |
 
 function summarize(nodes: Node[], depth: number, start: string, end: string) {
   const items = nodes.slice(0, 4).map(node => literal(node, depth));
-  if (items.some(Boolean)) return start + items.map(item => item ?? '…').join(', ') + (nodes.length > items.length ? ', …' : '') + end;
+  if (items.some(item => item && item !== '[redacted string]')) return start + items.map(item => item ?? '…').join(', ') + (nodes.length > items.length ? ', …' : '') + end;
 }
 
 export function literalArgs(call: import('ts-morph').CallExpression) {

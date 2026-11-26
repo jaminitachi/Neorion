@@ -248,7 +248,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
     assert.equal(query(kind, target, ...flags), output);
     assert.equal(await mcp.text('query', { kind, target, ...options }), output);
     assert.equal(stable(reversedOutput), stable(output));
-    assert.ok(Buffer.byteLength(output.split('\n').slice(1).join('\n')) <= 6000);
+    assert.ok(Buffer.byteLength(output.split('\n').slice(1).join('\n')) <= 8000);
     return output;
   }
   const impact = await check('impact', 'normalize');
@@ -351,7 +351,7 @@ test('path gives the shortest directed chain from a page, symbol, or layout', { 
   assert.match(directly, /^0 route \/items.* Items$/m);
   assert.match(directly, /^1 render .*CreateItem \[when empty\] \[cond\]$/m);
   assert.match(directly, /^2 event .*onSubmit .*onClick <button Create>/m);
-  assert.match(directly, /^3 action .*createItem -> server\/actions\.ts:6 \[args \[redacted string\]\]$/m);
+  assert.match(directly, /^3 action .*createItem -> server\/actions\.ts:6$/m);
   const fromFile = query('path', 'app/(main)/items/page.tsx', 'server/actions.ts#submitItem');
   assert.equal(fromFile, directly);
   const layout = query('path', '/other', 'createItem');
@@ -1534,13 +1534,110 @@ test('render queries trace else-if exits, flag complex early exits and summarize
       return <ThemeProvider><LocaleProvider>{children}</LocaleProvider></ThemeProvider>;
     }
   `);
+  fs.mkdirSync(path.join(root, 'app/long-guard'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'app/long-guard/page.tsx'), `
+    export function LongGuardChild() { return <i />; }
+    export default function LongGuardParent({ flags }) {
+      ${Array.from({ length: 5 }, (_, i) =>
+        `if (${Array.from({ length: 15 }, (_, j) => `flags.flag${i}_${j}`).join(' || ')}) return null;`).join('\n')}
+      return <LongGuardChild />;
+    }
+  `);
   build();
   const direct = query('who_renders', 'ResourceRow', '--direct');
   assert.match(direct, /app\/page\.tsx:9#Page .*when .*loading.*error.*list items\.flatMap\(\.\.\.\)\.map/);
-  assert.match(direct, /# partial: .*preceding switch, exception or loop exits untraced/);
+  assert.match(direct, /\[guard partial: preceding switch, exception or loop exits untraced\]/);
+  assert.match(direct, /^# complete:/m);
+  const impact = query('impact', 'ResourceRow');
+  assert.match(impact, /render app\/page\.tsx:9 ResourceRow .*\[guard partial:/);
+  assert.match(impact, /^page \/ .*\[cond\]$/m);
+  assert.doesNotMatch(impact, /app\/page\.tsx.*\[(?:possible|partial url)\]/);
+  assert.doesNotMatch(impact, /# partial: .*exits untraced/);
   assert.doesNotMatch(direct, /item => item\.visible/);
+  const longGuard = query('who_renders', 'LongGuardChild', '--direct');
+  assert.match(longGuard, /^direct .*LongGuardParent .*\[when .*\.\.\./m);
+  assert.match(longGuard, /^# complete:/m);
+  assert.doesNotMatch(longGuard, /guard partial|output truncated/);
   const wrappers = query('wrappers', '/');
   assert.equal((wrappers.match(/\[when supported\]/g) ?? []).length, 1);
+  assert.doesNotMatch(wrappers, /app\/layout\.tsx.*\[cond\]/);
+});
+
+test('impact budgets evidence independently of graph rows', t => {
+  const { build, query, root } = fixture(t);
+  fs.mkdirSync(path.join(root, 'app/budget'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'app/budget/page.tsx'), `
+    import { BudgetGroup } from './group';
+    export default function BudgetPage() { return <BudgetGroup />; }
+  `);
+  fs.writeFileSync(path.join(root, 'app/budget/group.tsx'), `
+    import { BudgetLeaf } from './leaf';
+    export function BudgetGroup({ flags }) {
+      return <>{${Array.from({ length: 80 }, (_, i) => `(flags.active && flags.visible && flags.ready && flags.item${i}) && <BudgetLeaf />`).join('}{')}} </>;
+    }
+  `);
+  fs.writeFileSync(path.join(root, 'app/budget/leaf.tsx'), 'export function BudgetLeaf() { return <i />; }');
+  build();
+  const output = query('impact', 'BudgetLeaf');
+  assert.match(output, /^d1 render app\/budget\/group\.tsx:.*BudgetGroup/m);
+  assert.match(output, /^d2 render app\/budget\/page\.tsx:.*BudgetPage/m);
+  assert.match(output, /^  render app\/budget\/group\.tsx:.*\[when /m);
+  assert.match(output, /^# evidence lines omitted: [1-9]\d*$/m);
+  assert.match(output, /^# complete:/m);
+  assert.doesNotMatch(output, /^# more:/m);
+  const limited = query('impact', 'BudgetLeaf', '--limit', '2');
+  assert.match(limited, /^# more: 1 /m);
+  assert.match(limited, /^# partial: output truncated/m);
+});
+
+test('impact retains callers beyond resolved in-file callback hops', t => {
+  const { build, query, root } = fixture(t);
+  fs.mkdirSync(path.join(root, 'app/callback-budget'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'app/callback-budget/calls.ts'), `
+    export function callbackTarget() {}
+    function middle() { callbackTarget(); }
+    export function begin() { middle(); }
+  `);
+  fs.writeFileSync(path.join(root, 'app/callback-budget/page.tsx'), `
+    import { useCallback as memoize } from 'react';
+    import { begin } from './calls';
+    export default function CallbackPage() {
+      const first = memoize(() => begin(), []);
+      const second = memoize(() => first(), []);
+      return <button onClick={second}>Run</button>;
+    }
+  `);
+  build();
+  const output = query('impact', 'callbackTarget');
+  assert.match(output, /^page \/callback-budget /m);
+  assert.match(output, /^d4 call .*second < first/m);
+  assert.match(output, /^d5 event .*CallbackPage < second/m);
+  assert.match(output, /^# complete:/m);
+});
+
+test('API route callers can be traced past the default depth in CLI and MCP', async t => {
+  const { build, query, root, env } = fixture(t);
+  fs.mkdirSync(path.join(root, 'app/api/depth'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'app/api/depth/route.ts'), 'export function GET() { return Response.json({ ok: true }); }');
+  fs.writeFileSync(path.join(root, 'chain.ts'), `
+    export function sendDepth() { return fetch('/api/depth'); }
+    export function firstDepth() { return sendDepth(); }
+    export function secondDepth() { return firstDepth(); }
+    export function thirdDepth() { return secondDepth(); }
+  `);
+  build();
+  const defaultDepth = query('api_consumers', '/api/depth');
+  assert.match(defaultDepth, /^call1 .*sendDepth/m);
+  assert.match(defaultDepth, /^# try: .*--depth 2/m);
+  assert.match(defaultDepth, /^# partial: caller depth limit/m);
+  const expanded = query('api_consumers', '/api/depth', '--depth', '3');
+  assert.match(expanded, /^call3 .*secondDepth/m);
+  assert.match(expanded, /^# complete:/m);
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assert.equal(await mcp.text('query', { kind: 'api_consumers', target: '/api/depth', depth: 3 }), expanded);
+  assert.doesNotMatch(await mcp.text('query', { kind: 'api_consumers', target: '/api/depth', callers: 0 }), /^call\d/m);
 });
 
 test('changes verifies a symbol rename against live imports and retains a stale importer', { timeout: 65_000 }, t => {

@@ -5,7 +5,7 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
   'pagesEdges' | 'pagesIssues' | 'pagesObservedCalls' | 'pagesOwnerIssues' |
   'trpcFiles' | 'trpcModuleUses' | 'trpcUses' | 'trpcAliases' | 'trpcUnbound' | 'trpcIssues' |
-  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callSites' | 'returnSites' | 'unresolvedCallSites'> & {
+  'flowCalls' | 'callGates' | 'flowIssues' | 'callIssues' | 'refEvidence' | 'renderLabels' | 'callLiterals' | 'returnLiterals' | 'unresolvedCallLiterals'> & {
   ends?: [number, number][];
   types?: number[];
   useSites?: [number, number?][];
@@ -19,12 +19,12 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
 export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIndex {
   const { graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callSites, returnSites, unresolvedCallSites, ...rest } = index;
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, returnLiterals, unresolvedCallLiterals, ...rest } = index;
   if (!graphReferences || !graphNames || !externalCalls || !externalModules) return index;
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callSites, returnSites, unresolvedCallSites
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels, callLiterals, returnLiterals, unresolvedCallLiterals
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
 

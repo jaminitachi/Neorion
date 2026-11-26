@@ -83,7 +83,7 @@ test('P4 Formbricks index and five real stdio calls meet size and latency target
       const result = await client.text(tool, args);
       timings.push(performance.now() - start);
       const bytes = Buffer.byteLength(result);
-      assert.ok(bytes <= 6000 && result.split('\n').every(line => Buffer.byteLength(line) <= 400));
+      assert.ok(bytes <= 8000 && result.split('\n').every(line => Buffer.byteLength(line) <= 400));
       assert.doesNotMatch(result, / : 0 results|^# ambiguous|stale \d+/);
       if (run === 0 && process.env.NEORION_MCP_SMOKE) t.diagnostic(`${tool} (${bytes} bytes)\n${result}`);
     }

@@ -130,7 +130,7 @@ test('U2 all tools apply UTF-8, line and byte budgets with exact omission counts
     const shown = lines.slice(1).filter(line => !line.startsWith('#')).length;
     assert.ok(shown > 0 && shown <= max, tool);
     assert.equal(omitted, count - shown, tool);
-    assert.ok(Buffer.byteLength(output) <= 6000, tool);
+    assert.ok(Buffer.byteLength(output) <= 8000, tool);
     assert.ok(lines.every(line => Buffer.byteLength(line) <= 400), tool);
   }
   const defaultLimit = await client.text('who_renders', { component: 'Target' });
@@ -229,7 +229,8 @@ test('who_renders follows a JSX callback returned by a hook to the page route', 
   assert.match(direct, /^direct ui\/editor-dialog\.tsx:5#EditorDialog$/m);
 
   const dialog = await client.text('who_renders', { component: 'EditorDialog', direct: true });
-  assert.match(dialog, /^direct ui\/editor-dialog\.tsx:9#DialogCallback$/m);
+  assert.match(dialog, /^direct ui\/editor-dialog\.tsx:9#DialogCallback \[guard partial: render callback invocation untraced\]$/m);
+  assert.match(dialog, /^# complete:/m);
   assert.doesNotMatch(dialog, /UnusedCallback/);
 });
 
