@@ -11,7 +11,7 @@ export const tools = [{
       kind: { enum: kinds },
       app: { type: 'string', description: 'Next.js app path or package name in the workspace. Omit to query all apps when available.' },
       target: { type: 'string', description: 'Required for every kind except changes. Name, path#Name, route URL/file, or search text.' },
-      limit: { type: 'integer', minimum: 1, maximum: 100 },
+      limit: { type: 'integer', minimum: 1, maximum: 2000, description: 'Limits above 100 require api_consumers with includeTests explicitly enabled.' },
       direct: { type: 'boolean' },
       includeExternal: { type: 'boolean', default: true, description: 'For wrappers, include third-party components on the page’s wrapper chain. Set false to hide only third-party non-providers.' },
       includeTests: { type: 'boolean' },

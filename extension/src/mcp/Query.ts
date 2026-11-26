@@ -22,6 +22,7 @@ const actionShortName = (name: string) => name.slice(name.lastIndexOf('.') + 1);
 const actionLocation = (action: ServerAction) => `${location(action.file, action.line)}#${action.name}`;
 const bytes = (text: string) => Buffer.byteLength(text);
 const graphOutputBytes = 6000;
+const expandedApiLimit = 2000;
 const evidenceOutputBytes = 2000;
 const totalOutputBytes = graphOutputBytes + evidenceOutputBytes;
 const oneLine = (text: string) => text.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ');
@@ -126,7 +127,8 @@ function validate(name: string, value: unknown) {
   const filter = tool === 'search' ? rawFilter ?? 'any' : 'any';
   const integerInRange = (value: unknown, min: number, max: number): value is number =>
     typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
-  if (!integerInRange(limit, 1, tool === 'search' ? 50 : 100)) throw new Error('Invalid argument limit.');
+  const maxLimit = tool === 'api_consumers' && input.includeTests === true ? expandedApiLimit : tool === 'search' ? 50 : 100;
+  if (!integerInRange(limit, 1, maxLimit)) throw new Error('Invalid argument limit.');
   if (!integerInRange(callers, 0, 2)) throw new Error('Invalid argument callers.');
   if (input.depth !== undefined && input.callers !== undefined) throw new Error('Choose either depth or callers.');
   if (!integerInRange(depth, tool === 'api_consumers' && input.depth === undefined ? 0 : 1, tool === 'callees' ? 3 : 6)) throw new Error('Invalid argument depth.');
@@ -141,7 +143,7 @@ function validate(name: string, value: unknown) {
 
 function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter', suggestedFilter?: string) {
   const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
-  const limit = Math.min(count, tool === 'search' ? 50 : 100);
+  const limit = Math.min(count, args.limit > 100 ? expandedApiLimit : tool === 'search' ? 50 : 100);
   let narrow = '';
   if (tool === 'search') {
     narrow = 'narrow the text';
@@ -1103,6 +1105,24 @@ export class QueryEngine {
             }
           }
         };
+        if (guards) {
+          const reenter = (file: string, line: number) => {
+            if (!visible(file)) return;
+            const fact = this.index.apiCallFacts?.[apiCallKey(file, line, owner, owner)];
+            if (!fact) return;
+            const [args, callerGuards] = fact;
+            if (guards.some(([parameter, required]) => args?.some(([index, value]) => index === parameter && value !== required))) return;
+            // Re-entry changes the feasible arguments at the outer invocation.
+            // Keep that state at this depth so recursion costs no caller row.
+            queue.push({ id: owner, key: JSON.stringify(callerGuards) ?? '', guards: callerGuards });
+          };
+          for (const [, file, line, kind, , caller, , possible] of this.references.get(owner) ?? []) {
+            if (kind === 'call' && caller === owner && !possible) reenter(file, line);
+          }
+          for (const [caller, file, line, event, possible] of this.index.callbackInvocations?.[owner] ?? []) {
+            if (caller === owner && !event && !possible) reenter(file, line);
+          }
+        }
         const directCalls = callsTo(owner);
         const invocations = (this.index.callbackInvocations?.[owner] ?? []).filter(([caller, file]) =>
           caller !== owner && visible(file));
@@ -1413,6 +1433,7 @@ export class QueryEngine {
       return !!status.get(file);
     };
     const maxRows = result.limit ?? args.limit;
+    const rowOutputBytes = args.limit > 100 ? args.limit * 400 + graphOutputBytes : graphOutputBytes;
     const notesFirst = tool === 'wrappers';
     const renderedRows: Row[] = [];
     let shortened = false;
@@ -1437,7 +1458,7 @@ export class QueryEngine {
       const [rendered] = renderRow(entry);
       if (!rendered) continue;
       const size = bytes(rendered.text) + (renderedRows.length ? 1 : 0);
-      if (resultBytes + size > graphOutputBytes) break;
+      if (resultBytes + size > rowOutputBytes) break;
       resultBytes += size;
       renderedRows.push(rendered);
       if (!rendered.candidate) confirmedShown++;
@@ -1465,7 +1486,7 @@ export class QueryEngine {
     const omissionNote = (count: number) => `# evidence lines omitted: ${count}`;
     const omissionBytes = evidenceTotal ? bytes(omissionNote(evidenceTotal)) + 1 : 0;
     // Impact reserves the graph row budget before accounting for metadata or annotations.
-    const outputCap = tool === 'impact' ? totalOutputBytes - omissionBytes : graphOutputBytes;
+    const outputCap = tool === 'impact' ? totalOutputBytes - omissionBytes : rowOutputBytes;
     let shown = renderedRows.length;
     let noteCount = notes.length;
     const truncation = 'output truncated';
@@ -1504,13 +1525,13 @@ export class QueryEngine {
       let footer = coverage;
       if (tool === 'who_renders' && reason === truncationWithReason &&
           bytes(body) + 1 + bytes(footer) > outputCap) {
-        footer = `# partial: ${[truncation, workspaceIssue].filter(Boolean).join('; ')}`;
+        footer = `# partial: ${[truncation, result.partial === DYNAMIC_RENDER_ISSUE ? 'dynamic ref' : undefined, workspaceIssue].filter(Boolean).join('; ')}`;
       }
       const output = `${body}\n${footer}`;
       const outputBytes = bytes(output);
       if (outputBytes <= outputCap) {
         if (!evidenceTotal) return { text: output, targetResolved };
-        let remainingEvidence = Math.min(evidenceOutputBytes, totalOutputBytes - outputBytes) - omissionBytes;
+        let remainingEvidence = Math.min(evidenceOutputBytes, rowOutputBytes + evidenceOutputBytes - outputBytes) - omissionBytes;
         let evidenceShown = 0;
         const evidenceLines = (entries: Row[]) => {
           const lines: string[] = [];

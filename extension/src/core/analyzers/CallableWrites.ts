@@ -1,5 +1,6 @@
 import { Node, SyntaxKind, ts, type SourceFile } from 'ts-morph';
 import { wrappedExpression } from './ArchitectureFacts';
+import type { CallableReferences } from './CallableReferences';
 import { visitKinds } from './CompilerWalk';
 
 export function staticMember(node: Node | undefined, identifier = true): string | undefined {
@@ -93,7 +94,7 @@ export class CallableWrites {
   private parameterWrites: [Parameter, Write][] = [];
   private parameterArguments = new Map<Parameter, Node[]>();
 
-  constructor(private files: Set<SourceFile>, private declarations: (node: Node) => Node[]) {
+  constructor(private files: Set<SourceFile>, private declarations: (node: Node) => Node[], private references: CallableReferences) {
     for (const file of files) visitKinds(file, writeKinds, node => {
       if (!isWriteOperation(node.compilerNode) || staticallyUnreachable(node)) return;
       if (Node.isBinaryExpression(node)) this.record(node.getLeft(), [], node);
@@ -112,6 +113,14 @@ export class CallableWrites {
   }
 
   forRead(node: Node) {
+    if (Node.isIdentifier(node)) {
+      for (const binding of this.declarations(node)) {
+        const write = this.forBinding(binding, []);
+        if (write) return write;
+      }
+      return;
+    }
+    if (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node) && !wrappedExpression(node)) return;
     const path: Member[] = [];
     let root = node;
     while (true) {
@@ -217,7 +226,7 @@ export class CallableWrites {
     if (!Node.isIdentifier(name) || !Node.isFunctionLikeDeclaration(fn)) return args;
     const index = fn.getParameters().indexOf(parameter);
     if (index < 0 || parameter.isRestParameter()) return args;
-    for (const ref of name.findReferencesAsNodes()) {
+    for (const ref of this.references.uses(name)) {
       if (!this.files.has(ref.getSourceFile())) continue;
       const member = ref.getParent();
       const value = Node.isPropertyAccessExpression(member) && member.getNameNode() === ref ? member : ref;

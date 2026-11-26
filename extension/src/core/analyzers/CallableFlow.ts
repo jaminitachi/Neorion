@@ -1,6 +1,8 @@
-import { type CallExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import { declarationsOf, wrappedExpression } from './ArchitectureFacts';
 import { constValue, JsxSite } from './PropFlow';
+import { visitKinds } from './CompilerWalk';
+import { CallableReferences } from './CallableReferences';
 import { bindingSelection, CallableWrites, staticMember } from './CallableWrites';
 
 export { staticMember } from './CallableWrites';
@@ -9,22 +11,24 @@ export type FunctionNode = import('ts-morph').ArrowFunction | import('ts-morph')
   import('ts-morph').FunctionDeclaration | import('ts-morph').MethodDeclaration;
 
 export function isFunction(node: Node | undefined): node is FunctionNode {
-  return Node.isArrowFunction(node) || Node.isFunctionExpression(node) ||
-    Node.isFunctionDeclaration(node) || Node.isMethodDeclaration(node);
+  const kind = node?.compilerNode.kind;
+  return kind === SyntaxKind.ArrowFunction || kind === SyntaxKind.FunctionExpression ||
+    kind === SyntaxKind.FunctionDeclaration || kind === SyntaxKind.MethodDeclaration;
 }
+
+const returnKinds = new Set([SyntaxKind.ReturnStatement]);
 
 export function returnedValues(fn: FunctionNode): Node[] {
   const body = fn.getBody();
   if (!body) return [];
   if (!Node.isBlock(body)) return [body];
   const values: Node[] = [];
-  body.forEachDescendant((node, traversal) => {
-    if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node)) traversal.skip();
+  visitKinds(body, returnKinds, node => {
     if (Node.isReturnStatement(node)) {
       const expression = node.getExpression();
       if (expression) values.push(expression);
     }
-  });
+  }, { skipNode: node => ts.isClassDeclaration(node) || ts.isFunctionLike(node) && !ts.isFunctionExpression(node) });
   return values;
 }
 
@@ -65,6 +69,8 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
   if (Node.isIdentifier(expression) && declarationsOf(expression).includes(parameter)) return members;
 }
 
+const noTargets: Target[] = [];
+
 type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[]; write?: Node };
 export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
@@ -72,10 +78,13 @@ export class CallableFlow {
   private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
   private stores = new WeakMap<Node, boolean>();
 
+  readonly references: CallableReferences;
   readonly writes: CallableWrites;
 
-  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf) {
-    this.writes = new CallableWrites(files, declarations);
+  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf,
+    exported: ReadonlySet<Node> = new Set()) {
+    this.references = new CallableReferences(files, symbol, exported);
+    this.writes = new CallableWrites(files, declarations, this.references);
   }
 
   private packageOf(node: Node) {
@@ -106,6 +115,7 @@ export class CallableFlow {
     if (cached) return cached;
     if (Node.isIdentifier(expression)) {
       const declarations = this.declarations(expression);
+      if (!declarations.some(declaration => this.files.has(declaration.getSourceFile()))) return noTargets;
       if (declarations.length === 1) {
         const declaration = declarations[0];
         const value = isFunction(declaration) ? declaration : constValue(declaration);

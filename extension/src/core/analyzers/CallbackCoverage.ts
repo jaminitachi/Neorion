@@ -1,6 +1,7 @@
 import { Node, SyntaxKind, type JsxAttribute, type JsxSpreadAttribute } from 'ts-morph';
 import { wrappedExpression } from './ArchitectureFacts';
 import { isFunction, packageMember, staticMember, type FunctionNode } from './CallableFlow';
+import type { CallableReferences } from './CallableReferences';
 import { constValue } from './PropFlow';
 import { staticallyUnreachable } from './CallableWrites';
 
@@ -11,9 +12,8 @@ const enum Coverage {
 
 /** Prove every use of one value, starting from its creation or its definition. */
 export class CallbackCoverage {
-  private references = new WeakMap<Node, Node[]>();
-
   constructor(
+    private readonly references: CallableReferences,
     private readonly inProject: (node: Node) => boolean,
     private readonly isExported: (node: Node) => boolean,
     private readonly follows: (id: number, site: Node) => boolean,
@@ -29,10 +29,8 @@ export class CallbackCoverage {
     const combine = (results: Coverage[]) => results.reduce((worst, result) => Math.max(worst, result), Coverage.Covered);
     const binding = (name: Node | undefined, members: string[], stored: boolean, eventProp = false): Coverage => {
       if (Node.isIdentifier(name)) {
-        let references = this.references.get(name);
-        if (!references) this.references.set(name, references = name.findReferencesAsNodes());
         const symbol = name.getSymbol();
-        const uses = references.filter(use => {
+        const uses = this.references.uses(name).filter(use => {
           if (use === name || !this.inProject(use) || use.getFirstAncestor(Node.isTypeNode) ||
               staticallyUnreachable(use)) return false;
           const parent = use.getParent();

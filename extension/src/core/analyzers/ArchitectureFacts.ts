@@ -32,6 +32,7 @@ function addFact(facts: DetailFacts, file: string, fact: string, depth = 1, fanO
 }
 
 const MAX_LISTED_IMPORTERS = 8;
+const namespaceAccessKinds = new Set([SyntaxKind.PropertyAccessExpression, SyntaxKind.ElementAccessExpression]);
 
 type RelativePath = (source: SourceFile) => string;
 
@@ -85,7 +86,7 @@ export function collectRenameFacts(
         record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()), true);
       }
     }
-    if (namespaces.size) file.forEachDescendant(node => {
+    if (namespaces.size) visitKinds(file, namespaceAccessKinds, node => {
       if (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node)) return;
       const expression = node.getExpression();
       let root = expression;
@@ -1359,9 +1360,15 @@ function addition(node: Node | undefined) {
 }
 
 export function wrappedExpression(node: Node) {
-  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) ||
-      Node.isTypeAssertion(node) || Node.isSatisfiesExpression(node) || Node.isNonNullExpression(node)) {
-    return node.getExpression();
+  switch (node.compilerNode.kind) {
+    case SyntaxKind.ParenthesizedExpression:
+    case SyntaxKind.AsExpression:
+    case SyntaxKind.TypeAssertionExpression:
+    case SyntaxKind.SatisfiesExpression:
+    case SyntaxKind.NonNullExpression:
+      return (node as import('ts-morph').ParenthesizedExpression | import('ts-morph').AsExpression |
+        import('ts-morph').TypeAssertion | import('ts-morph').SatisfiesExpression |
+        import('ts-morph').NonNullExpression).getExpression();
   }
 }
 
@@ -1396,7 +1403,9 @@ function literalUrl(node: Node) {
 }
 
 function isGlobalFetch(expression: Node) {
-  return /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+  const node = expression.compilerNode;
+  const name = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isIdentifier(node) ? node.text : undefined;
+  return name === 'fetch' && /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
     !optionValueDeclarations(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
 }
 
@@ -1887,6 +1896,8 @@ function isSwrFallbackKey(node: Node): boolean {
 }
 
 const requestMethods = ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'];
+const httpCallKind = new Set([SyntaxKind.CallExpression]);
+const httpModules = new Set(['swr', 'swr/immutable', 'axios', 'node-fetch', 'undici', 'http', 'https', 'node:http', 'node:https']);
 
 function axiosInstance(node: Node | undefined) {
   const init = valueNode(node);
@@ -1925,18 +1936,20 @@ function playwrightRequest(node: Node) {
 
 export function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
   const expression = call.getExpression();
-  const origin = importBinding(expression);
+  const fetch = isGlobalFetch(expression);
+  const requestMethod = Node.isPropertyAccessExpression(expression) && requestMethods.includes(expression.getName());
+  if (!fetch && !requestMethod) return;
   const [url, options] = call.getArguments();
   if (!url) return;
-  if (/^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
-    !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile())) {
+  if (fetch) {
     const methodProperty = property(options, 'method');
     const method = textValue(methodProperty)?.toUpperCase() ??
       (options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
         options.getProperties().some(Node.isSpreadAssignment)) ? '?' : 'GET');
     return { url, method, via: 'fetch' };
   }
-  if (!Node.isPropertyAccessExpression(expression) || !requestMethods.includes(expression.getName())) return;
+  if (!Node.isPropertyAccessExpression(expression)) return;
+  const origin = importBinding(expression);
   const method = expression.getName().toUpperCase();
   const instance = pages && axiosInstance(expression.getExpression());
   if (origin?.module === 'axios' && requestMethods.includes(origin.name) || instance) {
@@ -2068,17 +2081,22 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     if (!fn || !projectFiles.has(fn.getSourceFile())) return [];
     if (summaries.has(fn)) return summaries.get(fn)!;
     const result: { request: Request; call: Node; parameter: number }[] = [];
-    const visit = (node: Node, traversal?: { skip(): void }) => {
-      if (Node.isFunctionLikeDeclaration(node)) { traversal?.skip(); return; }
-      if (!Node.isCallExpression(node) || conditionalAt(node, fn)) return;
+    const parameters = fn.getParameters();
+    const visit = (node: Node) => {
+      if (!Node.isCallExpression(node)) return;
       const request = httpRequest(node, true);
-      if (!request) return;
+      if (!request || conditionalAt(node, fn)) return;
       const binding = bindingOf(valueNode(request.url) ?? request.url);
-      const parameter = fn.getParameters().findIndex(parameter => parameter === binding);
+      const parameter = parameters.findIndex(parameter => parameter === binding);
       if (parameter >= 0) result.push({ request, call: node, parameter });
     };
-    const body = fn.getBody();
-    if (body) { visit(body); body.forEachDescendant(visit); }
+    const body = parameters.length && fn.getBody();
+    if (body) {
+      visit(body);
+      if (!Node.isFunctionLikeDeclaration(body)) visitKinds(body, httpCallKind, visit, {
+        skipNode: node => ts.isFunctionLike(node) && !ts.isFunctionExpression(node)
+      });
+    }
     summaries.set(fn, result);
     return result;
   };
@@ -2105,17 +2123,30 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     }
   };
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
+    const imports = file.getImportDeclarations();
+    if (!imports.length && !/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText())) continue;
     const source = relativePath(file);
-    const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
-      ['swr', 'swr/immutable', 'axios', 'node-fetch', 'undici', 'http', 'https', 'node:http', 'node:https'].includes(declaration.getModuleSpecifierValue()) ||
-      sdkModules.has(declaration.getModuleSpecifierValue()));
+    const httpImports = new Set<string>();
+    let usesHttpLibrary = false;
+    for (const declaration of imports) {
+      const module = declaration.getModuleSpecifierValue();
+      if (!httpModules.has(module) && !sdkModules.has(module)) continue;
+      usesHttpLibrary = true;
+      const clause = declaration.compilerNode.importClause;
+      const bindings = clause?.namedBindings;
+      if (clause?.name) httpImports.add(clause.name.text);
+      if (bindings && ts.isNamespaceImport(bindings)) httpImports.add(bindings.name.text);
+      if (bindings && ts.isNamedImports(bindings)) for (const specifier of bindings.elements) httpImports.add(specifier.name.text);
+    }
     const handledTransports = new Set<Node>();
     const collectRequest = (node: CallExpression | NewExpression) => {
       const isConstructor = Node.isNewExpression(node);
       const expression = node.getExpression();
       const globalFetch = !isConstructor && isGlobalFetch(expression);
-      const origin = !globalFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
+      const callee = expression.compilerNode;
+      const binding = ts.isPropertyAccessExpression(callee) ? callee.expression : callee;
+      const origin = !globalFetch && usesHttpLibrary && (!ts.isIdentifier(binding) || httpImports.has(binding.text)) ?
+        importOrigin(expression) : undefined;
       const isFetch = globalFetch || !isConstructor && (origin?.module === 'node-fetch' && origin.name === 'default' ||
         origin?.module === 'undici' && origin.name === 'fetch');
       const nodeHttp = !isConstructor && origin?.module && /^(?:node:)?https?$/.test(origin.module) &&
@@ -2264,10 +2295,11 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     const constructors: NewExpression[] = [];
     // Exclude impossible literals and request sites before allocating ts-morph wrappers.
     const wrapNode = (node: ts.Node) => {
-      if (ts.isCallExpression(node) && !config && !usesHttpLibrary) {
+      if (ts.isCallExpression(node) && !usesHttpLibrary) {
+        if (config && !excludedRequest) return node.arguments.length > 0;
         const callee = node.expression;
-        return ts.isIdentifier(callee) ? callee.escapedText === 'fetch' :
-          ts.isPropertyAccessExpression(callee) && callee.name.escapedText === 'fetch';
+        return ts.isIdentifier(callee) ? callee.text === 'fetch' :
+          ts.isPropertyAccessExpression(callee) && callee.name.text === 'fetch';
       }
       if (ts.isNewExpression(node)) return usesHttpLibrary;
       if (ts.isStringLiteralLike(node)) return !!index && node.text.includes('/api');

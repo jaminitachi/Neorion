@@ -29,7 +29,8 @@
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 100
+          "maximum": 2000,
+          "description": "Limits above 100 require api_consumers with includeTests explicitly enabled."
         },
         "direct": {
           "type": "boolean"

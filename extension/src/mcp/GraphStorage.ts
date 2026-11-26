@@ -78,7 +78,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   }
   const renderEdges = index.renderEdges.map((edge, offset) => {
     const site = edge[7];
-    if (!site || index.sourceEvidence || excludedSites.has(site)) return edge;
+    if (!site || index.renderEvidence?.[site] || excludedSites.has(site)) return edge;
     facts.renderSites!.push([offset, site]);
     if (edge[8]) {
       const packed: typeof edge = [...edge];

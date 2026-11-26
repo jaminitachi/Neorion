@@ -128,7 +128,7 @@ test('graph callbacks give the same results with and without their kind filters'
       node.forEachDescendant((child, traversal) => {
         const raw = child.compilerNode;
         options.visitRaw?.(raw);
-        if (options.skip?.has(raw)) traversal.skip();
+        if (options.skip?.has(raw) || options.skipNode?.(raw)) traversal.skip();
         else callback(child);
       });
     }
@@ -193,7 +193,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 10);
+  assert.equal(kindSets.size, 12);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
@@ -2911,6 +2911,65 @@ test('API consumers apply literal arguments to guarded requests and guarded help
   const alsoSave = query('api_consumers', '/api/also-save');
   assert.match(alsoSave, /^ *event\d+ +preview\.tsx:9 /m);
   assert.match(alsoSave, /^ *event\d+ +preview\.tsx:10 /m);
+});
+
+test('API callers include guarded requests reached by direct, scheduled and mutual re-entry', async t => {
+  const { root, env, build, query } = fixture(t);
+  for (const name of ['retry', 'retry-timer', 'retry-helper', 'no-retry']) {
+    const directory = path.join(root, 'app/api', name);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  }
+  fs.writeFileSync(path.join(root, 'retry.tsx'), [
+    'export function Retry() {',
+    "  const load = (retry: boolean) => { if (retry) fetch('/api/retry'); else load(true); };",
+    "  const later = (retry: boolean) => { if (retry) fetch('/api/retry-timer'); else setTimeout(() => later(true), 1000); };",
+    "  const viaHelper = (retry: boolean) => { if (retry) fetch('/api/retry-helper'); else helper(); };",
+    '  const helper = () => viaHelper(true);',
+    "  const never = (retry: boolean) => { if (retry) fetch('/api/no-retry'); else never(false); };",
+    '  return <div>',
+    '    <button onClick={() => load(false)}>Load</button>',
+    '    <button onClick={() => later(false)}>Later</button>',
+    '    <button onClick={() => viaHelper(false)}>Helper</button>',
+    '    <button onClick={() => never(false)}>Never</button>',
+    '  </div>;',
+    '}'
+  ].join('\n'));
+  build();
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  for (const [name, line] of [['retry', 8], ['retry-timer', 9], ['retry-helper', 10], ['no-retry', 0]]) {
+    const target = '/api/' + name;
+    for (const result of [query('api_consumers', target), await mcp.text('query', { kind: 'api_consumers', target, depth: 6 })]) {
+      if (line) assert.match(result, new RegExp(`^ *event1 +retry[.]tsx:${line} `, 'm'));
+      else assert.doesNotMatch(result, /retry[.]tsx:11 /);
+      assert.match(result, /^# complete:/m);
+    }
+  }
+});
+
+test('an expanded API consumer window reaches test callers beyond the normal row and byte limits', async t => {
+  const { root, env, build, query } = fixture(t);
+  const directory = path.join(root, 'app/api/expanded');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  fs.writeFileSync(path.join(root, 'request-with-a-long-name.ts'), [
+    "export function request() { return fetch('/api/expanded'); }",
+    ...Array.from({ length: 159 }, () => "fetch('/api/expanded');")
+  ].join('\n'));
+  fs.writeFileSync(path.join(root, 'late-caller.test.ts'), [
+    "import { request } from './request-with-a-long-name';",
+    'request();'
+  ].join('\n'));
+  build();
+  assert.doesNotMatch(query('api_consumers', '/api/expanded', '--include-tests', '--limit', '100'), /late-caller/);
+  const assertCaller = result => assert.match(result, /^call1 +late-caller[.]test[.]ts:2 request \[test\]$/m);
+  assertCaller(query('api_consumers', '/api/expanded', '--include-tests', '--limit', '200'));
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  assertCaller(await mcp.text('query', { kind: 'api_consumers', target: '/api/expanded', includeTests: true, limit: 200 }));
 });
 
 test('API callback coverage follows escapes of wrappers and factories used as callback values', t => {

@@ -15,6 +15,7 @@ import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { CallbackCoverage } from './CallbackCoverage';
+import { staticallyUnreachable } from './CallableWrites';
 import { argumentGuards, booleanArguments } from './ArgumentGuards';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
@@ -708,7 +709,7 @@ export class QueryIndexBuilder {
     });
 
     const projectFiles = new Set(files);
-    const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node));
+    const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node), exported);
     const localCallables = new Map<number, Node>();
     const callableDefinitions = new Map<number, FunctionNode>();
     const workspaceEvent = (attribute: Node | undefined) => {
@@ -797,10 +798,14 @@ export class QueryIndexBuilder {
     }
 
     const creationSites = new Map<number, Set<CallExpression>>();
-    const followedUses = new WeakMap<Node, Set<number>>();
+    const followedUses = new WeakMap<Node, number | Set<number>>();
     const unindexedCallbacks = new Map<FunctionNode, Set<number>>();
     const recordCallbackScope = (site: Node, target: number, escapingValue = false) => {
       if (historyOnly || !this.fetches.length) return;
+      let scope = site.compilerNode.parent;
+      while (scope && !ts.isArrowFunction(scope) && !ts.isFunctionExpression(scope) &&
+          !ts.isFunctionDeclaration(scope) && !ts.isMethodDeclaration(scope)) scope = scope.parent;
+      if (!scope || graphOwners.has(scope) || graphOwners.has(scope.parent)) return;
       const fn = site.getFirstAncestor(isFunction);
       if (!fn || byNode.has(fn) || byNode.has(fn.getParent()!)) return;
       let value: Node = fn;
@@ -833,9 +838,9 @@ export class QueryIndexBuilder {
       if (Node.isCallExpression(site)) recordCallbackScope(site, id, index.callbackCreations?.[id] !== undefined);
       if (!callableDefinitions.has(id) && !returnedBy.has(id)) return;
       if (!possible) {
-        const followed = followedUses.get(site) ?? new Set<number>();
-        followed.add(id);
-        followedUses.set(site, followed);
+        const followed = followedUses.get(site);
+        if (followed instanceof Set) followed.add(id);
+        else if (followed !== id) followedUses.set(site, followed === undefined ? id : new Set([followed, id]));
       }
       if (Node.isCallExpression(site) && returnedBy.has(id)) {
         const sites = creationSites.get(id) ?? new Set<CallExpression>();
@@ -967,8 +972,9 @@ export class QueryIndexBuilder {
       ownerCache.set(node, result);
       return result;
     };
+    const lifecycleFiles = new Set([...pages?.owners.keys() ?? []].map(node => node.getSourceFile()));
     const owners = (node: Node): Owners => {
-      if (!pages) return ownerAt(node.compilerNode.parent);
+      if (!pages || !lifecycleFiles.has(node.getSourceFile())) return ownerAt(node.compilerNode.parent);
       let graph: number | undefined;
       for (const parent of [node, ...node.getAncestors()]) {
         const lifecycle = pages?.owners.get(parent);
@@ -1020,10 +1026,15 @@ export class QueryIndexBuilder {
       argumentGuards(site, definition(owner), flowDeclarations, callableFlow.writes);
     const recordApiCall = (from: number | undefined, to: number, site: CallExpression) => {
       if (historyOnly || !this.fetches.length) return;
+      const callee = definition(to);
+      const caller = definition(from);
+      if (!callee?.compilerNode.parameters.length && !caller?.compilerNode.parameters.length) return;
+      const recursive = from === to;
+      if (recursive && staticallyUnreachable(site)) return;
       const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
-      const args = booleanArguments(site, definition(to), flowDeclarations);
-      const guards = guardsAt(site, from);
-      const fact: ApiCallFact | undefined = args || guards ? [args, guards] : undefined;
+      const args = booleanArguments(site, callee, flowDeclarations);
+      const guards = argumentGuards(site, caller, flowDeclarations, callableFlow.writes);
+      const fact: ApiCallFact | undefined = recursive || args || guards ? [args, guards] : undefined;
       if (!callFacts.has(key)) callFacts.set(key, fact);
       else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
     };
@@ -1527,7 +1538,7 @@ export class QueryIndexBuilder {
       const cached = ignoredCollections.get(parent);
       if (cached !== undefined) return cached;
       const name = parent.getNameNode();
-      const uses = Node.isIdentifier(name) ? name.findReferencesAsNodes() : [];
+      const uses = Node.isIdentifier(name) ? callableFlow.references.uses(name) : [];
       const ignored = uses.length > 0 && uses.every(use => {
         let supplied: Node = use;
         let expression = supplied.getParent();
@@ -1628,6 +1639,7 @@ export class QueryIndexBuilder {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
       const content = historyOnly ? '' : file.getFullText();
+      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(file.compilerNode.text);
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -2063,10 +2075,10 @@ export class QueryIndexBuilder {
           if (evidence) ((index.returnLiterals ??= {})[owner] ??= []).push([startLine(node), evidence]);
         } else if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
-          record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
+          record(node, flowDeclarations(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
         } else if (Node.isImportClause(node)) {
           const binding = node.getDefaultImport();
-          if (binding) record(binding, declarationsOf(binding), 'import');
+          if (binding) record(binding, flowDeclarations(binding), 'import');
         } else if (Node.isBindingElement(node) && Node.isObjectBindingPattern(node.getParent())) {
           const declaration = node.getParentOrThrow().getParent();
           const initializer = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
@@ -2087,7 +2099,7 @@ export class QueryIndexBuilder {
             if (name !== 'default') record(node, declarations, 'export-star');
           }
         } else if (Node.isExportSpecifier(node)) {
-          record(node, declarationsOf(node.getAliasNode() ?? node.getNameNode()), 're-export');
+          record(node, flowDeclarations(node.getAliasNode() ?? node.getNameNode()), 're-export');
         } else if (Node.isCallExpression(node) || Node.isNewExpression(node) || Node.isTaggedTemplateExpression(node)) {
           if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return;
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
@@ -2102,7 +2114,7 @@ export class QueryIndexBuilder {
             if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
                 !components.has(assignment) && !aliases.has(assignment) &&
                 (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
-              for (const target of declarationsOf(first)) {
+              for (const target of flowDeclarations(first)) {
                 const id = byNode.get(target);
                 if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
               }
@@ -2125,7 +2137,7 @@ export class QueryIndexBuilder {
           const resolver = procedureResolvers.get(node);
           if (resolver && !Node.isArrowFunction(resolver) && !Node.isFunctionExpression(resolver)) {
             const procedure = byNode.get(node)!;
-            if (!record(resolver, declarationsOf(resolver), 'call', undefined, procedure, procedure)) {
+            if (!record(resolver, flowDeclarations(resolver), 'call', undefined, procedure, procedure)) {
               for (const id of [procedure, ...index.trpcAliases?.[procedure] ?? []]) {
                 recordTrpcIssue(id, fileId, startLine(resolver));
               }
@@ -2181,10 +2193,18 @@ export class QueryIndexBuilder {
           const parent = node.getParent();
           if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent) ||
               dynamicSelectors.has(node)) return;
-          record(node, declarationsOf(node).filter(declaration =>
+          record(node, flowDeclarations(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
-      }, { visitRaw: commentBoundaries ? scanNodeComments : undefined });
+      }, {
+        visitRaw: commentBoundaries ? scanNodeComments : undefined,
+        filterRaw: node => {
+          if (!ts.isIdentifier(node)) return !historyOnly || !ts.isReturnStatement(node);
+          const text = node.text;
+          return names.has(text) || localNames.has(text) || namespaces.has(text) ||
+            escapedIdentifiers;
+        }
+      });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {
@@ -2301,10 +2321,39 @@ export class QueryIndexBuilder {
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);
     if (!historyOnly && this.fetches.length) {
+      const requestCallers = new Map<number, Set<number>>();
+      const addCaller = (target: number, caller: number) => {
+        const callers = requestCallers.get(target) ?? new Set<number>();
+        callers.add(caller);
+        requestCallers.set(target, callers);
+      };
+      for (const [target, , , kind, , caller] of index.references) {
+        if (kind === 'call' && caller !== undefined) addCaller(target, caller);
+      }
+      const requestOwners = new Set(index.fetches.flatMap(({ owner, binding }) =>
+        owner !== undefined && !binding ? [owner] : []));
+      // Walk backwards through every indexed caller, independent of the query depth and test filters.
+      for (const owner of requestOwners) {
+        for (const caller of requestCallers.get(owner) ?? []) requestOwners.add(caller);
+        for (const [caller] of index.callbackInvocations?.[owner] ?? []) requestOwners.add(caller);
+      }
+      // Unknown factory invocations can leave a gap in a callback they produce.
+      const producersOf = new Map<number, Set<number>>();
+      for (const [factory, callbacks] of returnedBy) for (const callback of callbacks.keys()) {
+        const producers = producersOf.get(callback) ?? new Set<number>();
+        producers.add(factory);
+        producersOf.set(callback, producers);
+      }
+      const relevant = new Set(requestOwners);
+      for (const callback of relevant) for (const producer of producersOf.get(callback) ?? []) relevant.add(producer);
       const coverage = new CallbackCoverage(
+        callableFlow.references,
         node => projectFiles.has(node.getSourceFile()),
         node => exported.has(node),
-        (id, site) => followedUses.get(site)?.has(id) === true,
+        (id, site) => {
+          const followed = followedUses.get(site);
+          return followed instanceof Set ? followed.has(id) : followed === id;
+        },
         (id, fn, path) => returnedBy.get(byNode.get(fn) ?? byNode.get(fn.getParent()!) ?? 0)
           ?.get(id)?.has(JSON.stringify(path)) === true,
         attribute => {
@@ -2329,9 +2378,11 @@ export class QueryIndexBuilder {
       };
       const locationOf = (node: Node): [string, number] => [relativePath(node.getSourceFile()), startLine(node)];
       for (const [factory, callbacks] of returnedBy) {
+        if (!relevant.has(factory)) continue;
         const fn = factoryDefinitions.get(factory)!;
         const unknownSites = coverage.inspect(factory, fn, [], true, true);
         for (const [callback, paths] of callbacks) {
+          if (!relevant.has(callback)) continue;
           for (const site of unknownSites) gap(callback, locationOf(site));
           for (const site of creationSites.get(factory) ?? []) {
             const issues = [...paths.values()].flatMap(path => [...coverage.inspect(callback, site, path)]);
@@ -2341,19 +2392,21 @@ export class QueryIndexBuilder {
         }
       }
       for (const [fn, targets] of unindexedCallbacks) {
+        const coveredTargets = [...targets].filter(target => relevant.has(target));
+        if (!coveredTargets.length) continue;
         for (const issue of coverage.inspect(0, fn, [], true)) {
-          for (const target of targets) gap(target, locationOf(issue));
+          for (const target of coveredTargets) gap(target, locationOf(issue));
         }
       }
       for (const [callback, fn] of callableDefinitions) {
-        if (returnedBy.has(callback)) continue;
+        if (!relevant.has(callback) || returnedBy.has(callback)) continue;
         for (const issue of coverage.inspect(callback, fn, [], true, !localCallables.has(callback))) {
           gap(callback, locationOf(issue));
         }
       }
       // A factory can itself escape as a callback. Any unknown invocation of it
       // is also an unknown creation of the callbacks it returns.
-      const producers = new Set(returnedBy.keys());
+      const producers = new Set([...returnedBy.keys()].filter(factory => relevant.has(factory)));
       for (const factory of producers) {
         const gaps = [...index.callbackCoverageGaps?.[factory] ?? []];
         for (const [, file, line, covered] of index.callbackCreations?.[factory] ?? []) {
@@ -2361,7 +2414,7 @@ export class QueryIndexBuilder {
         }
         producers.delete(factory);
         for (const callback of returnedBy.get(factory)!.keys()) for (const site of gaps) {
-          if (gap(callback, site) && returnedBy.has(callback)) producers.add(callback);
+          if (relevant.has(callback) && gap(callback, site) && returnedBy.has(callback)) producers.add(callback);
         }
       }
     }
@@ -2416,8 +2469,9 @@ export class QueryIndexBuilder {
       ...index.fetches.flatMap(fetch => fetch.gates ?? []),
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
-    if (historyOnly) for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7] && !excludedSites.has(edge[7])) {
+    for (const edge of index.renderEdges) {
+      if (edge[7] && !scopes.has(edge[1]) && !suppliers.has(edge[1]) &&
+          !excludedSites.has(edge[7]) && !index.renderEvidence?.[edge[7]]) {
         if (edge[8]) edge[7] = undefined;
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }

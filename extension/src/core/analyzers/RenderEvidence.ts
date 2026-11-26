@@ -1,4 +1,5 @@
-import { Node, SyntaxKind } from 'ts-morph';
+import { Node, SyntaxKind, ts } from 'ts-morph';
+import { visitKinds } from './CompilerWalk';
 import { importBinding } from './StaticBindings';
 
 export type RenderEvidence = { conditions?: string[]; lists?: string[]; issue?: string };
@@ -22,15 +23,18 @@ function exits(node: Node): boolean {
   return directExit(node);
 }
 
+const nestedExits = new WeakMap<Node, boolean>();
+const exitKinds = new Set([SyntaxKind.ReturnStatement, SyntaxKind.ThrowStatement, SyntaxKind.ExpressionStatement]);
+
 function hasNestedExit(node: Node): boolean {
+  const cached = nestedExits.get(node);
+  if (cached !== undefined) return cached;
   let found = false;
-  node.forEachDescendant((child, traversal) => {
-    if (Node.isFunctionLikeDeclaration(child)) traversal.skip();
-    else if (directExit(child)) {
-      found = true;
-      traversal.stop();
-    }
+  visitKinds(node, exitKinds, child => { found = directExit(child); }, {
+    skipNode: child => found || ts.isFunctionLike(child) && !ts.isFunctionExpression(child),
+    filterRaw: child => !ts.isExpressionStatement(child) || ts.isCallExpression(child.expression)
   });
+  nestedExits.set(node, found);
   return found;
 }
 
