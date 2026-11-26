@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { historicalInput, historyEnvironmentSupported, listHistoryInputs, type HistoryEdit } from '../core/HistoryInputs';
 import { workspaceCache } from '../core/WorkspaceCache';
 import { compare, DependencyGraph, graphRow, hasGraph, type ChangeOrigin, type QueryRow } from './Graph';
-import { GRAPH_INDEX_REVISION, INDEX_SCHEMA, isTestFile, VERSION, type QueryIndex } from './Index';
+import { GRAPH_INDEX_REVISION, INDEX_SCHEMA, ROUTER_INDEX_REVISION, isTestFile, VERSION, type QueryIndex } from './Index';
 
 export const historyBudgetMs = 20_000;
 type Git = (args: string[], input?: Buffer, maxBuffer?: number) => Buffer;
@@ -23,7 +23,8 @@ function historicalGraph(root: string, git: Git, ref: string | undefined, prefix
   const stagedTree = ref ? undefined : git(['ls-files', '--stage', '--full-name', '-z', '--', ':/']);
   const treeId = stagedTree ? createHash('sha256').update(stagedTree).digest('hex') :
     git(['rev-parse', '--verify', ref! + '^{tree}']).toString('utf8').trim();
-  const key = createHash('sha256').update(JSON.stringify([VERSION, GRAPH_INDEX_REVISION, prefix, treeId])).digest('hex');
+  const revisions = live?.router ? [GRAPH_INDEX_REVISION, ROUTER_INDEX_REVISION] : [GRAPH_INDEX_REVISION];
+  const key = createHash('sha256').update(JSON.stringify([VERSION, ...revisions, prefix, treeId])).digest('hex');
   let incrementalKey: string | undefined;
   if (live?.projectSnapshot && !live.pagesWorkspaceInputs && !live.routes.some(route => route.pages)) {
     try {

@@ -3,9 +3,9 @@ import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
-import { formatProjectCandidates, type ProjectSelection } from '../core/FindProject';
-import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
-import { projectSnapshot, workspaceInputsHash, workspaceSourcesHash } from '../core/ProjectSnapshot';
+import { formatProjectCandidates, projectAppsLabel, type ProjectSelection } from '../core/FindProject';
+import { GRAPH_INDEX_REVISION, INDEX_PATH, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, VERSION, WRAPPER_INDEX_REVISION, type QueryIndex } from './Index';
+import { projectSnapshot, routerDependencySnapshot, workspaceInputsHash, workspaceSourcesHash } from '../core/ProjectSnapshot';
 import type { QueryAnswer } from './Query';
 
 type BuildResult = { error?: string; building?: boolean };
@@ -23,6 +23,8 @@ async function fresh(root: string, indexPath: string) {
   if (index?.schema !== INDEX_SCHEMA || index.generator !== VERSION || !index.files) return false;
   if (index.wrapperRevision !== WRAPPER_INDEX_REVISION || !Array.isArray(index.serverActions)) return false;
   if (index.queryRevision !== QUERY_INDEX_REVISION || index.graphRevision !== GRAPH_INDEX_REVISION) return false;
+  if (index.router && (index.router.revision !== ROUTER_INDEX_REVISION ||
+    index.router.dependencies !== routerDependencySnapshot(root))) return false;
   const inputs = index.pagesWorkspaceInputs;
   if (inputs && (!inputs.hash || inputs.hash !== workspaceInputsHash(root, inputs.offset, inputs.files))) return false;
   if (index.workspaceSources && index.workspaceSources.hash !== workspaceSourcesHash(root, index.workspaceSources)) return false;
@@ -135,7 +137,7 @@ export function projectRootNotice({ directory, guessCandidates, searchLimited, d
   const candidates = guessCandidates.length > 1 ? ` Candidates: ${formatProjectCandidates(guessCandidates)}.` : '';
   const development = developmentPackages ? ` Found ${developmentPackages} other package${developmentPackages === 1 ? '' : 's'} with only a development dependency on Next.` : '';
   const appHint = apps?.some(app => app.directory !== directory)
-    ? ` Next.js apps: ${apps.map(app => JSON.stringify(app.id)).join(', ')}. Use --app <name> to select one.` : '';
+    ? ` ${projectAppsLabel(apps)}: ${apps.map(app => JSON.stringify(app.id)).join(', ')}. Use --app <name> to select one.` : '';
   const limitNote = searchLimited ? ' The directory scan reached its limit.' : '';
   const confirmation = directory === requested
     ? 'Use --root . from the selected directory with query or mcp to confirm it.'
@@ -151,7 +153,7 @@ export function projectText(selection: ProjectSelection, requested: string, text
 
 export function appList(selection: ProjectSelection) {
   const apps = selection.apps!;
-  return ['# Next.js apps', ...apps.map(app => `  ${JSON.stringify(app.id)} (${JSON.stringify(app.name)})`),
+  return ['# ' + projectAppsLabel(apps), ...apps.map(app => `  ${JSON.stringify(app.id)} (${JSON.stringify(app.name)})`),
     selection.searchLimited ? '# partial: directory scan limit reached' : '# partial: apps not indexed together',
     '# hint: Use --app <name> on the CLI or set app in the MCP query.'].join('\n');
 }

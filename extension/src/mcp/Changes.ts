@@ -166,7 +166,8 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     .map(directory => repositoryPath(workspace!.offset + '/' + directory + '/'));
   const appPath = (file: string) => file.startsWith(prefix) ? file.slice(prefix.length) :
     packagePrefixes.some(directory => file.startsWith(directory)) ? posix.relative(prefix || '.', file) : undefined;
-  const workspaceConfig = (file: string) => file.startsWith('../') ? config.test(posix.basename(file)) : config.test(file);
+  const configFile = (file: string) => config.test(file.startsWith('../') ? posix.basename(file) : file) ||
+    !!index.router && (index.router.registryFiles.includes(file) || /^(?:react-router|remix|vite)\.config\.[cm]?[jt]s$/.test(file));
   const rootPackage = !!prefix && files.some(entry => entry.file === 'package.json' || entry.old === 'package.json');
   const outside = files.filter(({ file, old }) => appPath(file) === undefined && (!old || appPath(old) === undefined) &&
     file !== 'package.json' && old !== 'package.json').length;
@@ -177,7 +178,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     return [{ ...entry, file, old, status: entry.status === 'R' && !old ? 'A' : entry.status }];
   }).sort((a, b) => compare(a.file, b.file));
   const totalFiles = files.length + Number(rootPackage);
-  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => workspaceConfig(file) ||
+  const mayChangeRouteFiles = rootPackage || files.some(({ file, old, status }) => configFile(file) ||
     status !== 'M' && [file, old].some(path => path && /^(?:src\/)?(?:app|pages)\//.test(path)));
   const worktreeDiffers = ({ file, old }: DiffFile) => localChanges.has(repositoryPath(file)) ||
     (old !== undefined && localChanges.has(repositoryPath(old)));
@@ -246,7 +247,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     const worktree = worktreeDiffers(entry) ? ' [worktree differs]' : '';
     touched.add(file);
     if (status === 'D') {
-      const isConfig = workspaceConfig(file);
+      const isConfig = configFile(file);
       if (isConfig) configFiles++;
       changes.push(graphRow(`deleted ${file}${isConfig ? ' [config: all routes]' : ''}${worktree}`, file));
       if (!isConfig && (sourceFile.test(file) || routeAsset.test(file))) {
@@ -354,7 +355,7 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       if (existing && isMiddlewareFile(old ?? file) &&
           (matcherChanged || mayChangeRouteFiles || worktree || !graph.middleware(file))) middlewareFiles.set(file, old ?? file);
     }
-    if (workspaceConfig(file)) {
+    if (configFile(file)) {
       configFiles++;
       changes.push(graphRow(`file ${file} [config: all routes]${worktree}`, file));
       continue;
@@ -515,14 +516,16 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
   const otherFiles = new Set<string>();
   const possibleFiles = new Set<string>();
   let unknownMiddleware = [...middlewareFiles].some(([file]) => !history?.previousMiddleware.get(file) || !graph.middleware(file));
-  const currentRoutes = new Set(trace.routes.map(({ terminal }) => JSON.stringify([terminal.kind, terminal.file, terminal.name])));
-  const impacts = new Map(trace.routes.map(result => [JSON.stringify([result.terminal.kind, result.terminal.file, result.terminal.name]),
+  const terminalId = (terminal: typeof trace.routes[number]['terminal']) => JSON.stringify(
+    [terminal.kind, terminal.file, terminal.name, ...(terminal.route?.router ? [terminal.route.router.id] : [])]);
+  const currentRoutes = new Set(trace.routes.map(({ terminal }) => terminalId(terminal)));
+  const impacts = new Map(trace.routes.map(result => [terminalId(result.terminal),
     { terminal: result.terminal, origins: [...result.origins] }]));
   const liveMiddleware = new Set(trace.routes.filter(({ terminal }) => terminal.kind === 'middleware').map(({ terminal }) => terminal.file));
   for (const result of baseTrace?.routes ?? []) {
     const { terminal, origins } = result;
     if (terminal.kind === 'middleware' && middlewareFiles.has(terminal.file) && liveMiddleware.has(terminal.file)) continue;
-    const key = JSON.stringify([terminal.kind, terminal.file, terminal.name]);
+    const key = terminalId(terminal);
     const live = impacts.get(key);
     if (!live) impacts.set(key, { terminal, origins: [...origins] });
     else for (const impact of origins) {
@@ -556,8 +559,9 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
       rows.push(graphRow(`middleware ${file}  all matched routes${name === '/' ? '' : ` (matcher: ${name})`}${coverage}`, file));
       continue;
     }
-    if (kind === 'api') apiFiles.add(file);
-    else if (kind === 'page') pageFiles.add(file);
+    const identity = terminal.route?.router?.id ?? file;
+    if (kind === 'api') apiFiles.add(identity);
+    else if (kind === 'page') pageFiles.add(identity);
     else otherFiles.add(file);
     if (origins.every(origin => origin.possible)) possibleFiles.add(file);
     const labels = [...new Set(origins.map(({ origin, depth, fetch, possible }) =>
@@ -567,9 +571,12 @@ export function changes(root: string, index: QueryIndex, graph: DependencyGraph,
     const isCurrent = currentRoutes.has(key);
     rows.push(graphRow(`route ${kind} ${name}  ${file}${isCurrent ? '' : ' [base]'}${chain}`, ...isCurrent ? [file] : []));
   }
-  if (configFiles) for (const route of index.routes) (route.kind === 'page' ? pageFiles : apiFiles).add(route.file);
+  if (configFiles) for (const route of index.routes) {
+    if (route.router && route.kind === 'layout') continue;
+    (route.kind === 'page' ? pageFiles : apiFiles).add(route.router?.id ?? route.file);
+  }
   const routes = pageFiles.size + apiFiles.size;
-  const wrapperRoutes = new Set([...wrappers.values()].flatMap(wrapper => wrapper.pages.map(page => page.file))).size;
+  const wrapperRoutes = new Set([...wrappers.values()].flatMap(wrapper => wrapper.pages.map(page => page.router?.id ?? page.file))).size;
   if (outside) notes.push(graphRow(`# outside project: ${quantity(outside, 'file')}`));
   if (changes.length > 500) limited = true;
   const stops = new Set([...trace.stops, ...baseTrace?.stops ?? []]).size;

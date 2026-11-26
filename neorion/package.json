@@ -1,7 +1,7 @@
 {
   "name": "neorion",
   "version": "0.6.0",
-  "description": "Architecture queries for Next.js projects written in TypeScript or JavaScript.",
+  "description": "Offline architecture queries for Next.js, React Router Framework Mode, and Remix projects.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jaminitachi/Neorion.git",
