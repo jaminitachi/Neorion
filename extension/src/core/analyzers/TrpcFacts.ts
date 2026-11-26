@@ -54,12 +54,13 @@ function initializer(node: Node | undefined) {
 
 function imported(node: Node, modulePattern: RegExp, names: RegExp) {
   const access = member(node);
+  if (access && (!access.key || !names.test(access.key))) return false;
   const binding = (access?.base ?? node).getSymbol()?.getDeclarations()[0];
   if (Node.isImportSpecifier(binding) && !access && !binding.isTypeOnly()) {
     const entry = binding.getImportDeclaration();
     return !entry.isTypeOnly() && modulePattern.test(entry.getModuleSpecifierValue()) && names.test(binding.getName());
   }
-  if (!Node.isNamespaceImport(binding) || !access?.key || !names.test(access.key)) return false;
+  if (!Node.isNamespaceImport(binding) || !access) return false;
   const entry = binding.getFirstAncestorByKindOrThrow(SyntaxKind.ImportDeclaration);
   return !entry.isTypeOnly() && modulePattern.test(entry.getModuleSpecifierValue());
 }
@@ -73,7 +74,7 @@ export class TrpcFacts {
   private rootPaths = new Map<Router, Map<string, ProcedurePath>>();
   private allPaths = new Map<Router, Map<string, ProcedurePath[]>>();
 
-  constructor(files: SourceFile[], sources: Set<SourceFile>) {
+  constructor(files: SourceFile[], sources: Set<SourceFile>, private declarations = declarationsOf) {
     const clientFiles = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       !entry.isTypeOnly() && proxyPackage.test(entry.getModuleSpecifierValue()))));
     this.active = sources.size > 0 || clientFiles.size > 0;
@@ -325,7 +326,7 @@ export class TrpcFacts {
       return;
     }
     if (!Node.isIdentifier(node) && !member(node)) return;
-    const declaration = localValue(node);
+    const declaration = this.declarations(node)[0];
     const value = initializer(declaration);
     if (value) return this.proxy(value, seen);
     if (Node.isBindingElement(declaration) && Node.isObjectBindingPattern(declaration.getParent())) {
@@ -353,7 +354,7 @@ export class TrpcFacts {
     const expression = unwrap(call.getExpression());
     if (!member(expression) && !Node.isIdentifier(expression)) return;
     if (Node.isIdentifier(expression)) {
-      const binding = localValue(expression);
+      const binding = this.declarations(expression)[0];
       if (!Node.isBindingElement(binding) && !Node.isVariableDeclaration(binding)) return;
     }
     const proxy = this.proxy(expression);

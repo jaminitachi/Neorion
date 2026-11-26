@@ -1,5 +1,6 @@
-import { Node, SourceFile, SyntaxKind } from 'ts-morph';
-import { conditionalAt, declarationsOf, wrappedExpression } from './ArchitectureFacts';
+import { Node, SourceFile, SyntaxKind, ts, type Symbol } from 'ts-morph';
+import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
+import { conditionalAt, wrappedExpression } from './ArchitectureFacts';
 import { startLine } from './SourceLines';
 
 export type JsxSite = import('ts-morph').JsxOpeningElement | import('ts-morph').JsxSelfClosingElement;
@@ -7,6 +8,9 @@ export type RenderSite = JsxSite | import('ts-morph').CallExpression;
 type Prop = { component: Node; name: string; fallback?: Node };
 type SiteValue = { site: RenderSite; value?: Node; unknown?: boolean };
 type BoundValue = SiteValue & { gates: PropGate[] };
+type ForwardedSpread = { site: JsxSite; excluded: Set<string> };
+type EventDelivery = boolean | 'possible';
+type SlotUse = { site: Node; via: Node[]; conditional: boolean; lookup?: boolean };
 type Literal = string | number | boolean | null;
 export type PropConstraint = { prop: Prop; literal: Literal; equal: boolean };
 export type PropGate = { component: Node; sites: RenderSite[]; partial?: boolean; uncertainSites?: RenderSite[]; unscoped?: true };
@@ -25,9 +29,11 @@ function literal(node: Node | undefined): Literal | undefined {
 }
 
 export function constValue(node: Node) {
-  if (!Node.isVariableDeclaration(node) ||
-      node.getVariableStatement()?.getDeclarationKind() !== 'const') return;
-  return node.getInitializer();
+  if (!Node.isVariableDeclaration(node)) return;
+  const list = node.compilerNode.parent;
+  if (list.parent.kind === SyntaxKind.VariableStatement && (list.flags & ts.NodeFlags.BlockScoped) === ts.NodeFlags.Const) {
+    return node.getInitializer();
+  }
 }
 
 export class PropFlow {
@@ -35,14 +41,17 @@ export class PropFlow {
   private parameters = new Map<Node, Node>();
   private parameterFiles = new Set<SourceFile>();
   private props = new WeakMap<Node, Prop | null>();
+  private symbolsByNode = new WeakMap<Node, Symbol | null>();
+  private declarationsBySymbol = new WeakMap<Symbol, Node[]>();
   private resolvedBindings = new Map<Node, Map<string, Map<Node | undefined, BoundValue[]>>>();
   private receiverIdentifiers = new Map<Node, Set<string>>();
   private identifiers = new Map<string, PropGate>();
-  private forwardedEvents = new Map<Node, Map<string, boolean>>();
-  private slots = new Map<Node, Map<string, { site: Node; via: Node[]; conditional: boolean }[]>>();
+  private forwardedEvents = new Map<Node, Map<string, EventDelivery>>();
+  private forwardedSpreads = new Map<Node, ForwardedSpread[]>();
+  private slots = new Map<Node, Map<string, SlotUse[]>>();
 
   constructor(private bodies: Map<Node, Node>, private targets: Map<Node, Node[]>, private files: Set<SourceFile>,
-    private relativePath: (file: SourceFile) => string) {
+    private relativePath: (file: SourceFile) => string, private uncertainLookups: ReadonlySet<Node>) {
     for (const [component, body] of bodies) {
       const fn = body.getParent();
       if (Node.isArrowFunction(fn) || Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn)) {
@@ -68,6 +77,29 @@ export class PropFlow {
     return this.targets.get(site.getTagNameNode()) ?? [];
   }
 
+  lookupUncertain(site: JsxSite) {
+    return this.uncertainLookups.has(site.getTagNameNode());
+  }
+
+  symbol(node: Node): Symbol | undefined {
+    const cached = this.symbolsByNode.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const symbol = node.getSymbol();
+    this.symbolsByNode.set(node, symbol ?? null);
+    return symbol;
+  }
+
+  declarations(node: Node): Node[] {
+    const symbol = this.symbol(node);
+    if (!symbol) return [];
+    let entries = this.declarationsBySymbol.get(symbol);
+    if (!entries) {
+      entries = (symbol.getAliasedSymbol() ?? symbol).getDeclarations();
+      this.declarationsBySymbol.set(symbol, entries);
+    }
+    return entries;
+  }
+
   read(node: Node | undefined, member?: string, remaining = 8): Prop | undefined {
     if (!node || member || remaining !== 8) return this.readProp(node, member, remaining);
     if (!this.parameterFiles.has(node.getSourceFile())) return;
@@ -90,7 +122,7 @@ export class PropFlow {
       if (Node.isStringLiteral(key)) return this.read(node.getExpression(), key.getLiteralText(), remaining - 1);
     }
     if (!Node.isIdentifier(node)) return;
-    for (const decl of declarationsOf(node)) {
+    for (const decl of this.declarations(node)) {
       if (!this.files.has(decl.getSourceFile())) continue;
       const alias = constValue(decl);
       if (alias) return this.read(alias, member, remaining - 1);
@@ -142,7 +174,7 @@ export class PropFlow {
       return { unknown };
     }
     if (!Node.isIdentifier(expr)) return { unknown: true };
-    for (const declaration of declarationsOf(expr)) {
+    for (const declaration of this.declarations(expr)) {
       const alias = constValue(declaration);
       if (alias) return this.spreadValue(alias, name, remaining - 1);
       const pattern = Node.isBindingElement(declaration) && declaration.getDotDotDotToken() ? declaration.getParent() : undefined;
@@ -173,7 +205,9 @@ export class PropFlow {
         unknown: binding?.unknown || missingUnknown && !binding?.value && !prop.fallback };
     }
     let unknown = false;
-    for (const attr of [...site.getAttributes()].reverse()) {
+    const attributes = site.getAttributes();
+    for (let i = attributes.length - 1; i >= 0; i--) {
+      const attr = attributes[i];
       if (Node.isJsxSpreadAttribute(attr)) {
         const spread = this.spreadValue(attr.getExpression(), prop.name, remaining - 1);
         unknown ||= !!spread.unknown;
@@ -273,73 +307,93 @@ export class PropFlow {
     });
   }
 
-  forwardsEvent(site: JsxSite, name: string): boolean {
+  eventDelivery(site: JsxSite, name: string): EventDelivery {
     const targets = this.targetsOf(site);
-    return !targets.length || targets.some(target => {
-      const seen = this.forwardedEvents.get(target) ?? new Map<string, boolean>();
+    if (!targets.length) return true;
+    let delivery: EventDelivery = false;
+    for (const target of targets) {
+      const seen = this.forwardedEvents.get(target) ?? new Map<string, EventDelivery>();
       this.forwardedEvents.set(target, seen);
-      const cached = seen.get(name);
-      if (cached !== undefined) return cached;
-      seen.set(name, false);
-      const body = this.bodies.get(target);
-      const parameter = body?.getParent();
-      if (!Node.isFunctionDeclaration(parameter) && !Node.isArrowFunction(parameter) && !Node.isFunctionExpression(parameter)) {
-        return false;
+      let forwarded = seen.get(name);
+      if (forwarded === undefined) {
+        forwarded = false;
+        seen.set(name, false);
+        for (const { site, excluded } of this.eventSpreads(target)) {
+          if (excluded.has(name)) continue;
+          forwarded = this.eventDelivery(site, name) || forwarded;
+          if (forwarded === true) break;
+        }
+        seen.set(name, forwarded);
       }
-      const props = parameter.getParameters()[0];
-      const forwarded = body!.getDescendantsOfKind(SyntaxKind.JsxSpreadAttribute).some(spread => {
-        const expression = spread.getExpression();
-        const declarations = declarationsOf(expression);
-        if (!declarations.includes(props) && !declarations.some(declaration => {
-          if (!Node.isBindingElement(declaration) || !declaration.getDotDotDotToken()) return false;
+      delivery = forwarded || delivery;
+      if (delivery === true) break;
+    }
+    return delivery && this.lookupUncertain(site) ? 'possible' : delivery;
+  }
+
+  private eventSpreads(target: Node): ForwardedSpread[] {
+    const cached = this.forwardedSpreads.get(target);
+    if (cached) return cached;
+    const entries: ForwardedSpread[] = [];
+    this.forwardedSpreads.set(target, entries);
+    const body = this.bodies.get(target);
+    const fn = body?.getParent();
+    if (!body || !Node.isFunctionDeclaration(fn) && !Node.isArrowFunction(fn) && !Node.isFunctionExpression(fn)) return entries;
+    const props = fn.getParameters()[0];
+    if (!props) return entries;
+    for (const spread of body.getDescendantsOfKind(SyntaxKind.JsxSpreadAttribute)) {
+      const site = spread.getParent()?.getParent();
+      if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) continue;
+      const attributes = site.getAttributes();
+      const later = attributes.slice(attributes.indexOf(spread) + 1);
+      if (later.some(Node.isJsxSpreadAttribute)) continue;
+      for (const declaration of this.declarations(spread.getExpression())) {
+        const excluded = new Set(later.flatMap(attribute => Node.isJsxAttribute(attribute) ? attribute.getNameNode().getText() : []));
+        if (declaration !== props) {
+          if (!Node.isBindingElement(declaration) || !declaration.getDotDotDotToken()) continue;
           const pattern = declaration.getParent();
-          return Node.isObjectBindingPattern(pattern) && pattern.getParent() === props &&
-            !pattern.getElements().some(element => !element.getDotDotDotToken() &&
-              (element.getPropertyNameNode() ?? element.getNameNode()).getText() === name);
-        })) return false;
-        const opening = spread.getParent()?.getParent();
-        if (!Node.isJsxOpeningElement(opening) && !Node.isJsxSelfClosingElement(opening)) return false;
-        const attributes = opening.getAttributes();
-        if (attributes.slice(attributes.indexOf(spread) + 1).some(attribute => Node.isJsxSpreadAttribute(attribute) ||
-          attribute.getNameNode().getText() === name)) return false;
-        return this.forwardsEvent(opening, name);
-      });
-      seen.set(name, forwarded);
-      return forwarded;
-    });
+          if (!Node.isObjectBindingPattern(pattern) || pattern.getParent() !== props) continue;
+          for (const element of pattern.getElements()) {
+            if (!element.getDotDotDotToken()) excluded.add((element.getPropertyNameNode() ?? element.getNameNode()).getText());
+          }
+        }
+        entries.push({ site, excluded });
+      }
+    }
+    return entries;
   }
 
   private slotUses(component: Node) {
     const previous = this.slots.get(component);
     if (previous) return previous;
-    const uses = new Map<string, { site: Node; via: Node[]; conditional: boolean }[]>();
+    const uses = new Map<string, SlotUse[]>();
     this.slots.set(component, uses);
     const body = this.bodies.get(component);
     if (!body) return uses;
-    const add = (expr: Node, site: Node, via: Node[] = [], conditional = false, asComponent = false) => {
+    const add = (expr: Node, site: Node, via: Node[] = [], conditional = false, asComponent = false, lookup = false) => {
       // In JSX, logical and ternary operands can be selected as rendered nodes.
       if (Node.isConditionalExpression(expr)) {
-        add(expr.getWhenTrue(), site, via, true, asComponent);
-        add(expr.getWhenFalse(), site, via, true, asComponent);
+        add(expr.getWhenTrue(), site, via, true, asComponent, lookup);
+        add(expr.getWhenFalse(), site, via, true, asComponent, lookup);
         return;
       }
       if (Node.isBinaryExpression(expr)) {
         const operator = expr.getOperatorToken().getKind();
         if (operator === SyntaxKind.BarBarToken || operator === SyntaxKind.QuestionQuestionToken) {
-          add(expr.getLeft(), site, via, true, asComponent);
+          add(expr.getLeft(), site, via, true, asComponent, lookup);
         }
         if ([SyntaxKind.AmpersandAmpersandToken, SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken].includes(operator)) {
-          add(expr.getRight(), site, via, true, asComponent);
+          add(expr.getRight(), site, via, true, asComponent, lookup);
         }
         return;
       }
       const wrapped = wrappedExpression(expr);
-      if (wrapped) return add(wrapped, site, via, conditional, asComponent);
+      if (wrapped) return add(wrapped, site, via, conditional, asComponent, lookup);
       const prop = this.read(expr);
       if (prop?.component !== component) return;
       const key = asComponent ? 'tag:' + prop.name : prop.name;
       const sites = uses.get(key) ?? [];
-      sites.push({ site, via, conditional: conditional || !!conditionalAt(expr, body) });
+      sites.push({ site, via, conditional: conditional || !!conditionalAt(expr, body), lookup });
       uses.set(key, sites);
     };
     body.forEachDescendant(node => {
@@ -353,10 +407,10 @@ export class PropFlow {
           const name = parent.getNameNode().getText();
           for (const receiver of this.targetsOf(opening)) {
             for (const use of this.slotUses(receiver).get(name) ?? []) {
-              add(expr, use.site, [receiver, ...use.via], use.conditional);
+              add(expr, use.site, [receiver, ...use.via], use.conditional, false, use.lookup || this.lookupUncertain(opening));
             }
             for (const use of this.slotUses(receiver).get('tag:' + name) ?? []) {
-              add(expr, use.site, [receiver, ...use.via], use.conditional, true);
+              add(expr, use.site, [receiver, ...use.via], use.conditional, true, use.lookup || this.lookupUncertain(opening));
             }
           }
         } else if (Node.isJsxElement(parent)) {
@@ -364,7 +418,7 @@ export class PropFlow {
           if (this.targetsOf(opening).length) {
             for (const receiver of this.targetsOf(opening)) {
               for (const use of this.slotUses(receiver).get('children') ?? []) {
-                add(expr, use.site, [receiver, ...use.via], use.conditional);
+                add(expr, use.site, [receiver, ...use.via], use.conditional, false, use.lookup || this.lookupUncertain(opening));
               }
             }
           } else add(expr, node);
@@ -386,10 +440,11 @@ export class PropFlow {
       const binding = attribute && this.value(site, { name });
       if (attribute && binding?.value !== jsxValue(attribute)) return [];
       return (this.slotUses(receiver).get(asComponent ? 'tag:' + name : name) ?? []).map(use => ({
-        detail: `prop ${name} via ${[receiver, ...use.via].map(component =>
+        detail: (use.lookup || this.lookupUncertain(site) ? `${RENDER_LOOKUP_ISSUE}; ` : '') +
+          `prop ${name} via ${[receiver, ...use.via].map(component =>
           Node.isVariableDeclaration(component) || Node.isFunctionDeclaration(component)
             ? component.getName() ?? 'default' : 'default').join(' > ')} (rendered at ${this.relativePath(use.site.getSourceFile())}:${startLine(use.site)})`,
-        conditional: use.conditional, partial: !!binding?.unknown
+        conditional: use.conditional, partial: !!binding?.unknown || !!use.lookup || this.lookupUncertain(site)
       }));
     });
   }
