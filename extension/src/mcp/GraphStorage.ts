@@ -25,7 +25,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
   const facts: PackedFacts = {
     graphReferences, graphNames, externalCalls, externalModules, fileSymbols, defaultSymbols, exportSymbols, runtimeExports, moduleImports,
     routeFiles, layoutStyles, unresolvedCalls, trpcFiles, trpcModuleUses, trpcUses, trpcAliases, trpcUnbound, trpcIssues,
-    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callableOwners, callGates, flowIssues, callIssues, refEvidence, renderLabels,
+    pagesEdges, pagesIssues, pagesObservedCalls, pagesOwnerIssues, flowCalls, callGates, flowIssues, callIssues, refEvidence, renderLabels,
     callLiterals, returnLiterals, unresolvedCallLiterals
   };
   if (JSON.stringify(facts).length < minimumBytes) return index;
@@ -79,7 +79,8 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
     return edge.slice(0, edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4) as typeof edge;
   });
   return {
-    ...rest, symbols, references, routes, renderEdges, hasFlowCalls: !!flowCalls?.length || undefined,
+    // API callers use lexical owners without opening the packed graph.
+    ...rest, callableOwners: callableOwners ?? {}, symbols, references, routes, renderEdges, hasFlowCalls: !!flowCalls?.length || undefined,
     packedGraph: deflateRawSync(JSON.stringify(facts), { level: 6 }).toString('base64')
   };
 }

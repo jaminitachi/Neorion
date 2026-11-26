@@ -869,6 +869,9 @@ export class QueryEngine {
       } else if (fetch.owner !== undefined) requestOwners.add(fetch.owner);
     }
     let owners = new Set(requestOwners);
+    const callableOwners = levels > 0 && owners.size
+      ? this.callableOwners ??= readCallableOwners(this.index) ?? {}
+      : undefined;
     const memoizedCallbacks = new Set(this.index.memoizedCallbacks);
     const traversed = new Set<number>();
     const entries = new Map<string, { file: string; line: number; name: string; level: number; evidence: boolean }>();
@@ -878,14 +881,15 @@ export class QueryEngine {
       for (const owner of owners) {
         if (traversed.has(owner)) continue;
         traversed.add(owner);
+        const scope = lexicalOwner(callableOwners, owner);
+        // Consumers of a returned callback may only reference the hook that creates it.
+        if (scope !== owner) owners.add(scope);
         for (const [, file, line, kind, , caller] of this.references.get(owner) ?? []) {
           if (expired()) break;
           if (kind !== 'call' || (!includeTests && testFile(file)) || caller === owner) continue;
           const name = this.symbols.get(owner)?.name ?? 'unknown';
           const key = `${file}:${line} ${name}`;
-          if (caller !== undefined) this.callableOwners ??= readCallableOwners(this.index) ?? {};
-          const local = caller !== undefined &&
-            lexicalOwner(this.callableOwners, owner) === lexicalOwner(this.callableOwners, caller);
+          const local = caller !== undefined && scope === lexicalOwner(callableOwners, caller);
           const level = local ? Math.max(1, depth) : depth + 1;
           if (level > levels) {
             boundary.add(key);

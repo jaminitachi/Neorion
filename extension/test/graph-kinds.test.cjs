@@ -2252,6 +2252,92 @@ test('API caller depth reaches components through a hook’s local callbacks', a
   assert.doesNotMatch(await mcp.text('query', { kind: 'api_consumers', target: '/api/status', callers: 0 }), /^ *call\d/m);
 });
 
+test('API consumers climb through hooks that return memoized callbacks', async t => {
+  const { build, query, root, env } = fixture(t);
+  for (const [route, method] of [['track', 'POST'], ['load', 'GET'], ['reload', 'GET']]) {
+    const directory = path.join(root, 'app/api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), `export function ${method}() { return Response.json({}); }`);
+  }
+  fs.writeFileSync(path.join(root, 'send-track.ts'), `
+    export function send(page: number) { return fetch('/api/track', { method: 'POST', body: String(page) }); }
+  `);
+  fs.writeFileSync(path.join(root, 'request-hooks.ts'), `
+    import { useCallback } from 'react';
+    import { send } from './send-track';
+    export function useTracker() {
+      const track = useCallback((page: number) => send(page), []);
+      const start = useCallback(() => { setInterval(() => track(0), 1000); }, [track]);
+      return { track, start };
+    }
+    export function useLoader() {
+      const load = useCallback(() => fetch('/api/load'), []);
+      return { load };
+    }
+    export function useReload() {
+      const reload = useCallback(() => fetch('/api/reload'), []);
+      return reload;
+    }
+  `);
+  fs.writeFileSync(path.join(root, 'request-buttons.tsx'), `
+    'use client';
+    import { useTracker, useLoader, useReload } from './request-hooks';
+    export function Tracker() {
+      const { track, start } = useTracker();
+      return <button onClick={() => { start(); track(2); }} />;
+    }
+    export function Loader() {
+      const { load } = useLoader();
+      return <button onClick={() => load()} />;
+    }
+    export function Reloader() {
+      const reload = useReload();
+      return <button onClick={() => reload()} />;
+    }
+  `);
+  const indexFile = build();
+  const track = query('api_consumers', '/api/track');
+  assert.match(track, /^call1 +request-hooks\.ts:\d+ send$/m);
+  assert.match(track, /^  call1 +request-hooks\.ts:\d+ track$/m);
+  assert.match(track, /^# partial: caller depth limit/m);
+  assert.doesNotMatch(track, /request-buttons\.tsx/);
+  const expanded = query('api_consumers', '/api/track', '--depth', '2');
+  assert.match(expanded, /^call2 +request-buttons\.tsx:5 useTracker$/m);
+  assert.match(expanded, /^# complete:/m);
+  const load = query('api_consumers', '/api/load', '--limit', '2');
+  assert.match(load, /^call1 +request-buttons\.tsx:9 useLoader$/m);
+  assert.match(load, /^# complete:/m);
+  const reload = query('api_consumers', '/api/reload');
+  assert.match(reload, /^call1 +request-buttons\.tsx:13 useReload$/m);
+  assert.match(reload, /^# complete:/m);
+
+  const { packGraph, unpackGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  const packed = packGraph(index, 0);
+  assert.deepEqual(packed.callableOwners, index.callableOwners);
+  assert.deepEqual(unpackGraph(packed).callableOwners, index.callableOwners);
+  fs.writeFileSync(indexFile, JSON.stringify(packed));
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  const consumers = (target, args) => mcp.text('query', { kind: 'api_consumers', target, ...args });
+  const mcpTrack = await consumers('/api/track');
+  assert.match(mcpTrack, /^# try: set depth=2/m);
+  assert.equal(mcpTrack.replace(/^# try: .*\n/m, ''), track.replace(/^# try: .*\n/m, ''));
+  assert.equal(await consumers('/api/track', { depth: 2 }), expanded);
+  assert.equal(await consumers('/api/load', { limit: 2 }), load);
+  assert.equal(await consumers('/api/reload'), reload);
+  assert.doesNotMatch(await consumers('/api/track', { callers: 0 }), /^ *call\d|caller depth limit/m);
+
+  // Existing caches still keep their lexical owners in the packed facts.
+  const { deflateRawSync, inflateRawSync } = require('node:zlib');
+  const { callableOwners, packedGraph, ...base } = packed;
+  const facts = JSON.parse(inflateRawSync(Buffer.from(packedGraph, 'base64')));
+  const legacyGraph = deflateRawSync(JSON.stringify({ ...facts, callableOwners })).toString('base64');
+  fs.writeFileSync(indexFile, JSON.stringify({ ...base, packedGraph: legacyGraph }));
+  assert.equal(query('api_consumers', '/api/reload'), reload);
+});
+
 test('API route callers can be traced past the default depth in CLI and MCP', async t => {
   const { build, query, root, env } = fixture(t);
   fs.mkdirSync(path.join(root, 'app/api/depth'), { recursive: true });
