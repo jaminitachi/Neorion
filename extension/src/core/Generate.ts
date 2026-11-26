@@ -21,6 +21,13 @@ interface GenerateOptions {
 }
 
 export function generateGraph(projectPath: string, options: GenerateOptions) {
+    const graph = analyzeGraph(projectPath, options);
+    if (!options.markdown) return { graph };
+    options.onProgress?.("Generating Markdown...");
+    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
+}
+
+function analyzeGraph(projectPath: string, options: GenerateOptions): CodebaseGraph {
     const packageJsonPath = path.join(projectPath, 'package.json');
     const routerDirectory = (name: string) => {
         const root = path.join(projectPath, name);
@@ -87,8 +94,7 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
         devDependencies = Object.keys(pkg?.devDependencies ?? {}).sort();
     }
 
-    // 4. Construct Graph
-    const graph: CodebaseGraph = {
+    return {
         metadata: {
             name,
             router: hasAppRoutes ? (hasPagesRoutes ? 'mixed' : 'app') : (hasPagesRoutes ? 'pages' : 'none'),
@@ -100,10 +106,6 @@ export function generateGraph(projectPath: string, options: GenerateOptions) {
         libraries,
         devDependencies
     };
-
-    if (!options.markdown) return { graph };
-    options.onProgress?.("Generating Markdown...");
-    return { graph, outputPath: writeGraph(projectPath, graph, options.migrateLegacy ?? false) };
 }
 
 function openProject(root: string): Project {
