@@ -16,6 +16,7 @@ import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
+import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
@@ -91,6 +92,8 @@ function dynamicExport(node: Node) {
 }
 
 export class QueryIndexBuilder {
+  constructor(private readonly exportsOf = (file: SourceFile) => file.getExportedDeclarations()) {}
+
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
@@ -182,7 +185,7 @@ export class QueryIndexBuilder {
   }
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
-    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false): QueryIndex {
+    aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false, router?: RouterProject): QueryIndex {
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -196,7 +199,7 @@ export class QueryIndexBuilder {
     };
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
-    const exports = new Map(files.map(file => [file, file.getExportedDeclarations()]));
+    const exports = new Map(files.map(file => [file, this.exportsOf(file)]));
     const exported = new Set<Node>([...exports.values()].flatMap(entries => [...entries.values()].flat()));
     const fileByName = new Map<string, SourceFile>(files.map(file => [file.getFilePath(), file]));
     const names = new Set<string>();
@@ -565,7 +568,7 @@ export class QueryIndexBuilder {
     }
     const routeIds = new Map(routes.map((route, i) => [route.id, i + 1]));
     for (const route of routes) {
-      if (route.type !== 'page' && route.type !== 'api') {
+      if (!route.router && route.type !== 'page' && route.type !== 'api') {
         const component = route.componentId && byGraphId.get(route.componentId) || undefined;
         index.routeFiles![route.file] = component === undefined ? [route.type, route.path] : [route.type, route.path, undefined, component];
         continue;
@@ -594,6 +597,8 @@ export class QueryIndexBuilder {
         component, fileSymbol: byGraphId.get(`file:${route.file}`),
         layouts: page?.layouts.flatMap(layout => byGraphId.get(layout) ?? []), methods: route.methods,
         handlers: Object.keys(handlers).length ? handlers : undefined,
+        router: route.router && { ...route.router, id: route.id,
+          site: { file: relativePath(router!.routes[id - 1].site.getSourceFile()), line: startLine(router!.routes[id - 1].site) } },
         pages: route.pages, methodBasis: route.methodBasis, observedMethods: route.observedMethods
       });
       const chains = [...new Set(page?.chains.map(chain => {
@@ -1171,6 +1176,9 @@ export class QueryIndexBuilder {
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }
     }
+    if (router) (require('../frameworks/react-router/ModuleFacts') as typeof import('../frameworks/react-router/ModuleFacts'))
+      .indexRouterFacts({ index, project: router, files, relative: relativePath, exports,
+        symbol: node => byNode.get(node), owner: node => owners(node)[1], fileSymbol: file => byGraphId.get(`file:${file}`) });
     index.pagesWorkspaceInputs = workspace?.snapshot();
     return index;
   }

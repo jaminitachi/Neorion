@@ -115,6 +115,17 @@ Graphify 0.9.115 used one AST-only run per app and different file-selection rule
 
 Later tRPC tracing (#18) and query fixes (#23) add build time. A fresh ShareTab index build on `master` (`c6f5fb1`) took a median of 7.71 s across three runs in a separate session, so it is not directly comparable to the table.
 
+## Framework support
+
+Source builds were measured on two shallow, source-only checkouts. Build time and peak RSS are medians of three `neorion graph` runs. Registration matches compare route ID, module file, URL, parent and index flag against each framework's manifest builder.
+
+| App | Framework | Registration matches | Build time | Peak RSS | Query sample |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [Indie Stack](https://github.com/remix-run/indie-stack/tree/56abb93bf81f635b574d9ca23eed05602699458a) | Remix v2 | 10/10 | 2.97 s | 346,944 KiB | 9 partial |
+| [Epic Stack](https://github.com/epicweb-dev/epic-stack/tree/893610db76127fb5a5f1ffa786bee6b050637429) | React Router 7.16 | 49/49 | 8.12 s | 410,864 KiB | 9 partial |
+
+Partial results included missing dependencies and runtime destinations. Epic Stack also had unresolved forwarding through external providers and a possible submit method after a JSX spread.
+
 ## Install
 
 Neorion 0.6.0 is not on npm. Install it from the GitHub Release. This installs the `neorion` command, which runs on Node.js 18 or later.

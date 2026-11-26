@@ -1,8 +1,9 @@
+import type { RouterPattern } from '../core/frameworks/RouterMatch';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 6;
-export const QUERY_INDEX_REVISION = 9;
-export const GRAPH_INDEX_REVISION = 12;
+export const WRAPPER_INDEX_REVISION = 7;
+export const QUERY_INDEX_REVISION = 10;
+export const GRAPH_INDEX_REVISION = 13;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
@@ -111,6 +112,30 @@ export interface PagesEdge {
   matcher?: { source: string; conditional?: boolean; overlap?: boolean };
 }
 
+export type RouterEntry = {
+  role: string;
+  symbol: number;
+  file: string;
+  line: number;
+  method?: string;
+};
+
+export type RouterEdge = {
+  from?: number;
+  source?: number;
+  destination?: number;
+  to?: number;
+  kind: 'data' | 'render' | 'wrap' | 'navigate' | 'redirect' | 'load' | 'submit';
+  file: string;
+  line: number;
+  detail: string;
+  method?: string;
+  conditional?: boolean;
+  possible?: boolean;
+};
+
+export type RouterIssue = { reason: string; file: string; route?: number; kind: 'import' | 'module' | 'wrapper' | 'navigation' };
+
 export interface QueryIndex {
   schema: 1 | typeof INDEX_SCHEMA;
   coverage?: 1 | 2;
@@ -124,6 +149,16 @@ export interface QueryIndex {
     id: number; url: string; file: string; kind: string; line?: number;
     component?: number; fileSymbol?: number; layouts?: number[];
     pages?: boolean;
+    router?: RouterPattern & {
+      site: { file: string; line: number };
+      entries?: RouterEntry[];
+      boundaries?: RouterEntry[];
+      renderable?: false;
+      conditionalRender?: true;
+      possibleRender?: true;
+      conditionalLayouts?: number[];
+      possibleLayouts?: number[];
+    };
     methods?: string[];
     methodBasis?: 'enforced' | 'observed';
     observedMethods?: string[]; handlers?: Record<string, number>;
@@ -168,6 +203,14 @@ export interface QueryIndex {
   trpcFiles?: string[];
   // External workspace files used for Pages bindings and SDK version inference.
   pagesWorkspaceInputs?: { offset: string; files: string[]; hash?: string };
+  router?: {
+    framework: 'react-router' | 'remix';
+    basename: string;
+    registryIssues: string[];
+    registryFiles: string[];
+    issues: RouterIssue[];
+    edges: RouterEdge[];
+  };
   pagesUrlConfig?: NextUrlConfig;
   pagesEdges?: PagesEdge[];
   pagesIssues?: Record<number, string[]>;

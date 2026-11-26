@@ -1682,3 +1682,128 @@ test('Pages middleware impact explains template overlap and dynamic Next configu
   assert.match(impact, /^# partial:/m);
   assert.doesNotMatch(query('path', '/api/auth/csrf/embed', 'middleware'), /\[possible\]/);
 });
+
+const routerFixture = (t, name) => fixture(t, false, path.join(__dirname, 'fixtures', name));
+
+test('React Router Framework registrations, entry roles, Outlet chains and router-bound calls', async t => {
+  const app = routerFixture(t, 'react-router-config');
+  const git = (...args) => execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', ...args],
+    { cwd: app.root, env: app.env, stdio: 'ignore' });
+  git('init', '-q');
+  git('add', '.');
+  git('commit', '-qm', 'Fixture');
+  const data = path.join(app.root, 'src/ui/data.ts');
+  fs.writeFileSync(data, fs.readFileSync(data, 'utf8').replace('export function load() {',
+    'export function load() {\n  if (false) throw new Error();'));
+  const index = JSON.parse(fs.readFileSync(app.build(), 'utf8'));
+  const registered = new Map(index.routes.map(route => [route.router.id, route]));
+  assert.equal(index.router.framework, 'react-router');
+  assert.equal(index.router.basename, '/site');
+  assert.equal(registered.get('left').router.parentId, 'section');
+  assert.equal(registered.get('left').file, registered.get('right').file);
+  assert.equal(registered.get('home').router.index, true);
+  assert.equal(registered.get('case-sensitive').router.caseSensitive, true);
+  assert.equal(registered.get('receiver').kind, 'api');
+  assert.deepEqual(registered.get('receiver').methods, ['GET', '?']);
+  assert.deepEqual(registered.get('guarded').methods, ['POST']);
+  assert.equal(registered.get('guarded').methodBasis, 'enforced');
+  assert.deepEqual(registered.get('left').router.entries.map(entry => entry.role), [
+    'render', 'loader', 'action', 'client-loader', 'client-action', 'meta', 'links', 'headers', 'error-boundary', 'hydrate-fallback'
+  ]);
+  assert.equal(registered.get('left').router.entries.find(entry => entry.role === 'loader').file, 'src/ui/data.ts');
+  assert.equal(registered.get('unmounted').router.renderable, false);
+  const edges = index.router.edges;
+  assert.ok(edges.some(edge => edge.kind === 'submit' && edge.source === registered.get('left').id && edge.destination === edge.source));
+  assert.ok(edges.some(edge => edge.kind === 'submit' && edge.source === registered.get('right').id && edge.destination === edge.source));
+  assert.ok(edges.some(edge => edge.kind === 'submit' && edge.destination === registered.get('index-form').id));
+  assert.ok(edges.some(edge => edge.kind === 'redirect' && edge.file === 'src/ui/data.ts' && edge.destination === registered.get('receiver').id));
+  assert.ok(edges.some(edge => edge.detail === 'useRouteLoaderData → loader' && edge.destination === registered.get('root').id));
+  assert.ok(!edges.some(edge => edge.detail.includes('LocalLink')));
+  assert.ok(edges.some(edge => edge.kind === 'navigate' && edge.source === registered.get('right').id &&
+    edge.destination === registered.get('left').id));
+  assert.match(app.query('wrappers', '/site/gate/child'), /# partial: conditional outlet slot/);
+  assert.match(app.query('wrappers', '/site/Case'), /^# wrappers \/Case /m);
+  assert.doesNotMatch(app.query('wrappers', '/site/case'), /^page /m);
+  assert.match(app.query('wrappers', '/site/users/123'), /^# wrappers \/users\/:id\? /m);
+  assert.match(app.query('wrappers', '/site/files/folder/readme'), /^# wrappers \/files\/\* /m);
+  assert.match(app.query('wrappers', 'src/ui/route.tsx'), /route:left[\s\S]+route:right/);
+  assert.doesNotMatch(app.query('who_renders', 'MissingBanner'), /^\/uncoupled\/child /m);
+  assert.match(app.query('wrappers', '/site/uncoupled/child'), /^# partial: outlet slot unresolved/m);
+  const mcp = await openMcp(t, app.root, {
+    command: process.execPath, args: [entry, 'mcp', '--root', app.root], env: app.env, cwd: app.root
+  });
+  for (const [kind, target, cli, options, expected] of [
+    ['search', '/', ['--kind', 'route'], { filter: 'route' }, /route:left/],
+    ['wrappers', '/site/panel/left', [], {}, /Layout.*ShellProvider[\s\S]*Section[\s\S]*page src\/ui\/route.tsx/],
+    ['who_renders', 'Banner', [], {}, /\/panel\/left[^\n]+\[via layout\]/],
+    ['rename_impact', 'Banner', [], {}, /src\/ui\/root.tsx/],
+    ['api_consumers', 'route:receiver', [], {}, /POST fetcher.Form[\s\S]*GET fetcher.load[\s\S]*PATCH fetcher.submit/],
+    ['impact', 'src/ui/data.ts#load', [], {}, /page \/panel\/left[\s\S]*page \/panel\/right/],
+    ['callees', 'route:left', [], {}, /data[^\n]+\(loader\)[\s\S]*navigate[^\n]+\(Link\)/],
+    ['path', 'route:left', ['route:receiver'], { to: 'route:receiver' }, /1 redirect src\/ui\/data.ts/],
+    ['changes', undefined, ['--unstaged'], { scope: 'unstaged' }, /route page \/panel\/left[\s\S]*changed src\/ui\/data.ts[^\n]+load/]
+  ]) {
+    const stdout = app.query(kind, ...(target ? [target] : []), ...cli);
+    assert.match(stdout, expected, kind);
+    assert.match(stdout, /^# (?:complete|partial): /m);
+    assert.equal(await mcp.text('query', { kind, ...target && { target }, ...options }), stdout, kind);
+  }
+});
+
+test('React Router flatRoutes and Remix flat files preserve filename syntax and actual parents', t => {
+  for (const [fixtureName, mode, cases, omitted] of [
+    ['react-router-files', 'react-router', [
+      ['screens/_index', '/', 'root', true],
+      ['screens/reports.$year', '/reports/:year', 'screens/reports', false],
+      ['screens/reports_.standalone', '/reports/standalone', 'root', false],
+      ['screens/($lang).catalog.$', '/:lang?/catalog/*', 'root', false],
+      ['screens/feed[.]xml', '/feed.xml', 'root', false]
+    ], 'ignored.tsx'],
+    ['remix-v2', 'remix', [
+      ['routes/_index', '/', 'root', true],
+      ['routes/_auth.login', '/login', 'routes/_auth', false],
+      ['routes/docs._index', '/docs', 'routes/docs', true],
+      ['routes/docs_.$', '/docs/*', 'root', false],
+      ['routes/($lang).catalog', '/:lang?/catalog', 'root', false],
+      ['routes/feed[.]xml', '/feed.xml', 'root', false]
+    ], 'helper.tsx'],
+    ['react-router-auto', 'react-router', [
+      ['routes/_account/login', '/login', 'routes/_account/_layout', false],
+      ['routes/docs/route', '/docs', 'root', false]
+    ], 'help.test.tsx']
+  ]) {
+    const app = routerFixture(t, fixtureName);
+    const index = JSON.parse(fs.readFileSync(app.build(), 'utf8'));
+    assert.equal(index.router.framework, mode);
+    const registrations = new Map(index.routes.map(route => [route.router.id, route]));
+    for (const [id, url, parent, index] of cases) {
+      const route = registrations.get(id);
+      assert.deepEqual([route.url, route.router.parentId, !!route.router.index], [url, parent, index], id);
+    }
+    assert.ok(![...registrations.values()].some(route => route.file.endsWith(omitted) || route.file.includes('/+/')));
+    if (mode === 'remix') {
+      assert.match(app.query('api_consumers', '/feed.xml'), /load web\/routes\/_auth.login.tsx:[0-9]+ GET fetcher.load/);
+      assert.match(app.query('path', '/login', '/feed.xml'), /1 redirect web\/routes\/_auth.login.tsx/);
+      assert.match(app.query('wrappers', '/login'), /AuthLayout/);
+    }
+  }
+});
+
+test('runtime route configuration and unresolved imports surface partials through refreshed queries', t => {
+  const config = routerFixture(t, 'react-router-config');
+  config.build();
+  assert.match(config.query('wrappers', '/site/panel/left'), /^# complete:/m);
+  fs.appendFileSync(path.join(config.root, 'src/ui/registry.ts'),
+    "\nif (process.env.EXTRA) registry.push(register('/dynamic', 'home.tsx'));");
+  const dynamic = config.run(['query', 'wrappers', '/site/panel/left']);
+  assert.match(dynamic, /page src\/ui\/route.tsx/);
+  assert.match(dynamic, /# partial: route config is mutated at runtime/);
+  const remix = routerFixture(t, 'remix-v2');
+  fs.appendFileSync(path.join(remix.root, 'web/routes/_auth.login.tsx'), "\nexport { meta } from './missing';");
+  remix.build();
+  assert.match(remix.query('wrappers', '/login'), /^# partial: .*unresolved (?:route export meta|import \.\/missing)/m);
+  fs.writeFileSync(path.join(remix.root, 'remix.config.js'), 'export default { routes() { return []; } };');
+  const vite = path.join(remix.root, 'vite.config.ts');
+  fs.writeFileSync(vite, fs.readFileSync(vite, 'utf8').replace("ignoredRouteFiles:", "routes() { return []; }, ignoredRouteFiles:"));
+  assert.match(remix.run(['query', 'search', '/', '--kind', 'route']), /^# partial: unsupported Remix custom route registry/m);
+});

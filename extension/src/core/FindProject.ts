@@ -1,3 +1,4 @@
+import { routerFramework } from './frameworks/RouterProbe';
 import { existsSync, lstatSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -48,14 +49,15 @@ export function nextConfig(directory: string): string | undefined {
 }
 
 // A missing manifest allows hoisting. A broken manifest can't establish a project.
-function nextDependency(directory: string): 'runtime' | 'development' | false | null {
+function frameworkDependency(directory: string): 'runtime' | 'development' | 'router' | false | null {
   const manifest = join(directory, 'package.json');
   if (!isFile(manifest)) return false;
   try {
     const pkg = JSON.parse(readFileSync(manifest, 'utf8'));
     if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return null;
     if (typeof pkg.dependencies?.next === 'string') return 'runtime';
-    return typeof pkg.devDependencies?.next === 'string' ? 'development' : false;
+    if (typeof pkg.devDependencies?.next === 'string') return 'development';
+    return routerFramework(directory, pkg, isFile) ? 'router' : false;
   } catch (error) {
     if (error instanceof SyntaxError || unavailable(error)) return null;
     throw error;
@@ -133,9 +135,9 @@ function parentProject(start: string) {
     const parent = dirname(directory);
     if (parent === directory || parent === homedir()) break;
     project ||= isFile(join(parent, 'package.json')) || existsSync(join(parent, '.git'));
-    const dependency = nextDependency(parent);
+    const dependency = frameworkDependency(parent);
     if (dependency === null) break;
-    next ||= !!dependency;
+    next ||= dependency === 'runtime' || dependency === 'development';
     directory = parent;
   }
   return { project, next };
@@ -151,7 +153,8 @@ export function selectProject(root: string, confirm = false): ProjectSelection |
 
 function discoverProject(start: string): ProjectSelection | undefined {
   if (nextConfig(start)) return { directory: start };
-  const manifestNext = nextDependency(start);
+  const manifestNext = frameworkDependency(start);
+  if (manifestNext === 'router') return { directory: start };
   const dependency = !!manifestNext;
   if (dependency && hasOwnRoutes(start)) return { directory: start };
   const parent = parentProject(start);
@@ -168,12 +171,12 @@ function discoverProject(start: string): ProjectSelection | undefined {
   let visited = 0;
   for (const directory of nestedDirectories(start, name => !excludedNextDirectory(name), projectDepth)) {
     if (visited++ === directoryLimit) break;
-    const manifestNext = nextDependency(directory);
-    const dependency = !!manifestNext;
+    const manifestNext = frameworkDependency(directory);
+    const dependency = manifestNext === 'runtime' || manifestNext === 'development';
     const canInherit = manifestNext !== null && inheritedNext.get(dirname(directory)) === true &&
       !existsSync(join(directory, '.git'));
     inheritedNext.set(directory, dependency || canInherit);
-    if (manifestNext === 'runtime' || nextConfig(directory) || (dependency || canInherit) && hasInheritedRoutes(directory)) {
+    if (manifestNext === 'router' || manifestNext === 'runtime' || nextConfig(directory) || (dependency || canInherit) && hasInheritedRoutes(directory)) {
       apps.push({ directory, dependency });
     } else if (dependency) {
       developmentPackages.push({ directory, dependency });
