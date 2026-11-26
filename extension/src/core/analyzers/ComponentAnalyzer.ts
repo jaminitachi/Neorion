@@ -7,7 +7,7 @@ import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
 import {
   collectApiFacts, collectRenameFacts, collectRenderFacts, conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression
 } from './ArchitectureFacts';
-import { visitKinds } from './CompilerWalk';
+import { isFunctionLikeDeclaration, visitKinds } from './CompilerWalk';
 import { packageMember } from './CallableFlow';
 import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
@@ -98,24 +98,19 @@ function callable(node: Node, seen = new Set<Node>()): NodeWithBody | undefined 
 }
 
 function hasRender(body: Node): boolean {
-  const returnsJsx = (node: Node) =>
-    Node.isJsxElement(node) || Node.isJsxSelfClosingElement(node) || Node.isJsxFragment(node) ||
-    (Node.isCallExpression(node) && /(?:^|\.)createElement$/.test(node.getExpression().getText()));
-  if (!Node.isBlock(body)) return returnsJsx(body) || body.getDescendants().some(returnsJsx);
-
-  let found = false;
-  body.forEachDescendant((node, traversal) => {
-    if (Node.isFunctionLikeDeclaration(node) || Node.isClassDeclaration(node)) {
-      traversal.skip();
-    } else if (Node.isReturnStatement(node)) {
-      const value = node.getExpression();
-      if (value && (returnsJsx(value) || value.getDescendants().some(returnsJsx))) {
-        found = true;
-        traversal.stop();
-      }
-    }
-  });
-  return found;
+  const source = body.getSourceFile().compilerNode;
+  const containsJsx = (node: ts.Node): true | undefined => {
+    if (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node) || ts.isJsxFragment(node) ||
+        ts.isCallExpression(node) && /(?:^|\.)createElement$/.test(node.expression.getText(source))) return true;
+    return node.forEachChild(containsJsx);
+  };
+  const returnsJsx = (node: ts.Node): true | undefined => {
+    if (isFunctionLikeDeclaration(node) || ts.isClassDeclaration(node)) return;
+    if (ts.isReturnStatement(node) && node.expression && containsJsx(node.expression)) return true;
+    return node.forEachChild(returnsJsx);
+  };
+  const node = body.compilerNode;
+  return !!(ts.isBlock(node) ? node.forEachChild(returnsJsx) : containsJsx(node));
 }
 
 function actionBinding(node: Node): Node {
@@ -213,20 +208,32 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
     cached.set(symbol, id);
     return id;
   };
+  const symbols = new WeakMap<ts.Node, ts.Symbol | null>();
+  function symbolAt(node: ts.Node): ts.Symbol | undefined {
+    // Match ts-morph's Node.getSymbol lookup without wrapping unrelated action candidates.
+    const { symbol, name } = node as ts.Node & { symbol?: ts.Symbol; name?: ts.Node };
+    if (symbol) return symbol;
+    const cached = symbols.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const resolved = checker.getSymbolAtLocation(node) ?? (name && symbolAt(name));
+    symbols.set(node, resolved ?? null);
+    return resolved;
+  }
   // ACTION_SCAN_KINDS includes the node kinds resolved by this callback.
-  return (node: Node): string | undefined => {
-    if (Node.isPropertyAccessExpression(node)) {
-      const namespace = node.getExpression().getSymbol()?.compilerSymbol;
+  return (node: ts.Node): string | undefined => {
+    if (ts.isPropertyAccessExpression(node)) {
+      const namespace = symbolAt(node.expression);
       const source = namespace && namespace.flags & ts.SymbolFlags.Alias && checker.getAliasedSymbol(namespace);
-      const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.getName()) : undefined;
+      const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.name.getText()) : undefined;
       if (id) return id;
+      return fromSymbol(symbolAt(node));
     }
-    if (Node.isIdentifier(node) && node.getParentIfKind(SyntaxKind.PropertyAccessExpression)?.getNameNode() === node) return;
-    if (Node.isShorthandPropertyAssignment(node)) return fromSymbol(node.getValueSymbol()?.compilerSymbol);
-    if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) return fromSymbol(node.getSymbol()?.compilerSymbol);
-    if ((Node.isArrowFunction(node) || Node.isFunctionExpression(node)) && !Node.isVariableDeclaration(actionBinding(node))) {
-      return bindings.get(node);
+    if (ts.isIdentifier(node)) {
+      if (node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+      return fromSymbol(symbolAt(node));
     }
+    if (ts.isShorthandPropertyAssignment(node)) return fromSymbol(checker.getShorthandAssignmentValueSymbol(node));
+    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return byDeclaration.get(node);
   };
 }
 
@@ -258,12 +265,15 @@ export class ComponentAnalyzer {
     const index = includeFacts ? new QueryIndexBuilder(exportsOf) : undefined;
     const actions = new Set<string>();
     const actionIds = new Map<Node, string>();
-    const actionNames = new Set<Node>();
+    const actionNames = new Set<ts.Node>();
     const actionModules = new Map<ts.Symbol, Map<string, string>>();
-    const paths = new WeakMap<SourceFile, string>();
+    const paths = new Map<SourceFile, string>();
     const relativePath = (file: SourceFile) => {
       let relative = paths.get(file);
-      if (relative === undefined) paths.set(file, relative = path.relative(this.root, file.getFilePath()).split(path.sep).join('/'));
+      if (relative === undefined) {
+        relative = path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
+        paths.set(file, relative);
+      }
       return relative;
     };
     const routesByFile = new Map(routes.map(route => [route.file, route]));
@@ -286,7 +296,7 @@ export class ComponentAnalyzer {
           actionIds.set(target, id);
           if (Node.isVariableDeclaration(target) || Node.isFunctionDeclaration(target) || Node.isFunctionExpression(target)) {
             const name = target.getNameNode();
-            if (name) actionNames.add(name);
+            if (name) actionNames.add(name.compilerNode);
           }
         }
         return id;
@@ -455,7 +465,7 @@ export class ComponentAnalyzer {
     if (router) for (const route of routes) route.componentId = routesByFile.get(route.file)?.componentId;
 
     const edges = new Map<string, ComponentEdge>();
-    const componentCalls = new Set<Node>();
+    const componentCalls = new Set<ts.Node>();
     type Imports = { byDeclaration: Map<Node, import('ts-morph').ImportDeclaration>; names: Set<string> };
     const importsByFile = new Map<SourceFile, Imports>();
     const importsFor = (file: SourceFile) => {
@@ -726,7 +736,7 @@ export class ComponentAnalyzer {
           }
         }
         if (!Node.isCallExpression(child)) return;
-        componentCalls.add(child);
+        componentCalls.add(child.compilerNode);
         const expression = child.getExpression();
         const [argument] = child.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, component.id, body);
@@ -744,9 +754,21 @@ export class ComponentAnalyzer {
       component.hooks = [...usedHooks];
     }
 
-    const actionReference = actions.size && actionReferences(files[0].getProject().getTypeChecker().compilerObject, actionIds, actionModules);
+    const actionReference = actions.size
+      ? actionReferences(files[0].getProject().getTypeChecker().compilerObject, actionIds, actionModules) : undefined;
+    let lastActionNode: ts.Node | undefined;
+    let lastActionId: string | undefined;
+    const actionOf = actionReference && ((node: ts.Node) => {
+      // Reuse the raw filter's lookup when the wrapped visitor receives the same node.
+      if (node !== lastActionNode) {
+        lastActionNode = node;
+        lastActionId = actionNames.has(node) ? undefined : actionReference(node);
+      }
+      return lastActionId;
+    });
     const fileHooks = new Map<string, { hooks: string[]; isClient: boolean }>();
     for (const file of files) {
+      const source = file.compilerNode;
       const relative = relativePath(file);
       const from = `file:${relative}`;
       const usedHooks = new Set<string>();
@@ -754,24 +776,23 @@ export class ComponentAnalyzer {
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
       visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
-        if (actionReference && !actionNames.has(node)) {
-          const id = actionReference(node);
-          if (id) {
-            const ancestors = node.getAncestors();
-            if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
-              Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
-              const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
-              const line = startLine(node);
-              addEdge(owner, id, 'uses-action');
-              index?.useAction(id, relative, line, node);
-            }
+        const id = actionOf && actionOf(node.compilerNode);
+        if (id && (!(Node.isArrowFunction(node) || Node.isFunctionExpression(node)) ||
+                   !Node.isVariableDeclaration(actionBinding(node)))) {
+          const ancestors = node.getAncestors();
+          if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
+            Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
+            const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
+            const line = startLine(node);
+            addEdge(owner, id, 'uses-action');
+            index?.useAction(id, relative, line, node);
           }
         }
         if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !componentTags.has(node)) {
           render(node.getTagNameNode(), from);
         }
         if (Node.isJsxAttribute(node) && !componentAttributes.has(node)) inspectAttribute(node, from);
-        if (!Node.isCallExpression(node) || componentCalls.has(node)) return;
+        if (!Node.isCallExpression(node) || componentCalls.has(node.compilerNode)) return;
         const expression = node.getExpression();
         const [argument] = node.getArguments();
         if (argument && /(?:^|\.)createElement$/.test(expression.getText())) render(argument, from);
@@ -781,6 +802,17 @@ export class ComponentAnalyzer {
         if (!HOOK.test(name) && !aliasedHooks.has(name)) return;
         const hook = resolveHook(expression, importsFor(file));
         if (hook && hooks.get(hook)?.path) usedHooks.add(hook);
+      }, {
+        filterRaw: node => {
+          if (!ts.isCallExpression(node)) return RENDER_KINDS.has(node.kind) || actionOf?.(node) !== undefined;
+          if (componentCalls.has(node)) return false;
+          const expression = node.expression;
+          if (node.arguments.length && /(?:^|\.)createElement$/.test(expression.getText(source))) return true;
+          if (!aliasedHooks) return false;
+          const name = ts.isPropertyAccessExpression(expression) ? expression.name.getText(source) :
+            ts.isIdentifier(expression) ? expression.getText(source) : '';
+          return HOOK.test(name) || aliasedHooks.has(name);
+        }
       });
       if (usedHooks.size) fileHooks.set(relative, { hooks: [...usedHooks], isClient: isClientFile(file) });
     }

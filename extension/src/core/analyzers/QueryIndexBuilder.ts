@@ -8,7 +8,7 @@ import {
   apiCallKey, CALLABLE_WRITE_ISSUE, isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ApiCallFact, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
-import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
@@ -185,7 +185,7 @@ function resolvedPromiseValue(call: import('ts-morph').CallExpression) {
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'resolve') return;
   const promise = callee.getExpression();
   if (!Node.isIdentifier(promise) || promise.getText() !== 'Promise' ||
-      declarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
+      uncachedDeclarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
   const value = unwrapValue(call.getArguments()[0]);
   if (Node.isIdentifier(value)) return value;
 }
@@ -375,7 +375,7 @@ function readsUrlParameter(value: Node) {
       const constructor = source.getExpression();
       const params = packageMember(constructor, 'next/navigation') === 'ReadonlyURLSearchParams' ||
         Node.isIdentifier(constructor) && constructor.getText() === 'URLSearchParams' &&
-          declarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+          uncachedDeclarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
       return params && fromLocation(source.getArguments()[0]);
     }
     if (!Node.isCallExpression(source)) return false;
@@ -512,6 +512,7 @@ export class QueryIndexBuilder {
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false, router?: RouterProject): QueryIndex {
+    const declarationsOf = (node: Node) => flow.declarations(node);
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -650,12 +651,20 @@ export class QueryIndexBuilder {
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
+    const types = new WeakMap<Node, ReturnType<Node['getType']>>();
+    const typeOf = (node: Node) => {
+      let type = types.get(node);
+      if (type === undefined) {
+        type = node.getType();
+        types.set(node, type);
+      }
+      return type;
+    };
     const apiRoutes = new Map(routes.flatMap(route => {
       const file = fileByName.get(path.join(root, route.file));
       return file && !route.pages && route.type === 'api' ? [[file, route] as const] : [];
     }));
-    const flowDeclarations = (node: Node) => flow.declarations(node);
-    const trpcFacts = new TrpcFacts(files, trpcSources, apiRoutes, flowDeclarations);
+    const trpcFacts = new TrpcFacts(files, trpcSources, apiRoutes, declarationsOf);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
     const procedureResolvers = new Map<Node, Node>();
@@ -709,7 +718,7 @@ export class QueryIndexBuilder {
     });
 
     const projectFiles = new Set(files);
-    const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node), exported);
+    const callableFlow = new CallableFlow(projectFiles, declarationsOf, node => flow.symbol(node), exported);
     const localCallables = new Map<number, Node>();
     const callableDefinitions = new Map<number, FunctionNode>();
     const workspaceEvent = (attribute: Node | undefined) => {
@@ -817,7 +826,7 @@ export class QueryIndexBuilder {
       }
       const argument = Node.isCallExpression(parent) && parent.getArguments().includes(value) ? parent : undefined;
       const callee = argument?.getExpression();
-      const declarations = callee ? flowDeclarations(callee) : [];
+      const declarations = callee ? declarationsOf(callee) : [];
       const react = callee && packageMember(callee, 'react');
       const scheduler = react && ['useEffect', 'useLayoutEffect', 'useInsertionEffect'].includes(react) ||
         Node.isIdentifier(callee) && ['setTimeout', 'setInterval', 'queueMicrotask'].includes(callee.getText()) &&
@@ -925,7 +934,7 @@ export class QueryIndexBuilder {
           binding = binding.getExpression();
         }
         if (!Node.isIdentifier(binding)) return;
-        const bindings = flowDeclarations(binding);
+        const bindings = declarationsOf(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
             (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || Node.isVariableDeclaration(decl) && !!decl.getInitializer() || isFunction(decl)))) return;
         if (expression === node.getExpression() && expression === binding && bindings.some(decl => {
@@ -933,7 +942,7 @@ export class QueryIndexBuilder {
           return id !== undefined && index.symbols[id - 1].kind !== 'constant' && !Node.isBindingElement(decl);
         })) return;
         const targets = callableTargets(expression);
-        const ordinaryMember = targets.length && expression !== binding && flowDeclarations(expression)
+        const ordinaryMember = targets.length && expression !== binding && declarationsOf(expression)
           .some(decl => byNode.has(decl) && !Node.isBindingElement(decl));
         const resolved = targets.flatMap(({ fn, via, gates, supplied, write }) => {
           if (supplied) suppliedCallbacks.add(supplied);
@@ -1023,7 +1032,7 @@ export class QueryIndexBuilder {
     const definition = (id: number | undefined) => id === undefined ? undefined :
       callableDefinitions.get(id) ?? factoryDefinitions.get(id);
     const guardsAt = (site: Node, owner: number | undefined) =>
-      argumentGuards(site, definition(owner), flowDeclarations, callableFlow.writes);
+      argumentGuards(site, definition(owner), declarationsOf, callableFlow.writes);
     const recordApiCall = (from: number | undefined, to: number, site: CallExpression) => {
       if (historyOnly || !this.fetches.length) return;
       const callee = definition(to);
@@ -1032,8 +1041,8 @@ export class QueryIndexBuilder {
       const recursive = from === to;
       if (recursive && staticallyUnreachable(site)) return;
       const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
-      const args = booleanArguments(site, callee, flowDeclarations);
-      const guards = argumentGuards(site, caller, flowDeclarations, callableFlow.writes);
+      const args = booleanArguments(site, callee, declarationsOf);
+      const guards = argumentGuards(site, caller, declarationsOf, callableFlow.writes);
       const fact: ApiCallFact | undefined = recursive || args || guards ? [args, guards] : undefined;
       if (!callFacts.has(key)) callFacts.set(key, fact);
       else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
@@ -1575,7 +1584,7 @@ export class QueryIndexBuilder {
       } else if (Node.isArrayLiteralExpression(value)) {
         for (const element of value.getElements()) recordComponentValue(element, property);
       } else if (Node.isIdentifier(value) || Node.isPropertyAccessExpression(value)) {
-        for (const declaration of flowDeclarations(value)) recordComponentDeclaration(declaration, property);
+        for (const declaration of declarationsOf(value)) recordComponentDeclaration(declaration, property);
       }
     };
     const externalModules = new Map<string, number>();
@@ -2075,16 +2084,16 @@ export class QueryIndexBuilder {
           if (evidence) ((index.returnLiterals ??= {})[owner] ??= []).push([startLine(node), evidence]);
         } else if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
-          record(node, flowDeclarations(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
+          record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
         } else if (Node.isImportClause(node)) {
           const binding = node.getDefaultImport();
-          if (binding) record(binding, flowDeclarations(binding), 'import');
+          if (binding) record(binding, declarationsOf(binding), 'import');
         } else if (Node.isBindingElement(node) && Node.isObjectBindingPattern(node.getParent())) {
           const declaration = node.getParentOrThrow().getParent();
           const initializer = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
           const property = node.getPropertyNameNode() ?? node.getNameNode();
           if (!initializer || !Node.isIdentifier(property) || !Node.isIdentifier(node.getNameNode())) return;
-          const symbol = initializer.getType().getProperty(property.getText());
+          const symbol = typeOf(initializer).getProperty(property.getText());
           const declarations = (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
           const id = declarations.map(target => byNode.get(target)).find(value => value !== undefined);
           if (id !== undefined) {
@@ -2099,7 +2108,7 @@ export class QueryIndexBuilder {
             if (name !== 'default') record(node, declarations, 'export-star');
           }
         } else if (Node.isExportSpecifier(node)) {
-          record(node, flowDeclarations(node.getAliasNode() ?? node.getNameNode()), 're-export');
+          record(node, declarationsOf(node.getAliasNode() ?? node.getNameNode()), 're-export');
         } else if (Node.isCallExpression(node) || Node.isNewExpression(node) || Node.isTaggedTemplateExpression(node)) {
           if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) return;
           const expression = Node.isTaggedTemplateExpression(node) ? node.getTag() : node.getExpression();
@@ -2114,7 +2123,7 @@ export class QueryIndexBuilder {
             if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
                 !components.has(assignment) && !aliases.has(assignment) &&
                 (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
-              for (const target of flowDeclarations(first)) {
+              for (const target of declarationsOf(first)) {
                 const id = byNode.get(target);
                 if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
               }
@@ -2137,14 +2146,14 @@ export class QueryIndexBuilder {
           const resolver = procedureResolvers.get(node);
           if (resolver && !Node.isArrowFunction(resolver) && !Node.isFunctionExpression(resolver)) {
             const procedure = byNode.get(node)!;
-            if (!record(resolver, flowDeclarations(resolver), 'call', undefined, procedure, procedure)) {
+            if (!record(resolver, declarationsOf(resolver), 'call', undefined, procedure, procedure)) {
               for (const id of [procedure, ...index.trpcAliases?.[procedure] ?? []]) {
                 recordTrpcIssue(id, fileId, startLine(resolver));
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, flowDeclarations(expression), 'call',
-            undefined, owner, graphOwner, possible ? true : undefined);
+          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression),
+            'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
@@ -2186,23 +2195,22 @@ export class QueryIndexBuilder {
         } else if (Node.isElementAccessExpression(node)) {
           const key = node.getArgumentExpression();
           if (Node.isStringLiteral(key)) {
-            const symbol = node.getExpression().getType().getProperty(key.getLiteralText());
+            const symbol = typeOf(node.getExpression()).getProperty(key.getLiteralText());
             if (symbol) record(key, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
           }
         } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
           const parent = node.getParent();
           if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent) ||
               dynamicSelectors.has(node)) return;
-          record(node, flowDeclarations(node).filter(declaration =>
+          record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
       }, {
         visitRaw: commentBoundaries ? scanNodeComments : undefined,
         filterRaw: node => {
           if (!ts.isIdentifier(node)) return !historyOnly || !ts.isReturnStatement(node);
-          const text = node.text;
-          return names.has(text) || localNames.has(text) || namespaces.has(text) ||
-            escapedIdentifiers;
+          const text = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
+          return names.has(text) || localNames.has(text) || namespaces.has(text);
         }
       });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);

@@ -1,7 +1,7 @@
 import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import { declarationsOf, wrappedExpression } from './ArchitectureFacts';
+import { isFunctionLikeDeclaration, visitKinds } from './CompilerWalk';
 import { constValue, JsxSite } from './PropFlow';
-import { visitKinds } from './CompilerWalk';
 import { CallableReferences } from './CallableReferences';
 import { bindingSelection, CallableWrites, staticMember } from './CallableWrites';
 
@@ -28,7 +28,7 @@ export function returnedValues(fn: FunctionNode): Node[] {
       const expression = node.getExpression();
       if (expression) values.push(expression);
     }
-  }, { skipNode: node => ts.isClassDeclaration(node) || ts.isFunctionLike(node) && !ts.isFunctionExpression(node) });
+  }, { skipNode: node => isFunctionLikeDeclaration(node) || ts.isClassDeclaration(node) });
   return values;
 }
 
