@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
-import { valid } from 'semver';
+import { valid, validRange } from 'semver';
 import { applyEdits, findNodeAtLocation, modify, parseTree, getNodeValue, type ParseError, type Node } from 'jsonc-parser';
 import { workspaceCache } from './WorkspaceCache';
 import { mcpCommand } from './McpCommand';
@@ -115,24 +115,43 @@ const launchBundle = (flag: string) => [
   'require(server);'
 ].join('\n');
 
-function isCursorNeorionEntry(value: unknown, localEntry: string) {
-  if (!value || typeof value !== 'object') return false;
+function cursorNeorionEntry(value: unknown, localEntry: string): 'scoped' | 'missing-root' | undefined {
+  if (!value || typeof value !== 'object') return;
   const { type, command, args } = value as Command;
-  if ((type !== undefined && type !== 'stdio') || !Array.isArray(args) ||
-      !args.every(arg => typeof arg === 'string')) return false;
+  if ((type !== undefined && type !== 'stdio') || typeof command !== 'string' || !Array.isArray(args) ||
+      !args.every(arg => typeof arg === 'string')) return;
   const workspace = '${workspaceFolder}';
+  const inWorkspace = (root: string) => {
+    const normalized = process.platform === 'win32' ? root.replace(/\\/g, '/') : root;
+    return (normalized === workspace || normalized.startsWith(workspace + '/')) &&
+      !normalized.split('/').includes('..') && !normalized.includes('\0');
+  };
   const matches = (expected: Command) => command === expected.command && JSON.stringify(args) === JSON.stringify(expected.args);
-  if (matches(mcpCommand({ root: workspace, localEntry }))) return true;
+  if (matches(mcpCommand({ root: workspace, localEntry }))) return 'scoped';
 
+  const executable = path.win32.basename(command);
+  let manual: string[] | undefined;
+  if (/^neorion(?:\.cmd)?$/.test(executable)) manual = args;
+  const npx = /^npx(?:\.cmd)?$/.test(executable);
+  const pnpmDlx = /^pnpm(?:\.cmd)?$/.test(executable) && args[0] === 'dlx';
+  if (npx || pnpmDlx) {
+    const [spec, ...invocation] = pnpmDlx || ['-y', '--yes'].includes(args[0]) ? args.slice(1) : args;
+    const version = /^neorion@(.+)$/.exec(spec ?? '')?.[1];
+    if (spec === 'neorion' || version === 'latest' || (version?.trim() && validRange(version))) manual = invocation;
+  }
+  if (manual?.[0] === 'mcp') {
+    if (manual.length === 1) return 'missing-root';
+    if (manual.length === 3 && ['--root', '--workspace'].includes(manual[1]) && inWorkspace(manual[2])) return 'scoped';
+  }
   const root = args.at(-1);
-  if (!root || (root !== workspace && !root.startsWith(workspace + '/'))) return false;
+  if (!root || !inWorkspace(root)) return;
   // Compare the full launch arguments after extracting the installed package's version.
   const spec = (command === 'npx' ? args[1] : /\bnpx -y (\S+) mcp\b/.exec(args[1] ?? '')?.[1]) ?? '';
   const releaseVersion = /\/download\/v([^/]+)\//.exec(spec)?.[1];
   const version = valid(releaseVersion ?? spec.split('@').at(-1) ?? '');
   const options = { root, registryVersion: version ?? undefined, useRelease: !!releaseVersion };
-  return !!version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
-    matches(mcpCommand({ ...options, discover, platform: 'win32' })));
+  if (version && [false, true].some(discover => matches(mcpCommand({ ...options, discover, platform: 'linux' })) ||
+    matches(mcpCommand({ ...options, discover, platform: 'win32' })))) return 'scoped';
 }
 
 function isExtensionCursorEntry(cache: string, entry: unknown) {
@@ -175,6 +194,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   const projectArgument = relativeProject || '.';
   const updated = new Set<McpTarget>();
 
+  let reusedCursorEntry = false;
   let preserveLegacyBundle = false;
   for (const target of connect ? targets : Object.keys(state.configs) as McpTarget[]) {
     const { file: configFile, key, type, variable } = MCP_TARGETS[target];
@@ -221,8 +241,16 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
     if (type) entry.type = 'stdio';
     const parsed = config(original ?? '{}', target);
     const current = parsed.entry && getNodeValue(parsed.entry);
-    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry)) &&
-        (isCursorNeorionEntry(current, cursorSetup.legacyLocalEntry) || isExtensionCursorEntry(cache, current))) continue;
+    if (cursorSetup && parsed.entry && (!previous || previous.hadNeorion || !equal(current, previous.entry))) {
+      const existing = cursorNeorionEntry(current, cursorSetup.legacyLocalEntry);
+      if (existing === 'missing-root') {
+        throw new Error(`In ${configFile}, add --root \${workspaceFolder} to the existing Neorion MCP arguments and rerun setup.`);
+      }
+      if (existing === 'scoped' || isExtensionCursorEntry(cache, current)) {
+        reusedCursorEntry = true;
+        continue;
+      }
+    }
     const implicitStdio = target === 'Cursor' && (!previous || previous.hadNeorion) &&
       equal(current, { command: entry.command, args: entry.args });
     const inline = target === 'Cursor' && !!parsed.group && onOneLine(original!, parsed.bom, parsed.group);
@@ -304,6 +332,7 @@ export function planMcp(root: string, project: string, targets: McpTarget[], bun
   if (legacyState !== null && legacyStateFile) changes.push({ file: legacyStateFile, content: null });
   return {
     count: updated.size,
+    reusedCursorEntry,
     configured: Object.keys(state.configs).length > 0,
     commit(finalize?: () => void) {
       const undo: Change[] = [];

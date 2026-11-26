@@ -959,7 +959,7 @@ test('Claude installs the hook only in projects and skips the user settings dire
   }
 });
 
-test('Claude cleans up created settings and prunes empty containers in legacy settings', t => {
+test('Claude cleans up created settings and prunes its empty containers', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
   const env = { PATH: home };
@@ -970,6 +970,7 @@ test('Claude cleans up created settings and prunes empty containers in legacy se
     assert.equal(result.stderr, '');
   };
   setup();
+  assert.match(fs.readFileSync(file, 'utf8'), /"PreToolUse": \[\r?\n/);
   setup();
   setup('--remove');
   assert.ok(!fs.existsSync(path.dirname(file)));
@@ -1006,6 +1007,35 @@ test('Claude cleans up created settings and prunes empty containers in legacy se
   assert.deepEqual(readJson(file), {});
 });
 
+test('Claude prunes containers from the master hook with or without an intervening setup', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const file = path.join(root, '.claude/settings.json');
+  fs.mkdirSync(path.dirname(file));
+  const setup = (...args) => {
+    const result = run(['setup', 'claude', '--no-hint', ...args], { PATH: home });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  const permissions = { allow: [] };
+  const legacyGroup = { matcher: 'Grep|Glob', hooks: [{ type: 'command', command: 'node',
+    args: ['-e', 'const ignored = /^[A-Z]\\w*(?:Props|Type)$/;', '--', 'neorion-query-advisory'],
+    timeout: 1, onFailure: 'continue' }] };
+  for (const upgrade of [false, true]) {
+    fs.writeFileSync(file, JSON.stringify({ permissions, hooks: { PreToolUse: [legacyGroup] } }, null, 2) + '\n');
+    if (upgrade) {
+      setup();
+      assert.doesNotMatch(setup(), /Neorion hook installed/);
+    }
+    setup('--remove');
+    assert.deepEqual(readJson(file), { permissions });
+  }
+  const PostToolUse = [{ matcher: 'Read', hooks: [{ type: 'command', command: 'user-read' }] }];
+  fs.writeFileSync(file, JSON.stringify({ permissions, hooks: { PreToolUse: [legacyGroup], PostToolUse } }));
+  setup('--remove');
+  assert.deepEqual(readJson(file), { permissions, hooks: { PostToolUse } });
+});
+
 test('Claude hook setup preserves compact user groups and adjacent JSONC comments', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
@@ -1025,6 +1055,50 @@ test('Claude hook setup preserves compact user groups and adjacent JSONC comment
     const removed = run(['setup', 'claude', '--remove', '--no-hint'], { PATH: home });
     assert.equal(removed.status, 0, removed.stderr);
     assert.equal(fs.readFileSync(file, 'utf8'), original);
+  }
+});
+
+test('Claude hook repeat setup preserves the installed settings byte for byte', async t => {
+  const group = '{"matcher":"Read","hooks":[{"type":"command","command":"user-read"}]}';
+  for (const [layout, original, installedLayout] of [
+    ['tab-indented', `\uFEFF{\r\n\t"hooks": {\r\n\t\t"PreToolUse": [\r\n\t\t\t${group}\r\n\t\t]\r\n\t}\r\n}\r\n`],
+    ['inline group', `{\n  "hooks": {\n    "PreToolUse": [${group}]\n  }\n}\n`,
+      /\},\n {6}\{\n {8}"matcher": "Grep\|Glob",\n/],
+    ['one line', `{"hooks":{"PreToolUse":[${group}]}}\n`, /^[^\r\n]+\n$/],
+    ['one line empty', '{"hooks":{"PreToolUse":[]}}', /^[^\r\n]+$/],
+    ['empty array', '{\n  "hooks": {\n    "PreToolUse": [], "PostToolUse": []\n  }\n}\n',
+      /"PreToolUse": \[\n {6}\{\n {8}"matcher": "Grep\|Glob",[\s\S]+\n {4}\], "PostToolUse": \[\]/],
+    ['empty array with spaces', '{\n  "hooks": {\n    "PreToolUse": [ ] // none yet\n  }\n}\n',
+      /\n {4}\] \/\/ none yet/],
+    ['empty array with comment', '{\n  "hooks": {\n    "PreToolUse": [ /* none */ ]\n  }\n}\n',
+      /\n {6}\/\* none \*\/\n {4}\]/],
+    ['empty array with permissions', '{"permissions":{},"hooks":{"PreToolUse":[]}}'],
+    ['existing empty hooks', '{"permissions":{},"hooks":{}}'],
+    ['existing empty hooks in multiline settings', '{\n  "permissions": {},\n  "hooks": {}\n}\n',
+      /"hooks": \{\n {4}"PreToolUse": \[/],
+    ['inline hooks with a comment', '{\r\n\t"permissions": {},\r\n\t"hooks": { /* keep */ },\r\n}\r\n',
+      /\r\n\t\t\/\* keep \*\/\r\n\t\},/]
+  ]) {
+    await t.test(layout, t => {
+      const { home, root, run } = fixture(t);
+      fakeAgent(home, 'claude');
+      const file = path.join(root, '.claude/settings.json');
+      fs.mkdirSync(path.dirname(file));
+      fs.writeFileSync(file, original);
+      const setup = (...args) => run(['setup', 'claude', '--no-hint', ...args], { PATH: home });
+      const added = setup();
+      assert.equal(added.status, 0, added.stderr);
+      const installed = fs.readFileSync(file);
+      assert.equal(neorionHooks(parse(installed.toString().replace(/^\uFEFF/, ''))).length, 1);
+      const repeated = setup();
+      assert.equal(repeated.status, 0, repeated.stderr);
+      assert.ok(fs.readFileSync(file).equals(installed), 'repeat setup changed settings bytes');
+      assert.doesNotMatch(repeated.stdout, /Neorion hook installed/);
+      if (installedLayout) assert.match(installed.toString(), installedLayout);
+      const removed = setup('--remove');
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.equal(fs.readFileSync(file, 'utf8'), original);
+    });
   }
 });
 
@@ -1061,6 +1135,7 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   };
   const manifest = path.join(root, 'package.json');
   const component = payload('Grep', '\\bDashboardShell\\b');
+  fs.appendFileSync(path.join(root, 'app/page.tsx'), 'export function FormError() { return <p />; }\n');
   fs.writeFileSync(manifest, '{"dependencies":{"next":"^15.0.0"}}');
   assert.equal(invoke(component, ['--require', preload]), '');
   const graph = run(['graph']);
@@ -1071,6 +1146,8 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
     [payload('Glob', componentGlob, 'app', '../another/session'), 'who_renders', 'DashboardShell'],
     [payload('Glob', '**/app/settings/[id]/page.tsx'), 'wrappers', '/settings/[id]'],
     [payload('Grep', '/api/users'), 'api_consumers', '/api/users'],
+    [payload('Grep', 'FormError'), 'search', 'FormError'],
+    [payload('Glob', '**/ChatSDKError.ts'), 'search', 'ChatSDKError'],
     [payload('Grep', 'signOut'), 'search', 'signOut']
   ]) {
     const output = invoke(input);
@@ -1085,13 +1162,31 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
     payload('Bash', 'DashboardShell'), payload('Glob', '**/*.{tsx,ts}'),
     ...['Dashboard.*|Shell', 'Error', 'Promise', 'React', 'Props', '^export', '^import', 'useState', 'useCurrentUser',
       'className', '\\bonClick\\b', 'getServerSideProps', 'generateMetadata', 'dangerouslySetInnerHTML',
-      'NextResponse', 'Metadata', 'ButtonProps', 'ButtonType']
+      'NextResponse', 'Metadata', 'ButtonProps', 'ButtonType', 'ArtifactKind', 'UIMessage', 'ModelMessage']
       .map(pattern => payload('Grep', pattern))
   ]) {
     assert.equal(invoke(input), '', input);
   }
   fs.writeFileSync(manifest, '{"dependencies":{"react":"^19.0.0"}}');
   assert.equal(invoke(payload('Grep', 'DashboardShell', undefined, 'non-next-project')), '');
+});
+
+test('Claude hook removal preserves an array whose original group was deleted after setup', t => {
+  const { home, root, run } = fixture(t);
+  fakeAgent(home, 'claude');
+  const file = path.join(root, '.claude/settings.json');
+  const group = '{"matcher":"Read","hooks":[]}';
+  fs.mkdirSync(path.dirname(file));
+  fs.writeFileSync(file, `{\n  "hooks": {\n    "PreToolUse": [${group},]\n  }\n}\n`);
+  const setup = (...args) => run(['setup', 'claude', '--no-hint', ...args], { PATH: home });
+  const added = setup();
+  assert.equal(added.status, 0, added.stderr);
+  const installed = fs.readFileSync(file, 'utf8');
+  assert.ok(installed.includes(group + ','));
+  fs.writeFileSync(file, installed.replace(group + ',', ''));
+  const removed = setup('--remove');
+  assert.equal(removed.status, 0, removed.stderr);
+  assert.deepEqual(readJson(file), { hooks: { PreToolUse: [] } });
 });
 
 test('Cursor setup merges MCP and shares the Claude hint, with idempotent project removal', t => {
@@ -1208,23 +1303,41 @@ test('Cursor migrates an owned local entry to a release archive and leaves a mat
   assert.equal(fs.readFileSync(config, 'utf8'), withServer);
 });
 
-test('Cursor reuses extension registry entries and gives guidance for conflicting servers', t => {
+test('Cursor reuses user and extension MCP entries and gives guidance for conflicting servers', t => {
   const { root, run } = fixture(t);
   const config = path.join(root, '.cursor/mcp.json');
   const rule = path.join(root, '.cursor/rules/neorion-query.mdc');
   fs.mkdirSync(path.dirname(config));
-  for (const options of [{ root: '${workspaceFolder}' }, { root: '${workspaceFolder}/apps/web', registryVersion: '0.5.2' },
+  const registryEntries = [{ root: '${workspaceFolder}' }, { root: '${workspaceFolder}/apps/web', registryVersion: '0.5.2' },
     { root: '${workspaceFolder}', registryVersion: '0.5.2', platform: 'win32' },
     { root: '${workspaceFolder}', discover: true, platform: 'linux' },
     { root: '${workspaceFolder}', discover: true, platform: 'win32' },
-    { root: '${workspaceFolder}', registryVersion: '0.5.2', useRelease: true }]) {
-    const original = JSON.stringify({ mcpServers: { neorion: {
-      ...mcpCommand(options), type: 'stdio'
-    } } });
+    { root: '${workspaceFolder}', registryVersion: '0.5.2', useRelease: true }]
+    .map(options => ({ ...mcpCommand(options), type: 'stdio' }));
+  for (const neorion of [...registryEntries,
+    { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}'] },
+    { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}/apps/web'] },
+    { command: 'neorion', args: ['mcp', '--workspace', '${workspaceFolder}'] },
+    { command: '/usr/local/bin/neorion', args: ['mcp', '--root', '${workspaceFolder}'] },
+    { type: 'stdio', command: 'C:\\npm\\neorion.cmd', args: ['mcp', '--root', '${workspaceFolder}/apps/web'] },
+    { command: 'npx', args: ['-y', 'neorion', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'npx', args: ['--yes', 'neorion', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'npx', args: ['-y', 'neorion@^0.6.0', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'pnpm', args: ['dlx', 'neorion', 'mcp', '--workspace', '${workspaceFolder}/apps/web'] },
+    { type: 'stdio', command: 'npx', args: ['neorion@latest', 'mcp', '--root', '${workspaceFolder}'],
+      env: { NEORION_AUTOBUILD: '0' } },
+    { command: 'npx', args: ['neorion@0.5.2', 'mcp', '--root', '${workspaceFolder}'] }
+  ]) {
+    const original = `{\n  // Keep the existing entry\n  "mcpServers": { "neorion": ${JSON.stringify(neorion)}, },\n}\n`;
     fs.writeFileSync(config, original);
     const added = run(['setup', 'cursor']);
     assert.equal(added.status, 0, added.stderr);
-    assert.ok(fs.existsSync(rule));
+    assert.ok(added.stdout.split(/\r?\n/).includes(`${config} (existing Neorion entry kept)`));
+    assertQueryHint(fs.readFileSync(rule, 'utf8'));
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    const repeated = run(['setup', 'cursor']);
+    assert.equal(repeated.status, 0, repeated.stderr);
+    assert.ok(repeated.stdout.split(/\r?\n/).includes(`${config} (existing Neorion entry kept)`));
     assert.equal(fs.readFileSync(config, 'utf8'), original);
     const removed = run(['setup', 'cursor', '--remove']);
     assert.equal(removed.status, 0, removed.stderr);
@@ -1232,13 +1345,42 @@ test('Cursor reuses extension registry entries and gives guidance for conflictin
     assert.equal(fs.readFileSync(config, 'utf8'), original);
   }
 
-  const conflict = '{"mcpServers":{"neorion":{"command":"another-server"}}}';
-  fs.writeFileSync(config, conflict);
-  const failed = run(['setup', 'cursor']);
-  assert.equal(failed.status, 1);
-  assert.match(failed.stderr, /Keep the existing entry or remove it.*before rerunning setup/);
-  assert.equal(fs.readFileSync(config, 'utf8'), conflict);
-  assert.ok(!fs.existsSync(rule));
+  for (const neorion of [{ command: 'another-server' }, { command: 'neorion', args: ['query'] }]) {
+    const conflict = JSON.stringify({ mcpServers: { neorion } });
+    fs.writeFileSync(config, conflict);
+    const failed = run(['setup', 'cursor']);
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /Keep the existing entry or remove it.*before rerunning setup/);
+    assert.equal(fs.readFileSync(config, 'utf8'), conflict);
+    assert.ok(!fs.existsSync(rule));
+  }
+});
+
+test('Cursor requires an explicit workspace root for hand-written Neorion entries', t => {
+  const { root, run } = fixture(t);
+  const config = path.join(root, '.cursor/mcp.json');
+  const rule = path.join(root, '.cursor/rules/neorion-query.mdc');
+  fs.mkdirSync(path.dirname(config));
+  for (const neorion of [
+    { command: 'neorion', args: ['mcp'] },
+    { command: 'npx', args: ['-y', 'neorion', 'mcp'] },
+    { command: '/usr/local/bin/neorion', args: ['mcp'] },
+    { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}/../outside'] },
+    { command: 'pnpm', args: ['dlx', 'neorion', 'mcp', '--workspace', '${workspaceFolder}/../outside'] },
+    ...(process.platform === 'win32' ? [] : [
+      { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}\\outside'] }
+    ]),
+    { command: 'npx', args: ['-y', 'neorion@next', 'mcp', '--root', '${workspaceFolder}'] },
+    { command: 'neorion', args: ['mcp', '--root', '${workspaceFolder}', '--verbose'] }
+  ]) {
+    const original = JSON.stringify({ mcpServers: { neorion } });
+    fs.writeFileSync(config, original);
+    const failed = run(['setup', 'cursor']);
+    assert.equal(failed.status, 1);
+    if (neorion.args.at(-1) === 'mcp') assert.match(failed.stderr, /add --root \$\{workspaceFolder\}/);
+    assert.equal(fs.readFileSync(config, 'utf8'), original);
+    assert.ok(!fs.existsSync(rule));
+  }
 });
 
 test('Setup upgrades or removes a released 0.5.2 Codex skill and an untracked legacy registration', async t => {
@@ -1631,8 +1773,15 @@ test('failed Codex MCP registration leaves the project hint and skill untouched'
   assert.match(result.stderr, /Cannot load Codex configuration[\s\S]*Check that CODEX_HOME/);
   assert.equal(fs.readFileSync(hint, 'utf8'), '# Project instructions\n');
   assert.equal(fs.existsSync(path.join(home, '.agents/skills/neorion')), false);
+  assert.equal(fs.existsSync(path.join(home, '.agents')), false);
   assert.equal(fs.existsSync(mock.config), false);
   assert.ok(mock.calls().some(([, action]) => action === 'add'));
+  fs.mkdirSync(path.join(home, '.agents'));
+  assert.equal(run(['setup', 'codex'], env).status, 1);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.agents')), []);
+  fs.mkdirSync(path.join(home, '.agents/skills/other'), { recursive: true });
+  assert.equal(run(['setup', 'codex'], env).status, 1);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.agents/skills')), ['other']);
 });
 
 test('declared React SDK ranges select the hook endpoint without installed types', t => {
@@ -1690,4 +1839,17 @@ test('an app inherits the workspace SDK declaration and refreshes when it change
   manifest(app, '^2.0.0', { name: 'web' });
   assert.match(query('chat'), consumer);
   assert.doesNotMatch(query('custom'), consumer);
+  manifest(app, 'catalog:', { name: 'web' });
+  const yaml = path.join(workspace, 'pnpm-workspace.yaml');
+  fs.writeFileSync(yaml, "packages:\n  - 'apps/*'\ncatalog:\n  '@ai-sdk/react': '^1.1.0'\n");
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  fs.writeFileSync(yaml, "packages: [apps/*]\ncatalog: { '@ai-sdk/react': '^2.1.0' }\ncatalogs:\n  legacy: { '@ai-sdk/react': '~1.2.0' }\n");
+  assert.match(query('chat'), consumer);
+  assert.doesNotMatch(query('custom'), consumer);
+  manifest(app, 'catalog:legacy', { name: 'web' });
+  assert.match(query('custom'), consumer);
+  assert.doesNotMatch(query('chat'), consumer);
+  fs.unlinkSync(yaml);
+  for (const route of ['custom', 'chat']) assert.match(query(route), /useCustomChat POST AI SDK transport \[partial url\]/);
 });

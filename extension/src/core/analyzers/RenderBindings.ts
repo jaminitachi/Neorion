@@ -15,6 +15,13 @@ type Supply = { site: RenderSite; name: string };
 type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
 enum Resolution { Unknown, Empty, External, Local }
 
+export function isComponentWrapper(node: Node | undefined): node is CallExpression {
+  if (!Node.isCallExpression(node)) return false;
+  const callee = node.getExpression();
+  const name = packageMember(callee, 'react');
+  return name === 'memo' || name === 'forwardRef' || /(?:^|\.)(?:memo|forwardRef)$/.test(callee.getText());
+}
+
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
   if (candidate.possible !== existing.possible) return !candidate.possible;
   return !candidate.conditional && existing.conditional;
