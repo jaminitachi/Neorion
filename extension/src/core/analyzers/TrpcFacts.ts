@@ -97,7 +97,8 @@ export class TrpcFacts {
         const expression = node.getExpression();
         const kind = imported(expression, proxyPackage, reactFactories) ? 'react' :
           imported(expression, proxyPackage, proxyFactories) ? 'client' :
-          imported(expression, tanstackPackage, /^createTRPCContext$/) ? 'context' : undefined;
+          imported(expression, tanstackPackage, /^createTRPCContext$/) ? 'context' :
+          imported(expression, tanstackPackage, /^createTRPCOptionsProxy$/) ? 'options' : undefined;
         if (kind) factories.set(node, kind);
       });
     }
@@ -238,11 +239,14 @@ export class TrpcFacts {
         if (child) {
           this.nested.add(child);
           result.entries.set(name, child);
-        } else if (Node.isObjectLiteralExpression(value)) {
-          const record: Router = { entries: new Map() };
-          this.readObject(value, record, branch, property);
-          result.entries.set(name, record);
-        } else result.unresolved ??= property;
+        } else {
+          const recordNode = Node.isIdentifier(value) || member(value) ? unwrap(initializer(localValue(value!))) : value;
+          if (Node.isObjectLiteralExpression(recordNode)) {
+            const record: Router = { entries: new Map() };
+            this.readObject(recordNode, record, branch, property);
+            result.entries.set(name, record);
+          } else result.unresolved ??= property;
+        }
       }
     }
   }

@@ -1817,9 +1817,8 @@ test('Pages API workspace proof is scoped and invalidates the index after siblin
   const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
   assert.deepEqual(index.routes.find(route => route.url === '/api/fixture').methods, ['POST']);
   assert.deepEqual(index.routes.find(route => route.url === '/api/alias').methods, ['ALL']);
-  assert.ok(index.pagesWorkspaceInputs.files.includes('packages/dispatch/handler.ts'));
-  assert.ok(index.pagesWorkspaceInputs.files.every(file => !file.includes('packages/unused/')));
-  assert.ok(Object.keys(index.files).every(file => !file.startsWith('../')));
+  assert.equal(index.workspacePackages['../packages/dispatch/handler.ts'], '@fixture/dispatch');
+  assert.ok(!Object.keys(index.files).some(file => file.includes('/packages/unused/')));
   fs.writeFileSync(path.join(workspace, 'packages/dispatch/handler.ts'), 'export const dispatch = () => () => null;\n');
   const query = run('query', 'api_consumers', '/api/fixture');
   assert.match(query, /# partial: API handler factory or re-export unresolved/);

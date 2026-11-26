@@ -31,13 +31,13 @@ function rootBinding(node: Node): Node {
   return node;
 }
 
-function externalAlias(node: Node | undefined, files: Set<SourceFile>): string | undefined {
+function externalAlias(node: Node | undefined, files: Set<SourceFile>, workspace?: WorkspaceBindings): string | undefined {
   if (!Node.isIdentifier(node) && !Node.isPropertyAccessExpression(node)) return;
   const root = rootBinding(node);
   const binding = root.getSymbol()?.getDeclarations()[0];
   const imported = binding?.getFirstAncestorByKind(SyntaxKind.ImportDeclaration);
   const module = imported?.getModuleSpecifierValue();
-  if (!module || !isPackageSpecifier(module) || declarationsOf(root).some(target => files.has(target.getSourceFile()))) return;
+  if (!module || !isPackageSpecifier(module) || workspace?.has(module) || declarationsOf(root).some(target => files.has(target.getSourceFile()))) return;
   if (module === 'zod' || module.startsWith('zod/')) return;
   const name = Node.isImportSpecifier(binding) ? binding.getName() :
     Node.isNamespaceImport(binding) ? '' : 'default';
@@ -201,7 +201,14 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
       }
       if (id) break;
     }
-    if (!id && symbol.flags & ts.SymbolFlags.Alias) id = fromSymbol(checker.getImmediateAliasedSymbol(symbol));
+    if (!id && symbol.flags & ts.SymbolFlags.Alias && symbol.declarations?.length) {
+      try {
+        id = fromSymbol(checker.getImmediateAliasedSymbol(symbol));
+      } catch (error) {
+        // The checker can mark synthesized members as aliases without a resolvable alias declaration.
+        if (!(error instanceof Error) || error.message !== 'Debug Failure.') throw error;
+      }
+    }
     cached.set(symbol, id);
     return id;
   };
@@ -340,7 +347,7 @@ export class ComponentAnalyzer {
         if (aliases.has(node)) continue;
         const fn = callable(node);
         const initializer = Node.isVariableDeclaration(node) ? node.getInitializer() : undefined;
-        const aliasOf = schemaBindings.has(node) ? undefined : externalAlias(initializer, projectFiles);
+        const aliasOf = schemaBindings.has(node) ? undefined : externalAlias(initializer, projectFiles, this.workspace);
         const body = fn ? fn.getBody() : (aliasOf ? initializer : undefined) ??
           (Node.isClassDeclaration(node) ? node.getInstanceMethod('render')?.getBody() : undefined);
         if (!body) continue;

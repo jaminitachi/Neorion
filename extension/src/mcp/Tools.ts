@@ -9,6 +9,7 @@ export const tools = [{
     type: 'object',
     properties: {
       kind: { enum: kinds },
+      app: { type: 'string', description: 'Next.js app path or package name in the workspace. Omit to query all apps when available.' },
       target: { type: 'string', description: 'Required for every kind except changes. Name, path#Name, route URL/file, or search text.' },
       limit: { type: 'integer', minimum: 1, maximum: 100 },
       direct: { type: 'boolean' },
