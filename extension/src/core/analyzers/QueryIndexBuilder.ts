@@ -5,7 +5,7 @@ import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -20,7 +20,9 @@ import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
-import { isComponentWrapper } from './RenderBindings';
+import { isComponentWrapper, renderBindings } from './RenderBindings';
+import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
+import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -36,7 +38,7 @@ const REFERENCE_KINDS = new Set([
 const FLOW_KINDS = new Set([SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
 const MOCK_KEY_KINDS = new Set([SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.MethodDeclaration]);
 
-function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
+function configuredPaths(source: SourceFile, root: string, specifier: string) {
   if (specifier.startsWith('.')) return [path.resolve(path.dirname(source.getFilePath()), specifier)];
   const options = source.getProject().getCompilerOptions();
   const matches = Object.entries(options.paths ?? {}).flatMap(([pattern, targets]) => {
@@ -51,41 +53,6 @@ function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
   }).sort((a, b) => b.rank - a.rank);
   const match = matches[0];
   return match ? match.targets.map(target => path.resolve(root, options.baseUrl ?? '.', target.replace('*', match.wildcard))) : [];
-}
-
-function componentValueUse(node: Node, indexedComponent: (node: Node | undefined) => boolean): boolean {
-  if (Node.isShorthandPropertyAssignment(node)) return true;
-  let value = node;
-  for (let parent = value.getParent(); parent; parent = value.getParent()) {
-    if (wrappedExpression(parent) === value ||
-        Node.isPropertyAccessExpression(parent) && parent.getNameNode() === value ||
-        Node.isConditionalExpression(parent) && parent.getCondition() !== value) {
-      value = parent;
-      continue;
-    }
-    if (Node.isBinaryExpression(parent) &&
-        [SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken, SyntaxKind.AmpersandAmpersandToken]
-          .includes(parent.getOperatorToken().getKind())) {
-      value = parent;
-      continue;
-    }
-    if (Node.isJsxExpression(parent)) {
-      const attribute = parent.getParent();
-      return Node.isJsxAttribute(attribute) && attribute.getNameNode().getText() !== 'children';
-    }
-    if (Node.isCallExpression(parent) && parent.getArguments()[0] === value) {
-      const helper = packageMember(parent.getExpression(), 'react');
-      if (helper === 'createElement' || (helper === 'memo' || helper === 'forwardRef') && indexedComponent(parent.getParent())) {
-        return false;
-      }
-    }
-    return Node.isArrayLiteralExpression(parent) || Node.isSpreadElement(parent) || Node.isSpreadAssignment(parent) ||
-      ((Node.isPropertyAssignment(parent) || Node.isVariableDeclaration(parent)) && parent.getInitializer() === value) ||
-      ((Node.isCallExpression(parent) || Node.isNewExpression(parent)) && parent.getArguments().includes(value)) ||
-      Node.isReturnStatement(parent) || Node.isArrowFunction(parent) && parent.getBody() === value ||
-      Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getRight() === value;
-  }
-  return false;
 }
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
@@ -110,31 +77,323 @@ function receiver(expression: Node) {
   if (Node.isIdentifier(expression)) return { root: expression, members };
 }
 
+function throughWrappers(node: Node) {
+  for (let parent = node.getParent(); parent && wrappedExpression(parent) === node; parent = node.getParent()) node = parent;
+  return node;
+}
+
+function unwrapValue(node: Node | undefined) {
+  let inner: Node | undefined;
+  while (node && (inner = wrappedExpression(node))) node = inner;
+  return node;
+}
+
 function dynamicExport(node: Node) {
-  const parent = node.getParent();
-  if (!Node.isPropertyAccessExpression(parent) || parent.getName() !== 'then') return { name: 'default' };
-  const call = parent.getParent();
-  const callback = Node.isCallExpression(call) ? call.getArguments()[0] : undefined;
-  if (!Node.isArrowFunction(callback) && !Node.isFunctionExpression(callback)) return;
-  const body = callback.getBody();
-  const statements = Node.isBlock(body) ? body.getStatements() : [];
-  const result = Node.isBlock(body)
-    ? statements.length === 1 && Node.isReturnStatement(statements[0]) ? statements[0].getExpression() : undefined
-    : body;
-  if (Node.isPropertyAccessExpression(result) &&
-      result.getExpression().getText() === callback.getParameters()[0]?.getName()) {
-    return { name: result.getName(), selector: result.getNameNode() };
+  let expression = throughWrappers(node);
+  const awaited = expression.getParent();
+  if (Node.isAwaitExpression(awaited) && awaited.getExpression() === expression) {
+    expression = throughWrappers(awaited);
+    const selector = expression.getParent();
+    if (Node.isPropertyAccessExpression(selector) && selector.getExpression() === expression) {
+      return { name: selector.getName(), selector, expression: throughWrappers(selector) };
+    }
   }
+  const parent = expression.getParent();
+  if (!Node.isPropertyAccessExpression(parent) || parent.getExpression() !== expression || parent.getName() !== 'then') {
+    return { name: 'default', expression };
+  }
+  const call = parent.getParent();
+  if (!Node.isCallExpression(call) || call.getExpression() !== parent) return;
+  const callback = call.getArguments()[0];
+  if (!Node.isArrowFunction(callback) && !Node.isFunctionExpression(callback)) return;
+  let result = unwrapValue(simpleReturn(callback.getBody()));
+  // React.lazy expects an object with a default export.
+  if (Node.isObjectLiteralExpression(result) && result.getProperties().length === 1) {
+    const [member] = result.getProperties();
+    if (Node.isPropertyAssignment(member) && member.getName() === 'default') result = unwrapValue(member.getInitializer());
+  }
+  const parameter = callback.getParameters()[0];
+  if (!parameter) return;
+  if (Node.isPropertyAccessExpression(result) && bindingOf(unwrapValue(result.getExpression())) === parameter) {
+    return { name: result.getName(), selector: result, expression: throughWrappers(call) };
+  }
+  if (!Node.isIdentifier(result)) return;
+  const binding = bindingOf(result);
+  if (binding === parameter) return { name: 'default', expression: throughWrappers(call) };
+  const pattern = parameter.getNameNode();
+  if (!Node.isBindingElement(binding) || !Node.isObjectBindingPattern(pattern) || binding.getParent() !== pattern ||
+      binding.getInitializer() || binding.getDotDotDotToken()) return;
+  const property = binding.getPropertyNameNode() ?? binding.getNameNode();
+  if (Node.isIdentifier(property) || Node.isStringLiteral(property)) {
+    return { name: Node.isIdentifier(property) ? property.getText() : property.getLiteralText(), expression: throughWrappers(call) };
+  }
+}
+
+function simpleReturn(body: Node) {
+  if (!Node.isBlock(body)) return body;
+  const statements = body.getStatements();
+  const last = statements.pop();
+  if (Node.isReturnStatement(last) && statements.every(statement =>
+    Node.isVariableStatement(statement) && statement.getDeclarationKind() === 'const')) return last.getExpression();
+}
+
+function returnedValueUse(node: Node) {
+  let child = node;
+  for (let parent = child.getParent(); parent; child = parent, parent = parent.getParent()) {
+    if (Node.isReturnStatement(parent)) return parent.getExpression() === child;
+    if (Node.isArrowFunction(parent)) return parent.getBody() === child;
+    if (wrappedExpression(parent) === child || Node.isShorthandPropertyAssignment(parent) ||
+        Node.isPropertyAssignment(parent) && parent.getInitializer() === child ||
+        Node.isObjectLiteralExpression(parent) || Node.isArrayLiteralExpression(parent) ||
+        Node.isConditionalExpression(parent) && parent.getCondition() !== child) continue;
+    return false;
+  }
+  return false;
+}
+
+function lazyFactory(call: import('ts-morph').CallExpression) {
+  const callee = call.getExpression();
+  if (!Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return false;
+  const origin = importBinding(callee);
+  return origin?.module === 'next/dynamic' && origin.name === 'default' && Node.isIdentifier(callee) ||
+    origin?.module === 'react' && packageMember(callee, 'react') === 'lazy';
+}
+
+function lazyVariable(call: Node) {
+  const initializer = throughWrappers(call);
+  const binding = initializer.getParent();
+  return Node.isVariableDeclaration(binding) && binding.getInitializer() === initializer &&
+    binding.getVariableStatement()?.getDeclarationKind() === 'const' ? binding : undefined;
+}
+
+function stableComponentBinding(node: Node) {
+  if (Node.isVariableDeclaration(node)) return !!constValue(node);
+  if (!Node.isFunctionDeclaration(node)) return false;
+  const name = node.getNameNode();
+  return !name?.findReferences().some(symbol => symbol.getReferences().some(reference =>
+    reference.isWriteAccess() && !reference.isDefinition() && reference.getNode() !== name &&
+    !reference.getNode().getFirstAncestorByKind(SyntaxKind.ImportDeclaration)));
+}
+
+function resolvedPromiseValue(call: import('ts-morph').CallExpression) {
+  const callee = call.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'resolve') return;
+  const promise = callee.getExpression();
+  if (!Node.isIdentifier(promise) || promise.getText() !== 'Promise' ||
+      declarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
+  const value = unwrapValue(call.getArguments()[0]);
+  if (Node.isIdentifier(value)) return value;
+}
+
+type LoaderImport = {
+  imported: import('ts-morph').CallExpression;
+  name?: string;
+  selector?: import('ts-morph').PropertyAccessExpression;
+  possible: boolean;
+  partialOnly?: 'namespace' | 'opaque';
+};
+
+type LoaderTarget = LoaderImport | { value: Node; promise: import('ts-morph').CallExpression; possible: boolean };
+
+function loaderTargets(loader: FunctionNode, files: ReadonlySet<SourceFile>): LoaderTarget[] {
+  type Selection = Pick<LoaderImport, 'name' | 'selector'>;
+  type PromiseBinding = { parameter: Node; input: Node; outer?: PromiseBinding };
+  const targets: LoaderTarget[] = [];
+  let budget = 64;
+  const follow = (value: Node | undefined, possible: boolean, selection?: Selection, binding?: PromiseBinding) => {
+    const node = unwrapValue(value);
+    if (!node || --budget < 0) return;
+    if (Node.isAwaitExpression(node)) {
+      follow(node.getExpression(), possible, selection, binding);
+    } else if (Node.isConditionalExpression(node)) {
+      const condition = valueNode(node.getCondition());
+      if (!Node.isFalseLiteral(condition)) follow(node.getWhenTrue(), possible || !Node.isTrueLiteral(condition), selection, binding);
+      if (!Node.isTrueLiteral(condition)) follow(node.getWhenFalse(), possible || !Node.isFalseLiteral(condition), selection, binding);
+    } else if (!selection && Node.isPropertyAccessExpression(node)) {
+      follow(node.getExpression(), possible, { name: node.getName(), selector: node }, binding);
+    } else if (!selection && Node.isElementAccessExpression(node)) {
+      const index = node.getArgumentExpression();
+      const keys = index ? finiteTemplateValues(index) : [undefined];
+      for (const key of keys) if (key !== undefined) {
+        follow(node.getExpression(), possible || keys.length !== 1, { name: key }, binding);
+      }
+    } else if (Node.isObjectLiteralExpression(node) && (!selection || selection.name === 'default')) {
+      const [member, extra] = node.getProperties();
+      if (!extra && Node.isPropertyAssignment(member) && member.getName() === 'default') {
+        follow(member.getInitializer(), possible, undefined, binding);
+      }
+    } else if (Node.isIdentifier(node)) {
+      const declaration = bindingOf(node);
+      if (binding && declaration === binding.parameter) {
+        follow(binding.input, possible, selection, binding.outer);
+      } else if (!selection && Node.isBindingElement(declaration) && !declaration.getInitializer() && !declaration.getDotDotDotToken()) {
+        const pattern = declaration.getParent();
+        const property = declaration.getPropertyNameNode() ?? declaration.getNameNode();
+        const name = Node.isIdentifier(property) ? property.getText() : Node.isStringLiteral(property) ? property.getLiteralText() : undefined;
+        if (name && Node.isObjectBindingPattern(pattern)) {
+          const owner = pattern.getParent();
+          if (binding && owner === binding.parameter) follow(binding.input, possible, { name }, binding.outer);
+          else follow(constValue(owner), possible, { name }, binding);
+        }
+      } else if (declaration) {
+        const local = Node.isVariableDeclaration(declaration) && localLoaderValue(declaration, node);
+        follow(constValue(declaration) ?? (local || undefined), possible, selection, binding);
+      }
+    } else if (Node.isCallExpression(node)) {
+      const callee = node.getExpression();
+      const resolved = !selection ? resolvedPromiseValue(node) : undefined;
+      if (callee.getKind() === SyntaxKind.ImportKeyword) {
+        targets.push({ imported: node, name: 'default', ...selection, possible });
+      } else if (resolved) {
+        targets.push({ value: resolved, promise: node, possible });
+      } else if (Node.isPropertyAccessExpression(callee) && callee.getName() === 'then') {
+        const callback = functionNode(node.getArguments()[0]);
+        const parameter = callback?.getParameters()[0];
+        if (callback && files.has(callback.getSourceFile())) {
+          const body = callback.getBody();
+          const result = body && (simpleReturn(body) ?? mutableLoaderReturn(body));
+          const input = callee.getExpression();
+          for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) {
+            const before = targets.length;
+            follow(returned, possible || !result, selection, parameter ? { parameter, input, outer: binding } : binding);
+            if (targets.length !== before || !Node.isCallExpression(input) ||
+                input.getExpression().getKind() !== SyntaxKind.ImportKeyword) continue;
+            const value = unwrapValue(returned);
+            if (!Node.isElementAccessExpression(value) && !Node.isPropertyAccessExpression(value)) continue;
+            const receiver = unwrapValue(value.getExpression());
+            const declaration = bindingOf(receiver);
+            const namespace = parameter && declaration === parameter;
+            const opaque = Node.isPropertyAccessExpression(value) && Node.isIdentifier(receiver) && !declaration;
+            if (namespace || opaque) targets.push({ imported: input,
+              name: Node.isPropertyAccessExpression(value) ? value.getName() : undefined,
+              possible: true, partialOnly: namespace ? 'namespace' : 'opaque' });
+          }
+        }
+      } else {
+        const fn = functionNode(callee);
+        if (fn && files.has(fn.getSourceFile())) {
+          for (const { node } of executionSites(fn.getBody()).returned) follow(node, true, selection);
+        }
+      }
+    }
+  };
+  const body = loader.getBody();
+  const result = body && (simpleReturn(body) ?? mutableLoaderReturn(body));
+  for (const returned of result ? [result] : executionSites(body).returned.map(entry => entry.node)) follow(returned, !result);
+  return targets;
+}
+
+function mutableLoaderReturn(body: Node) {
+  const [result, other] = executionSites(body).returned;
+  if (!result || other || result.possible) return;
+  const read = unwrapValue(result.node);
+  const binding = bindingOf(read);
+  if (Node.isIdentifier(read) && Node.isVariableDeclaration(binding) && localLoaderValue(binding, read)) return result.node;
+}
+
+function localLoaderValue(declaration: import('ts-morph').VariableDeclaration, read: import('ts-morph').Identifier) {
+  const statement = declaration.getVariableStatement();
+  const name = declaration.getNameNode();
+  const returned = throughWrappers(read).getParent();
+  if (!statement || statement.getDeclarationKind() !== 'let' || !Node.isIdentifier(name) ||
+      !Node.isReturnStatement(returned) || !Node.isBlock(statement.getParent()) ||
+      statement.getParent() !== returned.getParent() || statement.getStart() >= returned.getStart()) return;
+  let value = declaration.getInitializer();
+  let latest = statement.getStart();
+  for (const symbol of name.findReferences()) for (const reference of symbol.getReferences()) {
+    if (!reference.isWriteAccess() || reference.isDefinition()) continue;
+    const use = reference.getNode();
+    const assignment = use.getParent();
+    if (!Node.isBinaryExpression(assignment) || assignment.getLeft() !== use ||
+        assignment.getOperatorToken().getKind() !== SyntaxKind.EqualsToken) return;
+    const entry = assignment.getParent();
+    if (!Node.isExpressionStatement(entry) || entry.getParent() !== statement.getParent() ||
+        entry.getStart() <= statement.getStart()) return;
+    if (entry.getStart() < returned.getStart() && entry.getStart() > latest) {
+      value = assignment.getRight();
+      latest = entry.getStart();
+    }
+  }
+  return value;
+}
+
+function finiteTemplateValues(node: Node, remaining = 8): (string | undefined)[] {
+  if (!remaining) return [undefined];
+  const value = valueNode(node);
+  if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) return [value.getLiteralText()];
+  if (Node.isNumericLiteral(value)) return [String(value.getLiteralValue())];
+  if (Node.isConditionalExpression(value)) {
+    const condition = valueNode(value.getCondition());
+    if (Node.isTrueLiteral(condition)) return finiteTemplateValues(value.getWhenTrue(), remaining - 1);
+    if (Node.isFalseLiteral(condition)) return finiteTemplateValues(value.getWhenFalse(), remaining - 1);
+    return [...new Set([value.getWhenTrue(), value.getWhenFalse()].flatMap(branch => finiteTemplateValues(branch, remaining - 1)))];
+  }
+  if (Node.isElementAccessExpression(value)) {
+    const array = valueNode(value.getExpression());
+    const index = value.getArgumentExpression();
+    if (Node.isArrayLiteralExpression(array) && index && !array.getElements().some(Node.isSpreadElement)) {
+      const keys = finiteTemplateValues(index, remaining - 1);
+      if (keys.every(key => key !== undefined && /^\d+$/.test(key))) {
+        return [...new Set(keys.flatMap(key => {
+          const element = array.getElements()[Number(key)];
+          return element && !Node.isOmittedExpression(element) ? finiteTemplateValues(element, remaining - 1) : ['undefined'];
+        }))];
+      }
+    }
+  }
+  // The checker can prove finite literal domains even when their runtime source
+  // is opaque (for example, an indexed tuple or a union-valued parameter).
+  const type = (value ?? node).getType();
+  const choices = type.isUnion() ? type.getUnionTypes() : [type];
+  if (choices.every(choice => choice.isStringLiteral() || choice.isNumberLiteral() ||
+      choice.isBooleanLiteral() || choice.isNull() || choice.isUndefined())) {
+    return [...new Set(choices.map(choice => String(choice.getLiteralValue() ?? choice.getText())))];
+  }
+  return [undefined];
+}
+
+function readsUrlParameter(value: Node) {
+  if (!Node.isCallExpression(value)) return false;
+  const callee = value.getExpression();
+  if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'get' ||
+      !Node.isStringLiteral(value.getArguments()[0])) return false;
+  const seen = new Set<Node>();
+  const fromLocation = (input: Node | undefined): boolean => {
+    const source = valueNode(input);
+    if (!source || seen.size >= 16 || seen.has(source)) return false;
+    seen.add(source);
+    if (Node.isBinaryExpression(source) &&
+        [SyntaxKind.QuestionQuestionToken, SyntaxKind.BarBarToken].includes(source.getOperatorToken().getKind())) {
+      return fromLocation(source.getLeft()) || fromLocation(source.getRight());
+    }
+    if (Node.isNewExpression(source)) {
+      const constructor = source.getExpression();
+      const params = packageMember(constructor, 'next/navigation') === 'ReadonlyURLSearchParams' ||
+        Node.isIdentifier(constructor) && constructor.getText() === 'URLSearchParams' &&
+          declarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+      return params && fromLocation(source.getArguments()[0]);
+    }
+    if (!Node.isCallExpression(source)) return false;
+    const expression = source.getExpression();
+    if (packageMember(expression, 'next/navigation') === 'useSearchParams') return true;
+    if (Node.isPropertyAccessExpression(expression) && expression.getName() === 'toString') {
+      return fromLocation(expression.getExpression());
+    }
+    return returns(functionNode(expression)?.getBody()).some(fromLocation);
+  };
+  return fromLocation(callee.getExpression());
 }
 
 export class QueryIndexBuilder {
   constructor(private readonly exportsOf = (file: SourceFile) => file.getExportedDeclarations()) {}
 
   private edges: [string, string, number, number, true?, true?, string?, RenderSite?, string?][] = [];
+  private renderSelections = new Map<typeof this.edges[number], RenderSelection>();
+  private contextExcluded = new Set<typeof this.edges[number]>();
   private replacedInlineRenders = new Set<typeof this.edges[number]>();
   private renderSites = new Map<Node, typeof this.edges>();
   private renderPairs = new Map<string, typeof this.edges>();
-  private renderLookupIssues = new Map<string, Node>();
+  private renderLookupIssues = new Map<string, { tag: Node; bindings: Node[] }>();
   private pageConditions = new Map<string, Map<typeof this.edges[number], PageRenderCondition>>();
   private propRequests: { file: string; node: Node; method?: string; gates: PropGate[] }[] = [];
   private pages = new Map<string, { layouts: string[]; chains: Wrapper[][] }>();
@@ -159,13 +418,16 @@ export class QueryIndexBuilder {
   private actions = new Map<string, ServerAction>();
   private actionUses: { caller: ServerAction['callers'][number]; node: Node }[] = [];
 
-  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node, detail?: string, site?: RenderSite, file?: string) {
+  render(from: string, to: string, line: number, conditional: number, layout?: true, possible?: true, tag?: Node,
+    detail?: string, site?: RenderSite, file?: string, contextExcluded?: true, selection?: RenderSelection) {
     const edge: typeof this.edges[number] = possible ? [from, to, line, conditional, layout, possible] :
       layout ? [from, to, line, conditional, layout] : [from, to, line, conditional];
     if (detail) edge[6] = detail;
     if (site) edge[7] = site;
     if (file) edge[8] = file;
     this.edges.push(edge);
+    if (selection) this.renderSelections.set(edge, selection);
+    if (contextExcluded) this.contextExcluded.add(edge);
     if (tag) {
       const entries = this.renderSites.get(tag) ?? [];
       entries.push(edge);
@@ -177,8 +439,14 @@ export class QueryIndexBuilder {
     }
   }
 
-  unresolvedRenderLookup(owner: string, tag: Node) {
-    if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, tag);
+  unresolvedRenderLookup(owner: string, tag: Node, bindings: Node[]) {
+    if (!this.renderLookupIssues.has(owner)) this.renderLookupIssues.set(owner, { tag, bindings });
+  }
+
+  private opaqueRenderLookups: { owner: string; tag: Node; sources: Set<Node> }[] = [];
+
+  opaqueRenderLookup(owner: string, tag: Node, sources: Set<Node>) {
+    this.opaqueRenderLookups.push({ owner, tag, sources });
   }
 
   replaceInlineRender(tag: Node, target: string, file: string, component?: string) {
@@ -256,6 +524,48 @@ export class QueryIndexBuilder {
     const exports = new Map(files.map(file => [file, this.exportsOf(file)]));
     const exported = new Set<Node>([...exports.values()].flatMap(entries => [...entries.values()].flat()));
     const fileByName = new Map<string, SourceFile>(files.map(file => [file.getFilePath(), file]));
+    const resolveDynamicModules = (specifier: Node | undefined, source: SourceFile, allowTemplate: boolean) => {
+      const resolve = (text: string) => fileByName.get(ts.resolveModuleName(text, source.getFilePath(),
+        source.getProject().getCompilerOptions(), ts.sys).resolvedModule?.resolvedFileName ?? '');
+      if (Node.isStringLiteral(specifier) || Node.isNoSubstitutionTemplateLiteral(specifier)) {
+        const target = declarationsOf(specifier).find(Node.isSourceFile) ?? resolve(specifier.getLiteralText());
+        return { modules: target ? [target] : [], exact: true };
+      }
+      if (!allowTemplate || !specifier) return { modules: [], exact: false };
+      if (!Node.isTemplateExpression(specifier)) {
+        const choices = finiteTemplateValues(specifier);
+        return { modules: [...new Set(choices.flatMap(value => value === undefined ? [] : resolve(value) ?? []))],
+          exact: choices.length === 1 && choices[0] !== undefined };
+      }
+      const placeholder = '\u0000';
+      let choices = [specifier.getHead().getLiteralText()];
+      let exact = true;
+      for (const span of specifier.getTemplateSpans()) {
+        const values = finiteTemplateValues(span.getExpression());
+        const suffix = span.getLiteral().getLiteralText();
+        exact &&= values.length === 1 && values[0] !== undefined;
+        const expanded = new Set<string>();
+        for (const prefix of choices) {
+          for (const value of values) {
+            expanded.add(prefix + (value ?? placeholder) + suffix);
+            if (expanded.size >= 4096) break;
+          }
+          if (expanded.size >= 4096) break;
+        }
+        choices = [...expanded];
+      }
+      const finite = choices.filter(choice => !choice.includes(placeholder)).flatMap(choice => resolve(choice) ?? []);
+      const patterns = choices.filter(choice => choice.includes(placeholder) && choice.split(placeholder, 1)[0].includes('/'))
+        .flatMap(choice => configuredPaths(source, root, choice)).map(absolute =>
+          new RegExp('^' + absolute.split(placeholder).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*') + '$'));
+      const modules = patterns.length ? files.filter(file => {
+        const absolute = file.getFilePath();
+        const stem = absolute.replace(/\.[cm]?[jt]sx?$/, '');
+        return patterns.some(regex => regex.test(absolute) || regex.test(stem) ||
+          stem.endsWith('/index') && regex.test(stem.slice(0, -6)));
+      }) : [];
+      return { modules: [...new Set([...finite, ...modules])], exact };
+    };
     const names = new Set<string>();
     const wrappedOwners = new Set<number>();
     const add = (node: Node, name: string, kind: QueryIndex['symbols'][number]['kind'], aliasOf: string | null) => {
@@ -272,7 +582,9 @@ export class QueryIndexBuilder {
     };
 
     for (const [node, component] of components) {
-      byGraphId.set(component.id, add(node, component.name, 'component', component.aliasOf ?? null));
+      const id = add(node, component.name, 'component', component.aliasOf ?? null);
+      if (component.renderName) index.symbols[id - 1].renderName = component.renderName;
+      byGraphId.set(component.id, id);
     }
     const actionSymbols = new Map<string, number>();
     for (const [node, id] of actions) {
@@ -389,6 +701,18 @@ export class QueryIndexBuilder {
     const projectFiles = new Set(files);
     const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node));
     const localCallables = new Map<number, Node>();
+    const workspaceEvent = (attribute: Node | undefined) => {
+      if (!Node.isJsxAttribute(attribute)) return;
+      const site = attribute.getParent()?.getParent();
+      if (!workspace || !Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return;
+      const name = attribute.getNameNode().getText();
+      if (!/^on[A-Z]/.test(name)) return;
+      const imported = importBinding(site.getTagNameNode());
+      if (imported && workspace.has(imported.module) ||
+          flow.targetsOf(site).some(target => workspace.packageFor(target.getSourceFile().getFilePath()))) {
+        return { site, name };
+      }
+    };
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
       let parent: Node | undefined = fn.getParent();
@@ -407,19 +731,26 @@ export class QueryIndexBuilder {
           Node.isVariableDeclaration(declaration) && Node.isSourceFile(declaration.getVariableStatement()?.getParent()))) return;
       const factoryName = declaration?.getName();
       const attribute = Node.isJsxExpression(parent) && parent.getParent();
+      const workspaceSite = workspaceEvent(attribute || undefined);
       const declaredName = Node.isArrowFunction(fn) ? undefined : fn.getName();
       const name = declaredName ??
         (returnedCallback && factoryName ? factoryName + ' (returned callback)' : factoryName) ?? event ??
+        (workspaceSite && workspaceSite.name + ' ' + jsxLabel(workspaceSite.site)) ??
         (attribute && Node.isJsxAttribute(attribute) ? attribute.getNameNode().getText() : undefined);
       if (!name) return;
       const id = add(binding, name, 'function', null);
       localCallables.set(id, binding);
-      if (returnedCallback || !factoryName && !declaredName) index.symbols[id - 1].synthetic = true;
+      const symbol = index.symbols[id - 1];
+      if (returnedCallback || !factoryName && !declaredName) symbol.synthetic = true;
+      if (symbol.synthetic && !event && workspaceSite && name !== workspaceSite.name) {
+        symbol.selectorAliases = [workspaceSite.name];
+      }
       byNode.set(fn, id);
       return id;
     };
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
       detail: string; gates?: PropGate[]; lookup: boolean }[] = [];
+    const pendingEvents: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; fn: FunctionNode; name: string }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
     const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[] }[]>();
     const dynamicCallSites = new Set<Node>();
@@ -455,7 +786,12 @@ export class QueryIndexBuilder {
             return;
           }
           const delivery = flow.eventDelivery(site, name);
-          if (!delivery) return;
+          if (!delivery) {
+            if (isFunction(value) && workspaceEvent(node)) {
+              pendingEvents.push({ site, attribute: node, fn: value, name });
+            }
+            return;
+          }
           const targets = callableTargets(value);
           if (!targets.length) {
             if (flow.read(value)) dynamicCallSites.add(node);
@@ -501,6 +837,13 @@ export class QueryIndexBuilder {
       }, { filterRaw: node => !ts.isJsxAttribute(node) || ts.isIdentifier(node.name) &&
         (node.name.text === 'ref' || /^on[A-Z]/.test(node.name.text)) });
     }
+    // Let existing invocation evidence establish selector aliases before
+    // adding handlers that were previously absent from the index.
+    const untracedEvents = pendingEvents.flatMap(({ site, attribute, fn, name }) => {
+      const label = jsxLabel(site);
+      const target = callableId(fn, name + ' ' + label);
+      return target === undefined ? [] : [{ site, attribute, target, detail: `${name} <${label}>` }];
+    });
 
     type Owners = [legacy?: number, graph?: number, possible?: boolean];
     const graphOwners = new Map([...byNode].filter(([, id]) => index.symbols[id - 1].kind !== 'constant')
@@ -566,6 +909,17 @@ export class QueryIndexBuilder {
         const line = startLine(event.attribute);
         (index.callIssues ??= {})[gateKey(owner, event.target, line)] = `${RENDER_LOOKUP_ISSUE} (${file}:${line})`;
       }
+    }
+    // An untraced callback still belongs to its JSX supplier for reverse impact.
+    const tracedHandlers = new Set(eventSites.map(({ target }) => target));
+    for (const targets of indirectCalls.values()) for (const { id } of targets) tracedHandlers.add(id);
+    for (const { site, attribute, target, detail } of untracedEvents) {
+      if (tracedHandlers.has(target)) continue;
+      const owner = owners(site)[1] ?? fileIdOf(site);
+      const line = startLine(attribute);
+      addFlowCall(owner, target, attribute, detail);
+      (index.callIssues ??= {})[gateKey(owner, target, line)] =
+        `prop callback untraced (${relativePath(attribute.getSourceFile())}:${line})`;
     }
     for (const [call, targets] of indirectCalls) {
       if (!Node.isCallExpression(call)) continue;
@@ -738,28 +1092,163 @@ export class QueryIndexBuilder {
         index.pagesEdges.push(row);
       }
     }
-    for (const [owner, tag] of this.renderLookupIssues) {
+    const addLookupIssue = (owner: string, tag: Node, opaque = false) => {
       const id = byGraphId.get(owner);
       if (id !== undefined) {
-        (index.renderLookupIssues ??= {})[id] = `${RENDER_LOOKUP_ISSUE} (${relativePath(tag.getSourceFile())}:${startLine(tag)})`;
+        const file = relativePath(tag.getSourceFile());
+        const reason = `${RENDER_LOOKUP_ISSUE} (${file}:${startLine(tag)})`;
+        const issues = opaque ? index.opaqueRenderLookupIssues ??= {} : index.renderLookupIssues ??= {};
+        issues[id] ??= reason;
+        return { file, reason };
       }
+    };
+
+    const traceLookupInputs = (roots: Iterable<Node>, issue: NonNullable<ReturnType<typeof addLookupIssue>>) => {
+      type Members = (string | null)[];
+      const seen = new Map<Node, Set<string>>();
+      let budget = 160;
+      const visit = (input: Node | undefined, members: Members = [], supplier?: SourceFile) => {
+        if (!input || --budget < 0 || !projectFiles.has(input.getSourceFile())) return;
+        const key = JSON.stringify(members);
+        const prior = seen.get(input) ?? new Set<string>();
+        if (prior.has(key)) return;
+        prior.add(key);
+        seen.set(input, prior);
+        const id = byNode.get(input);
+        if (!members.length && id !== undefined && index.symbols[id - 1].kind === 'component') {
+          const uses = (index.scopedRenderValueIssues ??= {});
+          const valueFile = relativePath(supplier ?? input.getSourceFile());
+          if (!uses[id] || isTestFile(uses[id].file) || isTestFile(uses[id].valueFile)) uses[id] = { ...issue, valueFile };
+          return;
+        }
+        const follow = (node: Node | undefined, path = members) => visit(node, path, supplier);
+        const prop = flow.read(input);
+        if (prop) {
+          flow.values(prop).forEach(binding => visit(binding.value, members, binding.site.getSourceFile()));
+          return;
+        }
+        if (Node.isPropertyAccessExpression(input)) {
+          follow(input.getExpression(), [input.getName(), ...members]);
+        } else if (Node.isElementAccessExpression(input)) {
+          const selector = input.getArgumentExpression();
+          for (const choice of selector ? finiteTemplateValues(selector) : [undefined]) {
+            follow(input.getExpression(), [choice ?? null, ...members]);
+          }
+        } else if (Node.isIdentifier(input)) {
+          const parent = input.getParent();
+          const declarations = Node.isShorthandPropertyAssignment(parent)
+            ? parent.getValueSymbol()?.getDeclarations() : declarationsOf(input);
+          declarations?.forEach(declaration => follow(declaration));
+        } else if (Node.isBindingElement(input)) {
+          if (input.getDotDotDotToken()) return;
+          const pattern = input.getParent();
+          const property = input.getPropertyNameNode() ?? input.getNameNode();
+          const name = Node.isArrayBindingPattern(pattern) ? String(pattern.getElements().indexOf(input)) :
+            Node.isIdentifier(property) ? property.getText() : Node.isStringLiteral(property) ? property.getLiteralText() : undefined;
+          const owner = pattern.getParent();
+          if (name !== undefined) follow(Node.isParameterDeclaration(owner) ? owner : constValue(owner), [name, ...members]);
+        } else if (Node.isParameterDeclaration(input)) {
+          const callback = input.getParent();
+          const call = throughWrappers(callback).getParent();
+          if (Node.isCallExpression(call) && call.getArguments()[0] === throughWrappers(callback)) {
+            const callee = call.getExpression();
+            if (Node.isPropertyAccessExpression(callee) && ['map', 'flatMap', 'find', 'filter'].includes(callee.getName())) {
+              follow(callee.getExpression(), [null, ...members]);
+            }
+          }
+        } else if (Node.isCallExpression(input)) {
+          // An opaque factory can use its arguments to produce the selected member.
+          input.getArguments().forEach(argument => follow(argument, []));
+        } else if (Node.isVariableDeclaration(input)) {
+          follow(constValue(input));
+        } else if (Node.isExportAssignment(input)) {
+          follow(input.getExpression());
+        } else if (Node.isArrayLiteralExpression(input)) {
+          const [member, ...rest] = members;
+          const elements = input.getElements();
+          if (member == null || elements.some(Node.isSpreadElement)) {
+            for (const element of elements) {
+              if (Node.isSpreadElement(element)) follow(element.getExpression(), members);
+              else follow(element, rest);
+            }
+          } else if (/^(?:0|[1-9]\d*)$/.test(member)) follow(elements[Number(member)], rest);
+        } else if (Node.isObjectLiteralExpression(input)) {
+          const [member, ...rest] = members;
+          for (const property of [...input.getProperties()].reverse()) {
+            if (Node.isSpreadAssignment(property)) {
+              follow(property.getExpression(), members);
+            } else if (member == null || property.getName() === member) {
+              follow(property, rest);
+              if (member != null) break;
+            }
+          }
+        } else if (Node.isPropertyAssignment(input)) {
+          follow(input.getInitializer());
+        } else if (Node.isShorthandPropertyAssignment(input)) {
+          follow(input.getNameNode());
+        } else if (Node.isConditionalExpression(input)) {
+          const predicate = valueNode(input.getCondition());
+          if (!Node.isFalseLiteral(predicate)) follow(input.getWhenTrue());
+          if (!Node.isTrueLiteral(predicate)) follow(input.getWhenFalse());
+        } else follow(wrappedExpression(input));
+      };
+      for (const root of roots) visit(root);
+    };
+    for (const [owner, { tag, bindings }] of this.renderLookupIssues) {
+      const issue = addLookupIssue(owner, tag);
+      if (issue) traceLookupInputs(bindings, issue);
+    }
+    for (const { owner, tag, sources } of this.opaqueRenderLookups) {
+      const issue = addLookupIssue(owner, tag, true);
+      if (issue) traceLookupInputs(sources, issue);
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
+    const renderExclusions = new Map<string, string[]>();
+    const guardedRenders = new Map<QueryIndex['renderEdges'][number], { tag: Node; selection?: RenderSelection }>();
+    const guardInputs = new Map<number, Map<RenderSite, number>>();
+    const recordRenderInput = (from: number, to: number, site: RenderSite) => {
+      const inputs = guardInputs.get(to) ?? new Map<RenderSite, number>();
+      inputs.set(site, from);
+      guardInputs.set(to, inputs);
+    };
+    const contextExcluded = new Set<string>();
+    const contextAllowed = new Set<string>();
+    const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
     for (const edge of this.edges) {
       if (this.replacedInlineRenders.has(edge)) continue;
       const [from, to, line, conditional, layout, possible, detail, site, file] = edge;
       const source = byGraphId.get(from);
       const target = byGraphId.get(to);
       if (source === undefined || target === undefined) continue;
+      const definition = definitions.get(from);
+      const tag = Node.isCallExpression(site) ? site.getArguments()[0] : site?.getTagNameNode();
+      const key = renderSiteKey(source, target, line);
+      if (this.contextExcluded.size) (this.contextExcluded.has(edge) ? contextExcluded : contextAllowed).add(key);
+      const previous = renderExclusions.get(key);
+      const excluded = conditional && definition && tag && !layout ?
+        flow.excludedRenderSuppliers(tag, definition).flatMap(supplier => siteKey(supplier) ?? []) : [];
+      if (previous) renderExclusions.set(key, previous.filter(site => excluded.includes(site)));
+      else renderExclusions.set(key, excluded);
       index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
           [source, target, line, conditional, layout] : [source, target, line, conditional]);
+      if (site && tag && !layout && !historyOnly) {
+        recordRenderInput(source, target, site);
+        const selection = this.renderSelections.get(edge);
+        if (conditional || selection) guardedRenders.set(index.renderEdges[index.renderEdges.length - 1], { tag, selection });
+      }
       if (site && !possible && !historyOnly) {
         const targets = resolvedRenderSites.get(site) ?? new Set<number>();
         targets.add(target);
         resolvedRenderSites.set(site, targets);
       }
+    }
+    if (contextExcluded.size) index.contextRenderExclusions = [...contextExcluded].filter(key => !contextAllowed.has(key));
+    const excludedSites = new Set<string>();
+    for (const [key, sites] of renderExclusions) if (sites.length) {
+      (index.renderExclusions ??= {})[key] = sites;
+      for (const site of sites) excludedSites.add(site);
     }
     for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
@@ -790,31 +1279,54 @@ export class QueryIndexBuilder {
       });
     }
 
-    const dynamicBindings = new Map<Node, number>();
+    type LazyTarget = { id: number; origin: 'imported' | 'loaded' };
+    const dynamicBindings = new Map<Node, LazyTarget & { rendered: boolean }>();
+    const lazyProperties = new Map<Node, LazyTarget>();
+    const possibleLazyBindings = new Map<Node, Map<number, LazyTarget>>();
+    const unresolvedLazyComponents = new Set<number>();
+    const unresolvedDefaultComponents = new Set<number>();
+    const opaqueBindings = new Set<Node>();
     const componentValues = new Set<number>();
     const componentProperties = new Map<Node, Set<number>>();
     const componentFactories = new Set<Node>();
     const wrapperEdges: QueryIndex['renderEdges'] = [];
-    const unwrapValue = (node: Node | undefined) => {
-      let inner: Node | undefined;
-      while (node && (inner = wrappedExpression(node))) node = inner;
-      return node;
+    const lazyRender = (edge: QueryIndex['renderEdges'][number], site: RenderSite) => {
+      edge[7] = siteKey(site);
+      wrapperEdges.push(edge);
+      recordRenderInput(edge[0], edge[1], site);
+      const tag = Node.isCallExpression(site) ? site.getArguments()[0] : site.getTagNameNode();
+      if (tag && edge[3]) guardedRenders.set(edge, { tag });
+    };
+    const markPossibleLazy = (choices: LazyTarget[], binding?: Node) => {
+      if (binding && choices.length) {
+        const targets = possibleLazyBindings.get(binding) ?? new Map<number, LazyTarget>();
+        for (const choice of choices) targets.set(choice.id, choice);
+        possibleLazyBindings.set(binding, targets);
+      }
+      for (const { id } of choices) unresolvedLazyComponents.add(id);
     };
     if (!historyOnly) for (const [binding, component] of components) {
       let value = unwrapValue(Node.isVariableDeclaration(binding) ? binding.getInitializer() :
         Node.isExportAssignment(binding) ? binding.getExpression() : undefined);
-      if (!Node.isCallExpression(value)) continue;
-      componentFactories.add(value);
-      if (!isComponentWrapper(value)) continue;
+      if (!value) continue;
       const line = startLine(value);
-      do {
+      const wrapper = Node.isCallExpression(value);
+      if (wrapper) {
         componentFactories.add(value);
-        value = unwrapValue(value.getArguments()[0]);
-      } while (isComponentWrapper(value));
-      if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+        if (!isComponentWrapper(value)) continue;
+        do {
+          componentFactories.add(value);
+          value = unwrapValue(value.getArguments()[0]);
+        } while (isComponentWrapper(value));
+        if (!Node.isIdentifier(value) && !Node.isPropertyAccessExpression(value)) continue;
+      } else if (!Node.isIdentifier(value) || constValue(binding) === undefined) {
+        continue;
+      }
       for (const target of declarationsOf(value)) {
         const inner = components.get(target);
-        if (inner && inner !== component) wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+        if (inner && inner !== component && (wrapper || stableComponentBinding(target))) {
+          wrapperEdges.push([byGraphId.get(component.id)!, byGraphId.get(inner.id)!, line, 0]);
+        }
       }
     }
     if (!historyOnly) for (const [binding] of aliases) {
@@ -857,6 +1369,7 @@ export class QueryIndexBuilder {
       return ignored;
     };
     const recordComponentDeclaration = (node: Node, property?: Node) => {
+      if (Node.isVariableDeclaration(node)) opaqueBindings.add(node);
       const id = byNode.get(node);
       if (id === undefined || index.symbols[id - 1].kind !== 'component') return;
       if (property && propertyInIgnoredCollection(property)) return;
@@ -895,6 +1408,43 @@ export class QueryIndexBuilder {
       ...index.routes.flatMap(route => [route.component, ...route.layouts ?? [], ...Object.values(route.handlers ?? {})]),
       ...Object.values(index.routeFiles!).map(([, , , component]) => component)
     ]);
+    const canSelectLazyMember = (selector: Node, member: string, supplied: RenderSite | undefined) => {
+      let budget = 32;
+      const matchesProp = (prop: NonNullable<ReturnType<PropFlow['read']>>, at?: RenderSite): boolean => {
+        if (--budget < 0) return false;
+        const values = at ? [flow.value(at, prop)] : flow.values(prop);
+        if (!values.length) {
+          const id = byNode.get(prop.component);
+          return id !== undefined && routeComponents.has(id);
+        }
+        return values.every(({ site, value }) => {
+          if (value) return matches(value);
+          if (Node.isCallExpression(site)) return false;
+          return site.getAttributes().some(attribute => {
+            const source = Node.isJsxSpreadAttribute(attribute) && flow.read(attribute.getExpression(), prop.name);
+            return !!source && matchesProp(source);
+          });
+        });
+      };
+      const matches = (input: Node | undefined, at?: RenderSite): boolean => {
+        if (!input || --budget < 0) return false;
+        const prop = flow.read(input);
+        if (prop) return matchesProp(prop, at);
+        const value = valueNode(input);
+        if (Node.isStringLiteral(value) || Node.isNoSubstitutionTemplateLiteral(value)) return value.getLiteralText() === member;
+        if (Node.isConditionalExpression(value)) {
+          const condition = valueNode(value.getCondition());
+          return !Node.isFalseLiteral(condition) && matches(value.getWhenTrue(), at) ||
+            !Node.isTrueLiteral(condition) && matches(value.getWhenFalse(), at);
+        }
+        if (!Node.isCallExpression(value)) return false;
+        if (readsUrlParameter(value)) return true;
+        const fn = functionNode(value.getExpression());
+        return !!fn && projectFiles.has(fn.getSourceFile()) &&
+          executionSites(fn.getBody()).returned.some(({ node }) => matches(node, at));
+      };
+      return matches(selector, supplied);
+    };
     const indexedComponent = (node: Node | undefined) => {
       const id = node && byNode.get(node);
       return !!id && index.symbols[id - 1].kind === 'component';
@@ -954,7 +1504,7 @@ export class QueryIndexBuilder {
         for (const entry of imports) {
           const specifier = entry.getModuleSpecifierValue();
           if (!specifier.endsWith('.css') || entry.isTypeOnly()) continue;
-          for (const absolute of stylesheetPaths(file, root, specifier)) {
+          for (const absolute of configuredPaths(file, root, specifier)) {
             const style = path.relative(root, absolute).split(path.sep).join('/');
             if (!style || style.startsWith('../') || path.isAbsolute(style)) continue;
             const layouts = index.layoutStyles![style] ??= [];
@@ -1048,20 +1598,19 @@ export class QueryIndexBuilder {
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
             const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
-            if (index.renderLookupIssues && !jsx && !typeUse && symbol.kind === 'component' &&
-                !routeComponents.has(id) && componentValueUse(node, indexedComponent)) {
-              const valueUses = (index.renderValueUses ??= {});
-              if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
-            }
+            const returnedUse = !typeUse && !callbackUse && !executable && !jsx &&
+              (symbol.kind === 'function' || symbol.kind === 'hook') && returnedValueUse(node);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
-              recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);
+              recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse :
+                returnedUse ? GraphReferenceKind.ReturnedUse : GraphReferenceKind.Use, referenceOwner);
             }
             moduleUse = !typeUse && !jsx && !signature && referenceOwner === undefined;
             referenceCaller = sameFile ? undefined : referenceOwner;
             if (sameFile) referenceOwner = undefined;
             else if (callbackUse) referenceKind = 'callback-argument';
             else if (jsx) referenceKind = 'jsx-use';
+            else if (returnedUse) referenceKind = 'returned-use';
             if (typeUse && !sameFile && referenceKind === 'use') referenceKind = 'type-use';
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
@@ -1118,6 +1667,7 @@ export class QueryIndexBuilder {
           return;
         }
         if (found) return;
+        recordWorkspaceDependency(node, owner, workspace?.unresolvedBinding(expression));
         const targets = members.length ? declarationsOf(root).flatMap(target => byNode.get(target) ?? []) : [];
         for (const id of targets) recordGraph(id, startLine(node), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
         if (!targets.length && declaration?.getSourceFile() === file &&
@@ -1132,37 +1682,98 @@ export class QueryIndexBuilder {
           }
         }
       };
+      const selectedImports = new Map<Node, Set<string>>();
       const recordDynamic = (node: Node, specifier: Node | undefined, owner?: number) => {
-        if (!Node.isStringLiteral(specifier)) return;
-        const targetExport = dynamicExport(node);
-        if (!targetExport) return;
-        const { name, selector } = targetExport;
-        const resolved = declarationsOf(specifier).find(Node.isSourceFile) ?? fileByName.get(ts.resolveModuleName(
-          specifier.getLiteralText(), file.getFilePath(), file.getProject().getCompilerOptions(), ts.sys
-        ).resolvedModule?.resolvedFileName ?? '');
-        const targets = resolved && exports.get(resolved)?.get(name);
-        if (!targets?.length) return;
-        const moduleId = byGraphId.get(`file:${relativePath(resolved!)}`);
-        if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
-        const variable = node.getFirstAncestorByKind(SyntaxKind.VariableDeclaration);
-        const id = targets.map(target => byNode.get(target)).find(value => value !== undefined);
-        if (id !== undefined && variable && byNode.has(variable)) {
-          const initializer = variable.getInitializer();
-          const wrapper = Node.isCallExpression(initializer) && receiver(initializer.getExpression());
-          const imported = wrapper && packageBindings.get(wrapper.root.getText());
-          if (imported && (imported.module === 'next/dynamic' || imported.module === 'react' &&
-            (imported.name === 'lazy' || wrapper.members[0] === 'lazy')) &&
-            wrapper.root.getSymbol()?.getDeclarations().includes(imported.binding)) {
-            dynamicBindings.set(variable, id);
-            // JSX sites already point to the imported component. Keep a
-            // module-level import edge without inserting the local alias.
-            if (owner === byNode.get(variable)) owner = undefined;
-            if (selector) dynamicSelectors.add(selector);
+        const selections = selectedImports.get(node);
+        const target = dynamicExport(node);
+        const { modules } = resolveDynamicModules(specifier, file, !!selections);
+        if (selections) {
+          const loader = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+          const call = loader && throughWrappers(loader).getParent();
+          if (Node.isCallExpression(call) && owner === byNode.get(lazyVariable(call)!)) owner = undefined;
+        }
+        for (const resolved of modules) {
+          const exported = exports.get(resolved);
+          const moduleId = byGraphId.get(`file:${relativePath(resolved)}`);
+          const names = selections ?? (target ? [target.name] : []);
+          for (const name of names) {
+            const targets = exported?.get(name);
+            if (!targets?.length) continue;
+            if (moduleId !== undefined) (index.moduleImports![fileId] ??= []).push([moduleId, startLine(node), 'import', [[name]]]);
+            for (const target of targets) {
+              const id = byNode.get(target);
+              if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
+            }
           }
         }
+      };
+      const componentIds = (targets: Node[]) => [...new Set(targets.flatMap(target => {
+        const id = byNode.get(target);
+        return id !== undefined && index.symbols[id - 1].kind === 'component' ? [id] : [];
+      }))];
+      const hasLazyImport = imports.some(entry => {
+        const module = entry.getModuleSpecifierValue();
+        return module === 'next/dynamic' || module === 'react' &&
+          (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => binding.getName() === 'lazy'));
+      });
+      const recordLazyLoader = (node: import('ts-morph').CallExpression) => {
+        if (!lazyFactory(node)) return;
+        const loader = functionNode(node.getArguments()[0]);
+        if (!loader || !projectFiles.has(loader.getSourceFile())) return;
+        const binding = lazyVariable(node);
+        const targets = loaderTargets(loader, projectFiles);
+        const choices = new Map<number, LazyTarget>();
+        let exact = targets.length > 0;
         for (const target of targets) {
-          const id = byNode.get(target);
-          if (id !== undefined) recordGraph(id, startLine(node), GraphReferenceKind.DynamicImport, owner);
+          exact &&= !target.possible;
+          if ('value' in target) {
+            const declarations = declarationsOf(target.value);
+            const ids = componentIds(declarations);
+            for (const id of ids) choices.set(id, { id, origin: 'loaded' });
+            const stable = declarations.length === 1 && stableComponentBinding(declarations[0]);
+            if (ids.length && stable) componentFactories.add(target.promise);
+            exact &&= stable;
+            continue;
+          }
+          const { imported, name, selector, partialOnly } = target;
+          const { modules, exact: exactModule } = resolveDynamicModules(imported.getArguments()[0], imported.getSourceFile(), true);
+          exact &&= exactModule;
+          if (partialOnly) {
+            if (!historyOnly) for (const resolved of modules) {
+              const declarations = exports.get(resolved);
+              const all = [...declarations?.values() ?? []].flat();
+              const candidates = name === undefined ? all : declarations?.get(name) ?? [];
+              const local = componentIds(candidates.filter(candidate => candidate.getSourceFile() === resolved));
+              // An unbound receiver preserves a diagnostic for a sole named
+              // candidate. Namespace reads can identify a member directly.
+              if (partialOnly === 'opaque' && componentIds(all.filter(candidate => candidate.getSourceFile() === resolved)).length !== 1) continue;
+              if (name !== undefined || local.length === 1) {
+                markPossibleLazy(local.map(id => ({ id, origin: 'imported' })));
+              }
+            }
+            continue;
+          }
+          if (name === undefined) continue;
+          const names = selectedImports.get(imported) ?? new Set<string>();
+          names.add(name);
+          selectedImports.set(imported, names);
+          for (const resolved of modules) {
+            for (const id of componentIds(exports.get(resolved)?.get(name) ?? [])) choices.set(id, { id, origin: 'imported' });
+          }
+          if (selector) {
+            dynamicSelectors.add(selector.getNameNode());
+            dynamicSelectors.add(throughWrappers(selector));
+          }
+        }
+        if (historyOnly) return;
+        const [choice] = choices.values();
+        if (exact && choices.size === 1 && binding) {
+          dynamicBindings.set(binding, { ...choice, rendered: false });
+        } else {
+          if (exact && choices.size === 1 && Node.isPropertyAssignment(throughWrappers(node).getParent())) {
+            lazyProperties.set(node, choice);
+          }
+          markPossibleLazy([...choices.values()], binding);
         }
       };
       const scanComment = (range: ts.CommentRange) => {
@@ -1252,8 +1863,19 @@ export class QueryIndexBuilder {
             const args = node.getArguments();
             // The first argument supplies the component definition when this call creates its binding.
             for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
+            const assignment = throughWrappers(node).getParent();
+            const first = unwrapValue(args[0]);
+            if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
+                !components.has(assignment) && !aliases.has(assignment) &&
+                (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
+              for (const target of declarationsOf(first)) {
+                const id = byNode.get(target);
+                if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+              }
+            }
           }
           const [owner, graphOwner, possible] = owners(node);
+          if (hasLazyImport && Node.isCallExpression(node)) recordLazyLoader(node);
           if (Node.isCallExpression(node) && expression.getKind() === SyntaxKind.ImportKeyword) {
             const specifier = node.getArguments()[0];
             recordDynamic(node, specifier, graphOwner);
@@ -1306,7 +1928,8 @@ export class QueryIndexBuilder {
           const module = workspace?.unresolvedBinding(node.getTagNameNode());
           recordWorkspaceDependency(node, owner ?? fileId, module);
         } else if (Node.isPropertyAssignment(node)) {
-          if (!historyOnly) recordComponentValue(node.getInitializer(), node);
+          const value = node.getInitializer();
+          if (!historyOnly && value && !dynamicSelectors.has(value)) recordComponentValue(value, node);
         } else if (Node.isShorthandPropertyAssignment(node)) {
           const symbol = node.getValueSymbol();
           if (symbol) {
@@ -1360,18 +1983,56 @@ export class QueryIndexBuilder {
         for (const line of [...lines].sort((a, b) => a - b).slice(0, remaining)) notes.push([relative, line]);
       }
     }
-    if (dynamicBindings.size) for (const site of renderSites) {
+    // Collection lookups can pick a lazy loader through an object supplied as a prop.
+    const renderByNode = lazyProperties.size ? new Map(renderSites.map(site => [site.node, site])) : undefined;
+    if (dynamicBindings.size || possibleLazyBindings.size || lazyProperties.size) for (const site of renderSites) {
       if (!Node.isJsxOpeningElement(site.node) && !Node.isJsxSelfClosingElement(site.node)) continue;
-      const declarations = declarationsOf(site.node.getTagNameNode());
-      const binding = declarations.find(node => dynamicBindings.has(node));
-      if (binding) {
-        componentValues.delete(dynamicBindings.get(binding)!);
-        const owner = site.owner;
-        const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
-        const conditional = conditionalAt(site.node, body);
-        const refs = index.graphReferences![byGraphId.get(`file:${site.file}`)!] ??= [];
-        refs.push([dynamicBindings.get(binding)!, site.line, GraphReferenceKind.Render, owner, conditional]);
+      const tag = site.node.getTagNameNode();
+      const declarations = declarationsOf(tag);
+      const binding = declarations.map(node => dynamicBindings.get(node)).find(Boolean);
+      const possible = new Map(declarations.flatMap(node => [...possibleLazyBindings.get(node) ?? []]));
+      if (renderByNode && (Node.isPropertyAccessExpression(tag) || declarations.some(node => {
+        const initializer = Node.isVariableDeclaration(node) && unwrapValue(node.getInitializer());
+        return !!initializer && (Node.isElementAccessExpression(initializer) || Node.isPropertyAccessExpression(initializer));
+      }))) {
+        const traced = renderBindings(Node.isIdentifier(tag) ? declarations : [tag], projectFiles, indexedComponent, flow,
+          node => lazyProperties.has(node));
+        for (const choice of traced.targets) {
+          const loader = lazyProperties.get(choice.target);
+          const caller = choice.supply ? renderByNode.get(choice.supply.site) : site;
+          const owner = caller?.owner;
+          if (!loader || !caller || owner === undefined || owner === loader.id || index.symbols[owner - 1].kind !== 'component') continue;
+          // The registry's members bound its outputs. An opaque selector can
+          // further restrict its inputs, so require evidence for this member.
+          if (choice.lookup && (choice.lookup.member === undefined ||
+              !canSelectLazyMember(choice.lookup.selector, choice.lookup.member, choice.supply?.site))) continue;
+          const conditional = Number(choice.conditional || !!conditionalAt(site.node));
+          const detail = `${loader.origin} via ${tag.getText()}` + (choice.supply ? ` (prop ${choice.supply.name})` : '');
+          lazyRender([owner, loader.id, caller.line, conditional, undefined, choice.possible ? true : undefined, detail], caller.node as RenderSite);
+        }
       }
+      if (!binding && !possible.size) continue;
+      const owner = site.owner;
+      const body = owner === undefined ? undefined : site.node.getAncestors().find(node => byNode.get(node) === owner);
+      const conditional = conditionalAt(site.node, body);
+      if (owner !== undefined && index.symbols[owner - 1].kind === 'component') {
+        for (const { id, origin } of possible.values()) {
+          if (owner !== id) lazyRender([owner, id, site.line, conditional, undefined, true, `${origin} via ${tag.getText()}`], site.node);
+        }
+      }
+      if (!binding) continue;
+      const { id, origin } = binding;
+      if (owner !== undefined && index.symbols[owner - 1].kind === 'component' && owner !== id) {
+        lazyRender([owner, id, site.line, conditional, undefined, undefined, `${origin} via ${tag.getText()}`], site.node);
+        binding.rendered = true;
+      } else {
+        unresolvedLazyComponents.add(id);
+        const refs = index.graphReferences![byGraphId.get(`file:${site.file}`)!] ??= [];
+        refs.push([id, site.line, GraphReferenceKind.Render, owner, conditional]);
+      }
+    }
+    for (const [binding, { id, rendered }] of dynamicBindings) {
+      if (!rendered || opaqueBindings.has(binding)) unresolvedLazyComponents.add(id);
     }
     if (componentValues.size) {
       // Value references without a resolved render site can hide JSX behind a registry or callback.
@@ -1399,12 +2060,54 @@ export class QueryIndexBuilder {
           }
         }
       }
-      if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     }
+    for (const id of unresolvedLazyComponents) componentValues.add(id);
+    for (const id of unresolvedDefaultComponents) componentValues.add(id);
+    if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
+    const componentById = new Map([...components.keys()].map(node => [byNode.get(node), node]));
+    for (const [edge, { tag, selection }] of guardedRenders) {
+      const [from, to, line, , , , , site] = edge;
+      const component = componentById.get(from);
+      const body = component && flow.bodyOf(component);
+      if (!component || !body || !tag.getAncestors().includes(body)) continue;
+      const guards = [...flow.branchConditions(tag, body)];
+      if (!guards.length && !selection) continue;
+      const paths: string[][] = [];
+      const conditionalPaths: string[][] = [];
+      const witnesses: string[][] = [];
+      const evaluated = new Map<Node, RenderSite>();
+      let budget = 2048;
+      const inspect = (owner: Node | undefined, sites: string[]) => {
+        if (--budget < 0) return;
+        const state = evaluateRenderGuards(flow, guards, selection, evaluated);
+        if (state.blocked) {
+          (state.strict || !sites.length ? paths : conditionalPaths).push(sites);
+          return;
+        }
+        if (sites.length && state.supported) witnesses.push(sites);
+        if (!owner || sites.length >= 6 || !state.needed.has(owner) || evaluated.has(owner)) return;
+        for (const [supplier, parent] of guardInputs.get(byNode.get(owner)!) ?? []) {
+          if (budget <= 0) break;
+          evaluated.set(owner, supplier);
+          const outer = componentById.get(parent);
+          inspect(outer, [...sites, siteKey(supplier)]);
+          evaluated.delete(owner);
+        }
+      };
+      inspect(component, []);
+      const key = renderGuardKey(from, to, line, site);
+      if (paths.length) (index.renderGuardPaths ??= {})[key] = paths;
+      if (conditionalPaths.length) (index.renderConditionalPaths ??= {})[key] = conditionalPaths;
+      if (witnesses.length) (index.renderWitnessPaths ??= {})[key] = witnesses;
+      if (paths.length || conditionalPaths.length || witnesses.length) {
+        if (site) excludedSites.add(site);
+        for (const path of [...paths, ...conditionalPaths, ...witnesses]) for (const supplier of path) excludedSites.add(supplier);
+      }
+    }
     const scopes = new Set([
       ...Object.values(index.callGates ?? {}).flat(),
       ...Object.values(index.workspaceDependencies ?? {}).flatMap(dependencies => dependencies.flatMap(entry => entry.gates ?? [])),
@@ -1414,7 +2117,7 @@ export class QueryIndexBuilder {
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7]) {
+      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7] && !excludedSites.has(edge[7])) {
         if (edge[8]) edge[7] = undefined;
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }

@@ -2,10 +2,10 @@ import type { RouterPattern } from '../core/frameworks/RouterMatch';
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
-export const WRAPPER_INDEX_REVISION = 9;
+export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 12;
-export const GRAPH_INDEX_REVISION = 18;
+export const QUERY_INDEX_REVISION = 18;
+export const GRAPH_INDEX_REVISION = 24;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
@@ -13,7 +13,11 @@ export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
-export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE : 'JSX prop render untraced';
+export const DYNAMIC_RENDER_ISSUE = 'rendered through a dynamic reference';
+export const isLazyRender = (detail: string | undefined) => !!detail &&
+  (detail.startsWith('imported via ') || detail.startsWith('loaded via '));
+export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE :
+  isLazyRender(detail) ? DYNAMIC_RENDER_ISSUE : 'JSX prop render untraced';
 export const AI_SDK_URL_UNCERTAIN = 'uncertain AI SDK URL matches';
 
 export function transportIssue(override?: boolean) {
@@ -34,9 +38,11 @@ export interface SymbolEntry {
   end?: number;
   exported?: boolean;
   aliasOf?: string | null;
+  renderName?: string;
   localUses?: number[];
   typeOnly?: boolean;
   synthetic?: true;
+  selectorAliases?: string[];
 }
 
 export interface Wrapper {
@@ -86,7 +92,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 // by their position in the ordered file table.
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
-export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse }
+export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse, ReturnedUse }
 export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
@@ -106,6 +112,14 @@ export interface ServerAction {
 
 export type PageRenderCondition = 'excluded' | 'possible' | 'conditional';
 export const renderSiteKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
+export const renderGuardKey = (from: number, to: number, line: number, site?: string | null) =>
+  `${renderSiteKey(from, to, line)}:${site ?? ''}`;
+
+export function advanceRenderGuards(pending: string[][], incoming: string | null | undefined, started: string[][] | undefined) {
+  const matching = incoming ? pending.filter(path => path[0] === incoming).map(path => path.slice(1)) : [];
+  if (matching.some(path => !path.length) || started?.some(path => !path.length)) return;
+  return started ? [...matching, ...started] : matching;
+}
 
 export interface PagesEdge {
   from: number;
@@ -177,8 +191,14 @@ export interface QueryIndex {
     observedMethods?: string[]; handlers?: Record<string, number>;
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
+  renderExclusions?: Record<string, string[]>;
+  renderGuardPaths?: Record<string, string[][]>;
+  renderConditionalPaths?: Record<string, string[][]>;
+  renderWitnessPaths?: Record<string, string[][]>;
+  contextRenderExclusions?: string[];
   renderLookupIssues?: Record<number, string>;
-  renderValueUses?: Record<number, string>;
+  opaqueRenderLookupIssues?: Record<number, string>;
+  scopedRenderValueIssues?: Record<number, { file: string; reason: string; valueFile: string }>;
   dynamicRenderComponents?: number[];
   wrapperRevision?: number;
   queryRevision?: number;

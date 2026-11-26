@@ -3,16 +3,17 @@ import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } 
 import { isFunction, packageMember, returnedValues } from './CallableFlow';
 import { constValue, type PropFlow, type RenderSite } from './PropFlow';
 import { functionNode, importBinding, valueNode } from './StaticBindings';
+import { isTypeOnlyExport } from './RuntimeExports';
+import type { RenderSelection } from './RenderGuards';
 
-type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
-  import('ts-morph').ArrowFunction;
-type Target = RenderFunction | import('ts-morph').ClassDeclaration;
 const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
-export type RenderCertainty = { possible: boolean; conditional: boolean };
+export type RenderCertainty = { possible: boolean; conditional: boolean; contextExcluded?: true; selection?: RenderSelection };
 type ArrayBinding = { parameter: ParameterDeclaration; receiver: Node; outer?: ArrayBinding };
 type Supply = { site: RenderSite; name: string };
-type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
+type Lookup = { selector: Node; member?: string };
+type RenderChoice = RenderCertainty & { lookup?: Lookup };
+type Step = RenderChoice & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
 enum Resolution { Unknown, Empty, External, Local }
 
 export function isComponentWrapper(node: Node | undefined): node is CallExpression {
@@ -22,7 +23,60 @@ export function isComponentWrapper(node: Node | undefined): node is CallExpressi
   return name === 'memo' || name === 'forwardRef' || /(?:^|\.)(?:memo|forwardRef)$/.test(callee.getText());
 }
 
+/** Find a locally implemented HOC that returns or renders its component argument. */
+export function forwardedComponent(call: CallExpression, files: Set<SourceFile>):
+  { argument: Node; sites: { node: Node; conditional: number }[] } | undefined {
+  const factory = functionNode(call.getExpression());
+  const parameter = factory?.getParameters()[0];
+  const argument = call.getArguments()[0];
+  if (!factory || !parameter || !argument || !files.has(factory.getSourceFile())) return;
+  const values = returnedValues(factory);
+  if (values.length !== 1) return;
+  const guarded = conditionalAt(values[0], factory);
+  const returned = valueNode(values[0]);
+  const name = parameter.getNameNode();
+  const symbol = name.getSymbol();
+  if (!symbol) return;
+  if (Node.isIdentifier(name) && name.findReferences().some(reference =>
+    reference.getReferences().some(use => use.isWriteAccess() && use.getNode() !== name))) return;
+  if (Node.isIdentifier(returned) && returned.getSymbol() === symbol) {
+    return { argument, sites: [{ node: argument, conditional: guarded }] };
+  }
+  const component = functionNode(returned);
+  if (!component || !files.has(component.getSourceFile())) return;
+  const returns = returnedValues(component);
+  const sites: { node: Node; conditional: number }[] = [];
+  const inspect = (node: Node, conditional: number) => {
+    const wrapped = wrappedExpression(node);
+    if (wrapped) return inspect(wrapped, conditional);
+    if (Node.isConditionalExpression(node)) {
+      inspect(node.getWhenTrue(), 1);
+      inspect(node.getWhenFalse(), 1);
+      return;
+    }
+    if (Node.isBinaryExpression(node) && node.getOperatorToken().getKind() === SyntaxKind.AmpersandAmpersandToken) {
+      inspect(node.getRight(), 1);
+      return;
+    }
+    const opening = Node.isJsxElement(node) ? node.getOpeningElement() : node;
+    if (Node.isJsxOpeningElement(opening) || Node.isJsxSelfClosingElement(opening)) {
+      const tag = opening.getTagNameNode();
+      if (tag.getSymbol() === symbol) sites.push({ node: tag, conditional });
+      if (!Node.isIdentifier(tag) || !/^[a-z]/.test(tag.compilerNode.text)) return;
+    }
+    if (Node.isJsxElement(node) || Node.isJsxFragment(node)) {
+      for (const child of node.getJsxChildren()) {
+        const value = Node.isJsxExpression(child) ? child.getExpression() : child;
+        if (value) inspect(value, conditional);
+      }
+    }
+  };
+  for (const value of returns) inspect(value, guarded || Number(returns.length > 1) || conditionalAt(value, component));
+  if (sites.length) return { argument, sites };
+}
+
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
+  if (candidate.contextExcluded !== existing.contextExcluded) return !candidate.contextExcluded;
   if (candidate.possible !== existing.possible) return !candidate.possible;
   return !candidate.conditional && existing.conditional;
 }
@@ -54,6 +108,73 @@ const isReducer = (method: string) => method === 'reduce' || method === 'reduceR
 function builtin(node: Node, name: string) {
   return Node.isIdentifier(node) && node.compilerNode.text === name &&
     declarationsOf(node).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+}
+
+/** Resolve a context predicate when its provider has no consumer in this app. */
+export function unprovidedContextTruth(files: Set<SourceFile>, isAppSource: (file: SourceFile) => boolean) {
+  const checked = new Map<Node, boolean>();
+  const references = (node: import('ts-morph').Identifier) => node.findReferencesAsNodes().filter(use => {
+    const parent = use.getParent();
+    return use !== node && files.has(use.getSourceFile()) && !Node.isImportSpecifier(parent) && !Node.isImportClause(parent) &&
+      !Node.isExportSpecifier(parent) && !use.getAncestors().some(Node.isTypeNode);
+  });
+  const mountedProvider = (node: Node, seen: Set<Node>): boolean => {
+    if (isAppSource(node.getSourceFile()) || seen.size >= 8) return true;
+    const owner = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+    const name = Node.isFunctionDeclaration(owner) && owner.getNameNode();
+    if (!name || !Node.isIdentifier(name)) return true;
+    if (seen.has(name)) return false;
+    const pending = new Set(seen).add(name);
+    return references(name).some(use => mountedProvider(use, pending));
+  };
+  const isUnprovided = (name: import('ts-morph').Identifier) => {
+    const cached = checked.get(name);
+    if (cached !== undefined) return cached;
+    const result = references(name).every(use => {
+      const parent = use.getParent();
+      if (Node.isCallExpression(parent) && packageMember(parent.getExpression(), 'react') === 'useContext') return true;
+      const provider = Node.isPropertyAccessExpression(parent) && parent.getName() === 'Provider' ? parent : use;
+      const tag = provider.getParent();
+      if (Node.isJsxOpeningElement(tag) || Node.isJsxSelfClosingElement(tag) || Node.isJsxClosingElement(tag)) {
+        return tag.getTagNameNode() === provider && !mountedProvider(use, new Set());
+      }
+      return false;
+    });
+    checked.set(name, result);
+    return result;
+  };
+  const returned = (call: Node | undefined) => {
+    if (!Node.isCallExpression(call)) return;
+    const fn = functionNode(call.getExpression());
+    if (!fn || !files.has(fn.getSourceFile())) return;
+    const [value, extra] = returnedValues(fn);
+    return !extra && value && !conditionalAt(value, fn) ? valueNode(value) : undefined;
+  };
+  return (condition: Node): boolean | undefined => {
+    const test = returned(valueNode(condition));
+    if (!Node.isCallExpression(test) || !builtin(test.getExpression(), 'Boolean')) return;
+    const [member] = test.getArguments();
+    if (!Node.isPropertyAccessExpression(member)) return;
+    const source = valueNode(member.getExpression());
+    const context = Node.isCallExpression(source) && packageMember(source.getExpression(), 'react') === 'useContext'
+      ? source : returned(source);
+    if (!Node.isCallExpression(context) || packageMember(context.getExpression(), 'react') !== 'useContext') return;
+    const [argument] = context.getArguments();
+    if (!argument) return;
+    const [binding] = declarationsOf(argument);
+    if (!Node.isVariableDeclaration(binding) || !files.has(binding.getSourceFile())) return;
+    const name = binding.getNameNode();
+    const initializer = valueNode(binding.getInitializer());
+    if (!Node.isIdentifier(name) || !Node.isCallExpression(initializer) ||
+        packageMember(initializer.getExpression(), 'react') !== 'createContext') return;
+    const defaults = valueNode(initializer.getArguments()[0]);
+    if (!Node.isObjectLiteralExpression(defaults) || defaults.getProperties().some(Node.isSpreadAssignment)) return;
+    const property = defaults.getProperty(member.getName());
+    const value = Node.isPropertyAssignment(property) ? valueNode(property.getInitializer()) : undefined;
+    const truth = Node.isStringLiteral(value) || Node.isNumericLiteral(value) ? Boolean(value.getLiteralValue()) :
+      Node.isTrueLiteral(value) ? true : Node.isFalseLiteral(value) || Node.isNullLiteral(value) ? false : undefined;
+    if (truth !== undefined && isUnprovided(name)) return truth;
+  };
 }
 
 function stateCall(node: Node | undefined): node is CallExpression {
@@ -162,15 +283,33 @@ function externalImport(node: Node, files: Set<SourceFile>): boolean {
 }
 
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
-export function renderBindings(declarations: Node[], files: Set<SourceFile>, flow?: PropFlow) {
+export function renderBindings(declarations: Node[], files: Set<SourceFile>,
+  indexedComponent: (node: Node) => boolean, flow?: PropFlow, indexedLoader?: (node: Node) => boolean,
+  contextTruth?: (condition: Node) => boolean | undefined) {
   const seen = new Map<Node, { step: Step; resolution: Resolution }[]>();
-  const targets = new Map<Supply | undefined, Map<Target, RenderCertainty>>();
+  const targets = new Map<Supply | undefined, Map<Node, RenderChoice>>();
   const supplies = new Map<RenderSite, Map<string, Supply>>();
   let unresolvedLookup = false;
   let unresolvedProp = false;
+  const opaqueLookups = new Set<Node>();
+  const register = (node: Node, { supply, possible, conditional, lookup, contextExcluded }: Step) => {
+    let scoped = targets.get(supply);
+    if (!scoped) targets.set(supply, scoped = new Map());
+    const prior = scoped.get(node);
+    const selection = lookup?.member === undefined ? undefined : { selector: lookup.selector, members: [lookup.member] };
+    const choice = { possible, conditional, lookup, contextExcluded, selection };
+    const best = !prior || preferRenderBinding(choice, prior) ? choice : prior;
+    if (prior) {
+      best.selection = selection && prior.selection?.selector === selection.selector ? {
+        selector: selection.selector, members: [...new Set([...prior.selection.members, ...selection.members])]
+      } : undefined;
+    }
+    scoped.set(node, best);
+    return Resolution.Local;
+  };
   const resolve = (node: Node | undefined, step: Step, remaining: number): Resolution => {
     if (!node || remaining <= 0) return Resolution.Unknown;
-    const { members, returns, possible, conditional, binding, supply } = step;
+    const { members, returns, possible, conditional, binding, supply, lookup, contextExcluded } = step;
     if (!files.has(node.getSourceFile())) {
       return !returns && !members.length && node.getSourceFile().isInNodeModules() &&
         (Node.isVariableDeclaration(node) || Node.isClassDeclaration(node) || isFunction(node)) ?
@@ -179,7 +318,9 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
     const steps = seen.get(node) ?? [];
     const prior = steps.find(({ step: previous }) => previous.binding === binding && previous.supply === supply &&
         previous.returns === returns && previous.possible === possible &&
-        previous.conditional === conditional && previous.members.length === members.length &&
+        previous.conditional === conditional && previous.contextExcluded === contextExcluded &&
+        previous.lookup?.selector === lookup?.selector &&
+        previous.lookup?.member === lookup?.member && previous.members.length === members.length &&
         previous.members.every((member, i) => member === members[i]));
     if (prior) return prior.resolution;
     const current = { step, resolution: Resolution.Unknown };
@@ -200,7 +341,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
     return current.resolution;
   };
   const trace = (node: Node, step: Step, next: (value: Node | undefined, change?: Partial<Step>) => boolean): Resolution | boolean | void => {
-    const { members, returns, possible, conditional, binding, supply } = step;
+    const { members, returns, possible, conditional, binding, supply, lookup } = step;
     if (isFunction(node) && returns) {
       const values = returnedValues(node);
       for (const value of values) {
@@ -209,11 +350,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
       return;
     }
     if (!returns && !members.length && (isFunction(node) && !Node.isMethodDeclaration(node) || Node.isClassDeclaration(node))) {
-      const scoped = targets.get(supply) ?? new Map<Target, RenderCertainty>();
-      targets.set(supply, scoped);
-      const existing = scoped.get(node);
-      if (!existing || preferRenderBinding(step, existing)) scoped.set(node, { possible, conditional });
-      return Resolution.Local;
+      return register(node, step);
     }
     if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
       return next(Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression());
@@ -282,7 +419,8 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
         const member = Node.isIdentifier(name) ? name.compilerNode.text :
           lookupKey(Node.isComputedPropertyName(name) ? name.getExpression() : name);
         if (member !== undefined && (covered.has(member) || key !== null && member !== key)) continue;
-        next(property, { members: rest, possible: uncertain || member === undefined });
+        next(property, { members: rest, possible: uncertain || member === undefined,
+          lookup: lookup && key === null && lookup.member === undefined ? { ...lookup, member } : lookup });
         if (member === undefined) uncertain = true;
         else if (key !== null) return;
         else covered.add(member);
@@ -296,6 +434,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
     }
     if (Node.isCallExpression(node) && !returns) {
       const expression = node.getExpression();
+      if (!members.length && indexedLoader?.(node)) return register(node, step);
       const collection = collectionCall(node);
       if (collection?.kind === 'element') {
         const key = collection.method === 'at' ? tupleAt(collection.receiver, node.getArguments()[0]) : undefined;
@@ -351,12 +490,17 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
       if (hook === 'useCallback' || hook === 'useMemo') {
         return next(node.getArguments()[0], { returns: hook === 'useMemo' });
       }
-      next(expression, { returns: true });
+      const resolved = next(expression, { returns: true });
+      if (!resolved && !members.length && !isComponentWrapper(node) && hook !== 'lazy' &&
+          !packageMember(expression, 'next/dynamic')) opaqueLookups.add(node);
       return;
     }
     if (Node.isConditionalExpression(node)) {
-      next(node.getWhenTrue(), { conditional: true });
-      next(node.getWhenFalse(), { conditional: true });
+      const choice = contextTruth?.(node.getCondition());
+      const yes = step.contextExcluded || (choice === false ? true : undefined);
+      const no = step.contextExcluded || (choice === true ? true : undefined);
+      next(node.getWhenTrue(), { conditional: true, contextExcluded: yes });
+      next(node.getWhenFalse(), { conditional: true, contextExcluded: no });
       return;
     }
     if (Node.isBinaryExpression(node)) {
@@ -370,11 +514,35 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
       }
     }
     if (Node.isElementAccessExpression(node)) {
-      const key = lookupKey(node.getArgumentExpression());
-      return next(node.getExpression(), { members: [key ?? null, ...members] });
+      const selector = node.getArgumentExpression();
+      const key = lookupKey(selector);
+      const resolved = next(node.getExpression(), { members: [key ?? null, ...members],
+        lookup: key === undefined && selector ? { selector } : lookup });
+      if (!resolved) opaqueLookups.add(node);
+      return resolved;
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
       if (!returns && !members.length && externalImport(node, files)) return Resolution.External;
+      if (Node.isIdentifier(node) && members.length &&
+          node.getSymbol()?.getDeclarations().some(Node.isNamespaceImport)) {
+        const source = importBinding(node)?.declaration.getModuleSpecifierSourceFile();
+        if (source && files.has(source)) {
+          const [key, ...rest] = members;
+          if (key === allArrayElements) return;
+          const choice = { ...step, members: rest, possible: possible || key === null };
+          let known = false;
+          for (const symbol of source.getExportSymbols()) {
+            if (key !== null && key !== symbol.getName() || isTypeOnlyExport(source, symbol)) continue;
+            for (const declaration of (symbol.getAliasedSymbol() ?? symbol).getDeclarations()) {
+              if (!returns && !rest.length && indexedComponent(declaration)) {
+                register(declaration, choice);
+                known = true;
+              } else next(declaration, choice);
+            }
+          }
+          return known ? Resolution.Local : undefined;
+        }
+      }
       const prop = flow && !supply && members.length ? flow.read(node) : undefined;
       if (flow && prop) {
         const bindings = flow.values(prop);
@@ -426,6 +594,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>, flo
   return {
     targets: [...targets].flatMap(([supply, scoped]) =>
       [...scoped].map(([target, certainty]) => ({ target, supply, ...certainty }))),
-    unresolvedLookup: unresolvedLookup || unresolvedProp
+    unresolvedLookup: unresolvedLookup || unresolvedProp,
+    opaqueLookups
   };
 }

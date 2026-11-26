@@ -315,6 +315,30 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('callees', 'useItems', '--uses', '--depth', '2'), /d2 call .*parse/);
 });
 
+test('CLI path uses a longer deadline and reports the effective budget on timeout', t => {
+  const { root, run, build } = fixture(t);
+  build();
+  const clock = path.join(path.dirname(root), 'clock.cjs');
+  fs.writeFileSync(clock, `
+    const now = performance.now.bind(performance);
+    let queryStarted = false;
+    Object.defineProperty(performance, 'now', { value() {
+      if (!new Error().stack.includes('.query (')) return now();
+      if (!queryStarted) {
+        queryStarted = true;
+        return 0;
+      }
+      return 2000;
+    } });
+  `);
+  const env = { NODE_OPTIONS: `--require=${JSON.stringify(clock)}`, NEORION_AUTOBUILD: '0' };
+  const args = ['query', 'path', '/items', 'createItem'];
+  assert.match(run(args, env), /^# complete:/m);
+  const timed = run(args, { ...env, NEORION_QUERY_DEADLINE_MS: '1000' });
+  assert.match(timed, /^# timeout path /m);
+  assert.match(timed, /^# partial: timed out \(1000 ms budget\)$/m);
+});
+
 test('impact reports bounded hubs, timeout, and legacy index coverage', { timeout: 30_000 }, t => {
   const { root, query, run, build } = fixture(t);
   const hub = Array.from({ length: 200 }, (_, i) => `export function caller${i}() { return cn(); }`).join('\n');
@@ -1550,6 +1574,11 @@ test('an unresolved typed render lookup only affects components used as values',
     import { memo } from 'react';
     export function UnusedIcon() { return <span/>; }
     export function StoredIcon() { return <span/>; }
+    export function DefaultIcon() { return <span/>; }
+    export function OrphanDefault() { return <span/>; }
+    export function RenamedIcon() { return <span/>; }
+    export function BarrelOnlyIcon() { return <span/>; }
+    export function TypeOnlyIcon() { return <span/>; }
     export function JsxOnlyIcon() { return <span/>; }
     export function WrappedIcon() { return <span/>; }
     export const MemoIcon = memo(WrappedIcon);
@@ -1558,6 +1587,17 @@ test('an unresolved typed render lookup only affects components used as values',
     export const icons = [{ icon: StoredIcon }];
     export function Unmounted() { return <JsxOnlyIcon/>; }
   `);
+  fs.writeFileSync(path.join(root, 'ui/values.ts'), `
+    import { DefaultIcon, RenamedIcon } from './unused';
+    export default (DefaultIcon);
+    export { RenamedIcon as RegistryIcon };
+    export { BarrelOnlyIcon as BarrelIcon } from './unused';
+    export type { TypeOnlyIcon as IconType } from './unused';
+  `);
+  fs.writeFileSync(path.join(root, 'ui/orphan.ts'), `
+    import { OrphanDefault as View } from './unused';
+    export default View;
+  `);
   const other = path.join(root, 'app/other');
   fs.mkdirSync(other);
   fs.writeFileSync(path.join(other, 'page.tsx'), `
@@ -1565,27 +1605,181 @@ test('an unresolved typed render lookup only affects components used as values',
     export default function OtherPage() { return <RenderedMemo/>; }
   `);
   fs.writeFileSync(path.join(root, 'app/page.tsx'), `
-    import OtherPage from './other/page';
+    import DefaultIcon from '../ui/values';
     type Item = { icon: () => any };
     declare function loadNav(entry: () => any): Item[];
-    const NAV = loadNav(OtherPage);
+    const NAV = loadNav(DefaultIcon);
     export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
   `);
   build();
   for (const [tool, target] of [
-    ['who_renders', 'StoredIcon'], ['callees', 'app/page.tsx#Page']
+    ['who_renders', 'DefaultIcon'],
+    ['callees', 'app/page.tsx#Page']
   ]) {
     const output = query(tool, target);
     assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
     assert.doesNotMatch(output, /^(?:page )?\/\s/m);
   }
-  for (const target of ['UnusedIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon', 'app/other/page.tsx#OtherPage']) {
+  for (const target of ['UnusedIcon', 'OrphanDefault', 'RenamedIcon', 'BarrelOnlyIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon',
+    'TypeOnlyIcon', 'app/other/page.tsx#OtherPage']) {
     assert.match(query('who_renders', target), /^# complete:/m);
   }
-  for (const target of ['UnusedIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  for (const target of ['UnusedIcon', 'OrphanDefault', 'BarrelOnlyIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  assert.match(query('who_renders', 'StoredIcon'), /^# partial: rendered through a dynamic reference/m);
   const inner = query('who_renders', 'RenderedInner');
   assert.match(inner, /^\/other\s.*depth 2 via RenderedMemo$/m);
   assert.match(inner, /^# complete:/m);
+});
+
+test('opaque element and factory lookups flag only value-used render candidates', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/registry.tsx'), `
+    import { register } from 'registry-package';
+    export { lookup } from 'registry-package';
+    export function RegisteredIcon() { return <span/>; }
+    export function MapIcon() { return <span/>; }
+    export function UnusedIcon() { return <span/>; }
+    export function UnrelatedIcon() { return <span/>; }
+    register('first', RegisteredIcon);
+  `);
+  fs.writeFileSync(path.join(root, 'ui/unrelated.ts'), `
+    import { UnrelatedIcon } from './registry';
+    export const unrelated = [UnrelatedIcon];
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import { getMap } from 'map-package';
+    import { MapIcon } from '../ui/registry';
+    export const icons = [MapIcon];
+    const MAP = getMap(icons);
+    export default function Page({ keyName }) {
+      const Icon = MAP[keyName];
+      return <Icon/>;
+    }
+  `);
+  fs.mkdirSync(path.join(root, 'app/registry'));
+  fs.writeFileSync(path.join(root, 'app/registry/page.tsx'), `
+    import { lookup } from '../../ui/registry';
+    export function registryKey(keyName) { return keyName; }
+    export default function RegistryPage({ keyName }) {
+      const Icon = lookup(registryKey(keyName));
+      return <Icon/>;
+    }
+  `);
+  build();
+  assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced \(app\/page\.tsx:8\)$/m);
+  assert.match(query('callees', 'RegistryPage'), /^# partial: component lookup key untraced \(app\/registry\/page\.tsx:6\)$/m);
+  const reverse = query('impact', 'registryKey');
+  assert.match(reverse, /^page \/registry\s/m);
+  assert.match(reverse, /^# complete:/m);
+  for (const target of ['RegisteredIcon', 'MapIcon']) {
+    const output = query('who_renders', target);
+    assert.match(output, target === 'MapIcon' ? /^# partial: component lookup key untraced/m :
+      /^# partial: rendered through a dynamic reference/m);
+    assert.doesNotMatch(output, /^\//m);
+  }
+  for (const target of ['UnusedIcon', 'UnrelatedIcon']) assert.match(query('who_renders', target), /^# complete:/m);
+});
+
+test('computed namespace lookups retain possible render paths to runtime component exports', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/icons.tsx'), `
+    import { memo } from 'react';
+    export function FirstIcon() { return <span/>; }
+    export const MemoIcon = memo(() => <span/>);
+    export default () => <span/>;
+    function PrivateIcon() { return <span/>; }
+    function TypeOnlyIcon() { return <span/>; }
+    export type { TypeOnlyIcon };
+    export const count = 1;
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import * as Icons from '../ui/icons';
+    export default function Page({ keyName }) {
+      const Picked = (Icons as any)[keyName];
+      return <Picked/>;
+    }
+  `);
+  fs.mkdirSync(path.join(root, 'app/exact'));
+  fs.writeFileSync(path.join(root, 'app/exact/page.tsx'), `
+    import * as Icons from '../../ui/icons';
+    export default function ExactPage() {
+      const Picked = (Icons as any)['FirstIcon'];
+      return <Picked/>;
+    }
+  `);
+  build();
+  for (const target of ['FirstIcon', 'MemoIcon', 'ui/icons.tsx#default']) {
+    const output = query('who_renders', target);
+    assert.match(output, /^\/\s.*\[possible\]$/m);
+    assert.match(output, /^# partial: component lookup key untraced/m);
+    if (target === 'FirstIcon') assert.match(output, /^\/exact\s.*depth 1$/m);
+    else assert.doesNotMatch(output, /^\/exact\s/m);
+  }
+  for (const target of ['PrivateIcon', 'TypeOnlyIcon']) {
+    assert.match(query('who_renders', target), /0 results[\s\S]*^# complete:/m);
+  }
+  assert.doesNotMatch(query('callees', 'app/page.tsx#Page'), /d1 render .*count/);
+});
+
+test('default-exported HOCs trace local forwarding and keep opaque factories partial', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/hoc.tsx'), `
+    export function withUi(Component) { return () => <main><Component/></main>; }
+    export const identity = Component => Component;
+  `);
+  fs.writeFileSync(path.join(root, 'ui/wrapped.tsx'), `
+    import { withUi } from './hoc';
+    export function BehindWrapper() { return <span/>; }
+    export function OpaqueInner() { return <span/>; }
+    export default withUi(BehindWrapper);
+  `);
+  fs.writeFileSync(path.join(root, 'ui/identity.tsx'), `
+    import { identity } from './hoc';
+    function IdentityInner() { return <span/>; }
+    export default identity(IdentityInner);
+  `);
+  fs.writeFileSync(path.join(root, 'ui/paywall.tsx'), `
+    function BillingPanel() { return <p>Billing</p>; }
+    function DemoPanel() { return <p>Demo</p>; }
+    function withDemoMode(View: typeof BillingPanel) {
+      if (process.env.NEXT_PUBLIC_DEMO_MODE === "1") View = DemoPanel;
+      return View;
+    }
+    export default withDemoMode(BillingPanel);
+  `);
+  fs.mkdirSync(path.join(root, 'app/billing'));
+  fs.writeFileSync(path.join(root, 'app/billing/page.tsx'), `
+    import Billing from '../../ui/paywall';
+    export default function BillingPage() { return <Billing/>; }
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import Wrapped, { OpaqueInner } from '../ui/wrapped';
+    import Identity from '../ui/identity';
+    import { identity } from '../ui/hoc';
+    function RootInner() { return <><Wrapped/><OpaqueInner/><Identity/></>; }
+    export default identity(RootInner);
+  `);
+  fs.mkdirSync(path.join(root, 'app/hoc-opaque'));
+  fs.writeFileSync(path.join(root, 'app/hoc-opaque/page.tsx'), `
+    import { withSdk } from 'opaque-package';
+    import { OpaqueInner } from '../../ui/wrapped';
+    export default withSdk(OpaqueInner);
+  `);
+  build();
+  for (const target of ['RootInner', 'BehindWrapper']) {
+    const output = query('who_renders', target);
+    assert.match(output, /^\/\s/m);
+    assert.match(output, /^# complete:/m);
+  }
+  assert.match(query('who_renders', 'IdentityInner'), /^\/ .* via .*identity\(IdentityInner\)/m);
+  const billing = query('who_renders', 'ui/paywall.tsx#BillingPanel');
+  assert.doesNotMatch(billing, /^\/billing\s/m);
+  assert.match(billing, /^# partial: rendered through a dynamic reference/m);
+  const opaque = query('who_renders', 'OpaqueInner');
+  assert.match(opaque, /^\/\s/m);
+  assert.doesNotMatch(opaque, /^\/hoc-opaque\s/m);
+  assert.match(opaque, /^# partial: rendered through a dynamic reference/m);
+  assert.match(query('impact', 'OpaqueInner'), /^page \/hoc-opaque\s/m);
 });
 
 test('typed render collections of uninstalled package icons resolve externally', t => {
@@ -1608,10 +1802,11 @@ test('typed render collections of uninstalled package icons resolve externally',
   const file = path.join(root, 'app/page.tsx');
   fs.writeFileSync(file, fs.readFileSync(file, 'utf8')
     .replace('const OPTS', 'declare function loadIcon(): typeof BellIcon;\n    const OPTS')
-    .replace('icon: ClockIcon', 'icon: loadIcon()'));
+    .replace('value: string; icon: typeof BellIcon', 'value: string; icon: typeof BellIcon; metadata?: () => any')
+    .replace('icon: ClockIcon', 'icon: loadIcon(), metadata: StoredIcon'));
   build();
   assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced/m);
-  assert.match(query('who_renders', 'StoredIcon'), /^# partial: component lookup key untraced/m);
+  assert.doesNotMatch(query('who_renders', 'StoredIcon'), /^# partial: component lookup key untraced/m);
 });
 
 test('typed recursive collection properties trace nested icons', t => {
@@ -2161,7 +2356,7 @@ test('Pages expands nested children in an inline layout and forwarded children i
   });
   for (const route of ['/', '/forward']) {
     const output = query('wrappers', route);
-    assert.match(output, /Layout \[Layout assigned at /);
+    assert.match(output, /Layout \(inline\) \[Layout assigned at /);
     assert.match(output, /\bOuter\b/);
     assert.match(output, /\bInner\b/);
     assert.match(output, /^# complete:/m);
@@ -2220,10 +2415,10 @@ for (const [form, setup, admin, plain, conditional] of [
   ['nullish ternary', 'const Layout = Component.Layout != null ? Component.Layout : EmptyLayout;', 'AdminLayout', 'EmptyLayout'],
   ['const component alias', 'const Layout = EmptyLayout;', 'EmptyLayout', 'EmptyLayout'],
   ['let component alias', 'let Layout = EmptyLayout;', 'EmptyLayout', 'EmptyLayout'],
-  ['guarded replacement', "let Layout = EmptyLayout; if (router.pathname === '/m') Layout = MarketingLayout;",
+  ['runtime guarded replacement', "let Layout = EmptyLayout; if (router.pathname.startsWith('/m')) Layout = MarketingLayout;",
     'EmptyLayout', 'EmptyLayout', 'both'],
   ['else-if replacement', "let Layout = EmptyLayout; if (Component.Layout) { Layout = Component.Layout; } " +
-    "else if (router.pathname === '/m') { Layout = MarketingLayout; }", 'AdminLayout', 'EmptyLayout', 'plain'],
+    "else if (router.pathname.startsWith('/m')) { Layout = MarketingLayout; }", 'AdminLayout', 'EmptyLayout', 'plain'],
   ['last write', 'let Layout = Component.Layout || EmptyLayout; Layout = MarketingLayout;', 'MarketingLayout', 'MarketingLayout'],
   ['falsy alias guard', 'let Layout = Component.Layout; if (!Layout) Layout = EmptyLayout;', 'AdminLayout', 'EmptyLayout']
 ]) {
@@ -2262,8 +2457,6 @@ for (const [form, setup, admin, plain, conditional] of [
 }
 
 for (const [form, setup, invoke] of [
-  ['switch', "let Layout; switch (router.pathname) { case '/m': Layout = MarketingLayout; break; " +
-    'default: Layout = Component.Layout || EmptyLayout; }', '<Layout><Component/></Layout>'],
   ['opaque JSX alias', 'const Layout = unknownLayout();', '<Layout><Component/></Layout>'],
   ['opaque getLayout alias', 'const getLayout = unknownLayout();', 'getLayout(<Component/>)'],
   ['opaque forwarded JSX alias', 'const Layout = unknownLayout();', '<Layout Component={Component}/>']
@@ -2280,6 +2473,85 @@ for (const [form, setup, invoke] of [
     assert.match(query('who_renders', 'AdminLayout'), /^# partial: custom App page slot unresolved$/m);
   });
 }
+
+for (const [form, setup, admin, plain, conditional] of [
+  ['runtime ternary', "const Layout = router.pathname.startsWith('/a') ? AdminLayout : EmptyLayout;",
+    ['AdminLayout', 'EmptyLayout'], ['AdminLayout', 'EmptyLayout'], true],
+  ['static page ternary', 'const Layout = Component.isAdmin ? AdminLayout : EmptyLayout;', ['AdminLayout'], ['EmptyLayout']],
+  ['compound guard', "let Layout = EmptyLayout; if (Component.Layout && router.pathname !== '/review-plain') Layout = Component.Layout;",
+    ['AdminLayout'], ['EmptyLayout']],
+  ['compound runtime guard', 'let Layout = EmptyLayout; if (Component.Layout && router.isPreview) Layout = Component.Layout;',
+    ['AdminLayout', 'EmptyLayout'], ['EmptyLayout'], true],
+  ['nullish guard', 'let Layout = Component.Layout; if (Component.Layout == null) Layout = EmptyLayout;',
+    ['AdminLayout'], ['EmptyLayout']],
+  ['strict null guard', 'let Layout = EmptyLayout; if (Component.Layout !== null && Component.Layout !== undefined) Layout = Component.Layout;',
+    ['AdminLayout'], ['EmptyLayout']],
+  ['simple switch', "let Layout; switch (router.pathname) { default: Layout = EmptyLayout; break; case '/review-admin': Layout = AdminLayout; }",
+    ['AdminLayout'], ['EmptyLayout']],
+  ['runtime switch', "let Layout; switch (router.mode) { case 'admin': Layout = AdminLayout; break; default: Layout = EmptyLayout; }",
+    ['AdminLayout', 'EmptyLayout'], ['AdminLayout', 'EmptyLayout'], true]
+]) {
+  test(`Pages chooses App wrapper branches for ${form}`, t => {
+    const query = pagesReviewFixture(t, {
+      ...reviewedLayouts,
+      'pages/_app.page.tsx': `import { AdminLayout, EmptyLayout } from '../lib/review-layouts';
+        export default function MyApp({ Component, router }) { ${setup} return <Layout><Component /></Layout>; }`,
+      'pages/review-admin.page.tsx': reviewAdmin + 'Admin.Layout = AdminLayout;\nAdmin.isAdmin = true;'
+    });
+    for (const [route, names] of [['/review-admin', admin], ['/review-plain', plain]]) {
+      const wrappers = query('wrappers', route);
+      assert.match(wrappers, /^# complete:/m);
+      for (const name of ['AdminLayout', 'EmptyLayout']) {
+        assert.equal(wrappers.includes(name), names.includes(name), wrappers);
+      }
+      assert.equal(wrappers.includes('[cond]'), !!conditional && names.length > 1, wrappers);
+    }
+    const renders = query('who_renders', 'AdminLayout');
+    assert.match(renders, /^\/review-admin .*\[via layout\]/m);
+    assert.equal(/^\/review-plain /m.test(renders), plain.includes('AdminLayout'), renders);
+    assert.match(renders, /^# complete:/m);
+  });
+}
+
+for (const [flow, setup] of [
+  ['switch', "switch (router.pathname) { case '/review-admin': Layout = MarketingLayout; default: Layout = EmptyLayout; }"],
+  ['try/catch/finally', 'try { Layout = MarketingLayout; } catch { Layout = EmptyLayout; }'],
+  ['loop', 'for (const value of router.layouts) Layout = MarketingLayout;'],
+  ['callback', 'router.layouts.forEach(() => { Layout = MarketingLayout; });'],
+  ['closure', 'function change() { Layout = MarketingLayout; } change();']
+]) {
+  test(`Pages diagnoses an opaque App ${flow} write`, t => {
+    const query = pagesReviewFixture(t, {
+      ...reviewedLayouts,
+      'pages/_app.page.tsx': `${reviewedApp} let Layout = EmptyLayout; ${setup} return <Layout><Component/></Layout>; }`
+    });
+    for (const output of [query('wrappers', '/review-plain'), query('who_renders', 'MarketingLayout')]) {
+      assert.match(output, /^# partial: custom App page slot unresolved/m);
+      assert.ok(output.includes(`(${flow} write)`), output);
+      assert.doesNotMatch(output, /\[via layout\]|EmptyLayout/);
+    }
+  });
+}
+
+test('Pages resolves a casted class App layout and labels its anonymous fallback', t => {
+  const query = pagesReviewFixture(t, {
+    ...reviewedLayouts,
+    'pages/review-admin.page.tsx': reviewAdmin + 'Admin.Layout = AdminLayout;',
+    'pages/_app.page.tsx': `export default class MyApp {
+      render() {
+        const { Component } = this.props;
+        const Layout = (Component as any).Layout || (({ children }) => <>{children}</>);
+        return <Layout><Component /></Layout>;
+      }
+    }`
+  });
+  const wrappers = query('wrappers', '/review-plain');
+  assert.match(wrappers, /Layout \(inline\) \[Layout fallback at pages\/_app\.page\.tsx:5\]/);
+  assert.match(wrappers, /^# complete:/m);
+  const admin = query('wrappers', '/review-admin');
+  assert.match(admin, /AdminLayout/);
+  assert.match(admin, /^# complete:/m);
+});
 
 for (const [form, setup] of [
   ['ternary', 'const getLayout = Component.getLayout ? Component.getLayout : page => page;'],
@@ -2363,7 +2635,7 @@ test('Pages preserves JSX lines and named render hops through inline page layout
   assert.match(arrow, /^2 render lib\/review-layouts\.tsx:2 Shell$/m);
   assert.match(query('path', '/review-block', 'AdminLayout'), /^1 render pages\/review-block\.page\.tsx:4 AdminLayout .*\[cond\]$/m);
   const output = query('wrappers', '/review-function');
-  assert.match(output, /Layout \[Layout assigned at pages\/review-function\.page\.tsx:3\]/);
+  assert.match(output, /InlineLayout \[Layout assigned at pages\/review-function\.page\.tsx:3\]/);
   assert.match(output, /AdminLayout, Shell/);
   assert.match(output, /^# complete:/m);
   const reverse = query('who_renders', 'Shell');

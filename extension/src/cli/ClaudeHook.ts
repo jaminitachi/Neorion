@@ -81,7 +81,7 @@ function runAdvisory(cacheFor: typeof workspaceCache, indexPath: string, legacyP
         const appFile = /^(?:src\/)?app\/(?:(.+)\/)?(page|route)$/.exec(stem);
         const pagesFile = /^(?:src\/)?pages\/(?!_)(.+)$/.exec(stem);
         if (appFile) {
-          target = '/' + (appFile[1] ?? '');
+          target = '/' + (appFile[1] ?? '').split('/').filter(part => !/^\([^()]+\)$/.test(part)).join('/');
           routeHandler = appFile[2] === 'route';
         } else if (pagesFile) {
           target = '/' + pagesFile[1].replace(/(?:^|\/)index$/, '');

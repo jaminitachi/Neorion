@@ -1,10 +1,10 @@
 import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { Node, ts, type ResolutionHostFactory, type SourceFile } from 'ts-morph';
+import { Node, ts, type ExportDeclaration, type ImportDeclaration, type ResolutionHostFactory, type SourceFile } from 'ts-morph';
 import { projectConfig, workspaceDirectories } from '../FindProject';
 import { parse } from 'yaml';
 import { workspaceInputsHash, workspaceSourcesHash } from '../ProjectSnapshot';
-import { importBinding } from './StaticBindings';
+import { bindingOf, importBinding } from './StaticBindings';
 
 function json(file: string) {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; }
@@ -19,6 +19,7 @@ const sourceFile = /\.[cm]?[jt]sx?$/i;
 const declarationFile = /\.d\.[cm]?ts$/i;
 const packageName = (module: string) => module.split('/').slice(0, module.startsWith('@') ? 2 : 1).join('/');
 type Package = { directory: string; name: string; manifest: ReturnType<typeof json> };
+type ReExport = { declaration: ImportDeclaration | ExportDeclaration; name: string; namespace?: boolean };
 
 function exportTargets(entry: unknown, wildcard: string): string[] {
   if (typeof entry === 'string') return [entry.split('*').join(wildcard)];
@@ -73,6 +74,11 @@ export class WorkspaceBindings {
   private readonly names = new Map<string, Package | undefined>();
   private readonly entryFiles = new Map<string, string | undefined>();
   private readonly unresolved = new Map<string, Set<string>>();
+  private readonly reExports = new Map<SourceFile, {
+    named: Map<string, ReExport | undefined>;
+    stars: ExportDeclaration[];
+    resolved: Set<string>;
+  }>();
   private pnpmDirectory?: string;
   private pnpm?: PnpmWorkspace;
 
@@ -276,11 +282,77 @@ export class WorkspaceBindings {
   }
 
   unresolvedBinding(expression: Node) {
+    if (!this.unresolved.size) return;
     let root = expression;
-    while (Node.isPropertyAccessExpression(root) || Node.isElementAccessExpression(root)) root = root.getExpression();
-    if (!this.unresolved.has(root.getSourceFile().getFilePath())) return;
+    const members: (string | undefined)[] = [];
+    while (Node.isPropertyAccessExpression(root) || Node.isElementAccessExpression(root)) {
+      const argument = Node.isElementAccessExpression(root) ? root.getArgumentExpression() : undefined;
+      members.unshift(Node.isPropertyAccessExpression(root) ? root.getName() :
+        Node.isStringLiteral(argument) ? argument.getLiteralText() : undefined);
+      root = root.getExpression();
+    }
+    if (!Node.isIdentifier(root)) return;
     const binding = importBinding(root);
-    if (binding && this.isUnresolved(root.getSourceFile(), binding.module)) return binding.module;
+    if (!binding) return;
+    const name = Node.isNamespaceImport(bindingOf(root)) ? members.shift() : binding.name;
+    return this.unresolvedFrom(binding.declaration, name, members, new Set());
+  }
+
+  private unresolvedFrom(declaration: ImportDeclaration | ExportDeclaration, name: string | undefined,
+    members: (string | undefined)[], seen: Set<string>): string | undefined {
+    const module = declaration.getModuleSpecifierValue();
+    if (module && this.isUnresolved(declaration.getSourceFile(), module)) return module;
+    const source = declaration.getModuleSpecifierSourceFile();
+    if (name !== undefined && source && !source.isInNodeModules() && !source.isDeclarationFile()) {
+      return this.unresolvedExport(source, name, members, seen);
+    }
+  }
+
+  private unresolvedExport(file: SourceFile, name: string, members: (string | undefined)[], seen: Set<string>): string | undefined {
+    const key = JSON.stringify([file.getFilePath(), name, members]);
+    if (seen.has(key)) return;
+    seen.add(key);
+    let exports = this.reExports.get(file);
+    if (!exports) {
+      exports = { named: new Map(), stars: [], resolved: new Set() };
+      for (const entry of file.getExportDeclarations()) {
+        if (entry.isTypeOnly()) continue;
+        const namespace = entry.getNamespaceExport();
+        if (namespace) exports.named.set(namespace.getName(), { declaration: entry, name: '*', namespace: true });
+        else if (!entry.compilerNode.exportClause) exports.stars.push(entry);
+        else for (const specifier of entry.getNamedExports()) {
+          const symbol = specifier.getAliasNode() ?? specifier.getNameNode();
+          let origin: ReExport | undefined;
+          if (!specifier.isTypeOnly()) {
+            if (entry.hasModuleSpecifier()) origin = { declaration: entry, name: specifier.getNameNode().compilerNode.text };
+            else {
+              const binding = specifier.getLocalTargetSymbol()?.getDeclarations()[0];
+              const imported = binding?.getFirstAncestorByKind(ts.SyntaxKind.ImportDeclaration);
+              if (imported && !imported.isTypeOnly() && !(Node.isImportSpecifier(binding) && binding.isTypeOnly())) {
+                origin = { declaration: imported, name: Node.isImportSpecifier(binding) ? binding.getNameNode().compilerNode.text : 'default',
+                  namespace: Node.isNamespaceImport(binding) || undefined };
+              }
+            }
+          }
+          exports.named.set(symbol.compilerNode.text, origin);
+        }
+      }
+      if (exports.stars.length) for (const [exported, declarations] of file.getExportedDeclarations()) {
+        if (declarations.some(node => !node.getSourceFile().isDeclarationFile())) exports.resolved.add(exported);
+      }
+      this.reExports.set(file, exports);
+    }
+    if (exports.named.has(name)) {
+      const binding = exports.named.get(name);
+      if (binding) return this.unresolvedFrom(binding.declaration, binding.namespace ? members[0] : binding.name,
+        binding.namespace ? members.slice(1) : members, seen);
+      return;
+    }
+    if (name === 'default' || exports.resolved.has(name)) return;
+    for (const entry of exports.stars) {
+      const missing = this.unresolvedFrom(entry, name, members, seen);
+      if (missing) return missing;
+    }
   }
 
   resolve(expression: Node | undefined) {
