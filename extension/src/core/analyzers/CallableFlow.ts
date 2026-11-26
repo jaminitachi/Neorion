@@ -180,32 +180,34 @@ export class CallableFlow {
       if (states === key || states instanceof Set && states.has(key)) return;
       if (states instanceof Set) states.add(key);
       else seen.set(node, states === undefined ? key : new Set([states, key]));
-      const resolve = (value: Node | undefined, selection: string[], calls: number, factories: CallExpression[]) =>
-        visit(value, selection, calls, factories, path, write);
       const wrapped = wrappedExpression(node);
-      if (wrapped) return resolve(wrapped, members, invoke, via);
-      if (isFunction(node) || Node.isVariableDeclaration(node) || Node.isBindingElement(node) || Node.isObjectLiteralExpression(node)) {
+      if (wrapped) return visit(wrapped, members, invoke, via, path, write);
+      const fn = isFunction(node) ? node : undefined;
+      const kind = node.compilerNode.kind;
+      if (fn || kind === SyntaxKind.VariableDeclaration || kind === SyntaxKind.BindingElement ||
+          kind === SyntaxKind.ObjectLiteralExpression) {
         write ??= this.writes.forBinding(node, members);
       }
-      if (isFunction(node)) {
+      if (fn) {
         if (!invoke) {
-          if (!members.length) result.push({ fn: node, via: via.map(call => call.getExpression().getText()), factories: via.length ? via : undefined, path, write });
+          if (!members.length) result.push({ fn, via: collectMembers ? [] : via.map(call => call.getExpression().getText()),
+            factories: via.length ? via : undefined, path, write });
           return;
         }
-        let values = this.returns.get(node);
-        if (!values) this.returns.set(node, values = returnedValues(node));
-        for (const value of values) resolve(value, members, invoke - 1, via);
+        let values = this.returns.get(fn);
+        if (!values) this.returns.set(fn, values = returnedValues(fn));
+        for (const value of values) visit(value, members, invoke - 1, via, path, write);
         return;
       }
-      if (Node.isVariableDeclaration(node)) return resolve(node.getInitializer(), members, invoke, via);
-      if (Node.isPropertyAssignment(node)) return resolve(node.getInitializer(), members, invoke, via);
+      if (Node.isVariableDeclaration(node)) return visit(node.getInitializer(), members, invoke, via, path, write);
+      if (Node.isPropertyAssignment(node)) return visit(node.getInitializer(), members, invoke, via, path, write);
       if (Node.isShorthandPropertyAssignment(node)) {
-        for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) resolve(decl, members, invoke, via);
+        for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) visit(decl, members, invoke, via, path, write);
         return;
       }
       if (Node.isBindingElement(node)) {
         const selection = bindingSelection(node, members);
-        if (selection) return resolve(node.getParent().getParent(), selection, invoke, via);
+        if (selection) return visit(node.getParent().getParent(), selection, invoke, via, path, write);
       }
       if (Node.isArrayLiteralExpression(node)) {
         const elements = node.getElements();
@@ -213,7 +215,7 @@ export class CallableFlow {
         const fixed = prefix < 0 ? elements : elements.slice(0, prefix);
         if (members.length) {
           const index = Number(members[0]);
-          if (String(index) === members[0]) resolve(fixed[index], members.slice(1), invoke, via);
+          if (String(index) === members[0]) visit(fixed[index], members.slice(1), invoke, via, path, write);
           return;
         }
         if (collectMembers && !invoke) fixed.forEach((element, index) =>
@@ -221,8 +223,8 @@ export class CallableFlow {
         return;
       }
       if (Node.isConditionalExpression(node)) {
-        resolve(node.getWhenTrue(), members, invoke, via);
-        resolve(node.getWhenFalse(), members, invoke, via);
+        visit(node.getWhenTrue(), members, invoke, via, path, write);
+        visit(node.getWhenFalse(), members, invoke, via, path, write);
         return;
       }
       if (Node.isObjectLiteralExpression(node)) {
@@ -239,7 +241,7 @@ export class CallableFlow {
         for (let i = properties.length - 1; i >= 0; i--) {
           const property = properties[i];
           if (Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode())) return;
-          if (staticMember(property.getNameNode()) === name) return resolve(property, rest, invoke, via);
+          if (staticMember(property.getNameNode()) === name) return visit(property, rest, invoke, via, path, write);
         }
       }
       if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
@@ -248,11 +250,11 @@ export class CallableFlow {
         const name = Node.isPropertyAccessExpression(node) ? node.getName() : staticMember(key, false);
         if (name !== undefined && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
           const before = result.length;
-          resolve(node.getExpression(), [name, ...members], invoke, via);
+          visit(node.getExpression(), [name, ...members], invoke, via, path, write);
           if (result.length > before) return;
         }
         for (const decl of this.declarations(node)) {
-          if (!Node.isPropertySignature(decl) && !Node.isMethodSignature(decl)) resolve(decl, members, invoke, via);
+          if (!Node.isPropertySignature(decl) && !Node.isMethodSignature(decl)) visit(decl, members, invoke, via, path, write);
         }
         return;
       }
@@ -262,7 +264,7 @@ export class CallableFlow {
       const origin = this.packageOf(callee);
       const hook = origin?.module === 'react' ? origin.name : undefined;
       if (hook === 'useMemo' || hook === 'useCallback') {
-        return resolve(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0), via);
+        return visit(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0), via, path, write);
       }
 
       const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
@@ -270,16 +272,16 @@ export class CallableFlow {
       if (creation && ['zustand', 'zustand/vanilla', 'zustand/traditional'].includes(creation.module) &&
           ['create', 'default', 'createStore', 'createWithEqualityFn'].includes(creation.name)) {
         const initializer = this.storeInitializer(args[0]);
-        return resolve(initializer, members, invoke, via);
+        return visit(initializer, members, invoke, via, path, write);
       }
 
       // Evaluate the selector against an actual Zustand binding. Local calls may
       // return a nested object or function, but do not supply selector semantics.
       if (isFunction(args[0]) && this.declarations(callee).some(decl => this.isStore(decl))) {
-        const path = selectedMembers(args[0]);
-        if (path) return resolve(callee, [...path, ...members], invoke + 1, [...via, node]);
+        const selection = selectedMembers(args[0]);
+        if (selection) return visit(callee, [...selection, ...members], invoke + 1, [...via, node], path, write);
       }
-      resolve(callee, members, invoke + 1, [...via, node]);
+      visit(callee, members, invoke + 1, [...via, node], path, write);
     };
     visit(expression, [], invocations, []);
     return result;

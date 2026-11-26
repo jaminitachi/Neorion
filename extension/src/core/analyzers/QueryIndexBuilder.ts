@@ -815,7 +815,7 @@ export class QueryIndexBuilder {
 
     const creationSites = new Map<number, Set<CallExpression>>();
     const followedUses = new WeakMap<Node, number | Set<number>>();
-    const unindexedCallbacks = new Map<FunctionNode, Set<number>>();
+    const callbackScopes: [FunctionNode, number, boolean][] = [];
     const recordCallbackScope = (site: Node, target: number, escapingValue = false) => {
       if (historyOnly || !this.fetches.length) return;
       let scope = site.compilerNode.parent;
@@ -824,6 +824,9 @@ export class QueryIndexBuilder {
       if (!scope || graphOwners.has(scope) || graphOwners.has(scope.parent)) return;
       const fn = site.getFirstAncestor(isFunction);
       if (!fn || byNode.has(fn) || byNode.has(fn.getParent()!)) return;
+      callbackScopes.push([fn, target, escapingValue]);
+    };
+    const callbackScopeKind = (fn: FunctionNode) => {
       let value: Node = fn;
       let parent = value.getParent();
       while (parent && (wrappedExpression(parent) === value ||
@@ -843,12 +846,8 @@ export class QueryIndexBuilder {
         Node.isFunctionDeclaration(node) && !node.getBody() && node.hasDeclareKeyword());
       if (Node.isFunctionDeclaration(fn) || Node.isVariableDeclaration(parent) ||
           Node.isReturnStatement(parent) || Node.isPropertyAssignment(parent) || Node.isArrayLiteralExpression(parent) ||
-          Node.isArrowFunction(parent) && parent.getBody() === value || react === 'useCallback' || declared ||
-          argument && escapingValue) {
-        const targets = unindexedCallbacks.get(fn) ?? new Set<number>();
-        targets.add(target);
-        unindexedCallbacks.set(fn, targets);
-      }
+          Node.isArrowFunction(parent) && parent.getBody() === value || react === 'useCallback' || declared) return 'bound';
+      if (argument) return 'argument';
     };
     const recordCallbackUse = (id: number, site: Node, possible = false) => {
       if (Node.isCallExpression(site)) recordCallbackScope(site, id, index.callbackCreations?.[id] !== undefined);
@@ -1729,12 +1728,18 @@ export class QueryIndexBuilder {
           }
         }
       }
-      const typeAncestors = new WeakMap<Node, boolean>();
-      const insideType = (node: Node | undefined): boolean => {
+      const typeAncestors = new WeakMap<ts.Node, boolean>();
+      const insideType = (node: ts.Node | undefined): boolean => {
         if (!node) return false;
         const cached = typeAncestors.get(node);
         if (cached !== undefined) return cached;
-        const result = Node.isTypeNode(node) || insideType(node.getParent());
+        const kind = node.kind;
+        // Match ts-morph's type-node predicate on compiler nodes.
+        const result = kind >= SyntaxKind.FirstTypeNode && kind <= SyntaxKind.LastTypeNode &&
+            kind !== SyntaxKind.OptionalType && kind !== SyntaxKind.TemplateLiteralTypeSpan ||
+          kind === SyntaxKind.ExpressionWithTypeArguments || kind === SyntaxKind.JSDocTypeExpression ||
+          kind >= SyntaxKind.JSDocAllType && kind <= SyntaxKind.JSDocNamepathType ||
+          kind === SyntaxKind.JSDocTypeLiteral || kind === SyntaxKind.JSDocSignature || insideType(node.parent);
         typeAncestors.set(node, result);
         return result;
       };
@@ -1853,7 +1858,7 @@ export class QueryIndexBuilder {
             }
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
-            const typeUse = !jsx && insideType(node.getParent());
+            const typeUse = !jsx && insideType(node.compilerNode.parent);
             const returnedUse = !typeUse && !callbackUse && !executable && !jsx &&
               (symbol.kind === 'function' || symbol.kind === 'hook') && returnedValueUse(node);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
@@ -1871,7 +1876,7 @@ export class QueryIndexBuilder {
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
-          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !insideType(node.getParent())) {
+          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !insideType(node.compilerNode.parent)) {
             trpcModuleUses.set(`${id}:${line}`, [id, line]);
           }
           const lines = references.get(id) ?? new Map<number, Reference[]>();
@@ -2072,7 +2077,7 @@ export class QueryIndexBuilder {
         const namespace = namespaces.get(node.getText());
         let parent = node.getParent();
         if (!namespace || parent === namespace.declaration ||
-            insideType(node.getParent())) return;
+            insideType(node.compilerNode.parent)) return;
         const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
         if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
         let receiver = node;
@@ -2447,11 +2452,23 @@ export class QueryIndexBuilder {
           }
         }
       }
+      const relevantScopes = new Set(callbackScopes.flatMap(([fn, target]) => relevant.has(target) ? [fn] : []));
+      const scopeKinds = new Map<FunctionNode, ReturnType<typeof callbackScopeKind>>();
+      const unindexedCallbacks = new Map<FunctionNode, Set<number>>();
+      for (const [fn, target, escaping] of callbackScopes) {
+        if (!relevantScopes.has(fn)) continue;
+        if (!scopeKinds.has(fn)) scopeKinds.set(fn, callbackScopeKind(fn));
+        const kind = scopeKinds.get(fn);
+        if (kind !== 'bound' && !(kind === 'argument' && escaping)) continue;
+        // Keep the original encounter order even when a scope also calls unrelated targets.
+        const targets = unindexedCallbacks.get(fn) ?? new Set<number>();
+        if (relevant.has(target)) targets.add(target);
+        unindexedCallbacks.set(fn, targets);
+      }
       for (const [fn, targets] of unindexedCallbacks) {
-        const coveredTargets = [...targets].filter(target => relevant.has(target));
-        if (!coveredTargets.length) continue;
+        if (!targets.size) continue;
         for (const issue of coverage.inspect(0, fn, [], true)) {
-          for (const target of coveredTargets) gap(target, locationOf(issue));
+          for (const target of targets) gap(target, locationOf(issue));
         }
       }
       for (const [callback, fn] of callableDefinitions) {

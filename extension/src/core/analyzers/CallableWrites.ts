@@ -93,6 +93,9 @@ export class CallableWrites {
   private writes = new Map<Node, Write[]>();
   private parameterWrites: [Parameter, Write][] = [];
   private parameterArguments = new Map<Parameter, Node[]>();
+  private readWrites = new WeakMap<Node, Node | null>();
+  private arrayReceivers = new WeakMap<Node, Node>();
+  private arrayWrites = new WeakMap<Node, boolean>();
 
   constructor(private files: Set<SourceFile>, private declarations: (node: Node) => Node[], private references: CallableReferences) {
     for (const file of files) visitKinds(file, writeKinds, node => {
@@ -104,15 +107,36 @@ export class CallableWrites {
       else if (Node.isPrefixUnaryExpression(node) || Node.isPostfixUnaryExpression(node)) this.record(node.getOperand(), [], node);
     }, { filterRaw: isWriteOperation });
     for (const [parameter, { path, site }] of this.parameterWrites) {
+      if (!this.isWrite(site)) continue;
       for (const argument of this.argumentsAt(parameter)) this.record(argument, path, site);
     }
   }
 
-  forBinding(binding: Node, members: string[]) {
-    return this.writes.get(binding)?.find(write => matchingPath(write.path, members))?.site;
+  forBinding(binding: Node, members: readonly Member[]) {
+    return this.writes.get(binding)?.find(write => matchingPath(write.path, members) && this.isWrite(write.site))?.site;
+  }
+
+  private isWrite(site: Node) {
+    const receiver = this.arrayReceivers.get(site);
+    if (!receiver) return true;
+    let array = this.arrayWrites.get(site);
+    if (array === undefined) {
+      const type = receiver.getType();
+      array = type.isArray() || type.isTuple();
+      this.arrayWrites.set(site, array);
+    }
+    return array;
   }
 
   forRead(node: Node) {
+    const cached = this.readWrites.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const write = this.readWrite(node);
+    this.readWrites.set(node, write ?? null);
+    return write;
+  }
+
+  private readWrite(node: Node) {
     if (Node.isIdentifier(node)) {
       for (const binding of this.declarations(node)) {
         const write = this.forBinding(binding, []);
@@ -133,8 +157,8 @@ export class CallableWrites {
     }
     if (!Node.isIdentifier(root)) return;
     for (const binding of this.declarations(root)) {
-      const write = this.writes.get(binding)?.find(write => matchingPath(write.path, path));
-      if (write) return write.site;
+      const write = this.forBinding(binding, path);
+      if (write) return write;
     }
   }
 
@@ -243,11 +267,12 @@ export class CallableWrites {
     if (!Node.isPropertyAccessExpression(callee)) return;
     const name = callee.getName();
     const receiver = callee.getExpression();
-    const [target, key] = call.getArguments();
     const object = Node.isIdentifier(receiver) && receiver.getText() === 'Object' && objectMutators.has(name);
     const reflect = Node.isIdentifier(receiver) && receiver.getText() === 'Reflect' && reflectMutators.has(name);
-    if ((object || reflect) && target &&
-        this.declarations(receiver).every(decl => !this.files.has(decl.getSourceFile()) && decl.getSourceFile().isDeclarationFile())) {
+    if (object || reflect) {
+      const [target, key] = call.getArguments();
+      if (!target || !this.declarations(receiver).every(decl => !this.files.has(decl.getSourceFile()) &&
+          decl.getSourceFile().isDeclarationFile())) return;
       if (name === 'assign' || name === 'defineProperties') {
         for (const source of call.getArguments().slice(1)) {
           if (!Node.isObjectLiteralExpression(source)) this.record(target, [undefined], call);
@@ -261,8 +286,10 @@ export class CallableWrites {
         this.record(target, [member], call);
       }
     } else if (arrayMutators.has(name)) {
-      const type = receiver.getType();
-      if (type.isArray() || type.isTuple()) this.record(receiver, [undefined], call);
+      // A method name alone does not establish an array write. Only ask the
+      // checker when the path could affect a read or propagate to an argument.
+      this.arrayReceivers.set(call, receiver);
+      this.record(receiver, [undefined], call);
     }
   }
 }

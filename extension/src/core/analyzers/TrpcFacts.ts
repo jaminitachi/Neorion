@@ -254,8 +254,8 @@ export class TrpcFacts {
   private httpDispatch(site: CallExpression, proxy: Proxy, name: string, operation: string): Pick<ProcedureUse, 'transport' | 'transportIssue' | 'transportRoutes'> {
     const method = mutationCalls.test(operation) ? 'POST' :
       /^(?:query|useQuery|useSuspenseQuery|useInfiniteQuery|useSuspenseInfiniteQuery)$/.test(operation) ? 'GET' : undefined;
-    if (operation.startsWith('use') && Node.isFalseLiteral(valueNode(property(valueNode(site.getArguments()[1]), 'enabled')))) return {};
     if (!method || !proxy.client || !proxy.router || proxy.kind !== 'react' && proxy.kind !== 'client') return {};
+    if (operation.startsWith('use') && Node.isFalseLiteral(valueNode(property(valueNode(site.getArguments()[1]), 'enabled')))) return {};
     const links = this.links.get(proxy.client) ?? [];
     const handlers = this.handlers.get(proxy.router) ?? [];
     const candidates = links.flatMap(link => {
