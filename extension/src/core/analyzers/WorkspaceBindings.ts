@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync, realpathSync } from 'node:fs';
 import * as path from 'node:path';
 import { Node, Project } from 'ts-morph';
+import { parse } from 'yaml';
 import { workspaceInputsHash } from '../ProjectSnapshot';
 import { importBinding } from './StaticBindings';
 
@@ -8,8 +9,25 @@ function json(file: string) {
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return undefined; }
 }
 
+type PnpmWorkspace = { packages?: unknown; catalog?: unknown; catalogs?: unknown };
+
+function pnpmWorkspace(file: string): PnpmWorkspace | undefined {
+  try {
+    const value: unknown = parse(readFileSync(file, 'utf8'), { maxAliasCount: 32, logLevel: 'silent' });
+    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
+  } catch {
+    // Missing or malformed workspace settings cannot select a dependency version.
+  }
+}
+
+function own(value: unknown, key: string): unknown {
+  return value && typeof value === 'object' && Object.prototype.hasOwnProperty.call(value, key)
+    ? (value as Record<string, unknown>)[key] : undefined;
+}
+
 export class WorkspaceBindings {
   private workspaceRoot?: string;
+  private pnpm?: PnpmWorkspace;
   private readonly inputs = new Set<string>();
   private readonly packages = new Map<string, string>();
   private project?: Project;
@@ -23,13 +41,14 @@ export class WorkspaceBindings {
     for (let directory = root; directory !== path.dirname(directory); directory = path.dirname(directory)) {
       const workspace = json(path.join(directory, 'package.json'))?.workspaces;
       const yaml = path.join(directory, 'pnpm-workspace.yaml');
-      const patterns: unknown = Array.isArray(workspace) ? workspace : workspace?.packages ??
-        (existsSync(yaml) ? [...readFileSync(yaml, 'utf8').matchAll(/^\s*-\s+['"]?([\w./*-]+)['"]?\s*$/gm)].map(match => match[1]) : []);
-      if (!Array.isArray(patterns) || !patterns.length) continue;
+      const pnpm = pnpmWorkspace(yaml);
+      const patterns: unknown = Array.isArray(workspace) ? workspace : workspace?.packages ?? pnpm?.packages;
+      if ((!Array.isArray(patterns) || !patterns.length) && !(pnpm && directory === root)) continue;
       this.workspaceRoot = directory;
+      this.pnpm = pnpm;
       this.inputs.add(path.join(directory, 'package.json'));
-      if (existsSync(yaml)) this.inputs.add(yaml);
-      for (const pattern of patterns) {
+      this.inputs.add(yaml);
+      for (const pattern of Array.isArray(patterns) ? patterns : []) {
         if (typeof pattern !== 'string' || !/^[\w./-]+(?:\/\*)?$/.test(pattern) || pattern.includes('..') || path.isAbsolute(pattern)) continue;
         const base = path.join(directory, pattern.replace(/\/\*$/, ''));
         if (!existsSync(base)) continue;
@@ -50,6 +69,11 @@ export class WorkspaceBindings {
 
   manifestBoundary() {
     return this.workspaceRoot ?? this.root;
+  }
+
+  catalogVersion(name: string, spec: string): unknown {
+    const catalog = spec.slice('catalog:'.length);
+    return own(!catalog || catalog === 'default' ? this.pnpm?.catalog : own(this.pnpm?.catalogs, catalog), name);
   }
 
   has(module: string) {

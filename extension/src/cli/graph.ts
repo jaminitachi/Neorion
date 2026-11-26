@@ -1,5 +1,5 @@
 import { join, resolve } from 'node:path';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { generateGraph } from '../core/Generate';
 export { inspectChangeSource } from '../core/analyzers/ChangeSource';
 export { SourceEvidence } from '../core/analyzers/SourceEvidence';
@@ -7,6 +7,7 @@ import { missingProject, selectProject } from '../core/FindProject';
 import { mcpCommand } from '../core/McpCommand';
 import { projectLabel, projectRootNotice } from '../mcp/Build';
 import { VERSION } from '../mcp/Index';
+import { incrementalHistory, type HistoryPlan } from '../core/analyzers/HistoricalExports';
 
 export function run(root: string, showMcpConfig = false) {
   const start = performance.now();
@@ -30,8 +31,17 @@ export function run(root: string, showMcpConfig = false) {
 if (require.main === module) {
   try {
     if (process.argv[2] === '--history-index') {
-      const { graph } = generateGraph(resolve(process.argv[3]), { index: true });
-      writeFileSync(process.argv[4], JSON.stringify(graph.index), { mode: 0o600 });
+      const root = resolve(process.argv[3]);
+      let index;
+      if (process.argv[5]) {
+        try {
+          index = incrementalHistory(root, JSON.parse(readFileSync(process.argv[5], 'utf8')) as HistoryPlan);
+        } catch {
+          // A changing worktree or an unsupported scope needs the base graph.
+        }
+      }
+      index ??= generateGraph(root, { index: true }).graph.index;
+      writeFileSync(process.argv[4], JSON.stringify(index), { mode: 0o600 });
     } else if (process.argv[2] === '--build-project') {
       generateGraph(resolve(process.argv[3]), { markdown: true });
     } else run(resolve(process.argv[2] ?? '.'));

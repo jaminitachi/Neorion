@@ -408,7 +408,8 @@ export class QueryEngine {
           const render = this.source?.render(site);
           pending.push({
             id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
-            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper, conditional: entry.conditional || !!conditional || !!(render?.conditions?.length || render?.lists?.length),
+            depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
+            conditional: entry.conditional || !!conditional || decision === 'conditional' || !!(render?.conditions?.length || render?.lists?.length),
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
             issue: entry.issue ?? render?.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
@@ -457,7 +458,7 @@ export class QueryEngine {
     const directCount = rows.length - reached.size;
     const directLabel = directCount ? `, ${directCount} direct ${directCount === 1 ? 'entry' : 'entries'}` : '';
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
-      issue === 'custom App page slot unresolved' || issue.startsWith('unresolved page property ') &&
+      issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??

@@ -51,7 +51,7 @@ export function returns(body: Node | undefined): Node[] {
   if (!Node.isBlock(body)) return [body];
   const result: Node[] = [];
   body.forEachDescendant((node, walk) => {
-    if (Node.isFunctionLikeDeclaration(node)) walk.skip();
+    if (Node.isFunctionLikeDeclaration(node) || Node.isFunctionExpression(node)) walk.skip();
     else if (Node.isReturnStatement(node)) {
       const expression = node.getExpression();
       if (expression) result.push(expression);

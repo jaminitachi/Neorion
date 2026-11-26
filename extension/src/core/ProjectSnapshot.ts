@@ -22,7 +22,7 @@ export function projectSnapshot(root: string) {
             const file = relative + entry.name;
             if (entry.isDirectory()) {
                 visit(file + '/');
-            } else if (inputs.test(file)) {
+            } else if (inputs.test(file) || entry.name === 'pnpm-workspace.yaml') {
                 const info = statSync(join(root, file), { throwIfNoEntry: false });
                 if (info?.isFile()) hash.update(JSON.stringify([file, info.size, info.mtimeMs, info.ctimeMs]));
             }

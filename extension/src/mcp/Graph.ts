@@ -1147,6 +1147,7 @@ export class DependencyGraph {
     const site = conditions && renderKey(edge);
     const decision = site ? conditions?.[site] : undefined;
     if (decision === 'excluded') return;
+    if (decision === 'conditional') return { ...edge, conditional: true };
     return decision === 'possible' ? { ...edge, partial: true,
       uncertainty: route && this.index.pagesWrapperIssues?.[route.id]?.[0] } : edge;
   }
@@ -1261,8 +1262,9 @@ export class DependencyGraph {
 
     const scope = 'over indexed render, event, call, action, fetch, dyn, use and wrap edges' +
       (this.index.pagesEdges ? ', including Pages lifecycle, middleware and navigation' : '');
+    const appCoverage = route && this.index.pagesWrapperIssues?.[route.id]?.find(issue => issue.startsWith('custom App unresolved ('));
     const coverage = (reason?: string) =>
-      [...new Set([reason, sdkIssue].filter(Boolean))].join('; ') || undefined;
+      [...new Set([reason, appCoverage, sdkIssue].filter(Boolean))].join('; ') || undefined;
     if (!goal) {
       const trace = this.traceImpact(goals, 6, false, expired);
       const pages = new Set(trace.terminals.flatMap(({ terminal }) => terminal.kind === 'page' ? [terminal.name] :
