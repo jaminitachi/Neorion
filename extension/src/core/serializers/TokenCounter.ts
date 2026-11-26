@@ -9,9 +9,8 @@ function loadEncoding() {
     if (!line) continue;
     const tokens = line.split(' ');
     let rank = Number.parseInt(tokens[1], 10);
-    for (let i = 2; i < tokens.length; i++) {
-      table.set(Buffer.from(tokens[i], 'base64').toString('latin1'), rank++);
-    }
+    // The source table already uses canonical base64 keys for arbitrary token bytes.
+    for (let i = 2; i < tokens.length; i++) table.set(tokens[i], rank++);
   }
   return { table, pattern: ranks.pat_str };
 }
@@ -39,7 +38,7 @@ export class TokenCounter {
 
   private countPiece(bytes: Buffer): number {
     const ranks = this.encoding.table;
-    if (ranks.has(bytes.toString('latin1'))) return 1;
+    if (ranks.has(bytes.toString('base64'))) return 1;
 
     // As in js-tiktoken, merge the lowest-ranked adjacent pair, taking the
     // leftmost pair when ranks tie. Each remaining part has a rank because
@@ -50,7 +49,7 @@ export class TokenCounter {
       let bestRank = Infinity;
       let mergeAt = -1;
       for (let i = 0; i < ends.length - 1; i++) {
-        const pair = bytes.toString('latin1', ends[i - 1] ?? 0, ends[i + 1]);
+        const pair = bytes.toString('base64', ends[i - 1] ?? 0, ends[i + 1]);
         const rank = ranks.get(pair);
         if (rank !== undefined && rank < bestRank) {
           bestRank = rank;

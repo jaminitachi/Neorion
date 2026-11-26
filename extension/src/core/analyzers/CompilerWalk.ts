@@ -36,7 +36,7 @@ export function visitKinds(root: Node, kinds: ReadonlySet<ts.SyntaxKind>, visitW
     visitRaw?.(node);
     if (skip?.has(node) || skipNode?.(node)) return;
     if (kinds.has(node.kind) && (!filterRaw || filterRaw(node))) visitWrapped(wrap.call(root, node));
-    node.forEachChild(visit);
+    ts.forEachChild(node, visit);
   };
-  root.compilerNode.forEachChild(visit);
+  ts.forEachChild(root.compilerNode, visit);
 }

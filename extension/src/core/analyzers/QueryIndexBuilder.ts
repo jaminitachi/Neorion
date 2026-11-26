@@ -34,6 +34,13 @@ type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gat
   route: string; node: Node; prop?: { site: RenderSite; value: Node; name: string }; propGates?: PropGate[];
 };
 
+function mockCall(expression: Node) {
+  const callee = expression.compilerNode;
+  return ts.isPropertyAccessExpression(callee) &&
+    (callee.name.text === 'mock' || callee.name.text === 'doMock') &&
+    /^(vi|jest)\.(mock|doMock)$/.test(expression.getText());
+}
+
 const REFERENCE_KINDS = new Set([
   SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
   SyntaxKind.ExportSpecifier, SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.TaggedTemplateExpression,
@@ -1010,13 +1017,33 @@ export class QueryIndexBuilder {
     };
     for (const site of dynamicCallSites) setFlowIssue(site, 'prop callback untraced');
     const gateKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
-    const mayHaveLiterals = (call: CallExpression) => !historyOnly && call.compilerNode.arguments.slice(0, 4).some(argument =>
-      ts.isIdentifier(argument) || ts.isLiteralExpression(argument) || ts.isObjectLiteralExpression(argument) ||
-      ts.isArrayLiteralExpression(argument) || ts.isConditionalExpression(argument) || ts.isPrefixUnaryExpression(argument) ||
-      ts.isParenthesizedExpression(argument) || ts.isAsExpression(argument) || ts.isSatisfiesExpression(argument) ||
-      ts.isNonNullExpression(argument) || ts.isAwaitExpression(argument) || ts.isTypeAssertionExpression(argument) ||
-      argument.kind === SyntaxKind.TrueKeyword || argument.kind === SyntaxKind.FalseKeyword || argument.kind === SyntaxKind.NullKeyword
-    );
+    const mayHaveLiterals = (call: CallExpression) => {
+      if (historyOnly) return false;
+      const args = call.compilerNode.arguments;
+      for (let i = 0; i < Math.min(args.length, 4); i++) {
+        const arg = args[i];
+        switch (arg.kind) {
+        case SyntaxKind.Identifier:
+        case SyntaxKind.ObjectLiteralExpression:
+        case SyntaxKind.ArrayLiteralExpression:
+        case SyntaxKind.ConditionalExpression:
+        case SyntaxKind.PrefixUnaryExpression:
+        case SyntaxKind.ParenthesizedExpression:
+        case SyntaxKind.AsExpression:
+        case SyntaxKind.SatisfiesExpression:
+        case SyntaxKind.NonNullExpression:
+        case SyntaxKind.AwaitExpression:
+        case SyntaxKind.TypeAssertionExpression:
+        case SyntaxKind.TrueKeyword:
+        case SyntaxKind.FalseKeyword:
+        case SyntaxKind.NullKeyword:
+          return true;
+        default:
+          if (ts.isLiteralExpression(arg)) return true;
+        }
+      }
+      return false;
+    };
     const callEvidence = new WeakMap<CallExpression, string | undefined>();
     const argsFor = (call: CallExpression) => {
       if (!callEvidence.has(call)) callEvidence.set(call, mayHaveLiterals(call) ? literalArgs(call) : undefined);
@@ -1028,7 +1055,7 @@ export class QueryIndexBuilder {
       const sites = ((index.callLiterals ??= {})[key] ??= []);
       if (!sites.includes(args)) sites.push(args);
     };
-    const callFacts = new Map<string, ApiCallFact | undefined>();
+    const apiCallSites = new Map<number, [number | undefined, CallExpression, FunctionNode | undefined, FunctionNode | undefined][]>();
     const definition = (id: number | undefined) => id === undefined ? undefined :
       callableDefinitions.get(id) ?? factoryDefinitions.get(id);
     const guardsAt = (site: Node, owner: number | undefined) =>
@@ -1038,14 +1065,9 @@ export class QueryIndexBuilder {
       const callee = definition(to);
       const caller = definition(from);
       if (!callee?.compilerNode.parameters.length && !caller?.compilerNode.parameters.length) return;
-      const recursive = from === to;
-      if (recursive && staticallyUnreachable(site)) return;
-      const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
-      const args = booleanArguments(site, callee, declarationsOf);
-      const guards = argumentGuards(site, caller, declarationsOf, callableFlow.writes);
-      const fact: ApiCallFact | undefined = recursive || args || guards ? [args, guards] : undefined;
-      if (!callFacts.has(key)) callFacts.set(key, fact);
-      else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
+      const sites = apiCallSites.get(to) ?? [];
+      sites.push([from, site, callee, caller]);
+      apiCallSites.set(to, sites);
     };
     const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
       const line = startLine(node);
@@ -1707,6 +1729,15 @@ export class QueryIndexBuilder {
           }
         }
       }
+      const typeAncestors = new WeakMap<Node, boolean>();
+      const insideType = (node: Node | undefined): boolean => {
+        if (!node) return false;
+        const cached = typeAncestors.get(node);
+        if (cached !== undefined) return cached;
+        const result = Node.isTypeNode(node) || insideType(node.getParent());
+        typeAncestors.set(node, result);
+        return result;
+      };
       const trpc = trpcSources.has(file) || trpcSources.size > 0 && imports.some(entry =>
         trpcSources.has(entry.getModuleSpecifierSourceFile()!) && hasValueBinding(entry));
       if (trpc) index.trpcFiles!.push(relative);
@@ -1766,7 +1797,7 @@ export class QueryIndexBuilder {
         for (const id of ids) recordTrpcIssue(id, fileId, line);
       };
       const recordGraph = (id: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number) => {
-        const key = JSON.stringify([id, line, kind, owner, detail]);
+        const key = `${id}:${line}:${kind}:${owner ?? ''}:${detail ?? ''}`;
         if (graphReferences.has(key)) return;
         const ref: GraphReference = [id, line, kind];
         if (owner !== undefined || detail !== undefined) ref[3] = owner;
@@ -1822,7 +1853,7 @@ export class QueryIndexBuilder {
             }
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
-            const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
+            const typeUse = !jsx && insideType(node.getParent());
             const returnedUse = !typeUse && !callbackUse && !executable && !jsx &&
               (symbol.kind === 'function' || symbol.kind === 'hook') && returnedValueUse(node);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
@@ -1840,7 +1871,7 @@ export class QueryIndexBuilder {
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
-          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !node.getAncestors().some(Node.isTypeNode)) {
+          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !insideType(node.getParent())) {
             trpcModuleUses.set(`${id}:${line}`, [id, line]);
           }
           const lines = references.get(id) ?? new Map<number, Reference[]>();
@@ -2041,7 +2072,7 @@ export class QueryIndexBuilder {
         const namespace = namespaces.get(node.getText());
         let parent = node.getParent();
         if (!namespace || parent === namespace.declaration ||
-            node.getAncestors().some(Node.isTypeNode)) return;
+            insideType(node.getParent())) return;
         const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
         if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
         let receiver = node;
@@ -2118,14 +2149,15 @@ export class QueryIndexBuilder {
             const args = node.getArguments();
             // The first argument supplies the component definition when this call creates its binding.
             for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
-            const assignment = throughWrappers(node).getParent();
             const first = unwrapValue(args[0]);
-            if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
-                !components.has(assignment) && !aliases.has(assignment) &&
-                (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
-              for (const target of declarationsOf(first)) {
-                const id = byNode.get(target);
-                if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+            if (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first)) {
+              const assignment = throughWrappers(node).getParent();
+              if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
+                  !components.has(assignment) && !aliases.has(assignment)) {
+                for (const target of declarationsOf(first)) {
+                  const id = byNode.get(target);
+                  if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+                }
               }
             }
           }
@@ -2155,12 +2187,12 @@ export class QueryIndexBuilder {
           const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression),
             'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
-          if (!Node.isCallExpression(node)) return;
+          if (historyOnly || !Node.isCallExpression(node) || !mockCall(expression)) return;
           const [module, factory] = node.getArguments();
           const specifier = Node.isStringLiteral(module) ? module :
             Node.isCallExpression(module) && module.getExpression().getKind() === SyntaxKind.ImportKeyword
               ? module.getArguments()[0] : undefined;
-          if (historyOnly || !/^(vi|jest)\.(mock|doMock)$/.test(expression.getText()) || !Node.isStringLiteral(specifier) || !factory) return;
+          if (!Node.isStringLiteral(specifier) || !factory) return;
           const moduleName = specifier.getLiteralText();
           const imported = file.getImportDeclarations().find(entry => entry.getModuleSpecifierValue() === moduleName);
           const resolved = imported?.getModuleSpecifierSourceFile() ?? fileByName.get(ts.resolveModuleName(
@@ -2345,6 +2377,22 @@ export class QueryIndexBuilder {
         for (const caller of requestCallers.get(owner) ?? []) requestOwners.add(caller);
         for (const [caller] of index.callbackInvocations?.[owner] ?? []) requestOwners.add(caller);
       }
+      // Only edges reachable from an indexed request participate in reverse API queries.
+      const callFacts = new Map<string, ApiCallFact | undefined>();
+      for (const to of requestOwners) {
+        for (const [from, site, callee, caller] of apiCallSites.get(to) ?? []) {
+          const recursive = from === to;
+          if (recursive && staticallyUnreachable(site)) continue;
+          const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
+          const args = booleanArguments(site, callee, declarationsOf);
+          const guards = argumentGuards(site, caller, declarationsOf, callableFlow.writes);
+          const fact: ApiCallFact | undefined = recursive || args || guards ? [args, guards] : undefined;
+          if (!callFacts.has(key)) callFacts.set(key, fact);
+          else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
+        }
+      }
+      for (const [key, fact] of callFacts) if (fact) (index.apiCallFacts ??= {})[key] = fact;
+      apiCallSites.clear();
       // Unknown factory invocations can leave a gap in a callback they produce.
       const producersOf = new Map<number, Set<number>>();
       for (const [factory, callbacks] of returnedBy) for (const callback of callbacks.keys()) {
@@ -2426,7 +2474,6 @@ export class QueryIndexBuilder {
         }
       }
     }
-    for (const [key, fact] of callFacts) if (fact) (index.apiCallFacts ??= {})[key] = fact;
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const componentById = new Map([...components.keys()].map(node => [byNode.get(node), node]));

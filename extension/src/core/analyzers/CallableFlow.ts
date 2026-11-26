@@ -70,6 +70,7 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
 }
 
 const noTargets: Target[] = [];
+const callablePackages = new Set(['react', 'zustand', 'zustand/vanilla', 'zustand/traditional', 'zustand/middleware', 'zustand/middleware/immer']);
 const callableValueKinds = new Set([
   SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.FunctionDeclaration, SyntaxKind.MethodDeclaration,
   SyntaxKind.VariableDeclaration, SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.BindingElement,
@@ -84,6 +85,7 @@ export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
   private returns = new WeakMap<FunctionNode, Node[]>();
   private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
+  private callableImports = new WeakMap<SourceFile, Set<string>>();
   private stores = new WeakMap<Node, boolean>();
 
   readonly references: CallableReferences;
@@ -98,6 +100,30 @@ export class CallableFlow {
   private packageOf(node: Node) {
     const cached = this.packageOrigins.get(node);
     if (cached !== undefined) return cached ?? undefined;
+    const root = Node.isPropertyAccessExpression(node) ? node.getExpression() : node;
+    if (Node.isIdentifier(root)) {
+      const file = root.getSourceFile();
+      let bindings = this.callableImports.get(file);
+      if (!bindings) {
+        bindings = new Set();
+        for (const entry of file.compilerNode.statements) {
+          if (!ts.isImportDeclaration(entry) || !ts.isStringLiteral(entry.moduleSpecifier) ||
+              !callablePackages.has(entry.moduleSpecifier.text)) continue;
+          const clause = entry.importClause;
+          const named = clause?.namedBindings;
+          if (clause?.name) bindings.add(clause.name.text);
+          if (named && ts.isNamespaceImport(named)) bindings.add(named.name.text);
+          if (named && ts.isNamedImports(named)) {
+            for (const specifier of named.elements) bindings.add(specifier.name.text);
+          }
+        }
+        this.callableImports.set(file, bindings);
+      }
+      if (!bindings.has(root.compilerNode.text)) {
+        this.packageOrigins.set(node, null);
+        return;
+      }
+    }
     const origin = packageOrigin(node, this.symbol);
     this.packageOrigins.set(node, origin ?? null);
     return origin;

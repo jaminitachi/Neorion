@@ -32,8 +32,21 @@ type HttpHandler = { route: RouteNode; endpoint: string };
 type ProcedureUse = { transport?: { method: string; route: RouteNode; links: CallExpression[] }; transportIssue?: string; transportRoutes?: RouteNode[]; site: CallExpression; operation: string; cache: boolean; targets: ProcedurePath[]; unresolved?: ProcedurePath[] };
 
 function unwrap(node: Node | undefined): Node | undefined {
-  while (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) || Node.isSatisfiesExpression(node) ||
-    Node.isNonNullExpression(node) || Node.isAwaitExpression(node)) node = node.getExpression();
+  while (node) {
+    switch (node.compilerNode.kind) {
+    case SyntaxKind.ParenthesizedExpression:
+    case SyntaxKind.AsExpression:
+    case SyntaxKind.SatisfiesExpression:
+    case SyntaxKind.NonNullExpression:
+    case SyntaxKind.AwaitExpression:
+      node = (node as import('ts-morph').ParenthesizedExpression | import('ts-morph').AsExpression |
+        import('ts-morph').SatisfiesExpression | import('ts-morph').NonNullExpression |
+        import('ts-morph').AwaitExpression).getExpression();
+      break;
+    default:
+      return node;
+    }
+  }
   return node;
 }
 
@@ -458,7 +471,8 @@ export class TrpcFacts {
       }
       return;
     }
-    if (!Node.isIdentifier(node) && !member(node)) return;
+    const access = member(node);
+    if (!Node.isIdentifier(node) && !access) return;
     const declaration = this.localValue(node);
     const value = initializer(declaration, this.localValue);
     if (value) return this.proxy(value, seen);
@@ -476,7 +490,6 @@ export class TrpcFacts {
         return { kind: 'hydration', router, prefix: [] };
       }
     }
-    const access = member(node);
     if (access) {
       const base = this.proxy(access.base, seen);
       if (base) return { ...base, prefix: [...base.prefix, access.key] };
@@ -485,7 +498,8 @@ export class TrpcFacts {
 
   uses(call: CallExpression): ProcedureUse[] | undefined {
     const expression = unwrap(call.getExpression());
-    if (!member(expression) && !Node.isIdentifier(expression)) return;
+    if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression) &&
+        !Node.isElementAccessExpression(expression)) return;
     if (Node.isIdentifier(expression)) {
       const binding = this.localValue(expression);
       if (!Node.isBindingElement(binding) && !Node.isVariableDeclaration(binding)) return;
