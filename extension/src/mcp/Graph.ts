@@ -1,14 +1,17 @@
 import { compileMiddlewareMatcher, middlewareMatcher } from '../core/analyzers/NextRouteMatch';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, advanceRenderGuards, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, renderGuardKey, renderIssue, renderSiteKey,
-  type ExternalCall, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, advanceRenderGuards, CALLABLE_WRITE_ISSUE, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, renderGuardKey, renderIssue, renderSiteKey,
+  type ExternalCall, type FetchEntry, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
   type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
 type Route = QueryIndex['routes'][number];
+import type { scanExcludedRequests } from './ExcludedRequests';
+import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
+
 type NodeId = number | string;
 type Label = 'call' | 'event' | 'action' | 'render' | 'fetch' | 'dyn' | 'use' | 'trpc' | 'data' | 'middleware' | 'navigate' | 'redirect' | 'rewrite' | 'wrap' | 'load' | 'submit';
 type Edge = {
   from: NodeId; to: NodeId; label: Label; file: string; line: number;
-  site?: string; gates?: FlowGate[];
+  site?: string; gates?: FlowGate[]; render?: RenderEvidence; literals?: string; args?: string[]; transport?: string;
   local?: boolean;
   returnedValue?: boolean;
   matcher?: NonNullable<QueryIndex['pagesEdges']>[number]['matcher'];
@@ -16,12 +19,27 @@ type Edge = {
   possibleReconnect?: true;
 };
 type PathEdge = Edge;
-type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boolean; via?: string[]; valueOnly?: boolean };
-export type QueryRow = { text: string; files: string[]; pathEnd?: number; annotation?: string; suffix?: string };
+export function renderSuffix(evidence?: RenderEvidence) {
+  const conditions = evidence?.conditions ?? [];
+  const guards = conditions.length > 1 ? conditions.map(condition => `(${condition})`).join(' && ') : conditions[0];
+  const lists = evidence?.lists?.join(' > ');
+  return (guards ? ` [when ${guards}]` : '') + (lists ? ` [list ${lists}]` : '') +
+    (evidence?.issue ? ` [guard partial: ${evidence.issue}]` : '');
+}
+type Visit = { depth: number; steps?: number; edge?: Edge; conditional?: boolean; possible?: boolean; via?: string[]; valueOnly?: boolean };
+function evidenceSuffix(edge: Edge) {
+  return renderSuffix(edge.render) + (edge.literals ? ` [args ${edge.literals}]` : '') +
+    (edge.transport ? ` [${edge.transport}]` : edge.label === 'trpc' && edge.transportIssue ? ` [${edge.transportIssue}]` : '');
+}
+export type QueryRow = {
+  candidate?: true;
+  text: string; files: string[]; pathEnd?: number; context?: string; suffix?: string; evidence?: QueryRow[];
+  annotation?: { offset: number; text: string };
+};
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
   unresolvedWorkspace?: Iterable<string>;
-  notes?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
+  notes?: QueryRow[]; evidence?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
   routerTraversal?: ReadonlySet<number>;
 };
 export type ChangeOrigin = { file: string; name: string; ids: NodeId[]; removed?: boolean; startsAt?: number;
@@ -33,7 +51,7 @@ const rank: Record<Label, number> = { call: 0, action: 1, event: 2, render: 2, f
 const outgoingRank: Record<Label, number> = { render: 0, event: 1, call: 1, action: 1, fetch: 2, dyn: 3, use: 4, trpc: 1, data: 0, middleware: 1, navigate: 3, redirect: 3, rewrite: 3, wrap: 6, load: 3, submit: 3 };
 const nodeBudget = 5000;
 const hubSize = 30;
-const fetchTypes = new Set(['fetch', 'SWR key', 'axios', 'Playwright request', 'tRPC request', AI_SDK_TRANSPORT]);
+const fetchTypes = new Set(['fetch', 'SWR key', 'axios', 'Node HTTP request', 'Playwright request', 'tRPC request', AI_SDK_TRANSPORT]);
 const renderKey = (edge: Edge) => edge.label === 'render' && typeof edge.from === 'number' && typeof edge.to === 'number'
   ? renderSiteKey(edge.from, edge.to, edge.line) : undefined;
 const strongerTransportIssue = (a?: string, b?: string) =>
@@ -41,6 +59,9 @@ const strongerTransportIssue = (a?: string, b?: string) =>
 const isNavigation = (label: Label) => label === 'navigate' || label === 'redirect' || label === 'rewrite';
 export const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 export const graphRow = (text: string, ...files: string[]): QueryRow => ({ text, files });
+export const annotatedRow = (prefix: string, suffix: string, annotation: string, ...files: string[]): QueryRow => ({
+  text: prefix + suffix, files, annotation: annotation ? { offset: prefix.length, text: annotation } : undefined
+});
 export const quantity = (count: number, singular: string, plural = singular + 's') => `${count} ${count === 1 ? singular : plural}`;
 export const moduleStops = (count: number) => `stopped at ${quantity(count, 'module-level use')} (importers not traced)`;
 const depthLimit = (count: number, depth: number) => count ?
@@ -163,6 +184,7 @@ export class DependencyGraph {
   private pageRoots = new Map<NodeId, Terminal[]>();
   private external = new Map<NodeId, ExternalCall[]>();
   private trpc: Set<string>;
+  private memoizedCallbacks: Set<number>;
   private unboundProcedures: Set<number>;
   private procedureSites = new Map<number, { file: string; use: TrpcUse }[]>();
   private trpcModuleUses = new Map<number, Set<string>>();
@@ -176,9 +198,13 @@ export class DependencyGraph {
   private gateScopes = new Set<number>();
   private propRequests = new Map<number, NonNullable<QueryIndex['uncertainPropRequests']>>();
 
-  constructor(private index: QueryIndex, symbols: Map<number, SymbolEntry>) {
+  private described = new WeakMap<Edge, Edge>();
+  private readExcludedRequests = false;
+
+  constructor(private index: QueryIndex, symbols: Map<number, SymbolEntry>, private excludedRequests?: () => ReturnType<typeof scanExcludedRequests> | undefined) {
     this.symbols = symbols;
     this.trpc = new Set(index.trpcFiles);
+    this.memoizedCallbacks = new Set(index.memoizedCallbacks);
     this.unboundProcedures = new Set(index.trpcUnbound);
     for (const request of index.uncertainPropRequests ?? []) {
       append(this.propRequests, request.owner, request);
@@ -279,19 +305,16 @@ export class DependencyGraph {
       for (const alias of index.trpcAliases?.[edge.from] ?? []) addEdge({ ...edge, from: alias });
     };
     const calls = new Set<string>();
-    const lexicalOwner = (id: NodeId) => {
-      while (typeof id === 'number' && index.callableOwners?.[id] !== undefined) id = index.callableOwners[id];
-      return id;
-    };
     const callSite = (to: NodeId, from: NodeId, line: number) => JSON.stringify([to, from, line]);
     const keyOf = (from: NodeId, to: NodeId, line: number) => `${from}:${to}:${line}`;
     const invocation = (from: NodeId, to: number, file: string, line: number, detail?: string, gates?: FlowGate[], possible?: true) => {
       const key = keyOf(from, to, line);
       add({ from, to, label: this.actions.has(to) ? 'action' : isEvent(detail) ? 'event' : 'call', file, line,
-        local: index.callableOwners?.[to] !== undefined && lexicalOwner(to) === lexicalOwner(from),
+        local: typeof from === 'number' && index.callableOwners?.[to] !== undefined &&
+          lexicalOwner(index.callableOwners, to) === lexicalOwner(index.callableOwners, from),
         partial: possible || !!index.callIssues?.[key],
         uncertainty: index.callIssues?.[key] ?? (possible ? this.coverageIssue(from) : undefined),
-        detail: detail || index.refEvidence?.[key], gates: gates ?? index.callGates?.[key] });
+        detail: detail || index.refEvidence?.[key], args: index.callLiterals?.[key], gates: gates ?? index.callGates?.[key] });
       calls.add(callSite(to, from, line));
     };
     for (const [target, referenceFile, line, kind, detail, owner, graphOwner, possible] of index.references) {
@@ -312,6 +335,7 @@ export class DependencyGraph {
           kind === GraphReferenceKind.Render ? 'render' : 'use';
         add({ from: owner ?? fileId, to, label, file, line,
           detail: label === 'call' && detail !== undefined ? index.graphNames![detail] : undefined,
+          args: label === 'call' ? index.callLiterals?.[keyOf(owner ?? fileId, to, line)] : undefined,
           conditional: label === 'render' && !!detail, typeOnly: kind === GraphReferenceKind.TypeUse || undefined,
           returnedValue: kind === GraphReferenceKind.ReturnedUse || undefined });
       }
@@ -354,7 +378,26 @@ export class DependencyGraph {
       if (source) add({ ...edge, from: this.routerId(source), sourceRoute: undefined });
       if (fact.from !== undefined) add({ ...edge, from: fact.from });
     }
-    for (const fetch of index.fetches) {
+    this.addFetches(index.fetches, routes, add);
+    for (const [fileKey, uses] of Object.entries(index.trpcUses ?? {})) {
+      const fileId = Number(fileKey);
+      const file = this.file(fileId);
+      for (const use of uses) {
+        const [to, line, operation, owner, args, transport, transportIssue] = use;
+        append(this.procedureSites, to, { file, use });
+        if (!operation.startsWith('cache:')) add({ from: owner ?? fileId, to, label: 'trpc', file, line, detail: operation, args: typeof args === 'string' ? [args] : undefined, transport, transportIssue });
+      }
+    }
+    for (const call of index.externalCalls!) {
+      append(this.external, call[0], call);
+      for (const alias of index.trpcAliases?.[call[0]] ?? []) append(this.external, alias, call);
+    }
+    for (const entries of this.incoming.values()) entries.sort(edgeOrder);
+    for (const entries of this.outgoing.values()) entries.sort(edgeOrder);
+  }
+
+  private addFetches(fetches: FetchEntry[], routes: Map<number, Route>, add: (edge: Edge) => void) {
+    for (const fetch of fetches) {
       const route = routes.get(fetch.route);
       if (!route || route.kind !== 'api') continue;
       append(this.fetches, route.file, fetch);
@@ -364,7 +407,7 @@ export class DependencyGraph {
       const method = route.methods?.includes('ALL') ? 'ALL' : route.methods?.length ? fetch.method === 'HEAD' && !route.methods.includes('HEAD') ? 'GET' : fetch.method : '?';
       const to = this.apiId(route, method);
       const from = fetch.graphOwner ?? fetch.owner ?? this.fileNode(fetch.file);
-      const uncertainty = (fetch.propUrlUnknown ? propUrlIssue : undefined) ??
+      const uncertainty = fetch.uncertainty ?? (fetch.propUrlUnknown ? propUrlIssue : undefined) ??
         (fetch.lifecyclePossible ? this.coverageIssue(from) ?? 'possible lifecycle callback' : undefined) ??
         this.index.pagesApiIssues?.[route.id]?.[0];
       add({ from, to, label: 'fetch', file: fetch.file,
@@ -374,21 +417,36 @@ export class DependencyGraph {
         transportIssue: fetch.via === AI_SDK_TRANSPORT && (fetch.partial || fetch.dynamic) ?
           transportIssue(fetch.transportOverride) : undefined });
     }
-    for (const [fileKey, uses] of Object.entries(index.trpcUses ?? {})) {
-      const fileId = Number(fileKey);
-      const file = this.file(fileId);
-      for (const use of uses) {
-        const [to, line, operation, owner] = use;
-        append(this.procedureSites, to, { file, use });
-        if (!operation.startsWith('cache:')) add({ from: owner ?? fileId, to, label: 'trpc', file, line, detail: operation });
-      }
-    }
-    for (const call of index.externalCalls!) {
-      append(this.external, call[0], call);
-      for (const alias of index.trpcAliases?.[call[0]] ?? []) append(this.external, alias, call);
-    }
-    for (const entries of this.incoming.values()) entries.sort(edgeOrder);
-    for (const entries of this.outgoing.values()) entries.sort(edgeOrder);
+  }
+
+  private includeExcludedRequests() {
+    if (this.readExcludedRequests || !this.excludedRequests) return;
+    this.readExcludedRequests = true;
+    const evidence = this.excludedRequests();
+    if (!evidence?.fetches.length) return;
+    const touched = new Set<NodeId>();
+    const seen = new Set<string>();
+    this.addFetches(evidence.fetches, new Map(this.index.routes.map(route => [route.id, route])), edge => {
+      const key = JSON.stringify([edge.from, edge.to, edge.line, edge.method, edge.detail]);
+      if (seen.has(key)) return;
+      seen.add(key);
+      append(this.incoming, edge.to, edge);
+      append(this.outgoing, edge.from, edge);
+      touched.add(edge.to);
+    });
+    for (const id of touched) this.incoming.get(id)?.sort(edgeOrder);
+  }
+
+  private describe(edge: Edge) {
+    if (!edge.args && (edge.label !== 'render' || !edge.site)) return edge;
+    const cached = this.described.get(edge);
+    if (cached) return cached;
+    const render = edge.label === 'render' && edge.site ? this.index.renderEvidence?.[edge.site] : undefined;
+    const described = render || edge.args?.length ? { ...edge, render, literals: edge.args?.join(' | '),
+      conditional: edge.conditional || !!render?.conditions?.length
+    } : edge;
+    this.described.set(edge, described);
+    return described;
   }
 
   private fileNode(file: string): NodeId {
@@ -581,8 +639,9 @@ export class DependencyGraph {
   }
 
   private predecessors(id: NodeId): Edge[] {
-    const direct = this.incoming.get(id) ?? [];
     const routes = this.handlerRoutes.get(id) ?? (this.name(id) === 'module' ? this.routesByFile.get(this.file(id)) : undefined);
+    if (typeof id === 'string' && this.api.has(id) || routes?.some(route => route.kind === 'api')) this.includeExcludedRequests();
+    const direct = this.incoming.get(id) ?? [];
     if (!routes) return direct;
     const attached = routes.flatMap(terminal => {
       if (terminal.kind !== 'api' || !terminal.route) return [];
@@ -612,18 +671,20 @@ export class DependencyGraph {
       .sort((a, b) => Number(a.use[2].startsWith('cache:')) - Number(b.use[2].startsWith('cache:')) ||
         compare(a.file, b.file) || a.use[1] - b.use[1] || compare(a.use[2], b.use[2]));
     let callers = 0;
-    const rows = sites.map(({ file, use: [, line, operation, owner] }) => {
+    const rows = sites.map(({ file, use: [, line, operation, owner, args, transport] }) => {
       const cache = operation.startsWith('cache:');
       if (!cache) callers++;
       const label = cache ? 'cache-only' : 'call';
       return graphRow(`${label} ${location(file, line)} ${owner === undefined ? 'module' : this.name(owner)} (${operation.replace(/^cache:/, '')})` +
+        (args ? ` [args ${args}]` : '') + (transport ? ` [${transport}]` : '') +
         (isTestFile(file) ? ' [test]' : ''), file);
     });
     const caches = sites.length - callers;
+    const transportNotes = new Set(sites.flatMap(({ use }) => use[6] ?? []));
     return {
       title: `${location(symbol.file, symbol.line)}#${symbol.name}`, rows, targets: [symbol.file],
       count: `${callers} caller ${callers === 1 ? 'site' : 'sites'}` + (caches ? `, ${caches} cache-only` : ''),
-      partial: this.trpcIssue(symbol.id, includeTests), scope: 'indexed tRPC callers and cache sites'
+      partial: this.trpcIssue(symbol.id, includeTests), notes: [...transportNotes].map(issue => graphRow('# ' + issue)), scope: 'indexed tRPC callers and cache sites'
     };
   }
 
@@ -659,14 +720,14 @@ export class DependencyGraph {
     if (symbol || site) return `tRPC client proxy not traced (${location(file, symbol?.line ?? site?.line)})`;
   }
 
-  traceImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, initialGates: FlowGate[] = []) {
-    const trace = this.walkImpact(seeds, depth, includeTests, expired, undefined, initialGates);
+  traceImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, initialGates: FlowGate[] = [], stopAtWrittenBindings = false) {
+    const trace = this.walkImpact(seeds, depth, includeTests, expired, undefined, initialGates, stopAtWrittenBindings);
     if (!trace.renderSites.size) return trace;
     trace.terminals = trace.terminals.flatMap(entry => {
       const route = entry.terminal.route;
       const conditions = route && this.index.pagesRenderConditions?.[route.id];
       if (!conditions || expired() || !Object.keys(conditions).some(site => trace.renderSites.has(site))) return [entry];
-      const scoped = this.walkImpact(seeds, depth, includeTests, expired, route, initialGates);
+      const scoped = this.walkImpact(seeds, depth, includeTests, expired, route, initialGates, stopAtWrittenBindings);
       const match = scoped.terminals.find(result => terminalKey(result.terminal) === terminalKey(entry.terminal));
       if (match?.visit.possible) trace.partial ??= scoped.partial;
       return match ? [match] : [];
@@ -674,20 +735,22 @@ export class DependencyGraph {
     return trace;
   }
 
-  private walkImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, route?: Route, initialGates: FlowGate[] = []) {
+  private walkImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, route: Route | undefined, initialGates: FlowGate[], stopAtWrittenBindings: boolean) {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const renderSites = new Set<string>();
     const visited = new Map<NodeId, Visit[]>();
-    type State = { id: NodeId; gates: FlowGate[]; guards: string[][]; visit: Visit };
+    type State = { id: NodeId; gates: FlowGate[]; guards: string[][]; visit: Visit; steps: number; deferredEdge?: Edge };
     const levels: State[][] = [];
     const states = new Map<string, number[]>();
     const reachedEdges = new Set<Edge>();
     const tests = new Set<string>();
     const boundary = new Set<string>();
+    const deferredCallbacks = new Map<string, State[]>();
     const hubs: QueryRow[] = [];
     const hidden = new Set<NodeId>();
     const terminals = new Map<string, Reached>();
     let nodeLimited = false;
+    let localCallbackUsed = false;
     let trpc: string | undefined;
     let pagesIssue: string | undefined;
     let sdkIssue: string | undefined;
@@ -697,26 +760,30 @@ export class DependencyGraph {
     let flowIssue: string | undefined;
     const impactKey = (id: NodeId, gates: FlowGate[], guards: string[][]) =>
       guards.length ? JSON.stringify([id, gates, guards]) : stateKey(id, gates);
-    const visit = (id: NodeId, value: Visit, gates: FlowGate[], guards: string[][]) => {
+    const visit = (id: NodeId, value: Visit, gates: FlowGate[], guards: string[][], steps: number) => {
       const key = impactKey(id, gates, guards);
       const prior = states.get(key);
       const flags = certaintyFlags(value);
-      if (coversVisit(prior, flags, value.depth)) return false;
+      if (coversVisit(prior, flags, steps)) return false;
       if (!prior && states.size >= nodeBudget) {
         nodeLimited = true;
         return false;
       }
       const depths = prior ?? [];
-      depths[flags] = value.depth;
+      depths[flags] = steps;
       states.set(key, depths);
-      (levels[value.depth] ??= []).push({ id, gates, guards, visit: value });
+      (levels[steps] ??= []).push({ id, gates, guards, visit: value, steps });
+      if (steps <= depth) {
+        for (const state of deferredCallbacks.get(key) ?? []) levels[state.steps].push(state);
+        deferredCallbacks.delete(key);
+      }
       return true;
     };
-    for (const seed of seeds) visit(seed, { depth: 0 }, initialGates, []);
+    for (const seed of seeds) visit(seed, { depth: 0 }, initialGates, [], 0);
     for (let level = 0; level < levels.length && !expired(); level++) {
-      for (const { id, gates, guards, visit: current } of levels[level]) {
+      for (const { id, gates, guards, visit: current, steps, deferredEdge } of levels[level]) {
         if (expired()) break;
-        if (coversVisit(states.get(impactKey(id, gates, guards)), certaintyFlags(current), level, true)) continue;
+        if (coversVisit(states.get(impactKey(id, gates, guards)), certaintyFlags(current), steps, true)) continue;
         const visits = visited.get(id);
         if (!visits || terminalCertainty(current) < terminalCertainty(visits[visits.length - 1])) {
           append(visited, id, current);
@@ -733,10 +800,12 @@ export class DependencyGraph {
           const metadata = terminal.kind === 'page' && this.name(id) === 'generateMetadata';
           if (!earlier || (terminal.route || terminal.pages) && terminalCertainty(current) < terminalCertainty(earlier.visit)) {
             terminals.set(key, { terminal, visit: current, node: id, metadata: metadata || !!earlier?.metadata });
-          } else if (metadata && earlier.visit.depth === level) {
+          } else if (metadata && earlier.visit.depth === current.depth) {
             earlier.metadata = true;
           }
           if (terminal.kind === 'api') {
+            this.includeExcludedRequests();
+            flowIssue ??= terminal.route && this.index.trpcHttpIssues?.[terminal.route.id];
             sdkIssue = strongerTransportIssue(sdkIssue, includeTests ? this.unboundedTransport : this.unboundedProductionTransport);
             for (const fetch of this.fetches.get(terminal.file) ?? []) {
               if (!includeTests && isTestFile(fetch.file)) continue;
@@ -748,8 +817,8 @@ export class DependencyGraph {
             }
           }
         }
-        const edges = this.predecessors(id);
-        const additions = new Map<string, { gates: FlowGate[]; guards: string[][]; visits: (Visit & { edge: Edge })[]; depths: number[] }>();
+        const edges = deferredEdge ? [deferredEdge] : this.predecessors(id);
+        const additions = new Map<string, { gates: FlowGate[]; guards: string[][]; visits: (Visit & { edge: Edge; steps: number })[]; depths: number[] }>();
         let hasCaller = false;
         for (let edge of edges) {
           if (edge.from === id) continue;
@@ -771,25 +840,45 @@ export class DependencyGraph {
           if (!remaining) continue;
           const key = impactKey(edge.from, awaiting, remaining);
           hasCaller = true;
-          const cost = impactCost(edge, gates);
-          if (level >= depth && cost && edge.label !== 'render' && edge.label !== 'event') {
-            boundary.add(key);
-            continue;
+          // Keep the memoized callback hop visible while allowing it within the caller budget.
+          const memoized = (edge.label === 'call' || edge.label === 'event') &&
+            typeof edge.to === 'number' && this.memoizedCallbacks.has(edge.to) && this.file(edge.to) === edge.file;
+          let cost = memoized ? 0 : impactCost(edge, gates);
+          let reachedOwner = false;
+          if (steps >= depth && cost && edge.label !== 'render' && edge.label !== 'event' && edge.label !== 'fetch') {
+            const owners = this.index.callableOwners;
+            const owner = typeof edge.from === 'number' ? owners?.[edge.from] : undefined;
+            if (owner !== undefined) {
+              const ownerKey = impactKey(lexicalOwner(owners, owner), awaiting, remaining);
+              reachedOwner = !!states.get(ownerKey)?.some(steps => steps <= depth);
+              // An owner can be reached through another edge at this level.
+              if (!reachedOwner) append(deferredCallbacks, ownerKey, { id, gates, guards, visit: current, steps, deferredEdge: edge });
+            }
+            if (!reachedOwner) {
+              boundary.add(key);
+              continue;
+            }
+            cost = 0;
           }
+          edge = this.describe(edge);
           flowIssue ??= gateIssue(edge) ?? (uncertainEntry(edge, gates) ? propValueIssue : undefined);
           if (edge.partial && edge.label !== 'fetch') pagesIssue ??= edge.uncertainty ?? (this.index.router ? 'possible router dependency' : 'possible Pages dependency');
           if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
-          const next = { depth: level + cost, edge, conditional: current.conditional || edge.conditional,
-            possible: current.possible || (edge.label === 'render' || edge.label === 'event') && edge.partial,
+          const written = edge.uncertainty?.startsWith(CALLABLE_WRITE_ISSUE);
+          if (written && stopAtWrittenBindings) continue;
+          const nextSteps = steps + cost;
+          const next = { depth: current.depth + (memoized || reachedOwner ? 1 : cost), steps: nextSteps, edge,
+            conditional: current.conditional || edge.conditional, possible: current.possible || written || (edge.label === 'render' || edge.label === 'event') && edge.partial,
             valueOnly: current.valueOnly || !current.edge && edge.returnedValue };
           const flags = certaintyFlags(next);
-          if (coversVisit(states.get(key), flags, next.depth)) continue;
+          if (coversVisit(states.get(key), flags, nextSteps)) continue;
           const pending = additions.get(key) ?? { gates: awaiting, guards: remaining, visits: [], depths: [] };
-          if (coversVisit(pending.depths, flags, next.depth)) continue;
+          if (coversVisit(pending.depths, flags, nextSteps)) continue;
           pending.visits[flags] = next;
-          pending.depths[flags] = next.depth;
+          pending.depths[flags] = nextSteps;
           additions.set(key, pending);
+          localCallbackUsed ||= memoized || reachedOwner;
         }
         trpc ??= this.trpcIssue(id, includeTests);
         if (!hasCaller) {
@@ -797,18 +886,18 @@ export class DependencyGraph {
           trpc ??= boundary;
           if (!boundary && !endpoints.length && current.edge) this.recordModuleStops(id, to => visited.has(to), stops);
         }
-        if (additions.size > hubSize && level < depth) {
+        if (additions.size > hubSize && steps < depth) {
           const edges = [...additions.values()].flatMap(({ visits }) => visits.map(({ edge }) => edge));
           const files = [...new Set(edges.map(edge => edge.file))].sort(compare);
           const label = edges[0].label;
-          hubs.push(graphRow(`d${level + 1} ${label}  ${additions.size} callers in ${quantity(files.length, 'file')} (top: ${files.slice(0, 3).join(', ')})`, ...files.slice(0, 3)));
+          hubs.push(graphRow(`d${current.depth + 1} ${label}  ${additions.size} callers in ${quantity(files.length, 'file')} (top: ${files.slice(0, 3).join(', ')})`, ...files.slice(0, 3)));
         }
         const via = additions.size ? [this.name(id), ...current.via ?? []].slice(0, 2) : undefined;
         for (const { gates: awaiting, guards: remaining, visits } of additions.values()) {
           if (expired()) break;
           for (const next of visits) {
             if (!next) continue;
-            if (visit(next.edge.from, { ...next, via }, awaiting, remaining) && additions.size > hubSize && level < depth) {
+            if (visit(next.edge.from, { ...next, via }, awaiting, remaining, next.steps) && additions.size > hubSize && steps < depth) {
               hidden.add(next.edge.from);
             }
           }
@@ -820,21 +909,24 @@ export class DependencyGraph {
     const partial = [limit, trpc, pagesIssue, flowIssue, stops.size ? 'module-level importers not traced' : undefined,
       sdkIssue].filter(Boolean).join('; ') ||
       (uncertain.size ? 'dynamic URL fetch' : undefined);
-    return { visited, terminals: [...terminals.values()].sort(terminalOrder), tests, hidden, hubs, partial, trpc, literals, stops, reachedEdges, renderSites };
+    return { visited, terminals: [...terminals.values()].sort(terminalOrder), tests, hidden, hubs, partial, trpc, literals, stops, reachedEdges, renderSites, localCallbackUsed };
   }
 
   consumerEvidence(owner: number, includeTests: boolean, expired: () => boolean, gates: FlowGate[] = [], supplier?: number) {
-    const trace = this.traceImpact([owner], 6, includeTests, expired, gates);
+    const trace = this.traceImpact([owner], 6, includeTests, expired, gates, true);
     const rows: QueryRow[] = [];
     for (const edge of trace.reachedEdges) {
-      if (isEvent(edge.detail)) {
-        rows.push(graphRow(`event  ${location(edge.file, edge.line)} ${edge.detail} -> ${this.name(edge.to)}`, edge.file));
+      const flags = edge.uncertainty?.startsWith(CALLABLE_WRITE_ISSUE) ? ' [possible]' : '';
+      if (edge.label === 'event') {
+        rows.push(graphRow(`event  ${location(edge.file, edge.line)} ${edge.detail} -> ${this.name(edge.to)}${flags}`, edge.file));
+      } else if (edge.label === 'call' && (flags || edge.detail?.startsWith('prop ') || edge.detail?.startsWith('via '))) {
+        rows.push(graphRow(`call   ${location(edge.file, edge.line)} ${this.name(edge.from)} -> ${this.name(edge.to)}${edge.detail ? ` (${edge.detail})` : ''}${flags}`, edge.file));
       }
     }
     if (supplier !== undefined) for (const edge of trace.reachedEdges) {
       if (edge.to !== supplier || !edge.site || edge.label !== 'render') continue;
       const label = this.index.renderLabels?.[edge.site];
-      rows.push(graphRow(`render ${location(edge.file, edge.line)} ${this.name(supplier)}${label ? ' in ' + label : ''}`, edge.file));
+      rows.push(annotatedRow(`render ${location(edge.file, edge.line)} ${this.name(supplier)}${label ? ' in ' + label : ''}`, '', renderSuffix(edge.render), edge.file));
     }
     if (rows.length || supplier !== undefined) {
       rows.push(...this.terminalRows(trace.terminals.filter(({ terminal }) => terminal.kind === 'page' || terminal.pages), 40));
@@ -929,13 +1021,13 @@ export class DependencyGraph {
     const unknownMiddleware = trace.terminals.some(({ terminal }) => terminal.kind === 'middleware' && !terminal.matchedRoutes);
     const groups = new Map<string, { id: NodeId; visit: Visit; edge: Edge }[]>();
     const files = new Set<string>();
-    const localCallers = [...trace.visited.values()].map(([visit]) => visit).filter(visit => visit.edge?.local && visit.depth <= depth);
+    const localCallers = [...trace.visited.values()].map(([visit]) => visit).filter(visit => visit.edge?.local && (visit.steps ?? visit.depth) <= depth);
     const summarizeLocals = trace.visited.size > hubSize && localCallers.length >= 3;
     let symbols = 0;
     let used = trace.terminals.reduce((max, { visit }) => Math.max(max, visit.depth), 0);
     for (const [id, visits] of trace.visited) {
       const [first] = visits;
-      if (first.edge && first.depth <= depth) {
+      if (first.edge && (first.steps ?? first.depth) <= depth) {
         if (typeof id === 'number' && this.symbols.has(id)) symbols++;
         files.add(this.file(id));
       }
@@ -943,13 +1035,18 @@ export class DependencyGraph {
         const edge = visit.edge;
         if (!edge) continue;
         used = Math.max(used, visit.depth);
-        if (visit.depth > depth && visits.length === 1 || trace.hidden.has(id) || summarizeLocals && edge.local) continue;
+        if ((visit.steps ?? visit.depth) > depth && visits.length === 1 && edge.label !== 'fetch' || trace.hidden.has(id) || summarizeLocals && edge.local) continue;
         append(groups, JSON.stringify([visit.depth, edge.label, edge.file, certaintyFlags(visit)]), { id, visit, edge });
       }
     }
     rows.push(...trace.hubs);
     const symbolRows = [...groups.values()].sort(([a], [b]) => a.visit.depth - b.visit.depth ||
       compare(a.edge.file, b.edge.file) || a.edge.line - b.edge.line || compare(this.name(a.id), this.name(b.id)));
+    const incomingEvidence = new Map<NodeId, Edge[]>();
+    for (const edge of trace.reachedEdges) {
+      if (edge.render || edge.label === 'fetch' || edge.literals || edge.transport || edge.transportIssue && edge.label === 'trpc') append(incomingEvidence, edge.from, edge);
+    }
+    const shownEvidence = new Set<string>();
     for (const items of symbolRows) {
       const [{ visit, edge }] = items;
       const lines = [...new Set(items.map(item => item.edge.line))].sort((a, b) => a - b);
@@ -958,11 +1055,21 @@ export class DependencyGraph {
       const label = names.length === 1 && names[0] === 'module' && edge.label !== 'dyn' ? 'module' : edge.label;
       const flags = (items.some(item => item.visit.conditional) ? ' [cond]' : '') +
         (items.some(item => this.action(item.id)) ? ' [action]' : '') +
-        (items.some(item => item.visit.possible) ? ' [possible]' : items.some(item => item.edge.partial) ? ' [partial url]' : '') +
+        (items.some(item => item.visit.possible || item.edge.partial && (item.edge.label !== 'fetch' || item.edge.uncertainty))
+          ? ' [possible]' : items.some(item => item.edge.partial) ? ' [partial url]' : '') +
         (isTestFile(edge.file) ? ' [test]' : '');
       const chain = seeds.length === 1 && items.every(item => item.edge.to === seeds[0]) ? '' : ` < ${via.join(', ')}`;
-      rows.push(graphRow(`d${visit.depth} ${label} ${edge.file}:${lines.slice(0, 5).join(',')}` +
-        `${lines.length > 5 ? '+' + (lines.length - 5) : ''} ${names.join(', ')}${chain}${flags}`, edge.file));
+      const graph = graphRow(`d${visit.depth} ${label} ${edge.file}:${lines.slice(0, 5).join(',')}` +
+        `${lines.length > 5 ? '+' + (lines.length - 5) : ''} ${names.join(', ')}${chain}${flags}`, edge.file);
+      rows.push(graph);
+      for (const { id } of items) for (const site of incomingEvidence.get(id) ?? []) {
+        const detail = site.label === 'fetch' ? `${site.method} ${site.url} (${site.detail})${site.partial ? ' [possible]' : ''}` : this.name(site.to);
+        const text = `  ${site.label} ${location(site.file, site.line)} ${detail}${evidenceSuffix(site)}`;
+        if (!shownEvidence.has(text)) {
+          shownEvidence.add(text);
+          (graph.evidence ??= []).push(graphRow(text, site.file));
+        }
+      }
     }
     if (actions.length > 1 && actions.length <= 5 && [...trace.reachedEdges].some(edge => edge.gates?.length)) {
       for (const { terminal, node } of actions) {
@@ -1015,7 +1122,8 @@ export class DependencyGraph {
       return issue && (includeTests || !isTestFile(issue.valueFile) && !isTestFile(issue.file)) ? [issue.reason] : [];
     })[0];
     return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
-      (used > depth ? ` (limit ${depth} + renders/events)` : '') +
+      (used > depth ? ` (limit ${depth} + renders/events${[...trace.visited.values()].some(visits =>
+        visits.some(visit => visit.depth > depth && visit.edge?.label === 'fetch')) ? '/HTTP' : ''}${trace.localCallbackUsed ? '/callbacks' : ''})` : '') +
       (trace.hubs.length ? ', hub collapsed' : ''),
       partial: [...middlewareReasons, trace.partial ?? scopedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
         .filter(Boolean).join('; ') || undefined,
@@ -1225,6 +1333,7 @@ export class DependencyGraph {
     const routeContext = this.routeContext(route);
     const targets = new Set(goals);
     const apiGoals = goals.flatMap(id => this.api.get(String(id)) ?? this.handlerRoutes.get(id) ?? []);
+    if (apiGoals.length) this.includeExcludedRequests();
     const initial = starts.map(id => ({ id, depth: 0, weak: 0, contexts: [] as Step['contexts'], alternatives: new Set<NodeId>() }));
     let layer: Step[] = initial;
     const seen = new Set(starts);
@@ -1349,7 +1458,7 @@ export class DependencyGraph {
     let pathIssue: string | undefined;
     for (let step = goal; step.edge && step.previous; step = step.previous) {
       for (const alternate of step.previous.alternatives) otherSteps.add(alternate);
-      const edge = step.edge;
+      const edge = this.describe(step.edge);
       pathIssue ??= edge.uncertainty ?? gateIssue(edge);
       if (edge.partial && !edge.transportIssue) pathIssue ??= edge.label === 'fetch' ? 'uncertain URL match' : 'possible dependency';
       if (edge.label === 'use') pathIssue ??= 'symbol use does not trace invocation';
@@ -1357,19 +1466,19 @@ export class DependencyGraph {
         this.index.pagesOwnerIssues?.[step.previous.id]?.[0] : undefined);
       const file = this.file(step.id);
       const symbol = typeof step.id === 'number' ? this.symbols.get(step.id) : undefined;
-      sdkIssue = strongerTransportIssue(sdkIssue, edge.transportIssue);
+      if (edge.label !== 'trpc') sdkIssue = strongerTransportIssue(sdkIssue, edge.transportIssue);
       if (edge.partial && this.index.pagesEdges && !edge.transportIssue) partial ??= edge.uncertainty ??
         (edge.label === 'fetch' ? 'uncertain URL match' : `possible ${edge.label} edge`);
       const name = edge.destination ? (edge.method ? edge.method + ' ' : '') + edge.destination.url : edge.label === 'fetch' ? `${edge.method} ${edge.url}` + (symbol ? ' (' + symbol.name + ')' : '') :
         this.name(step.id) + (edge.detail?.startsWith('.') ? edge.detail : '');
-      rows.unshift(graphRow(`${step.depth} ${edge.label} ${location(edge.file, edge.line)} ${name}` +
+      rows.unshift(annotatedRow(`${step.depth} ${edge.label} ${location(edge.file, edge.line)} ${name}` +
         ((step === goal || edge.label === 'trpc') && file !== edge.file ? ' -> ' + location(file, symbol?.line) : '') +
         (edge.detail && (edge.label === 'event' || edge.label === 'render' || edge.label === 'call' && !edge.detail.startsWith('.') ||
           edge.label === 'fetch' && edge.detail.includes(' via prop ') || edge.label === 'trpc' || edge.label === 'data' ||
           edge.label === 'middleware' || edge.label === 'wrap' && !!this.index.router || edge.label === 'load' || edge.label === 'submit' || isNavigation(edge.label))
-          ? ` (${edge.detail})` : '') +
+          ? ` (${edge.detail})` : ''),
         (edge.conditional ? ' [cond]' : '') + (edge.partial ? edge.label === 'fetch' && !edge.uncertainty ? ' [partial url]' : ' [possible]' : '') +
-        (edge.possibleReconnect ? ' [possible reconnect]' : ''), edge.file, file));
+        (edge.possibleReconnect ? ' [possible reconnect]' : ''), evidenceSuffix(edge), edge.file, file));
     }
     let origin = goal;
     while (origin.previous) origin = origin.previous;
@@ -1402,6 +1511,7 @@ export class DependencyGraph {
     const pending = seeds.map(id => ({ id, depth: 0, contexts: [] as RenderContexts }));
     const routerTraversal = this.index.router && new Set<number>();
     const rows: QueryRow[] = [];
+    const evidence: QueryRow[] = [];
     const packages = new Set<string>();
     const notes: QueryRow[] = [];
     const unresolvedWorkspace = this.index.workspaceDependencies && new Set<string>();
@@ -1434,7 +1544,7 @@ export class DependencyGraph {
             (!routeContext.has(edge.sourceRoute) || edge.sourceRoute === route?.id)) return [];
         if (!permits(edge.gates, current.contexts)) return [];
         const applicable = this.pageRenderEdge(edge, conditions, route);
-        return applicable ? [applicable] : [];
+        return applicable ? [this.describe(applicable)] : [];
       }).sort((a, b) => outgoingRank[a.label] - outgoingRank[b.label] || a.line - b.line || edgeOrder(a, b));
       const groups = new Map<string, Edge[]>();
       for (const edge of edges) append(groups, JSON.stringify([edge.label, edge.to, edge.detail, edge.method, edge.file, ...(this.index.router ? [edge.destination?.id] : [])]), edge);
@@ -1448,7 +1558,7 @@ export class DependencyGraph {
       for (const sites of groups.values()) {
         if (expired()) break;
         const [edge] = sites;
-        sdkIssue = strongerTransportIssue(sdkIssue, edge.transportIssue);
+        if (edge.label !== 'trpc') sdkIssue = strongerTransportIssue(sdkIssue, edge.transportIssue);
         flowIssue ??= sites.find(site => site.uncertainty)?.uncertainty ?? gateIssue(edge) ??
           (sites.some(site => site.gates?.some(gate => matchesContext(gate, current.contexts) === undefined)) ? propValueIssue : undefined);
         if (sites.some(site => site.partial && !site.transportIssue)) flowIssue ??= edge.label === 'fetch' ? 'uncertain URL match' : 'possible dependency';
@@ -1467,9 +1577,17 @@ export class DependencyGraph {
             (sites.some(site => site.partial) ? edge.label === 'fetch' && !edge.uncertainty ? ' [partial url]' : ' [possible]' : '') + (edge.from === edge.to ? ' [self]' : '') +
             (sites.some(site => site.possibleReconnect) ? ' [possible reconnect]' : '') +
             (!isTestFile(file) && isTestFile(target) ? ' [test]' : '');
-          rows.push(graphRow(`d${d} ${edge.label} ${site}  ${label}  ${target}` +
+          const annotations = sites.map(evidenceSuffix);
+          const shared = annotations.every(value => value === annotations[0]);
+          const row = annotatedRow(`d${d} ${edge.label} ${site}  ${label}  ${target}` +
             (edge.detail?.startsWith('.') ? `#${name}` : edge.label === 'trpc' ? `:${this.symbols.get(Number(edge.to))?.line} (${edge.detail})` :
-              edge.detail ? ` (${edge.detail})` : '') + flags + parent, file, target));
+              edge.detail ? ` (${edge.detail})` : ''), flags + parent, shared ? annotations[0] : '', file, target);
+          if (!shared) {
+            const distinct = new Set(sites.flatMap((entry, i) => annotations[i] ?
+              [`  ${entry.label} ${location(entry.file, entry.line)} ${label}${annotations[i]}`] : []));
+            row.evidence = [...distinct].map(text => graphRow(text, edge.file));
+          }
+          rows.push(row);
         }
         if (edge.partial && this.index.pagesEdges && (!edge.transportIssue || edge.uncertainty)) trpc ??= edge.uncertainty ??
           (edge.label === 'fetch' ? 'uncertain URL match' : `possible ${edge.label} edge`);
@@ -1497,6 +1615,12 @@ export class DependencyGraph {
       }
       if (typeof current.id === 'number') {
         unresolved += this.index.unresolvedCalls![current.id] ?? 0;
+        for (const [line, callee, args] of (this.index.unresolvedCallLiterals?.[current.id] ?? []).slice(0, 6)) {
+          evidence.push(graphRow(`d${d} observed ${location(file, line)} ${callee} [args ${args}] [target unresolved]${parent}`, file));
+        }
+        for (const [line, value] of (this.index.returnLiterals?.[current.id] ?? []).slice(0, 8)) {
+          evidence.push(graphRow(`d${d} return ${location(file, line)} ${value}${parent}`, file));
+        }
         for (const [file, line, expression] of this.index.pagesObservedCalls?.[current.id] ?? []) {
           rows.push(graphRow(`d${d} observed ${location(file, line)} ${expression} [target unresolved]${parent}`, file));
         }
@@ -1510,7 +1634,7 @@ export class DependencyGraph {
     const partial = [budget ? 'node budget' : trpc, flowIssue,
       unresolved ? `${quantity(unresolved, 'unresolved call')} on local variables or parameters` : undefined,
       sdkIssue].filter(Boolean).join('; ');
-    return { rows, notes, unresolvedWorkspace, routerTraversal, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
+    return { rows, notes, evidence, unresolvedWorkspace, routerTraversal, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
       (navigation.size ? `, ${navigation.size} navigation targets` : '') + (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };
   }

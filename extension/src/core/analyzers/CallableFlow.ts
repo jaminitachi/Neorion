@@ -1,14 +1,19 @@
-import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
+import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import { declarationsOf, wrappedExpression } from './ArchitectureFacts';
 import { isFunctionLikeDeclaration, visitKinds } from './CompilerWalk';
 import { constValue, JsxSite } from './PropFlow';
+import { CallableReferences } from './CallableReferences';
+import { bindingSelection, CallableWrites, staticMember } from './CallableWrites';
+
+export { staticMember } from './CallableWrites';
 
 export type FunctionNode = import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression |
   import('ts-morph').FunctionDeclaration | import('ts-morph').MethodDeclaration;
 
 export function isFunction(node: Node | undefined): node is FunctionNode {
-  return Node.isArrowFunction(node) || Node.isFunctionExpression(node) ||
-    Node.isFunctionDeclaration(node) || Node.isMethodDeclaration(node);
+  const kind = node?.compilerNode.kind;
+  return kind === SyntaxKind.ArrowFunction || kind === SyntaxKind.FunctionExpression ||
+    kind === SyntaxKind.FunctionDeclaration || kind === SyntaxKind.MethodDeclaration;
 }
 
 const returnKinds = new Set([SyntaxKind.ReturnStatement]);
@@ -64,18 +69,64 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
   if (Node.isIdentifier(expression) && declarationsOf(expression).includes(parameter)) return members;
 }
 
-type Target = { fn: FunctionNode; via: string[] };
+const noTargets: Target[] = [];
+const callablePackages = new Set(['react', 'zustand', 'zustand/vanilla', 'zustand/traditional', 'zustand/middleware', 'zustand/middleware/immer']);
+const callableValueKinds = new Set([
+  SyntaxKind.ArrowFunction, SyntaxKind.FunctionExpression, SyntaxKind.FunctionDeclaration, SyntaxKind.MethodDeclaration,
+  SyntaxKind.VariableDeclaration, SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.BindingElement,
+  SyntaxKind.ArrayLiteralExpression, SyntaxKind.ObjectLiteralExpression, SyntaxKind.ConditionalExpression,
+  SyntaxKind.Identifier, SyntaxKind.PropertyAccessExpression, SyntaxKind.ElementAccessExpression, SyntaxKind.CallExpression,
+  SyntaxKind.ParenthesizedExpression, SyntaxKind.AsExpression, SyntaxKind.TypeAssertionExpression,
+  SyntaxKind.SatisfiesExpression, SyntaxKind.NonNullExpression
+]);
+
+type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[]; write?: Node };
+type WriteProbe = { previous?: WriteProbe; node: Node; members?: string[]; write?: Node | null };
+type VisitState = { key: string | number; probe?: WriteProbe; both?: true };
+
 export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
   private returns = new WeakMap<FunctionNode, Node[]>();
   private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
+  private callableImports = new WeakMap<SourceFile, Set<string>>();
   private stores = new WeakMap<Node, boolean>();
 
-  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf) {}
+  readonly references: CallableReferences;
+  readonly writes: CallableWrites;
+
+  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf,
+    exported: ReadonlySet<Node> = new Set()) {
+    this.references = new CallableReferences(files, symbol, exported);
+    this.writes = new CallableWrites(files, declarations, this.references);
+  }
 
   private packageOf(node: Node) {
     const cached = this.packageOrigins.get(node);
     if (cached !== undefined) return cached ?? undefined;
+    const root = Node.isPropertyAccessExpression(node) ? node.getExpression() : node;
+    if (Node.isIdentifier(root)) {
+      const file = root.getSourceFile();
+      let bindings = this.callableImports.get(file);
+      if (!bindings) {
+        bindings = new Set();
+        for (const entry of file.compilerNode.statements) {
+          if (!ts.isImportDeclaration(entry) || !ts.isStringLiteral(entry.moduleSpecifier) ||
+              !callablePackages.has(entry.moduleSpecifier.text)) continue;
+          const clause = entry.importClause;
+          const named = clause?.namedBindings;
+          if (clause?.name) bindings.add(clause.name.text);
+          if (named && ts.isNamespaceImport(named)) bindings.add(named.name.text);
+          if (named && ts.isNamedImports(named)) {
+            for (const specifier of named.elements) bindings.add(specifier.name.text);
+          }
+        }
+        this.callableImports.set(file, bindings);
+      }
+      if (!bindings.has(root.compilerNode.text)) {
+        this.packageOrigins.set(node, null);
+        return;
+      }
+    }
     const origin = packageOrigin(node, this.symbol);
     this.packageOrigins.set(node, origin ?? null);
     return origin;
@@ -94,108 +145,187 @@ export class CallableFlow {
     }
   }
 
-  /** Resolve function values through immutable bindings, returned objects and Zustand selectors. */
+  /** Resolve function values through bindings, returned objects and Zustand selectors. */
   resolve(expression: Node): Target[] {
     if (isFunction(expression)) return [{ fn: expression, via: [] }];
     const cached = this.targets.get(expression);
     if (cached) return cached;
     if (Node.isIdentifier(expression)) {
       const declarations = this.declarations(expression);
+      if (!declarations.some(declaration => this.files.has(declaration.getSourceFile()))) return noTargets;
       if (declarations.length === 1) {
         const declaration = declarations[0];
         const value = isFunction(declaration) ? declaration : constValue(declaration);
-        if (isFunction(value) && this.files.has(value.getSourceFile())) {
-          const result = [{ fn: value, via: [] }];
+        const inline = this.inlineCallback(value);
+        const fn = inline ?? (isFunction(value) ? value : undefined);
+        if (fn && this.files.has(fn.getSourceFile())) {
+          const write = this.writes.forBinding(declaration, []) ?? (inline && this.writes.forBinding(inline, []));
+          const result = [{ fn, via: [], write }];
           this.targets.set(expression, result);
           return result;
         }
       }
     }
+    const result = this.resolveValues(expression);
+    this.targets.set(expression, result);
+    return result;
+  }
+
+  private inlineCallback(value: Node | undefined) {
+    if (!Node.isCallExpression(value) || !value.compilerNode.arguments.length) return;
+    const kind = value.compilerNode.arguments[0].kind;
+    if (kind !== SyntaxKind.ArrowFunction && kind !== SyntaxKind.FunctionExpression) return;
+    const origin = this.packageOf(value.getExpression());
+    if (origin?.module === 'react' && origin.name === 'useCallback') {
+      const [callback] = value.getArguments();
+      if (isFunction(callback)) return callback;
+    }
+  }
+
+  returnedCallbacks(fn: FunctionNode) {
+    const values = this.returnValues(fn);
+    return values.some(value => callableValueKinds.has(value.compilerNode.kind)) ? this.resolveValues(fn, 1, true) : noTargets;
+  }
+
+  private returnValues(fn: FunctionNode) {
+    let values = this.returns.get(fn);
+    if (!values) this.returns.set(fn, values = returnedValues(fn));
+    return values;
+  }
+
+  private resolveValues(expression: Node, invocations = 0, collectMembers = false): Target[] {
     const result: Target[] = [];
-    const seen = new Map<Node, string | number | Set<string | number>>();
-    let budget = 64;
-    const resolve = (node: Node | undefined, members: string[], invoke: number, via: Node[]): void => {
-      if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return;
-      const key = members.length ? invoke + ':' + JSON.stringify(members) : invoke;
+    const seen = new Map<Node, VisitState | Map<string | number, VisitState>>();
+    const findWrite = (probe: WriteProbe | undefined): Node | undefined => {
+      if (!probe) return;
+      if (probe.write === undefined) {
+        probe.write = findWrite(probe.previous) ?? (probe.members ?
+          this.writes.forBinding(probe.node, probe.members) : this.writes.forRead(probe.node)) ?? null;
+      }
+      return probe.write ?? undefined;
+    };
+    const visited = (node: Node, key: string | number, probe: WriteProbe | undefined) => {
       const states = seen.get(node);
-      if (states === key || states instanceof Set && states.has(key)) return;
-      if (states instanceof Set) states.add(key);
-      else seen.set(node, states === undefined ? key : new Set([states, key]));
+      if (!states) {
+        seen.set(node, { key, probe });
+        return false;
+      }
+      const first = states instanceof Map ? states.get(key) : states.key === key ? states : undefined;
+      if (first) {
+        if (first.both || first.probe === probe || !!findWrite(first.probe) === !!findWrite(probe)) return true;
+        first.both = true;
+      } else if (states instanceof Map) states.set(key, { key, probe });
+      else seen.set(node, new Map([[states.key, states], [key, { key, probe }]]));
+      return false;
+    };
+    let budget = 64;
+    const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], path?: string[], probe?: WriteProbe): void => {
+      if (!node || budget-- <= 0 || !callableValueKinds.has(node.compilerNode.kind) || !this.files.has(node.getSourceFile())) return;
+      const key = members.length || path?.length ? JSON.stringify([invoke, members, path]) : invoke;
+      if (visited(node, key, probe)) return;
       const wrapped = wrappedExpression(node);
-      if (wrapped) return resolve(wrapped, members, invoke, via);
-      if (isFunction(node)) {
+      if (wrapped) return visit(wrapped, members, invoke, via, path, probe);
+      const fn = isFunction(node) ? node : undefined;
+      const kind = node.compilerNode.kind;
+      if (!collectMembers && (fn || kind === SyntaxKind.VariableDeclaration || kind === SyntaxKind.BindingElement ||
+          kind === SyntaxKind.ObjectLiteralExpression)) {
+        probe = { previous: probe, node, members };
+      }
+      if (fn) {
         if (!invoke) {
-          if (!members.length) result.push({ fn: node, via: via.map(callee => callee.getText()) });
+          if (!members.length) result.push({ fn, via: collectMembers ? [] : via.map(call => call.getExpression().getText()),
+            factories: via.length ? via : undefined, path, write: findWrite(probe) });
           return;
         }
-        let values = this.returns.get(node);
-        if (!values) this.returns.set(node, values = returnedValues(node));
-        for (const value of values) resolve(value, members, invoke - 1, via);
+        for (const value of this.returnValues(fn)) visit(value, members, invoke - 1, via, path, probe);
         return;
       }
-      if (Node.isVariableDeclaration(node)) return resolve(constValue(node), members, invoke, via);
-      if (Node.isPropertyAssignment(node)) return resolve(node.getInitializer(), members, invoke, via);
+      if (Node.isVariableDeclaration(node)) return visit(node.getInitializer(), members, invoke, via, path, probe);
+      if (Node.isPropertyAssignment(node)) return visit(node.getInitializer(), members, invoke, via, path, probe);
       if (Node.isShorthandPropertyAssignment(node)) {
-        for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) resolve(decl, members, invoke, via);
+        for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) visit(decl, members, invoke, via, path, probe);
         return;
       }
-      if (Node.isBindingElement(node) && !node.getDotDotDotToken()) {
-        const pattern = node.getParent();
-        const name = node.getPropertyNameNode() ?? node.getNameNode();
-        if (Node.isObjectBindingPattern(pattern) && (Node.isIdentifier(name) || Node.isStringLiteral(name))) {
-          return resolve(pattern.getParent(), [Node.isStringLiteral(name) ? name.getLiteralText() : name.getText(), ...members], invoke, via);
-        }
+      if (Node.isBindingElement(node)) {
+        const selection = bindingSelection(node, members);
+        if (selection) return visit(node.getParent().getParent(), selection, invoke, via, path, probe);
       }
-      if (Node.isObjectLiteralExpression(node) && members.length) {
+      if (Node.isArrayLiteralExpression(node)) {
+        const elements = node.getElements();
+        const prefix = elements.findIndex(Node.isSpreadElement);
+        const fixed = prefix < 0 ? elements : elements.slice(0, prefix);
+        if (members.length) {
+          const index = Number(members[0]);
+          if (String(index) === members[0]) visit(fixed[index], members.slice(1), invoke, via, path, probe);
+          return;
+        }
+        if (collectMembers && !invoke) fixed.forEach((element, index) =>
+          visit(element, [], 0, via, [...path ?? [], String(index)], probe));
+        return;
+      }
+      if (Node.isConditionalExpression(node)) {
+        visit(node.getWhenTrue(), members, invoke, via, path, probe);
+        visit(node.getWhenFalse(), members, invoke, via, path, probe);
+        return;
+      }
+      if (Node.isObjectLiteralExpression(node)) {
         const [name, ...rest] = members;
         const properties = node.getProperties();
+        if (!members.length) {
+          if (collectMembers && !invoke) for (const property of properties) {
+            if (Node.isSpreadAssignment(property)) continue;
+            const key = staticMember(property.getNameNode());
+            if (key !== undefined) visit(property, [], 0, via, [...path ?? [], key], probe);
+          }
+          return;
+        }
         for (let i = properties.length - 1; i >= 0; i--) {
           const property = properties[i];
           if (Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode())) return;
-          if (property.getName() === name) return resolve(property, rest, invoke, via);
+          if (staticMember(property.getNameNode()) === name) return visit(property, rest, invoke, via, path, probe);
         }
       }
       if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
+        if (!collectMembers) probe = { previous: probe, node };
         const key = Node.isElementAccessExpression(node) ? node.getArgumentExpression() : undefined;
-        const name = Node.isPropertyAccessExpression(node) ? node.getName() : Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
-        if (name && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
+        const name = Node.isPropertyAccessExpression(node) ? node.getName() : staticMember(key, false);
+        if (name !== undefined && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
           const before = result.length;
-          resolve(node.getExpression(), [name, ...members], invoke, via);
+          visit(node.getExpression(), [name, ...members], invoke, via, path, probe);
           if (result.length > before) return;
         }
         for (const decl of this.declarations(node)) {
-          if (!Node.isPropertySignature(decl) && !Node.isMethodSignature(decl)) resolve(decl, members, invoke, via);
+          if (!Node.isPropertySignature(decl) && !Node.isMethodSignature(decl)) visit(decl, members, invoke, via, path, probe);
         }
         return;
       }
       if (!Node.isCallExpression(node)) return;
       const callee = node.getExpression();
-      const args = node.getArguments();
       const origin = this.packageOf(callee);
       const hook = origin?.module === 'react' ? origin.name : undefined;
       if (hook === 'useMemo' || hook === 'useCallback') {
-        return resolve(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0), via);
+        return visit(node.getArguments()[0], members, invoke + (hook === 'useMemo' ? 1 : 0), via, path, probe);
       }
 
-      const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
+      const factory = Node.isCallExpression(callee) && !callee.compilerNode.arguments.length ? callee.getExpression() : callee;
       const creation = invoke && (factory === callee ? origin : this.packageOf(factory));
       if (creation && ['zustand', 'zustand/vanilla', 'zustand/traditional'].includes(creation.module) &&
           ['create', 'default', 'createStore', 'createWithEqualityFn'].includes(creation.name)) {
-        const initializer = this.storeInitializer(args[0]);
-        return resolve(initializer, members, invoke, via);
+        const initializer = this.storeInitializer(node.getArguments()[0]);
+        return visit(initializer, members, invoke, via, path, probe);
       }
 
       // Evaluate the selector against an actual Zustand binding. Local calls may
       // return a nested object or function, but do not supply selector semantics.
-      if (isFunction(args[0]) && this.declarations(callee).some(decl => this.isStore(decl))) {
-        const path = selectedMembers(args[0]);
-        if (path) return resolve(callee, [...path, ...members], invoke + 1, [...via, callee]);
+      const first = node.compilerNode.arguments[0];
+      if (first && (ts.isArrowFunction(first) || ts.isFunctionExpression(first)) &&
+          this.declarations(callee).some(decl => this.isStore(decl))) {
+        const selection = selectedMembers(node.getArguments()[0]);
+        if (selection) return visit(callee, [...selection, ...members], invoke + 1, [...via, node], path, probe);
       }
-      if (!members.length && !invoke && !Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return;
-      resolve(callee, members, invoke + 1, [...via, callee]);
+      visit(callee, members, invoke + 1, [...via, node], path, probe);
     };
-    resolve(expression, [], 0, []);
-    this.targets.set(expression, result);
+    visit(expression, [], invocations, []);
     return result;
   }
 
@@ -211,7 +341,7 @@ export class CallableFlow {
   private storeFactory(node: Node | undefined) {
     if (!Node.isCallExpression(node)) return false;
     const callee = node.getExpression();
-    const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
+    const factory = Node.isCallExpression(callee) && !callee.compilerNode.arguments.length ? callee.getExpression() : callee;
     const origin = this.packageOf(factory);
     return !!origin && (origin.module === 'zustand' || origin.module === 'zustand/traditional') &&
       ['create', 'default', 'createWithEqualityFn'].includes(origin.name);

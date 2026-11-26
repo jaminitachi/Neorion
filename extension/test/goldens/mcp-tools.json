@@ -30,7 +30,8 @@
         "limit": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 100
+          "maximum": 2000,
+          "description": "Limits above 100 require api_consumers with includeTests explicitly enabled."
         },
         "direct": {
           "type": "boolean"
@@ -47,7 +48,7 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 2,
-          "description": "Caller depth for API route targets. Server action and tRPC targets list direct use sites."
+          "description": "Legacy caller depth for API route targets. Use depth for up to six levels. Server action and tRPC targets list direct use sites."
         },
         "filter": {
           "enum": [
@@ -65,7 +66,7 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 6,
-          "description": "Impact or changes depth (default 3) or callees depth (default 1, maximum 3)."
+          "description": "Impact or changes depth (default 3), callees depth (default 1, maximum 3), or API route caller depth (default 1)."
         },
         "uses": {
           "type": "boolean",

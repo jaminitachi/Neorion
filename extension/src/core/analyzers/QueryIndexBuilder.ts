@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
-import { Node, SourceFile, SyntaxKind, ts, type CallExpression } from 'ts-morph';
+import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  apiCallKey, CALLABLE_WRITE_ISSUE, isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ApiCallFact, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type DetailFact, type DetailFacts, type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -14,12 +14,17 @@ import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { CallbackCoverage } from './CallbackCoverage';
+import { staticallyUnreachable } from './CallableWrites';
+import { argumentGuards, booleanArguments } from './ArgumentGuards';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { TrpcFacts } from './TrpcFacts';
+import { literalArgs, literalReturn } from './LiteralEvidence';
+import { renderEvidence } from './RenderEvidence';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
@@ -30,11 +35,18 @@ type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gat
   route: string; node: Node; prop?: { site: RenderSite; value: Node; name: string }; propGates?: PropGate[];
 };
 
+function mockCall(expression: Node) {
+  const callee = expression.compilerNode;
+  return ts.isPropertyAccessExpression(callee) &&
+    (callee.name.text === 'mock' || callee.name.text === 'doMock') &&
+    /^(vi|jest)\.(mock|doMock)$/.test(expression.getText());
+}
+
 const REFERENCE_KINDS = new Set([
   SyntaxKind.ImportSpecifier, SyntaxKind.ImportClause, SyntaxKind.BindingElement, SyntaxKind.ExportDeclaration,
   SyntaxKind.ExportSpecifier, SyntaxKind.CallExpression, SyntaxKind.NewExpression, SyntaxKind.TaggedTemplateExpression,
   SyntaxKind.JsxOpeningElement, SyntaxKind.JsxSelfClosingElement, SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment,
-  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier
+  SyntaxKind.ElementAccessExpression, SyntaxKind.Identifier, SyntaxKind.ReturnStatement
 ]);
 const FLOW_KINDS = new Set([SyntaxKind.JsxAttribute, SyntaxKind.CallExpression]);
 const MOCK_KEY_KINDS = new Set([SyntaxKind.PropertyAssignment, SyntaxKind.ShorthandPropertyAssignment, SyntaxKind.MethodDeclaration]);
@@ -515,6 +527,7 @@ export class QueryIndexBuilder {
       wrapperRevision: WRAPPER_INDEX_REVISION, queryRevision: QUERY_INDEX_REVISION,
       files: Object.create(null), symbols: [], routes: [], renderEdges: [], wrapChains: Object.create(null),
       routeWrap: {}, branches: {}, references: [], fetches: [], serverActions: [...this.actions.values()], mentions: Object.create(null),
+      sourceEvidence: !historyOnly || undefined,
       graphRevision: GRAPH_INDEX_REVISION, graphReferences: {}, graphNames: [], externalCalls: [], externalModules: [],
       unresolvedCalls: {}, fileSymbols: [],
       defaultSymbols: Object.create(null), exportSymbols: {}, runtimeExports: {}, moduleImports: {},
@@ -655,7 +668,11 @@ export class QueryIndexBuilder {
       }
       return type;
     };
-    const trpcFacts = new TrpcFacts(files, trpcSources, declarationsOf);
+    const apiRoutes = new Map(routes.flatMap(route => {
+      const file = fileByName.get(path.join(root, route.file));
+      return file && !route.pages && route.type === 'api' ? [[file, route] as const] : [];
+    }));
+    const trpcFacts = new TrpcFacts(files, trpcSources, apiRoutes, declarationsOf);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
     const procedureResolvers = new Map<Node, Node>();
@@ -709,8 +726,9 @@ export class QueryIndexBuilder {
     });
 
     const projectFiles = new Set(files);
-    const callableFlow = new CallableFlow(projectFiles, declarationsOf, node => flow.symbol(node));
+    const callableFlow = new CallableFlow(projectFiles, declarationsOf, node => flow.symbol(node), exported);
     const localCallables = new Map<number, Node>();
+    const callableDefinitions = new Map<number, FunctionNode>();
     const workspaceEvent = (attribute: Node | undefined) => {
       if (!Node.isJsxAttribute(attribute)) return;
       const site = attribute.getParent()?.getParent();
@@ -726,7 +744,11 @@ export class QueryIndexBuilder {
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
       let parent: Node | undefined = fn.getParent();
-      while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned)) {
+      let memoized = false;
+      while (parent && (wrappedExpression(parent) === returned || isFunction(parent) && parent.getBody() === returned ||
+          Node.isCallExpression(parent) && parent.getArguments()[0] === returned &&
+          packageMember(parent.getExpression(), 'react') === 'useCallback')) {
+        if (Node.isCallExpression(parent)) memoized = true;
         returned = parent;
         parent = parent.getParent();
       }
@@ -734,7 +756,10 @@ export class QueryIndexBuilder {
       const returnedCallback = isFunction(returned) && returned !== fn;
       const binding = returnedCallback ? fn : declaration ?? fn;
       const known = byNode.get(fn) ?? byNode.get(binding);
-      if (known !== undefined) return known;
+      if (known !== undefined) {
+        callableDefinitions.set(known, fn);
+        return known;
+      }
       // Top-level declarations already passed through the ordinary symbol index.
       // Keep its exclusions when the same value is referenced indirectly.
       if (!returnedCallback && (Node.isSourceFile(parent) ||
@@ -749,7 +774,9 @@ export class QueryIndexBuilder {
         (attribute && Node.isJsxAttribute(attribute) ? attribute.getNameNode().getText() : undefined);
       if (!name) return;
       const id = add(binding, name, 'function', null);
+      if (memoized) (index.memoizedCallbacks ??= []).push(id);
       localCallables.set(id, binding);
+      callableDefinitions.set(id, fn);
       const symbol = index.symbols[id - 1];
       if (returnedCallback || !factoryName && !declaredName) symbol.synthetic = true;
       if (symbol.synthetic && !event && workspaceSite && name !== workspaceSite.name) {
@@ -758,18 +785,99 @@ export class QueryIndexBuilder {
       byNode.set(fn, id);
       return id;
     };
+    const returnedBy = new Map<number, Map<number, Map<string, string[]>>>();
+    const factoryDefinitions = new Map<number, FunctionNode>();
+    const associateReturns = (factory: number, value: FunctionNode) => {
+      if (factoryDefinitions.has(factory)) return;
+      factoryDefinitions.set(factory, value);
+      for (const { fn, path = [], factories } of callableFlow.returnedCallbacks(value)) {
+        const callback = callableId(fn, index.symbols[factory - 1].name + ' (returned callback)');
+        if (callback === undefined || callback === factory || index.symbols[callback - 1].kind === 'component') continue;
+        const callbacks = returnedBy.get(factory) ?? new Map<number, Map<string, string[]>>();
+        const paths = callbacks.get(callback) ?? new Map<string, string[]>();
+        paths.set(JSON.stringify(path), path);
+        callbacks.set(callback, paths);
+        returnedBy.set(factory, callbacks);
+        ((index.callbackCreations ??= {})[callback] ??= []);
+        // A forwarded return can introduce local factories that were absent
+        // from the ordinary symbol index.
+        for (const call of factories ?? []) for (const { fn: inner } of callableFlow.resolve(call.getExpression())) {
+          const innerId = callableId(inner);
+          if (innerId !== undefined) associateReturns(innerId, inner);
+        }
+      }
+    };
+    if (!historyOnly && this.fetches.length) for (const [binding, factory] of [...byNode]) {
+      const value = isFunction(binding) ? binding : constValue(binding);
+      if (!isFunction(value) || value.getSourceFile() !== binding.getSourceFile()) continue;
+      if (index.symbols[factory - 1].kind === 'function') callableDefinitions.set(factory, value);
+      associateReturns(factory, value);
+    }
+
+    const creationSites = new Map<number, Set<CallExpression>>();
+    const followedUses = new WeakMap<Node, number | Set<number>>();
+    const callbackScopes: [FunctionNode, number, boolean][] = [];
+    const recordCallbackScope = (site: Node, target: number, escapingValue = false) => {
+      if (historyOnly || !this.fetches.length) return;
+      let scope = site.compilerNode.parent;
+      while (scope && !ts.isArrowFunction(scope) && !ts.isFunctionExpression(scope) &&
+          !ts.isFunctionDeclaration(scope) && !ts.isMethodDeclaration(scope)) scope = scope.parent;
+      if (!scope || graphOwners.has(scope) || graphOwners.has(scope.parent)) return;
+      const fn = site.getFirstAncestor(isFunction);
+      if (!fn || byNode.has(fn) || byNode.has(fn.getParent()!)) return;
+      callbackScopes.push([fn, target, escapingValue]);
+    };
+    const callbackScopeKind = (fn: FunctionNode) => {
+      let value: Node = fn;
+      let parent = value.getParent();
+      while (parent && (wrappedExpression(parent) === value ||
+          Node.isConditionalExpression(parent) && parent.getCondition() !== value)) {
+        value = parent;
+        parent = value.getParent();
+      }
+      const argument = Node.isCallExpression(parent) && parent.getArguments().includes(value) ? parent : undefined;
+      const callee = argument?.getExpression();
+      const declarations = callee ? declarationsOf(callee) : [];
+      const react = callee && packageMember(callee, 'react');
+      const scheduler = react && ['useEffect', 'useLayoutEffect', 'useInsertionEffect'].includes(react) ||
+        Node.isIdentifier(callee) && ['setTimeout', 'setInterval', 'queueMicrotask'].includes(callee.getText()) &&
+        !declarations.some(node => projectFiles.has(node.getSourceFile()));
+      if (scheduler && argument?.getArguments()[0] === value) return;
+      const declared = declarations.some(node =>
+        Node.isFunctionDeclaration(node) && !node.getBody() && node.hasDeclareKeyword());
+      if (Node.isFunctionDeclaration(fn) || Node.isVariableDeclaration(parent) ||
+          Node.isReturnStatement(parent) || Node.isPropertyAssignment(parent) || Node.isArrayLiteralExpression(parent) ||
+          Node.isArrowFunction(parent) && parent.getBody() === value || react === 'useCallback' || declared) return 'bound';
+      if (argument) return 'argument';
+    };
+    const recordCallbackUse = (id: number, site: Node, possible = false) => {
+      if (Node.isCallExpression(site)) recordCallbackScope(site, id, index.callbackCreations?.[id] !== undefined);
+      if (!callableDefinitions.has(id) && !returnedBy.has(id)) return;
+      if (!possible) {
+        const followed = followedUses.get(site);
+        if (followed instanceof Set) followed.add(id);
+        else if (followed !== id) followedUses.set(site, followed === undefined ? id : new Set([followed, id]));
+      }
+      if (Node.isCallExpression(site) && returnedBy.has(id)) {
+        const sites = creationSites.get(id) ?? new Set<CallExpression>();
+        sites.add(site);
+        creationSites.set(id, sites);
+      }
+    };
+
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
-      detail: string; gates?: PropGate[]; lookup: boolean }[] = [];
+      detail: string; gates?: PropGate[]; lookup: boolean; supplied?: Node; write?: Node }[] = [];
     const pendingEvents: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; fn: FunctionNode; name: string }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
-    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[] }[]>();
+    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[]; supplied?: Node; write?: Node }[]>();
     const dynamicCallSites = new Set<Node>();
     const callableTargets = (expression: Node) => {
       const prop = flow.read(expression);
       if (!prop) return callableFlow.resolve(expression).map(target => ({ ...target, gates: undefined, supplied: undefined }));
+      const write = callableFlow.writes.forRead(expression);
       const bindings = flow.bindings(prop);
       return bindings.flatMap(({ value, gates }) => value ? callableFlow.resolve(value).map(target =>
-        ({ ...target, gates, supplied: value })) : []);
+        ({ ...target, write: write ?? target.write, gates, supplied: value })) : []);
     };
     const suppliedCallbacks = new Set<Node>();
     const reactFacts = historyOnly ? undefined : (require('./ReactFacts') as typeof import('./ReactFacts')).ReactFacts;
@@ -815,19 +923,22 @@ export class QueryIndexBuilder {
           }
           const label = jsxLabel(site);
           const event = isFunction(value) ? name + ' ' + label : undefined;
-          for (const { fn, via, gates, supplied } of targets) {
+          for (const { fn, via, gates, supplied, write } of targets) {
             const target = callableId(fn, event);
             if (supplied) suppliedCallbacks.add(supplied);
-            if (target !== undefined) eventSites.push({
+            if (target === undefined) continue;
+            if (!historyOnly && this.fetches.length) associateReturns(target, fn);
+            eventSites.push({
               site, attribute: node, target, detail: `${name} <${label}>${via.length ? ' via ' + via.join(' > ') : ''}`, gates,
-              lookup: delivery === 'possible'
+              lookup: delivery === 'possible', supplied, write
             });
           }
           return;
         }
         if (!Node.isCallExpression(node)) return;
         calls?.push(node);
-        const expression = node.getExpression();
+        let expression: Node = node.getExpression();
+        for (let inner = wrappedExpression(expression); inner; inner = wrappedExpression(expression)) expression = inner;
         // Existing references cover ordinary declarations. Resolve value flow for
         // lexical bindings, property reads, and calls whose target is returned.
         if (!Node.isIdentifier(expression) && !Node.isPropertyAccessExpression(expression) &&
@@ -839,15 +950,20 @@ export class QueryIndexBuilder {
         if (!Node.isIdentifier(binding)) return;
         const bindings = declarationsOf(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
-            (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
-        if (expression === binding && bindings.some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
+            (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || Node.isVariableDeclaration(decl) && !!decl.getInitializer() || isFunction(decl)))) return;
+        if (expression === node.getExpression() && expression === binding && bindings.some(decl => {
+          const id = byNode.get(decl);
+          return id !== undefined && index.symbols[id - 1].kind !== 'constant' && !Node.isBindingElement(decl);
+        })) return;
         const targets = callableTargets(expression);
-        if (targets.length && expression !== binding && declarationsOf(expression)
-          .some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
-        const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
+        const ordinaryMember = targets.length && expression !== binding && declarationsOf(expression)
+          .some(decl => byNode.has(decl) && !Node.isBindingElement(decl));
+        const resolved = targets.flatMap(({ fn, via, gates, supplied, write }) => {
           if (supplied) suppliedCallbacks.add(supplied);
           const id = callableId(fn);
-          return id === undefined ? [] : [{ id, via, gates }];
+          if (id === undefined) return [];
+          if (!historyOnly && this.fetches.length) associateReturns(id, fn);
+          return ordinaryMember && !write ? [] : [{ id, via, gates, supplied, write }];
         });
         if (resolved.length) indirectCalls.set(node, resolved);
         else if (flow.read(expression)) dynamicCallSites.add(node);
@@ -879,8 +995,9 @@ export class QueryIndexBuilder {
       ownerCache.set(node, result);
       return result;
     };
+    const lifecycleFiles = new Set([...pages?.owners.keys() ?? []].map(node => node.getSourceFile()));
     const owners = (node: Node): Owners => {
-      if (!pages) return ownerAt(node.compilerNode.parent);
+      if (!pages || !lifecycleFiles.has(node.getSourceFile())) return ownerAt(node.compilerNode.parent);
       let graph: number | undefined;
       for (const parent of [node, ...node.getAncestors()]) {
         const lifecycle = pages?.owners.get(parent);
@@ -907,11 +1024,72 @@ export class QueryIndexBuilder {
     };
     for (const site of dynamicCallSites) setFlowIssue(site, 'prop callback untraced');
     const gateKey = (from: number, to: number, line: number) => `${from}:${to}:${line}`;
+    const mayHaveLiterals = (call: CallExpression) => {
+      if (historyOnly) return false;
+      const args = call.compilerNode.arguments;
+      for (let i = 0; i < Math.min(args.length, 4); i++) {
+        const arg = args[i];
+        switch (arg.kind) {
+        case SyntaxKind.Identifier:
+        case SyntaxKind.ObjectLiteralExpression:
+        case SyntaxKind.ArrayLiteralExpression:
+        case SyntaxKind.ConditionalExpression:
+        case SyntaxKind.PrefixUnaryExpression:
+        case SyntaxKind.ParenthesizedExpression:
+        case SyntaxKind.AsExpression:
+        case SyntaxKind.SatisfiesExpression:
+        case SyntaxKind.NonNullExpression:
+        case SyntaxKind.AwaitExpression:
+        case SyntaxKind.TypeAssertionExpression:
+        case SyntaxKind.TrueKeyword:
+        case SyntaxKind.FalseKeyword:
+        case SyntaxKind.NullKeyword:
+        case SyntaxKind.NumericLiteral:
+          return true;
+        }
+      }
+      return false;
+    };
+    const callEvidence = new WeakMap<CallExpression, string | undefined>();
+    const argsFor = (call: CallExpression) => {
+      if (!callEvidence.has(call)) callEvidence.set(call, mayHaveLiterals(call) ? literalArgs(call) : undefined);
+      return callEvidence.get(call);
+    };
+    const recordCallSite = (key: string, call: CallExpression) => {
+      const args = argsFor(call);
+      if (!args) return;
+      const sites = ((index.callLiterals ??= {})[key] ??= []);
+      if (!sites.includes(args)) sites.push(args);
+    };
+    const apiCallSites = new Map<number, [number | undefined, CallExpression, FunctionNode | undefined, FunctionNode | undefined][]>();
+    const definition = (id: number | undefined) => id === undefined ? undefined :
+      callableDefinitions.get(id) ?? factoryDefinitions.get(id);
+    const guardsAt = (site: Node, owner: number | undefined) =>
+      argumentGuards(site, definition(owner), declarationsOf, callableFlow.writes);
+    const recordApiCall = (from: number | undefined, to: number, site: CallExpression) => {
+      if (historyOnly || !this.fetches.length) return;
+      const callee = definition(to);
+      const caller = definition(from);
+      if (!callee?.compilerNode.parameters.length && !caller?.compilerNode.parameters.length) return;
+      const sites = apiCallSites.get(to) ?? [];
+      sites.push([from, site, callee, caller]);
+      apiCallSites.set(to, sites);
+    };
     const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
       const line = startLine(node);
       const applicable = [...gatesOf(flow.gates(node)), ...gatesOf(gates, true)];
+      if (Node.isCallExpression(node)) {
+        recordCallSite(gateKey(from, to, line), node);
+        recordApiCall(from, to, node);
+      }
       (index.flowCalls ??= []).push([from, to, relativePath(node.getSourceFile()), line, detail,
         applicable.length ? applicable : undefined]);
+    };
+    const writtenCalls = new Set<string>();
+    const recordWriteIssue = (from: number, to: number, site: Node, write: Node) => {
+      const key = gateKey(from, to, startLine(site));
+      writtenCalls.add(key);
+      (index.callIssues ??= {})[key] = `${CALLABLE_WRITE_ISSUE} (${relativePath(write.getSourceFile())}:${startLine(write)})`;
     };
     const eventReferences = suppliedCallbacks;
     const actionBySymbol = new Map([...actionSymbols].map(([id, symbol]) => [symbol, this.actions.get(id)]));
@@ -921,7 +1099,11 @@ export class QueryIndexBuilder {
       if (value && !isFunction(value)) eventReferences.add(value);
       const owner = owners(event.site)[1] ?? fileIdOf(event.site);
       addFlowCall(owner, event.target, event.attribute, event.detail, event.gates);
-      if (event.lookup) {
+      const possible = !!event.write || event.lookup || event.gates?.some(gate => gate.partial);
+      recordCallbackUse(event.target, event.attribute, possible);
+      if (event.supplied) recordCallbackUse(event.target, event.supplied, possible);
+      if (event.write) recordWriteIssue(owner, event.target, event.attribute, event.write);
+      else if (event.lookup) {
         const file = relativePath(event.attribute.getSourceFile());
         const line = startLine(event.attribute);
         (index.callIssues ??= {})[gateKey(owner, event.target, line)] = `${RENDER_LOOKUP_ISSUE} (${file}:${line})`;
@@ -956,14 +1138,27 @@ export class QueryIndexBuilder {
             (key ? ` (key ${key})` : '') + (container ? ' ' + container : '');
         });
       });
-      for (const { id, via, gates } of targets) {
-        const detail = [via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
+      for (const { id, via, gates, supplied: input, write } of targets) {
+        const prop = flow.read(call.getExpression());
+        const supplied = prop && gates?.[0]?.sites[0];
+        const viaProp = prop ? 'prop ' + prop.name +
+          (supplied ? ` supplied at ${relativePath(supplied.getSourceFile())}:${startLine(supplied)}` : '') : '';
+        const detail = [viaProp, via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
         addFlowCall(from, id, call, detail, gates);
-        if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
+        const possible = !!write || !!issue || gates?.some(gate => gate.partial);
+        recordCallbackUse(id, call, possible);
+        if (input) recordCallbackUse(id, input, possible);
+        if (write) recordWriteIssue(from, id, call, write);
+        else if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
       }
     }
-    for (const [from, to, file, line] of index.flowCalls ?? []) {
+    for (const [from, to, file, line, detail, gates] of index.flowCalls ?? []) {
       actionBySymbol.get(to)?.callers.push([file, line, from]);
+      if (!callableDefinitions.has(to)) continue;
+      const event = /^on[A-Z]/.test(detail) ? detail : undefined;
+      const key = gateKey(from, to, line);
+      const possible = !!index.callIssues?.[key] || gates?.some(gate => gate.partial);
+      ((index.callbackInvocations ??= {})[to] ??= []).push([from, file, line, event, writtenCalls.has(key) ? 'write' : possible ? true : undefined]);
     }
     const mapArgument = (expression: Node, remaining = 6): string | undefined => {
       if (!remaining) return;
@@ -1056,16 +1251,16 @@ export class QueryIndexBuilder {
       if (chains.length) index.routeWrap[id] = chains[0];
       if (chains.length > 1) index.branches![id] = chains;
     }
+    const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
+      const id = routeIds.get(route);
+      return id === undefined ? [] : [[id, [...reasons]]];
+    }));
+    if (this.wrapperProblems.size) index.pagesWrapperIssues = issues(this.wrapperProblems);
     if (pages && config) {
       const routeEntries = new Map(index.routes.map(route => [route.id, route]));
       const routeStart = (id: number | undefined) => id === undefined ? undefined : routeEntries.get(id)?.fileSymbol;
-      const issues = (source: Map<string, Iterable<string>>) => Object.fromEntries([...source].flatMap(([route, reasons]) => {
-        const id = routeIds.get(route);
-        return id === undefined ? [] : [[id, [...reasons]]];
-      }));
       index.pagesUrlConfig = config.url;
       index.pagesIssues = issues(pages.issues);
-      index.pagesWrapperIssues = issues(this.wrapperProblems);
       if (this.pageConditions.size) {
         index.pagesRenderConditions = {};
         for (const [route, conditions] of this.pageConditions) {
@@ -1220,6 +1415,7 @@ export class QueryIndexBuilder {
       if (issue) traceLookupInputs(sources, issue);
     }
     const resolvedRenderSites = new Map<Node, Set<number>>();
+    const checkedRenderSites = new Set<string>();
     const renderExclusions = new Map<string, string[]>();
     const guardedRenders = new Map<QueryIndex['renderEdges'][number], { tag: Node; selection?: RenderSelection }>();
     const guardInputs = new Map<number, Map<RenderSite, number>>();
@@ -1246,6 +1442,14 @@ export class QueryIndexBuilder {
         flow.excludedRenderSuppliers(tag, definition).flatMap(supplier => siteKey(supplier) ?? []) : [];
       if (previous) renderExclusions.set(key, previous.filter(site => excluded.includes(site)));
       else renderExclusions.set(key, excluded);
+      if (site && !historyOnly) {
+        const evidenceKey = siteKey(site);
+        if (!checkedRenderSites.has(evidenceKey)) {
+          checkedRenderSites.add(evidenceKey);
+          const evidence = tag && renderEvidence(tag);
+          if (evidence) (index.renderEvidence ??= {})[evidenceKey] = evidence;
+        }
+      }
       index.renderEdges.push(file ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site), file] :
         site || detail ? [source, target, line, conditional, layout, possible, detail, site && siteKey(site)] :
         possible ? [source, target, line, conditional, layout, possible] : layout ?
@@ -1270,13 +1474,14 @@ export class QueryIndexBuilder {
     for (const { node, route, prop, propGates, ...entry } of this.fetches) {
       if (pages?.ignored.size && node.getAncestors().some(parent => pages.ignored.has(parent))) continue;
       const [owner, graphOwner, possible] = owners(node);
+      if (owner !== undefined) recordCallbackScope(node, owner);
       const key = prop && siteKey(prop.site);
       const binding = prop && key ? {
         file: relativePath(prop.value.getSourceFile()), line: startLine(prop.value), name: prop.name,
         supplier: owners(prop.site)[1], site: key
       } : undefined;
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
-        lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
+        argumentGuards: guardsAt(node, owner), lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
         gates: propGates?.length ? gatesOf([...flow.gates(node), ...propGates]) : undefined });
     }
     const suppliers = new Set(index.fetches.flatMap(fetch => fetch.binding?.supplier ?? []));
@@ -1370,7 +1575,7 @@ export class QueryIndexBuilder {
       const cached = ignoredCollections.get(parent);
       if (cached !== undefined) return cached;
       const name = parent.getNameNode();
-      const uses = Node.isIdentifier(name) ? name.findReferencesAsNodes() : [];
+      const uses = Node.isIdentifier(name) ? callableFlow.references.uses(name) : [];
       const ignored = uses.length > 0 && uses.every(use => {
         let supplied: Node = use;
         let expression = supplied.getParent();
@@ -1471,7 +1676,7 @@ export class QueryIndexBuilder {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
       const content = historyOnly ? '' : file.getFullText();
-      const escapedIdentifiers = file.compilerNode.text.includes('\\u');
+      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(file.compilerNode.text);
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -1530,6 +1735,21 @@ export class QueryIndexBuilder {
           }
         }
       }
+      const typeAncestors = new WeakMap<ts.Node, boolean>();
+      const insideType = (node: ts.Node | undefined): boolean => {
+        if (!node) return false;
+        const cached = typeAncestors.get(node);
+        if (cached !== undefined) return cached;
+        const kind = node.kind;
+        // Match ts-morph's type-node predicate on compiler nodes.
+        const result = kind >= SyntaxKind.FirstTypeNode && kind <= SyntaxKind.LastTypeNode &&
+            kind !== SyntaxKind.OptionalType && kind !== SyntaxKind.TemplateLiteralTypeSpan ||
+          kind === SyntaxKind.ExpressionWithTypeArguments || kind === SyntaxKind.JSDocTypeExpression ||
+          kind >= SyntaxKind.JSDocAllType && kind <= SyntaxKind.JSDocNamepathType ||
+          kind === SyntaxKind.JSDocTypeLiteral || kind === SyntaxKind.JSDocSignature || insideType(node.parent);
+        typeAncestors.set(node, result);
+        return result;
+      };
       const trpc = trpcSources.has(file) || trpcSources.size > 0 && imports.some(entry =>
         trpcSources.has(entry.getModuleSpecifierSourceFile()!) && hasValueBinding(entry));
       if (trpc) index.trpcFiles!.push(relative);
@@ -1557,13 +1777,31 @@ export class QueryIndexBuilder {
       const recordTrpcUse = (use: NonNullable<ReturnType<TrpcFacts['uses']>>[number], owner?: number) => {
         const line = startLine(use.site);
         const operation = use.cache ? 'cache:' + use.operation : use.operation;
+        const args = !use.cache && use.operation !== 'useMutation' ? argsFor(use.site) : undefined;
+        const transport = use.transport;
+        const link = transport && [...new Set(transport.links.map(site =>
+          `${relativePath(site.getSourceFile())}:${startLine(site)}`))].join(', ');
+        const destination = transport && `${transport.method} ${transport.route.path} via ${link}`;
+        for (const route of use.transportRoutes ?? []) {
+          const id = routeIds.get(route.id);
+          if (id !== undefined && use.transportIssue) (index.trpcHttpIssues ??= {})[id] = use.transportIssue;
+        }
         for (const procedure of use.targets) {
           const id = procedureIds.get(procedure);
           if (id === undefined) continue;
           const key = JSON.stringify([id, line, operation, owner]);
           if (trpcUseKeys.has(key)) continue;
           trpcUseKeys.add(key);
-          ((index.trpcUses ??= {})[fileId] ??= []).push([id, line, operation, owner]);
+          const entry: import('../../mcp/Index').TrpcUse = [id, line, operation, owner];
+          if (args !== undefined || destination || use.transportIssue) entry[4] = args;
+          if (destination || use.transportIssue) entry[5] = destination;
+          if (use.transportIssue) entry[6] = use.transportIssue;
+          ((index.trpcUses ??= {})[fileId] ??= []).push(entry);
+          if (transport) {
+            index.fetches.push({ file: relative, line, route: routeIds.get(transport.route.id)!, method: transport.method,
+              url: transport.route.path, via: 'tRPC request', owner, fn: owner === undefined ? null : index.symbols[owner - 1].name,
+              evidence: `${procedure.name} via ${link}` });
+          }
           if (!use.cache && !isTestFile(relative)) boundProcedures.add(id);
         }
         if (!use.unresolved) return;
@@ -1571,7 +1809,7 @@ export class QueryIndexBuilder {
         for (const id of ids) recordTrpcIssue(id, fileId, line);
       };
       const recordGraph = (id: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number) => {
-        const key = JSON.stringify([id, line, kind, owner, detail]);
+        const key = `${id}:${line}:${kind}:${owner ?? ''}:${detail ?? ''}`;
         if (graphReferences.has(key)) return;
         const ref: GraphReference = [id, line, kind];
         if (owner !== undefined || detail !== undefined) ref[3] = owner;
@@ -1586,13 +1824,25 @@ export class QueryIndexBuilder {
           if (!id) continue;
           line ??= startLine(node);
           found = true;
+          let uncertain = possible;
           if (kind === 'call') {
             const from = graphOwner ?? caller ?? fileId;
             const gates = gatesOf(flow.gates(node));
             if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
-            if (Node.isCallExpression(node) && refWrites.size) {
-              const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
-              if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
+            if (Node.isCallExpression(node)) {
+              const write = indirectCalls.get(node)?.find(target => target.id === id && target.write)?.write ??
+                callableFlow.writes.forRead(node.getExpression());
+              if (write) {
+                recordWriteIssue(from, id, node, write);
+                uncertain = true;
+              }
+              recordCallSite(gateKey(from, id, line), node);
+              recordApiCall(caller, id, node);
+              recordCallbackUse(id, node, !!uncertain);
+              if (refWrites.size) {
+                const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
+                if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
+              }
             }
           }
           let referenceKind = kind;
@@ -1615,7 +1865,7 @@ export class QueryIndexBuilder {
             }
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
-            const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
+            const typeUse = !jsx && insideType(node.compilerNode.parent);
             const returnedUse = !typeUse && !callbackUse && !executable && !jsx &&
               (symbol.kind === 'function' || symbol.kind === 'hook') && returnedValueUse(node);
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
@@ -1633,19 +1883,19 @@ export class QueryIndexBuilder {
           }
           // Type queries such as ReturnType<typeof createContext> are graph uses
           // but do not show that a dependency passed into a runtime router.
-          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !node.getAncestors().some(Node.isTypeNode)) {
+          if (trpc && moduleUse && !index.symbols[id - 1].typeOnly && !insideType(node.compilerNode.parent)) {
             trpcModuleUses.set(`${id}:${line}`, [id, line]);
           }
           const lines = references.get(id) ?? new Map<number, Reference[]>();
           const entries = lines.get(line) ?? [];
           const same = entries.some(entry => entry[3] === referenceKind && entry[4] === detail && entry[5] === referenceCaller &&
-            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller) && !!entry[7] === !!possible);
+            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller) && !!entry[7] === !!uncertain);
           if (same || (kind === 'use' && entries.some(entry => entry[3] === 'call'))) continue;
           const entry: Reference = [id, relative, line, referenceKind];
           if (detail !== undefined || referenceCaller !== undefined) entry[4] = detail;
           if (referenceCaller !== undefined) entry[5] = referenceCaller;
           if (referenceOwner !== undefined && referenceOwner !== referenceCaller) entry[6] = referenceOwner;
-          if (possible) entry[7] = possible;
+          if (uncertain) entry[7] = uncertain;
           // A call on the same line already records the resolved use for rename.
           lines.set(line, kind === 'call' ? [...entries.filter(entry => entry[3] !== 'use' && entry[3] !== 'jsx-use'), entry] :
             [...entries, entry]);
@@ -1687,11 +1937,22 @@ export class QueryIndexBuilder {
         if (found) return;
         recordWorkspaceDependency(node, owner, workspace?.unresolvedBinding(expression));
         const targets = members.length ? declarationsOf(root).flatMap(target => byNode.get(target) ?? []) : [];
-        for (const id of targets) recordGraph(id, startLine(node), GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
+        for (const id of targets) {
+          const line = startLine(node);
+          recordGraph(id, line, GraphReferenceKind.MemberCall, owner, graphName('.' + members.join('.')));
+          if (Node.isCallExpression(node)) recordCallSite(gateKey(owner, id, line), node);
+        }
         if (!targets.length && declaration?.getSourceFile() === file &&
             (Node.isParameterDeclaration(declaration) || Node.isVariableDeclaration(declaration) || Node.isBindingElement(declaration))) {
           index.unresolvedCalls![owner] = (index.unresolvedCalls![owner] ?? 0) + 1;
           routerCallSites?.set(node, owner);
+          if (Node.isCallExpression(node) && !historyOnly) {
+            const args = argsFor(node);
+            const callee = args && expression.getText();
+            if (callee && args && /^[$\w]+(?:\.[$\w]+){0,6}$/.test(callee) && callee.length <= 120) {
+              ((index.unresolvedCallLiterals ??= {})[owner] ??= []).push([startLine(node), callee, args]);
+            }
+          }
           if (pages && pages.lifecycleNames.size && index.symbols[owner - 1]?.name.match(/^(?:getServerSideProps|getStaticProps|getStaticPaths|getInitialProps)$/)) {
             const sites = ((index.pagesObservedCalls ??= {})[owner] ??= []);
             sites.push([relative, startLine(node), expression.getText()]);
@@ -1807,25 +2068,31 @@ export class QueryIndexBuilder {
           }
         }
       };
-      let lastLeadingPosition: number | undefined;
-      let lastTrailingPosition: number | undefined;
+      const commentBoundaries = /\/[/\*]/.test(content) ? new Uint8Array(content.length + 1) : undefined;
+      const mayStartComment = (pos: number) => {
+        const code = content.charCodeAt(pos);
+        return pos === 0 || code <= 32 || code === 47 || code >= 127;
+      };
       const scanNodeComments = (node: ts.Node) => {
-        const start = node.getFullStart();
-        // Parent and child nodes often share a boundary and therefore the same trivia.
-        if (start !== lastLeadingPosition) {
-          lastLeadingPosition = start;
-          for (const comment of ts.getLeadingCommentRanges(content, start) ?? []) scanComment(comment);
+        if (!commentBoundaries) return;
+        if (!(commentBoundaries[node.pos] & 1)) {
+          commentBoundaries[node.pos] |= 1;
+          if (mayStartComment(node.pos)) {
+            for (const comment of ts.getLeadingCommentRanges(content, node.pos) ?? []) scanComment(comment);
+          }
         }
-        if (node.end !== lastTrailingPosition) {
-          lastTrailingPosition = node.end;
-          for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+        if (!(commentBoundaries[node.end] & 2)) {
+          commentBoundaries[node.end] |= 2;
+          if (mayStartComment(node.end)) {
+            for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+          }
         }
       };
       const recordNamespaceUse = (node: Node) => {
         const namespace = namespaces.get(node.getText());
         let parent = node.getParent();
         if (!namespace || parent === namespace.declaration ||
-            node.getAncestors().some(Node.isTypeNode)) return;
+            insideType(node.compilerNode.parent)) return;
         const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
         if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
         let receiver = node;
@@ -1855,7 +2122,18 @@ export class QueryIndexBuilder {
       // Keep REFERENCE_KINDS in sync with the node kinds handled below, including tRPC calls and resolver owners.
       visitKinds(file, REFERENCE_KINDS, node => {
         if (namespaces.size && Node.isIdentifier(node)) recordNamespaceUse(node);
-        if (Node.isImportSpecifier(node)) {
+        if (Node.isReturnStatement(node)) {
+          const expression = node.getExpression();
+          const value = expression && wrappedExpression(expression) || expression;
+          if (!value || !Node.isObjectLiteralExpression(value)) return;
+          const fn = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+          const container = fn?.getParent();
+          const owner = fn && (byNode.get(fn) ?? (container && (Node.isVariableDeclaration(container) ||
+            procedureResolvers.get(container) === fn) ? byNode.get(container) : undefined));
+          if (owner === undefined) return;
+          const evidence = !historyOnly && literalReturn(value);
+          if (evidence) ((index.returnLiterals ??= {})[owner] ??= []).push([startLine(node), evidence]);
+        } else if (Node.isImportSpecifier(node)) {
           const binding = node.getAliasNode() ?? node.getNameNode();
           record(node, declarationsOf(binding), 'import', node.getAliasNode() ? `import as ${binding.getText()}` : undefined);
         } else if (Node.isImportClause(node)) {
@@ -1891,14 +2169,15 @@ export class QueryIndexBuilder {
             const args = node.getArguments();
             // The first argument supplies the component definition when this call creates its binding.
             for (const argument of componentFactories.has(node) ? args.slice(1) : args) recordComponentValue(argument, property);
-            const assignment = throughWrappers(node).getParent();
             const first = unwrapValue(args[0]);
-            if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
-                !components.has(assignment) && !aliases.has(assignment) &&
-                (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first))) {
-              for (const target of declarationsOf(first)) {
-                const id = byNode.get(target);
-                if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+            if (Node.isIdentifier(first) || Node.isPropertyAccessExpression(first)) {
+              const assignment = throughWrappers(node).getParent();
+              if (Node.isExportAssignment(assignment) && !assignment.isExportEquals() &&
+                  !components.has(assignment) && !aliases.has(assignment)) {
+                for (const target of declarationsOf(first)) {
+                  const id = byNode.get(target);
+                  if (id !== undefined && index.symbols[id - 1].kind === 'component') unresolvedDefaultComponents.add(id);
+                }
               }
             }
           }
@@ -1928,12 +2207,12 @@ export class QueryIndexBuilder {
           const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression),
             'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
-          if (!Node.isCallExpression(node)) return;
+          if (historyOnly || !Node.isCallExpression(node) || !mockCall(expression)) return;
           const [module, factory] = node.getArguments();
           const specifier = Node.isStringLiteral(module) ? module :
             Node.isCallExpression(module) && module.getExpression().getKind() === SyntaxKind.ImportKeyword
               ? module.getArguments()[0] : undefined;
-          if (historyOnly || !/^(vi|jest)\.(mock|doMock)$/.test(expression.getText()) || !Node.isStringLiteral(specifier) || !factory) return;
+          if (!Node.isStringLiteral(specifier) || !factory) return;
           const moduleName = specifier.getLiteralText();
           const imported = file.getImportDeclarations().find(entry => entry.getModuleSpecifierValue() === moduleName);
           const resolved = imported?.getModuleSpecifierSourceFile() ?? fileByName.get(ts.resolveModuleName(
@@ -1979,12 +2258,11 @@ export class QueryIndexBuilder {
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
       }, {
-        visitRaw: historyOnly || !/\/[/\*]/.test(content) ? undefined : scanNodeComments,
+        visitRaw: commentBoundaries ? scanNodeComments : undefined,
         filterRaw: node => {
-          if (!ts.isIdentifier(node)) return true;
-          // Use the source spelling, including Unicode escapes, just as the reference visitor does.
-          const name = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
-          return names.has(name) || localNames.has(name) || namespaces.has(name);
+          if (!ts.isIdentifier(node)) return !historyOnly || !ts.isReturnStatement(node);
+          const text = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
+          return names.has(text) || localNames.has(text) || namespaces.has(text);
         }
       });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
@@ -2102,6 +2380,132 @@ export class QueryIndexBuilder {
     if (componentValues.size) index.dynamicRenderComponents = [...componentValues].sort((a, b) => a - b);
     // A wrapper definition does not resolve a separate opaque use of its inner component.
     index.renderEdges.push(...wrapperEdges);
+    if (!historyOnly && this.fetches.length) {
+      const requestCallers = new Map<number, Set<number>>();
+      const addCaller = (target: number, caller: number) => {
+        const callers = requestCallers.get(target) ?? new Set<number>();
+        callers.add(caller);
+        requestCallers.set(target, callers);
+      };
+      for (const [target, , , kind, , caller] of index.references) {
+        if (kind === 'call' && caller !== undefined) addCaller(target, caller);
+      }
+      const requestOwners = new Set(index.fetches.flatMap(({ owner, binding }) =>
+        owner !== undefined && !binding ? [owner] : []));
+      // Walk backwards through every indexed caller, independent of the query depth and test filters.
+      for (const owner of requestOwners) {
+        for (const caller of requestCallers.get(owner) ?? []) requestOwners.add(caller);
+        for (const [caller] of index.callbackInvocations?.[owner] ?? []) requestOwners.add(caller);
+      }
+      // Only edges reachable from an indexed request participate in reverse API queries.
+      const callFacts = new Map<string, ApiCallFact | undefined>();
+      for (const to of requestOwners) {
+        for (const [from, site, callee, caller] of apiCallSites.get(to) ?? []) {
+          const recursive = from === to;
+          if (recursive && staticallyUnreachable(site)) continue;
+          const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
+          const args = booleanArguments(site, callee, declarationsOf);
+          const guards = argumentGuards(site, caller, declarationsOf, callableFlow.writes);
+          const fact: ApiCallFact | undefined = recursive || args || guards ? [args, guards] : undefined;
+          if (!callFacts.has(key)) callFacts.set(key, fact);
+          else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
+        }
+      }
+      for (const [key, fact] of callFacts) if (fact) (index.apiCallFacts ??= {})[key] = fact;
+      apiCallSites.clear();
+      // Unknown factory invocations can leave a gap in a callback they produce.
+      const producersOf = new Map<number, Set<number>>();
+      for (const [factory, callbacks] of returnedBy) for (const callback of callbacks.keys()) {
+        const producers = producersOf.get(callback) ?? new Set<number>();
+        producers.add(factory);
+        producersOf.set(callback, producers);
+      }
+      const relevant = new Set(requestOwners);
+      for (const callback of relevant) for (const producer of producersOf.get(callback) ?? []) relevant.add(producer);
+      const coverage = new CallbackCoverage(
+        callableFlow.references,
+        node => projectFiles.has(node.getSourceFile()),
+        node => exported.has(node),
+        (id, site) => {
+          const followed = followedUses.get(site);
+          return followed instanceof Set ? followed.has(id) : followed === id;
+        },
+        (id, fn, path) => returnedBy.get(byNode.get(fn) ?? byNode.get(fn.getParent()!) ?? 0)
+          ?.get(id)?.has(JSON.stringify(path)) === true,
+        attribute => {
+          const site = attribute.getParent()?.getParent();
+          if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site)) return;
+          const name = attribute.getNameNode().getText();
+          const supplied = flow.value(site, { name });
+          if (flow.lookupUncertain(site) || supplied.unknown || supplied.value !== jsxValue(attribute)) return;
+          return flow.parametersAt(site);
+        },
+        (spread, name) => {
+          const site = spread.getParent()?.getParent();
+          return (Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site)) &&
+            flow.eventDelivery(site, name) === true;
+        }
+      );
+      const gap = (id: number, site: [string, number]) => {
+        const gaps = ((index.callbackCoverageGaps ??= {})[id] ??= []);
+        if (gaps.some(([file, line]) => file === site[0] && line === site[1])) return false;
+        gaps.push(site);
+        return true;
+      };
+      const locationOf = (node: Node): [string, number] => [relativePath(node.getSourceFile()), startLine(node)];
+      for (const [factory, callbacks] of returnedBy) {
+        if (!relevant.has(factory)) continue;
+        const fn = factoryDefinitions.get(factory)!;
+        const unknownSites = coverage.inspect(factory, fn, [], true, true);
+        for (const [callback, paths] of callbacks) {
+          if (!relevant.has(callback)) continue;
+          for (const site of unknownSites) gap(callback, locationOf(site));
+          for (const site of creationSites.get(factory) ?? []) {
+            const issues = [...paths.values()].flatMap(path => [...coverage.inspect(callback, site, path)]);
+            for (const issue of issues) gap(callback, locationOf(issue));
+            index.callbackCreations![callback].push([factory, ...locationOf(site), issues.length ? undefined : true]);
+          }
+        }
+      }
+      const relevantScopes = new Set(callbackScopes.flatMap(([fn, target]) => relevant.has(target) ? [fn] : []));
+      const scopeKinds = new Map<FunctionNode, ReturnType<typeof callbackScopeKind>>();
+      const unindexedCallbacks = new Map<FunctionNode, Set<number>>();
+      for (const [fn, target, escaping] of callbackScopes) {
+        if (!relevantScopes.has(fn)) continue;
+        if (!scopeKinds.has(fn)) scopeKinds.set(fn, callbackScopeKind(fn));
+        const kind = scopeKinds.get(fn);
+        if (kind !== 'bound' && !(kind === 'argument' && escaping)) continue;
+        // Keep the original encounter order even when a scope also calls unrelated targets.
+        const targets = unindexedCallbacks.get(fn) ?? new Set<number>();
+        if (relevant.has(target)) targets.add(target);
+        unindexedCallbacks.set(fn, targets);
+      }
+      for (const [fn, targets] of unindexedCallbacks) {
+        if (!targets.size) continue;
+        for (const issue of coverage.inspect(0, fn, [], true)) {
+          for (const target of targets) gap(target, locationOf(issue));
+        }
+      }
+      for (const [callback, fn] of callableDefinitions) {
+        if (!relevant.has(callback) || returnedBy.has(callback)) continue;
+        for (const issue of coverage.inspect(callback, fn, [], true, !localCallables.has(callback))) {
+          gap(callback, locationOf(issue));
+        }
+      }
+      // A factory can itself escape as a callback. Any unknown invocation of it
+      // is also an unknown creation of the callbacks it returns.
+      const producers = new Set([...returnedBy.keys()].filter(factory => relevant.has(factory)));
+      for (const factory of producers) {
+        const gaps = [...index.callbackCoverageGaps?.[factory] ?? []];
+        for (const [, file, line, covered] of index.callbackCreations?.[factory] ?? []) {
+          if (!covered) gaps.push([file, line]);
+        }
+        producers.delete(factory);
+        for (const callback of returnedBy.get(factory)!.keys()) for (const site of gaps) {
+          if (relevant.has(callback) && gap(callback, site) && returnedBy.has(callback)) producers.add(callback);
+        }
+      }
+    }
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const componentById = new Map([...components.keys()].map(node => [byNode.get(node), node]));
@@ -2153,7 +2557,8 @@ export class QueryIndexBuilder {
       ...(index.uncertainPropRequests ?? []).flatMap(request => request.gates ?? [])
     ].map(gate => gate.scope));
     for (const edge of index.renderEdges) {
-      if (!scopes.has(edge[1]) && !suppliers.has(edge[1]) && edge[7] && !excludedSites.has(edge[7])) {
+      if (edge[7] && !scopes.has(edge[1]) && !suppliers.has(edge[1]) &&
+          !excludedSites.has(edge[7]) && !index.renderEvidence?.[edge[7]]) {
         if (edge[8]) edge[7] = undefined;
         else edge.length = edge[6] ? 7 : edge[5] ? 6 : edge[4] ? 5 : 4;
       }

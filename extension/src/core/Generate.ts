@@ -66,18 +66,24 @@ function analyzeGraph(projectPath: string, options: GenerateOptions): CodebaseGr
                 .some(part => part === 'node_modules' || part === '.next');
     });
     const pagesConfig = !router && fs.existsSync(pagesDir) ? readNextConfig(projectPath, sourceFiles) : undefined;
-    const routes = router?.routes ?? new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace).analyze(sourceFiles, staticMetadataFiles(appDir));
+    const appConfig = pagesConfig ?? (!router && fs.existsSync(appDir) ? readNextConfig(projectPath, sourceFiles, true) : undefined);
+    const routes = router?.routes ?? new RouteAnalyzer(appDir, pagesDir, projectPath, pagesConfig, workspace, appConfig).analyze(sourceFiles, [
+        ...staticRouteFiles(appDir), ...(pagesConfig?.extensions?.some(ext => /^(?:md|mdx)$/.test(ext)) ? staticRouteFiles(pagesDir, true) : [])
+    ]);
     const appPrefix = path.relative(projectPath, appDir).split(path.sep).join('/') + '/';
     const hasAppRoutes = routes.some(route => route.file.startsWith(appPrefix));
     const hasPagesRoutes = routes.some(route => !route.file.startsWith(appPrefix));
     options.onProgress?.("Scanning components and hooks...");
     const analysis = new ComponentAnalyzer(projectPath, pagesConfig, workspace)
-        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown, router);
+        .analyze(sourceFiles, routes, !!(options.markdown || options.index), !!options.index && !options.markdown, appConfig, router);
 
     if (analysis.index) {
         analysis.index.projectSnapshot = snapshot;
         if (analysis.index.router) analysis.index.router.dependencies = routerDependencies;
         analysis.index.workspaceSources = workspaceSources;
+        if (!pagesConfig && appConfig?.url && Object.values(appConfig.url).some(value => value !== undefined)) {
+            analysis.index.appUrlConfig = appConfig.url;
+        }
     }
 
     const directories = new Map<string, DirectoryMetadata>();
@@ -154,14 +160,15 @@ function openProject(root: string, workspace: WorkspaceBindings): Project {
     return project;
 }
 
-function staticMetadataFiles(directory: string): string[] {
+function staticRouteFiles(directory: string, pages = false): string[] {
     if (!fs.existsSync(directory)) return [];
     return fs.readdirSync(directory, { withFileTypes: true }).flatMap(entry => {
         const file = path.join(directory, entry.name);
-        if (entry.isDirectory() && !entry.name.startsWith('_') && !entry.name.startsWith('.')) {
-            return staticMetadataFiles(file);
+        if (entry.isDirectory() && (pages || !entry.name.startsWith('_')) && !entry.name.startsWith('.')) {
+            return staticRouteFiles(file, pages);
         }
-        return entry.isFile() && /^(?:opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name)
+        return entry.isFile() && (pages ? /\.mdx?$/.test(entry.name) :
+            /^(?:page\.mdx?|opengraph-image\.(?:png|jpg|jpeg|gif)|robots\.txt|sitemap\.xml)$/.test(entry.name))
             ? [file] : [];
     }).sort();
 }

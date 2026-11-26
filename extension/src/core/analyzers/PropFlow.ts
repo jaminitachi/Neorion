@@ -37,6 +37,8 @@ export function constValue(node: Node) {
   }
 }
 
+const noDeclarations: Node[] = [];
+
 export class PropFlow {
   private sites = new Map<Node, RenderSite[]>();
   private parameters = new Map<Node, Node>();
@@ -44,6 +46,7 @@ export class PropFlow {
   private props = new WeakMap<Node, Prop | null>();
   private symbolsByNode = new WeakMap<Node, Symbol | null>();
   private declarationsBySymbol = new WeakMap<Symbol, Node[]>();
+  private declarationsByNode = new WeakMap<Node, Node[]>();
   private resolvedBindings = new Map<Node, Map<string, Map<Node | undefined, BoundValue[]>>>();
   private receiverIdentifiers = new Map<Node, Set<string>>();
   private identifiers = new Map<string, PropGate>();
@@ -92,6 +95,15 @@ export class PropFlow {
     return this.targets.get(site.getTagNameNode()) ?? [];
   }
 
+  parametersAt(site: JsxSite) {
+    return this.targetsOf(site).map(target => {
+      const fn = this.bodies.get(target)?.getParent();
+      if (Node.isArrowFunction(fn) || Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn)) {
+        return fn.getParameters()[0]?.getNameNode();
+      }
+    });
+  }
+
   lookupUncertain(site: JsxSite) {
     return this.uncertainLookups.has(site.getTagNameNode());
   }
@@ -105,13 +117,13 @@ export class PropFlow {
   }
 
   declarations(node: Node): Node[] {
+    const cached = this.declarationsByNode.get(node);
+    if (cached) return cached;
     const symbol = this.symbol(node);
-    if (!symbol) return [];
-    let entries = this.declarationsBySymbol.get(symbol);
-    if (!entries) {
-      entries = (symbol.getAliasedSymbol() ?? symbol).getDeclarations();
-      this.declarationsBySymbol.set(symbol, entries);
-    }
+    const existing = symbol && this.declarationsBySymbol.get(symbol);
+    const entries = existing ?? (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? noDeclarations;
+    if (symbol && !existing) this.declarationsBySymbol.set(symbol, entries);
+    this.declarationsByNode.set(node, entries);
     return entries;
   }
 

@@ -1,7 +1,7 @@
 import type { PropFlow } from './PropFlow';
 import type { QueryIndexBuilder } from './QueryIndexBuilder';
-import { AI_SDK_TRANSPORT, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
-import { type BindingElement, type CallExpression, type Identifier, type JsxOpeningElement, type JsxSelfClosingElement, type NewExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
+import { AI_SDK_TRANSPORT, type FetchEntry, type PageRenderCondition, type Wrapper } from '../../mcp/Index';
+import { type BindingElement, type CallExpression, type Identifier, type JsxOpeningElement, type JsxSelfClosingElement, type NewExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import * as path from 'path';
 import { existsSync, readFileSync } from 'node:fs';
 import { intersects, validRange } from 'semver';
@@ -13,6 +13,7 @@ import { property, textValue, type NextConfig } from './NextConfig';
 import { matchNextRoutes, normalizeNextUrl, patternRank, routeSegments } from './NextRouteMatch';
 import type { WorkspaceBindings } from './WorkspaceBindings';
 import { startLine } from './SourceLines';
+import { renderEvidence } from './RenderEvidence';
 
 export function declarationsOf(node: Node): Node[] {
   const symbol = node.getSymbol();
@@ -31,13 +32,15 @@ function addFact(facts: DetailFacts, file: string, fact: string, depth = 1, fanO
 }
 
 const MAX_LISTED_IMPORTERS = 8;
+const namespaceAccessKinds = new Set([SyntaxKind.PropertyAccessExpression, SyntaxKind.ElementAccessExpression]);
 
 type RelativePath = (source: SourceFile) => string;
 
 export function collectRenameFacts(
   files: SourceFile[], relativePath: RelativePath,
   symbols: Map<Node, string>, facts: DetailFacts,
-  exportsOf = (file: SourceFile) => file.getExportedDeclarations()
+  exportsOf = (file: SourceFile) => file.getExportedDeclarations(),
+  resolveDeclarations = declarationsOf
 ) {
   // The checker follows path aliases and re-exports to the declaration.
   const exported = new Map<string, string>();
@@ -66,12 +69,12 @@ export function collectRenameFacts(
     const namespaces = new Set<Node>();
     for (const declaration of file.getImportDeclarations()) {
       const defaultImport = declaration.getDefaultImport();
-      if (defaultImport) record(declarationsOf(defaultImport));
+      if (defaultImport) record(resolveDeclarations(defaultImport));
       const namespace = declaration.getNamespaceImport();
       if (namespace) for (const binding of namespace.getSymbol()?.getDeclarations() ?? []) namespaces.add(binding);
       for (const specifier of declaration.getNamedImports()) {
         const binding = specifier.getAliasNode() ?? specifier.getNameNode();
-        const imported = declarationsOf(binding);
+        const imported = resolveDeclarations(binding);
         record(imported);
         if (imported.some(Node.isSourceFile)) {
           for (const declaration of binding.getSymbol()?.getDeclarations() ?? []) namespaces.add(declaration);
@@ -81,16 +84,16 @@ export function collectRenameFacts(
     for (const declaration of file.getExportDeclarations()) {
       if (!declaration.getModuleSpecifier()) continue;
       for (const specifier of declaration.getNamedExports()) {
-        record(declarationsOf(specifier.getAliasNode() ?? specifier.getNameNode()), true);
+        record(resolveDeclarations(specifier.getAliasNode() ?? specifier.getNameNode()), true);
       }
     }
-    if (namespaces.size) file.forEachDescendant(node => {
+    if (namespaces.size) visitKinds(file, namespaceAccessKinds, node => {
       if (!Node.isPropertyAccessExpression(node) && !Node.isElementAccessExpression(node)) return;
       const expression = node.getExpression();
       let root = expression;
       while (Node.isPropertyAccessExpression(root) || Node.isElementAccessExpression(root)) root = root.getExpression();
       if (!root.getSymbol()?.getDeclarations().some(binding => namespaces.has(binding))) return;
-      if (Node.isPropertyAccessExpression(node)) record(declarationsOf(node));
+      if (Node.isPropertyAccessExpression(node)) record(resolveDeclarations(node));
       else {
         const key = node.getArgumentExpression();
         if (!Node.isStringLiteral(key)) return;
@@ -760,23 +763,37 @@ function wrappedChains(body: Node, pagesApp: boolean, relativePath: RelativePath
           inlineLayout: inline ? expression : scope.inlineLayout, renderOwner: inline ? undefined : definition };
         const nested = local ? wrappedChains(local, false, relativePath, bodies, projectFiles, seen, nestedScope, workspace) : [];
         const primitive = names.some(layoutPrimitive);
+        const implementation = namedProvider ? functionNode(definition) : undefined;
+        const parameter = implementation?.getParameters()[0];
+        const returned = parameter ? returns(implementation?.getBody()) : [];
+        const passThrough = returned.length > 0 && returned.every(expression => {
+          const value = wrappedExpression(expression) ?? expression;
+          if (Node.isPropertyAccessExpression(value)) {
+            return value.getName() === 'children' && bindingOf(value.getExpression()) === parameter;
+          }
+          const binding = Node.isIdentifier(value) ? bindingOf(value) : undefined;
+          return Node.isBindingElement(binding) && binding.getParent().getParent() === parameter &&
+            (binding.getPropertyNameNode() ?? binding.getNameNode()).getText() === 'children';
+        });
         if (inline && !nested.length) {
           issues?.push(`page slot unresolved in ${property ?? tag.getText()}`);
         }
         const branchConditional = conditional || option.conditional;
         return chain.flatMap(prefix => (nested.length ? nested : [emptyChain]).map(next => {
-          const provider = !primitive && (namedProvider || !!next.contextProvider);
+          const provider = !primitive && (!passThrough && namedProvider || !!next.contextProvider || contextProvider);
           // A dedicated component gets its own row. Inline provider tags belong to the file rendering them.
           const providerTag = !property && provider && (!local || definition?.getSourceFile() === tag.getSourceFile());
           const source = providerTag ? tag : definition ?? tag;
           const evidenceSite = assignment?.site ?? (property ? tag : undefined);
           const site = evidenceSite && { file: relativePath(evidenceSite.getSourceFile()), line: startLine(evidenceSite) };
+          const guard = pagesScope ? undefined : renderEvidence(tag);
           const location: ChainWrapper = {
             file: relativePath(source.getSourceFile()), symbol: providerTag ? name : exportedName,
             inlineDefinition: inline ? true : undefined,
             inlineRender: scope?.inlineLayout ? { tag, owner: scope.renderOwner } : undefined,
             line: startLine(source), conditional: branchConditional, provider, providerTag, external, workspacePackage,
             unresolvedWorkspace: !definition ? workspace?.unresolvedBinding(target) : undefined,
+            guard, guardFile: guard ? relativePath(tag.getSourceFile()) : undefined,
             site, evidence: property && site && (assignment?.site ? `${property} assigned at ${site.file}:${site.line}` :
               `${property} fallback at ${site.file}:${site.line}`) || undefined,
             definitionFile: providerTag && definition && definition.getSourceFile() !== tag.getSourceFile()
@@ -1114,6 +1131,7 @@ export function collectRenderFacts(
     const document = shell('_document');
     const wrappers = app ? [] : layouts;
     const issues: string[] = [];
+    if (/\.mdx?$/.test(route.file)) issues.push('MDX page body and imports untraced');
     if (appFile && !app) issues.push(`custom App unresolved (${appFile} outside the TypeScript program)`);
     let chains = [emptyChain];
     if (document) {
@@ -1343,9 +1361,15 @@ function addition(node: Node | undefined) {
 }
 
 export function wrappedExpression(node: Node) {
-  if (Node.isParenthesizedExpression(node) || Node.isAsExpression(node) ||
-      Node.isTypeAssertion(node) || Node.isSatisfiesExpression(node) || Node.isNonNullExpression(node)) {
-    return node.getExpression();
+  switch (node.compilerNode.kind) {
+    case SyntaxKind.ParenthesizedExpression:
+    case SyntaxKind.AsExpression:
+    case SyntaxKind.TypeAssertionExpression:
+    case SyntaxKind.SatisfiesExpression:
+    case SyntaxKind.NonNullExpression:
+      return (node as import('ts-morph').ParenthesizedExpression | import('ts-morph').AsExpression |
+        import('ts-morph').TypeAssertion | import('ts-morph').SatisfiesExpression |
+        import('ts-morph').NonNullExpression).getExpression();
   }
 }
 
@@ -1380,7 +1404,9 @@ function literalUrl(node: Node) {
 }
 
 function isGlobalFetch(expression: Node) {
-  return /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
+  const node = expression.compilerNode;
+  const name = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isIdentifier(node) ? node.text : undefined;
+  return name === 'fetch' && /^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
     !optionValueDeclarations(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile());
 }
 
@@ -1772,16 +1798,20 @@ export function urlTexts(node: Node, seen = new Set<Node>(), expandConditional =
   }
 }
 
-function apiSegments(url: UrlText, config?: NextConfig) {
-  const prefix = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/api(?:[/?#]|$))/.exec(url.text)?.[0];
+function apiSegments(url: UrlText, config?: NextConfig, requestPath = false) {
+  if (!config && !requestPath && !url.text.includes('/api')) return;
+  const origin = /^(?:[\0\x01]+|https?:\/\/[^/?#]+)(?=\/(?!\/))/.exec(url.text)?.[0];
+  const prefix = requestPath || origin && localApi.test(url.text.slice(origin.length)) ? origin : undefined;
   const raw = prefix ? url.text.slice(prefix.length) : url.text;
   const local = config ? (normalizeNextUrl(raw, config.url) ?? raw) + (/[?#].*$/.exec(raw)?.[0] ?? '') : raw;
-  if (!localApi.test(local)) return;
+  if (!localApi.test(local) && (!requestPath || !/^\/(?!\/)/.test(local))) return;
   const [pathname] = local.split(/[?#]/, 1);
   const spanning = pathname.includes(spanningSlot);
   const trailingSlash = pathname.endsWith('/');
   const path = trailingSlash ? pathname.slice(0, -1) : pathname;
   const segments = path.slice(1).split('/');
+  // Non-API App Router matches need a local or unresolved origin and a fixed first segment.
+  if (requestPath && !localApi.test(local) && (unknownSlot.test(segments[0]) || /^https?:/.test(prefix ?? ''))) return;
   const boundedTail = pathname === local && segments.at(-1) === slot && pathname.indexOf(slot) === pathname.length - 1;
   return { segments, spanning, dynamic: spanning || !!url.dynamic && !boundedTail,
     partial: !!prefix || !!url.partial || trailingSlash && !unknownSlot.test(pathname),
@@ -1867,6 +1897,8 @@ function isSwrFallbackKey(node: Node): boolean {
 }
 
 const requestMethods = ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'];
+const httpCallKind = new Set([SyntaxKind.CallExpression]);
+const httpModules = new Set(['swr', 'swr/immutable', 'axios', 'node-fetch', 'undici', 'http', 'https', 'node:http', 'node:https']);
 
 function axiosInstance(node: Node | undefined) {
   const init = valueNode(node);
@@ -1905,18 +1937,20 @@ function playwrightRequest(node: Node) {
 
 export function httpRequest(call: import('ts-morph').CallExpression, pages: boolean) {
   const expression = call.getExpression();
-  const origin = importBinding(expression);
+  const fetch = isGlobalFetch(expression);
+  const requestMethod = Node.isPropertyAccessExpression(expression) && requestMethods.includes(expression.getName());
+  if (!fetch && !requestMethod) return;
   const [url, options] = call.getArguments();
   if (!url) return;
-  if (/^(?:(?:globalThis|window)\.)?fetch$/.test(expression.getText()) &&
-    !declarationsOf(expression).some(declaration => !declaration.getSourceFile().isDeclarationFile())) {
+  if (fetch) {
     const methodProperty = property(options, 'method');
     const method = textValue(methodProperty)?.toUpperCase() ??
       (options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
         options.getProperties().some(Node.isSpreadAssignment)) ? '?' : 'GET');
     return { url, method, via: 'fetch' };
   }
-  if (!Node.isPropertyAccessExpression(expression) || !requestMethods.includes(expression.getName())) return;
+  if (!Node.isPropertyAccessExpression(expression)) return;
+  const origin = importBinding(expression);
   const method = expression.getName().toUpperCase();
   const instance = pages && axiosInstance(expression.getExpression());
   if (origin?.module === 'axios' && requestMethods.includes(origin.name) || instance) {
@@ -1972,13 +2006,15 @@ const API_REFERENCE_KINDS = new Set([
 ]);
 
 export function collectApiFacts(root: string, files: SourceFile[], routes: RouteNode[], relativePath: RelativePath,
-  actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow) {
+  actionIds: Map<Node, string>, facts: DetailFacts | undefined, callable: (node: Node) => Node | undefined, index?: QueryIndexBuilder, config?: NextConfig, workspace?: WorkspaceBindings, flow?: PropFlow,
+  appConfig?: NextConfig, excludedRequest?: (entry: FetchEntry) => void) {
   const endpoints = routes.filter(route => route.type === 'api').map(route => ({
     route,
     segments: routeSegments(route.path)
   })).map(endpoint => ({ ...endpoint, rank: patternRank(endpoint.segments) }));
   if (!endpoints.length) return;
   endpoints.sort((a, b) => b.rank.localeCompare(a.rank));
+  const hasNonApiEndpoints = endpoints.some(({ route }) => !localApi.test(route.path));
   const urlMatches = (parsed: NonNullable<ReturnType<typeof apiSegments>>) => {
     const { segments, partial } = parsed;
     if (config && !segments.some(segment => unknownSlot.test(segment))) {
@@ -2014,10 +2050,11 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     }
     return matches;
   };
-  const matchValues = (values: UrlText[]) => {
+  const matchValues = (values: UrlText[], requestPath = false) => {
     let matches: Map<string, ReturnType<typeof urlMatches>[number]> | undefined;
     for (const value of values) {
-      const parsed = apiSegments(value, config);
+      const parsed = apiSegments(value, config) ??
+        (requestPath && (hasNonApiEndpoints || appConfig?.url.basePath) ? apiSegments(value, appConfig ?? config, true) : undefined);
       if (!parsed) continue;
       matches ??= new Map();
       for (const match of urlMatches(parsed)) {
@@ -2045,17 +2082,22 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     if (!fn || !projectFiles.has(fn.getSourceFile())) return [];
     if (summaries.has(fn)) return summaries.get(fn)!;
     const result: { request: Request; call: Node; parameter: number }[] = [];
-    const visit = (node: Node, traversal?: { skip(): void }) => {
-      if (Node.isFunctionLikeDeclaration(node)) { traversal?.skip(); return; }
-      if (!Node.isCallExpression(node) || conditionalAt(node, fn)) return;
+    const parameters = fn.getParameters();
+    const visit = (node: Node) => {
+      if (!Node.isCallExpression(node)) return;
       const request = httpRequest(node, true);
-      if (!request) return;
+      if (!request || conditionalAt(node, fn)) return;
       const binding = bindingOf(valueNode(request.url) ?? request.url);
-      const parameter = fn.getParameters().findIndex(parameter => parameter === binding);
+      const parameter = parameters.findIndex(parameter => parameter === binding);
       if (parameter >= 0) result.push({ request, call: node, parameter });
     };
-    const body = fn.getBody();
-    if (body) { visit(body); body.forEachDescendant(visit); }
+    const body = parameters.length && fn.getBody();
+    if (body) {
+      visit(body);
+      if (!Node.isFunctionLikeDeclaration(body)) visitKinds(body, httpCallKind, visit, {
+        skipNode: node => ts.isFunctionLike(node) && !ts.isFunctionExpression(node)
+      });
+    }
     summaries.set(fn, result);
     return result;
   };
@@ -2082,17 +2124,35 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
     }
   };
   for (const file of files) {
-    if (!/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText()) && !file.getImportDeclarations().length) continue;
+    const imports = file.getImportDeclarations();
+    if (!imports.length && !/\/api|\\(?:x|u|\/)|\bfetch\b/.test(file.getFullText())) continue;
     const source = relativePath(file);
-    const usesHttpLibrary = file.getImportDeclarations().some(declaration =>
-      ['swr', 'swr/immutable', 'axios'].includes(declaration.getModuleSpecifierValue()) ||
-      sdkModules.has(declaration.getModuleSpecifierValue()));
+    const httpImports = new Set<string>();
+    let usesHttpLibrary = false;
+    for (const declaration of imports) {
+      const module = declaration.getModuleSpecifierValue();
+      if (!httpModules.has(module) && !sdkModules.has(module)) continue;
+      usesHttpLibrary = true;
+      const clause = declaration.compilerNode.importClause;
+      const bindings = clause?.namedBindings;
+      if (clause?.name) httpImports.add(clause.name.text);
+      if (bindings && ts.isNamespaceImport(bindings)) httpImports.add(bindings.name.text);
+      if (bindings && ts.isNamedImports(bindings)) for (const specifier of bindings.elements) httpImports.add(specifier.name.text);
+    }
+    const httpImportCandidate = (callee: ts.Expression) => {
+      const binding = ts.isPropertyAccessExpression(callee) ? callee.expression : callee;
+      return usesHttpLibrary && (!ts.isIdentifier(binding) || httpImports.has(binding.text));
+    };
     const handledTransports = new Set<Node>();
     const collectRequest = (node: CallExpression | NewExpression) => {
       const isConstructor = Node.isNewExpression(node);
       const expression = node.getExpression();
-      const isFetch = !isConstructor && isGlobalFetch(expression);
-      const origin = !isFetch && usesHttpLibrary ? importOrigin(expression) : undefined;
+      const globalFetch = !isConstructor && isGlobalFetch(expression);
+      const origin = !globalFetch && httpImportCandidate(expression.compilerNode) ? importOrigin(expression) : undefined;
+      const isFetch = globalFetch || !isConstructor && (origin?.module === 'node-fetch' && origin.name === 'default' ||
+        origin?.module === 'undici' && origin.name === 'fetch');
+      const nodeHttp = !isConstructor && origin?.module && /^(?:node:)?https?$/.test(origin.module) &&
+        ['get', 'request'].includes(origin.name) ? origin.name : undefined;
       const isAiSdk = origin && (isConstructor ? origin.module === 'ai' && sdkTransports.has(origin.name) :
         (origin.module === '@ai-sdk/react' || origin.module === 'ai/react') && sdkHooks.has(origin.name));
       const isSwr = !isConstructor && (origin?.module === 'swr' || origin?.module === 'swr/immutable') &&
@@ -2101,7 +2161,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       const axiosMethod = !isConstructor && origin?.module === 'axios' &&
         ['get', 'delete', 'head', 'options', 'post', 'put', 'patch'].includes(origin.name)
         ? origin.name.toUpperCase() : undefined;
-      if (config && !isConstructor && !isFetch && !isSwr && !axiosMethod && !isAiSdk) {
+      if (config && !excludedRequest && !isConstructor && !isFetch && !isSwr && !axiosMethod && !isAiSdk && !nodeHttp) {
         const direct = httpRequest(node, true);
         const trpc = trpcRequest(node, workspace);
         const requests = direct ? [{ ...direct, evidence: undefined, text: undefined }] : trpc ? [trpc] :
@@ -2125,7 +2185,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
         }
         return;
       }
-      if (!isFetch && !isSwr && !axiosMethod && !isAiSdk) return;
+      if (!isFetch && !isSwr && !axiosMethod && !isAiSdk && !nodeHttp) return;
       const [argument, options] = node.getArguments();
       if (handledTransports.has(node)) return;
       const sdkRequests = isAiSdk ? aiSdkRequests(node, argument, origin.name, origin.module, classify, handledTransports, chatVersions, manifestBoundary, workspace) : undefined;
@@ -2133,13 +2193,13 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
         index?.uncertainChatTransport(source, node, sdkRequests.some(request => request.unbounded),
           sdkRequests.some(request => request.override));
       }
-      const methodProperty = Node.isObjectLiteralExpression(options) ? options.getProperty('method') : undefined;
-      const methodValue = Node.isPropertyAssignment(methodProperty) ? methodProperty.getInitializer() : undefined;
-      const fetchMethod = Node.isStringLiteral(methodValue) ? methodValue.getLiteralText().toUpperCase() :
-        options && (!Node.isObjectLiteralExpression(options) || methodProperty ||
-          options.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET';
+      const requestOptions = options;
+      const methodProperty = property(requestOptions, 'method');
+      const fetchMethod = textValue(methodProperty)?.toUpperCase() ??
+        (options && (!Node.isObjectLiteralExpression(requestOptions) || methodProperty ||
+          requestOptions.getProperties().some(Node.isSpreadAssignment)) ? undefined : 'GET');
       const via = sdkRequests ? AI_SDK_TRANSPORT :
-        isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : 'fetch';
+        isSwrMutate ? 'SWR mutate' : isSwr ? 'SWR key' : axiosMethod ? 'axios' : nodeHttp ? 'Node HTTP request' : 'fetch';
       const action = node.getAncestors().map(parent => actionIds.get(parent)).find(Boolean);
       const subject = action ? action.slice('action:'.length) : source;
       const owner = action ? subject.slice(0, subject.lastIndexOf('#')) : source;
@@ -2147,7 +2207,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       const requests: (Omit<SdkRequest, 'urls' | 'method'> & {
         urls: Iterable<Node | string | undefined>; method?: string;
       })[] = sdkRequests ?? [{
-        urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : axiosMethod,
+        urls: isSwr ? swrUrls(argument) : [argument], method: isFetch ? fetchMethod : nodeHttp ? nodeHttp === 'get' ? 'GET' : fetchMethod : axiosMethod,
         partial: false, unbounded: false
       }];
       for (const request of requests) {
@@ -2163,6 +2223,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
           const prop = directProp ?? embeddedProp;
           // Retain the static route pattern from a template with runtime path segments.
           const templateMatches = embeddedProp ? matchesFor(input) : undefined;
+          const templateRoute = templateMatches?.size === 1 ? templateMatches.values().next().value : undefined;
           const bindings = prop ? flow!.bindings(prop) : [];
           const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
             const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
@@ -2189,7 +2250,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
           for (const { values, binding, gates, unknown } of candidates) {
             const matches = matchValues(defaultReconnect ? values.map(value => ({
               ...value, text: value.text + '/' + slot + '/stream', partial: true
-            })) : values);
+            })) : values, isFetch || !!axiosMethod || !!nodeHttp);
             if (!matches) continue;
             const url = binding?.value ?? input;
             if (typeof url !== 'string' && (url.getSourceFile() === file || binding)) classify(url);
@@ -2201,11 +2262,27 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
               const patternMatched = unknown && !binding ? templateMatches?.get(route.id)?.markdown : markdown && !unknown;
               const mapFact = patternMatched && matchesMethod && origin?.name !== 'mutate' && !request.partial && !defaultReconnect;
               if (facts && mapFact) addFact(facts, owner, `fetch ${subject} -> ${route.file} ${route.path}${kind}`);
+              if (excludedRequest) {
+                const fn = node.getFirstAncestor(Node.isFunctionLikeDeclaration);
+                const declaration = fn?.getParent();
+                const name = Node.isFunctionDeclaration(fn) ? fn.getName() :
+                  Node.isVariableDeclaration(declaration) ? declaration.getName() :
+                  Node.isMethodDeclaration(fn) ? fn.getName() : undefined;
+                excludedRequest({
+                  file: source, line, route: Number(route.id), fn: name ?? null,
+                  method: method ?? '?', url: route.path, via, partial: partial || undefined, dynamic,
+                  uncertainty: 'HTTP caller outside the app compiler inputs; deployment trigger untraced'
+                });
+              }
               index?.fetch({
                 file: source, line, node, route: route.id,
                 method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
                 partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
                 propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates,
+                // If the fixed path identifies a different endpoint, keep this
+                // wider prop match as URL evidence rather than a request.
+                otherTemplateRoute: unknown && !binding && templateRoute && !templateRoute.partial && !templateRoute.dynamic &&
+                  templateRoute.route.id !== route.id ? templateRoute.route.path : undefined,
                 transportOverride: request.override || undefined, possibleReconnect: sdkRequests && request.method === 'GET' ? true : undefined
               });
               if (!facts || isSwr || !mapFact) continue;
@@ -2218,6 +2295,19 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
       }
     };
     const constructors: NewExpression[] = [];
+    // Exclude impossible literals and request sites before allocating ts-morph wrappers.
+    const wrapNode = (node: ts.Node) => {
+      if (ts.isCallExpression(node)) {
+        if (config && !excludedRequest && node.arguments.length || httpImportCandidate(node.expression)) return true;
+        const callee = node.expression;
+        return ts.isIdentifier(callee) ? callee.text === 'fetch' :
+          ts.isPropertyAccessExpression(callee) && callee.name.text === 'fetch';
+      }
+      if (ts.isNewExpression(node)) return httpImportCandidate(node.expression);
+      if (ts.isStringLiteralLike(node)) return !!index && node.text.includes('/api');
+      if (ts.isBinaryExpression(node)) return !!index && node.operatorToken.kind === SyntaxKind.PlusToken;
+      return !!index || ts.isCallExpression(node);
+    };
     // Read hooks first so a constructor supplied as a transport is indexed through its hook.
     visitKinds(file, API_REFERENCE_KINDS, node => {
       if (Node.isCallExpression(node)) collectRequest(node);
@@ -2225,14 +2315,14 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
         if (usesHttpLibrary) constructors.push(node);
       } else if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) ||
           Node.isTemplateExpression(node) || addition(node))) literals.push(node);
-    });
+    }, { filterRaw: wrapNode });
     for (const constructor of constructors) collectRequest(constructor);
   }
   for (const node of literals) {
-    const source = relativePath(node.getSourceFile());
     if (classified.has(node)) continue;
     const matches = matchesFor(node);
     if (!matches) continue;
+    const source = relativePath(node.getSourceFile());
     classify(node);
     const via = isSwrFallbackKey(node) ? 'SWR fallback key' : 'route literal';
     for (const { route, partial, dynamic } of matches.values()) {

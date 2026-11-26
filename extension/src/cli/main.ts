@@ -12,6 +12,8 @@ const help = `Usage:
   neorion query <kind> <target> [--limit n] [--root dir] [--app name]
   neorion query search <text> [--kind filter] [--limit n]
   neorion query wrappers <route> [--no-external | --include-external]
+  neorion query who_renders <component> [--direct]
+  neorion query api_consumers <route> [--depth n]
   neorion query impact <symbol|file> [--depth n] [--include-tests]
   neorion query callees <symbol> [--depth n] [--uses]
   neorion query path <from> <to>
@@ -185,6 +187,7 @@ async function main([command, ...args]: string[]) {
       app: { type: 'string' as const }, limit: { type: 'string' as const },
       kind: { type: 'string' as const },
       depth: { type: 'string' as const },
+      direct: { type: 'boolean' as const },
       'include-tests': { type: 'boolean' as const },
       uses: { type: 'boolean' as const },
       base: { type: 'string' as const },
@@ -232,6 +235,7 @@ async function main([command, ...args]: string[]) {
     ...(values.base === undefined ? {} : { base: values.base }),
     ...(values.staged || values.unstaged ? { scope: values.staged ? 'staged' : 'unstaged' } : {}),
     ...(values.depth === undefined ? {} : { depth: Number(values.depth) }),
+    ...(values.direct === undefined ? {} : { direct: values.direct }),
     ...(values['include-tests'] === undefined ? {} : { includeTests: values['include-tests'] }),
     ...(values.uses === undefined ? {} : { uses: values.uses })
   };

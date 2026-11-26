@@ -1,17 +1,20 @@
+import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
 import type { RouterPattern } from '../core/frameworks/RouterMatch';
 import type { WorkspaceSources } from '../core/ProjectSnapshot';
 import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 11;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 18;
-export const GRAPH_INDEX_REVISION = 24;
+export const CALLBACK_QUERY_REVISION = 17;
+export const QUERY_INDEX_REVISION = 19;
+export const GRAPH_INDEX_REVISION = 25;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
+export const CALLABLE_WRITE_ISSUE = 'callable binding or member written';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
 export const DYNAMIC_RENDER_ISSUE = 'rendered through a dynamic reference';
 export const isLazyRender = (detail: string | undefined) => !!detail &&
@@ -60,9 +63,17 @@ export interface Wrapper {
   site?: { file: string; line: number };
   phase?: 'document' | 'application';
   evidence?: string;
+  guard?: RenderEvidence;
+  guardFile?: string;
 }
 
 export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true; callback?: true };
+export type BooleanArguments = [parameter: number, value: boolean][];
+export type ApiCallFact = [args?: BooleanArguments, guards?: BooleanArguments];
+export const apiCallKey = (file: string, line: number, target: number, caller?: number) =>
+  `${caller ?? file}:${target}:${line}`;
+export type CallbackCreation = [factory: number, file: string, line: number, covered?: true];
+export type CallbackInvocation = [caller: number, file: string, line: number, event?: string, possible?: true | 'write'];
 export type FlowCall = [from: number, to: number, file: string, line: number, detail: string, gates?: FlowGate[]];
 
 export interface FetchEntry {
@@ -82,8 +93,11 @@ export interface FetchEntry {
   partial?: boolean;
   dynamic?: boolean;
   propUrlUnknown?: true;
+  otherTemplateRoute?: string;
+  uncertainty?: string;
   binding?: { file: string; line: number; name: string; supplier?: number; site: string };
   gates?: FlowGate[];
+  argumentGuards?: BooleanArguments;
 }
 
 type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number, possible?: true];
@@ -93,7 +107,7 @@ export type Reference = [symbol: number, file: string, ...site: ReferenceSite];
 export type IndexedReference = [symbol: number, file: string | null | number, ...site: ReferenceSite];
 export type ExternalCall = [owner: number, line: number, module: number, name: number, count?: number];
 export const enum GraphReferenceKind { Use, MemberCall, DynamicImport, Render, TypeUse, ReturnedUse }
-export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number];
+export type TrpcUse = [procedure: number, line: number, operation: string, owner?: number, args?: string, transport?: string, transportIssue?: string];
 export type GraphReference = [symbol: number, line: number, kind: GraphReferenceKind, owner?: number, detail?: number];
 export type NamespaceUse = [line: number, member?: string, owner?: number];
 export type ModuleImport = [target: number, line: number, kind: 'import' | 'effect' | 'export' | 'type',
@@ -229,11 +243,21 @@ export interface QueryIndex {
   externalModules?: string[];
   flowCalls?: FlowCall[];
   callableOwners?: Record<number, number>;
+  callbackCoverageGaps?: Record<number, [file: string, line: number][]>;
+  callbackCreations?: Record<number, CallbackCreation[]>;
+  apiCallFacts?: Record<string, ApiCallFact>;
+  callbackInvocations?: Record<number, CallbackInvocation[]>;
   hasFlowCalls?: boolean;
   callGates?: Record<string, FlowGate[]>;
   flowIssues?: Record<number, { reason: string; gates: FlowGate[] }[]>;
   callIssues?: Record<string, string>;
   refEvidence?: Record<string, string>;
+  sourceEvidence?: true;
+  callLiterals?: Record<string, string[]>;
+  unresolvedCallLiterals?: Record<number, [line: number, callee: string, args: string][]>;
+  returnLiterals?: Record<number, [line: number, value: string][]>;
+  renderEvidence?: Record<string, RenderEvidence>;
+  memoizedCallbacks?: number[];
   renderLabels?: Record<string, string>;
   uncertainPropRequests?: { file: string; owner: number; method?: string; gates?: FlowGate[] }[];
   unresolvedCalls?: Record<number, number>;
@@ -245,6 +269,7 @@ export interface QueryIndex {
   routeFiles?: Record<string, [kind: string, url: string, matcher?: string, component?: number, matchers?: string[]]>;
   layoutStyles?: Record<string, string[]>;
   trpcUses?: Record<number, TrpcUse[]>;
+  trpcHttpIssues?: Record<number, string>;
   trpcAliases?: Record<number, number[]>;
   trpcUnbound?: number[];
   trpcIssues?: Record<number, [file: number, line: number][]>;
@@ -266,6 +291,7 @@ export interface QueryIndex {
     edges: RouterEdge[];
   };
   pagesUrlConfig?: NextUrlConfig;
+  appUrlConfig?: NextUrlConfig;
   pagesEdges?: PagesEdge[];
   pagesIssues?: Record<number, string[]>;
   pagesWrapSites?: Record<number, Record<string, [position: number, evidence: string][]>>;
@@ -275,4 +301,9 @@ export interface QueryIndex {
   pagesObservedCalls?: Record<number, [file: string, line: number, expression: string][]>;
   pagesOwnerIssues?: Record<number, string[]>;
   trpcModuleUses?: Record<number, [target: number, line: number][]>;
+}
+
+export function lexicalOwner(owners: QueryIndex['callableOwners'], id: number): number {
+  while (owners?.[id] !== undefined) id = owners[id];
+  return id;
 }
