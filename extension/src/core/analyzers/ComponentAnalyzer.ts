@@ -442,6 +442,20 @@ export class ComponentAnalyzer {
       if (!to || to === from) return;
       edges.set(JSON.stringify([type, from, to]), { from, to, type });
     };
+    for (const [node, wrapper] of components) {
+      const initializer = Node.isVariableDeclaration(node) ? node.getInitializer() : undefined;
+      if (!Node.isCallExpression(initializer) ||
+          !['memo', 'forwardRef'].includes(packageMember(initializer.getExpression(), 'react') ?? '')) continue;
+      const [argument] = initializer.getArguments();
+      if (!argument) continue;
+      // Exported inner components keep their own symbols alongside their wrappers.
+      for (const declaration of declarationsOf(argument)) {
+        const target = components.get(declaration);
+        if (!target || target === wrapper) continue;
+        addEdge(wrapper.id, target.id, 'renders');
+        index?.render(wrapper.id, target.id, startLine(argument), 0);
+      }
+    }
     const declaredRenderTargets = (declarations: Node[]) => declarations.flatMap(declaration => {
       const assignment = declaration.getParent();
       if (Node.isPropertyAccessExpression(declaration) && Node.isBinaryExpression(assignment) &&
@@ -453,8 +467,31 @@ export class ComponentAnalyzer {
     // Discover component-valued bindings before assigning JSX to its owning body.
     const renderTargets = new Map<Node, ComponentNode[]>();
     const renderChoices = new Map<Node, Map<string, RenderCertainty>>();
-    const unresolvedLookups = new Set<Node>();
+    const unresolvedLookups = new Map<Node, Node[]>();
     const callbackBodies = new Set<ts.Node>();
+    const componentForBinding = (target: ReturnType<typeof renderBindings>['targets'][number]['target'], tag: Node) => {
+      let binding: Node = target;
+      while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
+             Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
+      const parent = binding.getParent();
+      if (Node.isVariableDeclaration(parent)) binding = parent;
+      const existing = resolveComponent(binding);
+      if (existing) return existing;
+      if (Node.isClassDeclaration(target)) return;
+      const body = target.getBody();
+      if (!body || !hasRender(body)) return;
+      const source = target.getSourceFile();
+      const relative = relativePath(source);
+      const name = lexicalName(binding) ?? tag.getText();
+      const component = {
+        id: `cmp:${relative}#${name}~${binding.getStart()}`, name, path: relative,
+        isClient: isClientFile(source), domain: DomainExtractor.extract('/' + relative), props: [], hooks: []
+      };
+      components.set(binding, component);
+      bodies.set(binding, body);
+      callbackBodies.add(body.compilerNode);
+      return component;
+    };
     for (const file of files) {
       // Keep RENDER_KINDS in sync with the render sites handled here and in the file scan below.
       visitKinds(file, RENDER_KINDS, node => {
@@ -479,32 +516,10 @@ export class ComponentAnalyzer {
           if (!previous || preferRenderBinding(choice, previous)) choices.set(component.id, choice);
         };
         const traced = renderBindings(bindings, projectFiles);
-        if (traced.unresolvedLookup) unresolvedLookups.add(tag);
+        if (traced.unresolvedLookup) unresolvedLookups.set(tag, bindings);
         for (const { target, ...choice } of traced.targets) {
-          let binding: Node = target;
-          while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
-                 Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
-          const parent = binding.getParent();
-          if (Node.isVariableDeclaration(parent)) binding = parent;
-          const existing = resolveComponent(binding);
-          if (existing) {
-            register(existing, choice);
-            continue;
-          }
-          if (Node.isClassDeclaration(target)) continue;
-          const body = target.getBody();
-          if (!body || !hasRender(body)) continue;
-          const source = target.getSourceFile();
-          const relative = relativePath(source);
-          const name = lexicalName(binding) ?? tag.getText();
-          const component = {
-            id: `cmp:${relative}#${name}~${binding.getStart()}`, name, path: relative,
-            isClient: isClientFile(source), domain: DomainExtractor.extract('/' + relative), props: [], hooks: []
-          };
-          components.set(binding, component);
-          bodies.set(binding, body);
-          callbackBodies.add(body.compilerNode);
-          register(component, choice);
+          const component = componentForBinding(target, tag);
+          if (component) register(component, choice);
         }
         if (choices.size) renderChoices.set(tag, choices);
       });
@@ -514,15 +529,37 @@ export class ComponentAnalyzer {
       [...choices.values()].some(choice => choice.possible) ? [tag] : []));
     const flow = new PropFlow(bodies, new Map([...renderTargets].map(([tag, targets]) =>
       [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath, uncertainLookups);
+    const propAttribute = (tag: Node, body?: Node) =>
+      tag.getAncestors().find(parent => parent === body || Node.isJsxAttribute(parent));
+    const propRenders = new Map<Node, (RenderCertainty & { target: ComponentNode; detail: string })[]>();
+    for (const [tag, bindings] of unresolvedLookups) {
+      const traced = renderBindings(bindings, projectFiles, flow);
+      if (!traced.unresolvedLookup) unresolvedLookups.delete(tag);
+      const attribute = propAttribute(tag);
+      if (Node.isJsxAttribute(attribute) && !flow.mayRenderSlot(attribute)) continue;
+      for (const { target, supply, possible, conditional } of traced.targets) {
+        if (!supply) continue;
+        const component = componentForBinding(target, tag);
+        if (!component) continue;
+        const receiver = Node.isCallExpression(supply.site) ? supply.site.getArguments()[0] : supply.site.getTagNameNode();
+        if (!receiver) continue;
+        const entries = propRenders.get(receiver) ?? [];
+        entries.push({ target: component, possible, conditional: conditional || !!conditionalAt(tag),
+          detail: `prop ${supply.name} via ${receiver.getText()} (rendered at ${relativePath(tag.getSourceFile())}:${startLine(tag)})` });
+        propRenders.set(receiver, entries);
+      }
+    }
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
       if (!suppliedComponent && unresolvedLookups.has(tag)) index?.unresolvedRenderLookup(from, tag);
+      const site = tag.getParent();
       if (!targets.length && Node.isPropertyAccessExpression(tag)) {
         targets.push(...declarationsOf(rootBinding(tag)).flatMap(node => resolveComponent(node) ?? []));
       }
-      for (const target of new Set(targets)) {
-        const site = tag.getParent();
-        const attribute = tag.getAncestors().find(parent => parent === body || Node.isJsxAttribute(parent));
+      const transferred = suppliedComponent ? [] : propRenders.get(tag) ?? [];
+      const renders = [...new Set(targets)].map(target => ({ target, ...renderChoices.get(tag)?.get(target.id), detail: undefined as string | undefined }));
+      for (const { target, possible, conditional: guarded, detail } of [...renders, ...transferred]) {
+        const attribute = propAttribute(tag, body);
         const element = Node.isJsxOpeningElement(site) ? site.getParent() : site;
         const parent = element?.getParent();
         const children = Node.isJsxElement(parent) ? flow.renderChildren(parent) : [];
@@ -541,14 +578,12 @@ export class ComponentAnalyzer {
         if (slot && !slot.length && Node.isJsxAttribute(attribute) && !flow.mayRenderSlot(attribute)) continue;
         addEdge(from, target.id, 'renders');
         if (index && from !== target.id) {
-          const choice = renderChoices.get(tag)?.get(target.id);
-          const possible = choice?.possible || undefined;
-          const conditional = choice?.conditional ? 1 : conditionalAt(tag, body);
-          const lookup = possible ? RENDER_LOOKUP_ISSUE : undefined;
+          const conditional = guarded ? 1 : conditionalAt(tag, body);
+          const lookup = [possible && RENDER_LOOKUP_ISSUE, detail].filter(Boolean).join('; ') || undefined;
           const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
             ? site : undefined;
           if (!slot?.length) {
-            index.render(from, target.id, startLine(tag), conditional, undefined, possible, this.config && tag, lookup, renderSite);
+            index.render(from, target.id, startLine(tag), conditional, undefined, possible || undefined, this.config && tag, lookup, renderSite);
           } else for (const transfer of slot) {
             index.render(from, target.id, startLine(tag), conditional || Number(transfer.conditional),
               undefined, possible || (transfer.partial ? true : undefined), this.config && tag,

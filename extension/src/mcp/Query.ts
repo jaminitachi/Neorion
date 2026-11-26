@@ -409,7 +409,7 @@ export class QueryEngine {
       reached.delete(route.id);
       trace(route);
     }
-    const rows = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
+    const rows: Row[] = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
       const { route, depth, layout, conditional, possible, slots } = entry;
       const chain = slots.length ? entry.chain : entry.chain.slice(-2);
       const fileLabel = location(route.file, route.line ?? 1);
@@ -417,9 +417,13 @@ export class QueryEngine {
       const label = `${url}  ${fileLabel}`;
       const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
         chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
-      return { ...row(`${label}  depth ${depth}${via.length ? ' via ' + via.join(' > ') : ''}` +
-        (slots.length ? ` [${slots.join('; ')}]` : '') + (layout ? ' [via layout]' : '') +
-        (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
+      return {
+        ...row(`${label}  depth ${depth}`, route.file),
+        pathEnd: label.length,
+        annotation: (via.length ? ' via ' + via.join(' > ') : '') + (slots.length ? ` [${slots.join('; ')}]` : ''),
+        suffix: (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') +
+          (possible ? ' [possible]' : '') + flagTest(route.file)
+      };
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
@@ -449,7 +453,8 @@ export class QueryEngine {
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
         (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) ??
-        (!reached.size && this.index.renderLookupIssues ? Object.values(this.index.renderLookupIssues)[0] : undefined) ??
+        (!reached.size && this.index.renderValueUses?.[symbol.id] ?
+          Object.values(this.index.renderLookupIssues ?? {})[0] : undefined) ??
         (this.index.schema === INDEX_SCHEMA && this.index.graphRevision !== GRAPH_INDEX_REVISION ? 'regenerate index for component lookup coverage' : undefined) };
   }
 
@@ -948,11 +953,13 @@ export class QueryEngine {
     const renderedRows: { text: string; files: string[] }[] = [];
     let shortened = false;
     const renderRow = (entry: Row) => {
-      const suffix = entry.files.some(stale) ? ' [stale]' : '';
-      const text = shorten(entry.text, entry.pathEnd ?? 0, 400 - bytes(suffix));
+      const suffix = (entry.suffix ?? '') + (entry.files.some(stale) ? ' [stale]' : '');
+      const cap = 400 - bytes(suffix);
+      const text = shorten(entry.text, entry.pathEnd ?? 0, cap);
       shortened ||= text !== oneLine(entry.text);
+      const annotation = text && entry.annotation ? shorten(entry.annotation, 0, cap - bytes(text)) ?? '' : '';
       // A path longer than the hard line cap cannot be represented intact.
-      return text === undefined ? [] : [{ text: text + suffix, files: entry.files }];
+      return text === undefined ? [] : [{ text: text + annotation + suffix, files: entry.files }];
     };
     let resultBytes = 0;
     for (const entry of result.rows) {

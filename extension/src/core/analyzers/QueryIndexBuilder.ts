@@ -13,7 +13,7 @@ import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
-import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
+import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { NextConfig } from './NextConfig';
@@ -49,6 +49,41 @@ function stylesheetPaths(source: SourceFile, root: string, specifier: string) {
   }).sort((a, b) => b.rank - a.rank);
   const match = matches[0];
   return match ? match.targets.map(target => path.resolve(root, options.baseUrl ?? '.', target.replace('*', match.wildcard))) : [];
+}
+
+function componentValueUse(node: Node, indexedComponent: (node: Node | undefined) => boolean): boolean {
+  if (Node.isShorthandPropertyAssignment(node)) return true;
+  let value = node;
+  for (let parent = value.getParent(); parent; parent = value.getParent()) {
+    if (wrappedExpression(parent) === value ||
+        Node.isPropertyAccessExpression(parent) && parent.getNameNode() === value ||
+        Node.isConditionalExpression(parent) && parent.getCondition() !== value) {
+      value = parent;
+      continue;
+    }
+    if (Node.isBinaryExpression(parent) &&
+        [SyntaxKind.BarBarToken, SyntaxKind.QuestionQuestionToken, SyntaxKind.AmpersandAmpersandToken]
+          .includes(parent.getOperatorToken().getKind())) {
+      value = parent;
+      continue;
+    }
+    if (Node.isJsxExpression(parent)) {
+      const attribute = parent.getParent();
+      return Node.isJsxAttribute(attribute) && attribute.getNameNode().getText() !== 'children';
+    }
+    if (Node.isCallExpression(parent) && parent.getArguments()[0] === value) {
+      const helper = packageMember(parent.getExpression(), 'react');
+      if (helper === 'createElement' || (helper === 'memo' || helper === 'forwardRef') && indexedComponent(parent.getParent())) {
+        return false;
+      }
+    }
+    return Node.isArrayLiteralExpression(parent) || Node.isSpreadElement(parent) || Node.isSpreadAssignment(parent) ||
+      ((Node.isPropertyAssignment(parent) || Node.isVariableDeclaration(parent)) && parent.getInitializer() === value) ||
+      ((Node.isCallExpression(parent) || Node.isNewExpression(parent)) && parent.getArguments().includes(value)) ||
+      Node.isReturnStatement(parent) || Node.isArrowFunction(parent) && parent.getBody() === value ||
+      Node.isBinaryExpression(parent) && parent.getOperatorToken().getKind() === SyntaxKind.EqualsToken && parent.getRight() === value;
+  }
+  return false;
 }
 
 function wrappedFunction(node: Node | undefined, remaining = 2): boolean {
@@ -737,6 +772,14 @@ export class QueryIndexBuilder {
       return id;
     };
     const renderSites: { node: Node; owner?: number; line: number; file: string }[] = [];
+    const routeComponents = new Set([
+      ...index.routes.flatMap(route => [route.component, ...route.layouts ?? [], ...Object.values(route.handlers ?? {})]),
+      ...Object.values(index.routeFiles!).map(([, , , component]) => component)
+    ]);
+    const indexedComponent = (node: Node | undefined) => {
+      const id = node && byNode.get(node);
+      return !!id && index.symbols[id - 1].kind === 'component';
+    };
     const orderedFiles = [...filesByRelative.keys()].sort();
     for (const relative of orderedFiles) {
       const file = filesByRelative.get(relative)!;
@@ -886,6 +929,11 @@ export class QueryIndexBuilder {
             const callbackUse = pages?.callbackUses.has(node) ||
               !!pages?.ignored.size && node.getAncestors().some(ancestor => pages.ignored.has(ancestor));
             const typeUse = !jsx && node.getAncestors().some(Node.isTypeNode);
+            if (index.renderLookupIssues && !jsx && !typeUse && symbol.kind === 'component' &&
+                !routeComponents.has(id) && componentValueUse(node, indexedComponent)) {
+              const valueUses = (index.renderValueUses ??= {});
+              if (!valueUses[id] || isTestFile(valueUses[id])) valueUses[id] = relative;
+            }
             if (sameFile && !callbackUse && !executable && !jsx && !signature && referenceOwner !== id &&
               (referenceOwner !== undefined || symbol.kind !== 'constant' || symbol.typeOnly)) {
               recordGraph(id, line, typeUse ? GraphReferenceKind.TypeUse : GraphReferenceKind.Use, referenceOwner);

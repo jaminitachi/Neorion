@@ -16,7 +16,7 @@ type Edge = {
 };
 type PathEdge = Edge;
 type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boolean; via?: string[] };
-export type QueryRow = { text: string; files: string[]; pathEnd?: number };
+export type QueryRow = { text: string; files: string[]; pathEnd?: number; annotation?: string; suffix?: string };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
   notes?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
@@ -948,7 +948,10 @@ export class DependencyGraph {
     notes.push(graphRow(`# risk: ${quantity(routeCount, 'route')} (${quantity(pageIds.size, 'page')}, ${quantity(apiFiles.size, 'API')}` +
       `${other ? `, ${quantity(other, 'meta or special file')}` : ''}), ${quantity(actions.length, 'server action')}, ` +
       `${quantity(layouts, 'layout')}; ${quantity(symbols, 'symbol')} in ${quantity(files.size, 'file')}; max depth ${used}; ${quantity(trace.tests.size, 'test')}`));
-    const unresolvedLookup = !routeCount && seeds.some(id => typeof id === 'number' && this.symbols.get(id)?.kind === 'component') &&
+    const unresolvedLookup = !routeCount && seeds.some(id => {
+      const file = typeof id === 'number' && this.index.renderValueUses?.[id];
+      return file && (includeTests || !isTestFile(file));
+    }) &&
       Object.entries(this.index.renderLookupIssues ?? {}).find(([id]) => includeTests || !isTestFile(this.file(Number(id))))?.[1];
     return { rows, notes, count: `${quantity(routeCount, 'route')}, ${quantity(actions.length, 'action')}, ${quantity(symbols, 'symbol')}, depth ${used}` +
       (used > depth ? ` (limit ${depth} + renders/events)` : '') +

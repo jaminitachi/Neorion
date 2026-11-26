@@ -1,8 +1,8 @@
 import { Node, SourceFile, SyntaxKind, type CallExpression, type ParameterDeclaration, type PropertyAssignment } from 'ts-morph';
-import { conditionalAt, declarationsOf, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { isFunction, packageMember, returnedValues } from './CallableFlow';
-import { constValue } from './PropFlow';
-import { functionNode, valueNode } from './StaticBindings';
+import { constValue, type PropFlow, type RenderSite } from './PropFlow';
+import { functionNode, importBinding, valueNode } from './StaticBindings';
 
 type RenderFunction = import('ts-morph').FunctionDeclaration | import('ts-morph').FunctionExpression |
   import('ts-morph').ArrowFunction;
@@ -11,7 +11,9 @@ const allArrayElements = Symbol('all array elements');
 type Member = string | null | typeof allArrayElements;
 export type RenderCertainty = { possible: boolean; conditional: boolean };
 type ArrayBinding = { parameter: ParameterDeclaration; receiver: Node; outer?: ArrayBinding };
-type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding };
+type Supply = { site: RenderSite; name: string };
+type Step = RenderCertainty & { members: Member[]; returns: boolean; binding?: ArrayBinding; supply?: Supply };
+enum Resolution { Unknown, Empty, External, Local }
 
 export function preferRenderBinding(candidate: RenderCertainty, existing: RenderCertainty): boolean {
   if (candidate.possible !== existing.possible) return !candidate.possible;
@@ -84,7 +86,7 @@ function collectionCall(node: Node, remaining = 12) {
 }
 
 function isArrayExpression(node: Node, remaining = 12): boolean {
-  const type = node.getType();
+  const type = node.getType().getNonNullableType();
   if (type.isArray() || type.isTuple()) return true;
   if (!remaining) return false;
   const collection = collectionCall(node, remaining);
@@ -139,36 +141,59 @@ function arrayContaining(property: PropertyAssignment) {
   return Node.isArrayLiteralExpression(array) ? { array, object } : undefined;
 }
 
+function externalImport(node: Node, files: Set<SourceFile>): boolean {
+  const binding = importBinding(node);
+  if (!binding || !isPackageSpecifier(binding.module)) return false;
+  const source = binding.declaration.getModuleSpecifierSourceFile();
+  if (source) return !files.has(source) && source.isInNodeModules();
+  const paths = node.getSourceFile().getProject().getCompilerOptions().paths ?? {};
+  return !Object.keys(paths).some(pattern => {
+    const star = pattern.indexOf('*');
+    return star < 0 ? pattern === binding.module :
+      binding.module.startsWith(pattern.slice(0, star)) && binding.module.endsWith(pattern.slice(star + 1));
+  });
+}
+
 /** Follow the value behind a JSX binding through lookups, local factories and React memoization. */
-export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
-  const seen = new Map<Node, { step: Step; resolved: boolean }[]>();
-  const targets = new Map<Target, RenderCertainty>();
+export function renderBindings(declarations: Node[], files: Set<SourceFile>, flow?: PropFlow) {
+  const seen = new Map<Node, { step: Step; resolution: Resolution }[]>();
+  const targets = new Map<Supply | undefined, Map<Target, RenderCertainty>>();
+  const supplies = new Map<RenderSite, Map<string, Supply>>();
   let unresolvedLookup = false;
-  const resolve = (node: Node | undefined, step: Step, remaining: number): boolean => {
-    if (!node || remaining <= 0) return false;
-    const { members, returns, possible, conditional, binding } = step;
+  let unresolvedProp = false;
+  const resolve = (node: Node | undefined, step: Step, remaining: number): Resolution => {
+    if (!node || remaining <= 0) return Resolution.Unknown;
+    const { members, returns, possible, conditional, binding, supply } = step;
     if (!files.has(node.getSourceFile())) {
       return !returns && !members.length && node.getSourceFile().isInNodeModules() &&
-        (Node.isVariableDeclaration(node) || Node.isClassDeclaration(node) || isFunction(node));
+        (Node.isVariableDeclaration(node) || Node.isClassDeclaration(node) || isFunction(node)) ?
+        Resolution.External : Resolution.Unknown;
     }
     const steps = seen.get(node) ?? [];
-    const prior = steps.find(({ step: previous }) => previous.binding === binding &&
+    const prior = steps.find(({ step: previous }) => previous.binding === binding && previous.supply === supply &&
         previous.returns === returns && previous.possible === possible &&
         previous.conditional === conditional && previous.members.length === members.length &&
         previous.members.every((member, i) => member === members[i]));
-    if (prior) return prior.resolved;
-    const current = { step, resolved: false };
+    if (prior) return prior.resolution;
+    const current = { step, resolution: Resolution.Unknown };
     steps.push(current);
     seen.set(node, steps);
+    const candidates = { best: Resolution.Unknown, unknown: false };
     const traced = trace(node, step, (value, change) => {
-      const resolved = resolve(value, change ? { ...step, ...change } : step, remaining - 1);
-      current.resolved ||= resolved;
-      return resolved;
+      const result = resolve(value, change ? { ...step, ...change } : step, remaining - 1);
+      candidates.best = Math.max(candidates.best, result);
+      candidates.unknown ||= result === Resolution.Unknown;
+      return result !== Resolution.Unknown;
     });
-    return (current.resolved ||= traced === true);
+    // External imports prove coverage only when every candidate was traced.
+    if (typeof traced === 'number') current.resolution = traced;
+    else if (!candidates.unknown || candidates.best !== Resolution.External) {
+      current.resolution = candidates.best || (traced ? Resolution.Empty : Resolution.Unknown);
+    }
+    return current.resolution;
   };
-  const trace = (node: Node, step: Step, next: (value: Node | undefined, change?: Partial<Step>) => boolean): boolean | void => {
-    const { members, returns, possible, conditional, binding } = step;
+  const trace = (node: Node, step: Step, next: (value: Node | undefined, change?: Partial<Step>) => boolean): Resolution | boolean | void => {
+    const { members, returns, possible, conditional, binding, supply } = step;
     if (isFunction(node) && returns) {
       const values = returnedValues(node);
       for (const value of values) {
@@ -177,9 +202,11 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
       return;
     }
     if (!returns && !members.length && (isFunction(node) && !Node.isMethodDeclaration(node) || Node.isClassDeclaration(node))) {
-      const existing = targets.get(node);
-      if (!existing || preferRenderBinding(step, existing)) targets.set(node, { possible, conditional });
-      return true;
+      const scoped = targets.get(supply) ?? new Map<Target, RenderCertainty>();
+      targets.set(supply, scoped);
+      const existing = scoped.get(node);
+      if (!existing || preferRenderBinding(step, existing)) scoped.set(node, { possible, conditional });
+      return Resolution.Local;
     }
     if (Node.isVariableDeclaration(node) || Node.isExportAssignment(node)) {
       return next(Node.isVariableDeclaration(node) ? node.getInitializer() : node.getExpression());
@@ -229,7 +256,7 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
           if (index-- === 0) return Node.isOmittedExpression(element);
         }
       }
-      return typeof key === 'string' && !spread;
+      return !node.getElements().length || typeof key === 'string' && !spread;
     }
     if (Node.isObjectLiteralExpression(node) && members.length) {
       const [key, ...rest] = members;
@@ -340,6 +367,23 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
       return next(node.getExpression(), { members: [key ?? null, ...members] });
     }
     if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) {
+      if (!returns && !members.length && externalImport(node, files)) return Resolution.External;
+      const prop = flow && !supply && members.length ? flow.read(node) : undefined;
+      if (flow && prop) {
+        const bindings = flow.values(prop);
+        unresolvedProp ||= !bindings.length;
+        for (const { site, value, unknown } of bindings) {
+          let names = supplies.get(site);
+          if (!names) supplies.set(site, names = new Map());
+          let source = names.get(prop.name);
+          if (!source) names.set(prop.name, source = { site, name: prop.name });
+          const uncertain = !!unknown || (Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site)) &&
+            flow.lookupUncertain(site);
+          const resolved = next(value, { supply: source, possible: possible || uncertain });
+          unresolvedProp ||= uncertain || !resolved;
+        }
+        return;
+      }
       const declarations = declarationsOf(node);
       const typeMember = declarations.some(target => Node.isPropertySignature(target) || Node.isPropertyDeclaration(target));
       if (Node.isPropertyAccessExpression(node) && (!declarations.length || typeMember ||
@@ -372,5 +416,9 @@ export function renderBindings(declarations: Node[], files: Set<SourceFile>) {
   };
   const initial = { members: [], returns: false, possible: false, conditional: false };
   declarations.forEach(node => resolve(node, initial, 40));
-  return { targets: [...targets].map(([target, certainty]) => ({ target, ...certainty })), unresolvedLookup };
+  return {
+    targets: [...targets].flatMap(([supply, scoped]) =>
+      [...scoped].map(([target, certainty]) => ({ target, supply, ...certainty }))),
+    unresolvedLookup: unresolvedLookup || unresolvedProp
+  };
 }
