@@ -649,7 +649,7 @@ export class ComponentAnalyzer {
         if (body) bodies.set(node, body);
       }
       if (!historyOnly) collectRenameFacts(files, relativePath, symbols, facts);
-      collectRenderFacts(routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
+      collectRenderFacts(this.root, routes, [...components.values()], [...edges.values()], files, bodies, relativePath, historyOnly ? undefined : facts, index, this.config, this.workspace);
       collectApiFacts(this.root, files, routes, relativePath, actionIds, historyOnly ? undefined : facts, callable, index, this.config, this.workspace, flow);
     }
     return { index: index?.build(files, routes, components, aliases, relativePath, actionIds, this.root, this.config, this.workspace, flow, historyOnly), facts, components: [...components.values()], hooks: [...hooks.values()], edges: [...edges.values()], actions: [...actions], fileHooks, pagesApps };
