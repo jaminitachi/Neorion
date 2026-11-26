@@ -13,6 +13,7 @@ const { cachePath, indexFile } = require('./workspace-cache.cjs');
 const { name, version } = require('../../neorion/package.json');
 const packageRoot = path.resolve(__dirname, '../../neorion');
 const entry = path.join(packageRoot, 'dist/neorion.cjs');
+const cursorWorkspaceCli = '.neorion/cursor-setup/neorion.cjs';
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 const cliSpawnTimeout = 180_000;
 
@@ -106,11 +107,22 @@ function assertQueryHint(hint) {
   }
   assert.match(block, /Query kinds are .*`path <from> <to>`, `changes`\./);
   assert.match(block, /For `path`, pass `target` and `to` in MCP\. For `changes`, omit `target`\./);
+  assertMonorepoGuidance(block);
   assert.match(block, /# complete` covers the indexed static matches in the stated scope/);
   assert.match(block, /# partial: <reason>.*verify against the source/);
   assert.match(block, /If MCP is unavailable, run `.+ query <kind> <target>`/);
   assert.match(block, /`.+ query path <from> <to>`.*`.+ query changes`/);
 }
+
+function assertMonorepoGuidance(text) {
+  assert.match(text, /MCP `app`.*CLI `--app <name>`/);
+  assert.match(text, /`App:` sections and `\[app\]` row prefixes/);
+  assert.match(text, /If Neorion only lists apps, rerun the query with .*listed app name/);
+}
+
+test('the Neorion skill documents app selection, combined results, and list mode', () => {
+  assertMonorepoGuidance(fs.readFileSync(path.join(packageRoot, 'skills/neorion/SKILL.md'), 'utf8'));
+});
 
 function copyCli(directory) {
   const copied = path.join(directory, 'dist/neorion.cjs');
@@ -221,7 +233,8 @@ test('CLI and MCP index JSX with jsconfig paths, baseUrl, and inherited include'
   fs.writeFileSync(path.join(root, 'src/label.jsx'), 'export function Label() { return <span />; }');
   fs.writeFileSync(path.join(root, 'public/explicit.jsx'), 'export const Explicit = 1;');
   fs.writeFileSync(path.join(root, 'ignored.jsx'), 'export function Ignored() { return <aside />; }');
-  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root, env });
+  const server = await openMcp(t, root, { command: process.execPath, args: [entry, 'mcp'], cwd: root,
+    env: { ...env, NEORION_BUILD_WAIT_MS: '120000' } });
   for (const target of ['Card', 'Label']) {
     const result = await server.text('query', { kind: 'who_renders', target });
     assert.match(result, /^\/  app\/page\.jsx:3/m);
@@ -341,6 +354,209 @@ test('A selected workspace root gives a confirmation hint and NEORION_ROOT match
   });
 });
 
+test('monorepo app indexes share workspace source and keep route results app-scoped', async t => {
+  const { root, env, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  const cli = (...args) => {
+    const result = run(args);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+
+  const graph = cli('graph');
+  assert.match(graph, /^App: "apps\/admin"$/m);
+  assert.match(graph, /^App: "apps\/web"$/m);
+  const [adminPath, webPath] = [...graph.matchAll(/^Overview: (.+)$/gm)]
+    .map(match => path.join(path.dirname(match[1]), indexFile));
+  assert.notEqual(webPath, adminPath);
+  const search = cli('query', 'search', 'SharedCard');
+  assert.match(search, /^\["apps\/admin"\] component \.\.\/\.\.\/packages\/ui\/src\/card\.tsx:1#SharedCard .*workspace package: @fixture\/ui/m);
+  assert.match(search, /^\["apps\/web"\] component /m);
+  assert.match(search, /# complete: all listed apps/);
+  assert.match(cli('query', 'wrappers', '/', '--app', 'web', '--no-external'), /SharedProvider \(workspace package: @fixture\/ui\)/);
+  assert.match(cli('query', 'who_renders', '../../packages/ui/src/card.tsx#SharedCard', '--app', 'apps/web'), /^\/  app\/page\.tsx:7/m);
+  assert.match(cli('query', 'api_consumers', 'post.all', '--app', '@fixture/web'), /call app\/page\.tsx:8 WebPage \(queryOptions\)/);
+  assert.match(cli('query', 'impact', 'post.all', '--app', 'apps/web'), /trpc app\/page\.tsx:8 WebPage/);
+  const allProcedures = cli('query', 'api_consumers', 'post.all');
+  assert.match(allProcedures, /^\["apps\/admin"\] # not present in this app$/m);
+  assert.match(allProcedures, /# complete: all listed apps\s*$/);
+  assert.match(cli('query', 'rename_impact', 'WebPage'), /# complete: all listed apps\s*$/);
+  const absent = cli('query', 'who_renders', 'NoSuchComponent');
+  assert.match(absent, /^# partial: \["apps\/admin"\] target unresolved$/m);
+  assert.match(absent, /# partial: see app results\s*$/);
+
+  const web = readJson(webPath);
+  const admin = readJson(adminPath);
+  assert.ok(web.files['../../packages/trpc/src/index.ts']);
+  assert.ok(!Object.keys(web.files).some(file => file.includes('/apps/admin/') || file.includes('/unused/')));
+  assert.ok(!Object.keys(admin.files).some(file => file.includes('/apps/web/') || file.includes('/packages/api/')));
+  const missing = run(['query', 'search', 'SharedCard', '--app', 'missing']);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /Unknown app "missing".*apps\/admin.*apps\/web/);
+
+  await t.test('MCP exposes the same namespaces and app filter', async subtest => {
+    const preload = path.join(path.dirname(root), 'record-workers.cjs');
+    const workerLog = path.join(path.dirname(root), 'workers.log');
+    fs.writeFileSync(preload, `
+const threads = require('node:worker_threads');
+if (threads.isMainThread) threads.Worker = class extends threads.Worker {
+  constructor(file, options) {
+    super(file, options);
+    require('node:fs').appendFileSync(${JSON.stringify(workerLog)}, options.workerData + '\\n');
+  }
+};`);
+    const client = await openMcp(subtest, root, { command: process.execPath,
+      args: ['--require', preload, entry, 'mcp', '--workspace', root], cwd: root, env });
+    const result = await client.text('query', { kind: 'search', target: 'SharedCard' });
+    assert.match(result, /^\["apps\/admin"\] component /m);
+    assert.match(result, /^\["apps\/web"\] component /m);
+    assert.equal(await client.text('query', { kind: 'search', target: 'SharedCard' }), result);
+    const callers = await client.text('query', { kind: 'api_consumers', target: 'post.all', app: 'web' });
+    assert.match(callers, /call app\/page\.tsx:8 WebPage/);
+    assert.match(callers, /^# complete: indexed tRPC callers and cache sites$/m);
+    const allCallers = await client.text('query', { kind: 'api_consumers', target: 'post.all' });
+    assert.match(allCallers, /^\["apps\/admin"\] # not present in this app$/m);
+    assert.match(allCallers, /# complete: all listed apps$/);
+    assert.deepEqual(fs.readFileSync(workerLog, 'utf8').trimEnd().split('\n').sort(),
+      ['admin', 'web'].map(app => path.join(root, 'apps', app)).sort());
+  });
+
+  const git = (...args) => childProcess.execFileSync('git', args, { cwd: root, env, stdio: 'pipe' });
+  git('init', '-q');
+  git('add', '.');
+  git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '-qm', 'workspace fixture');
+  const cardFile = path.join(root, 'packages/ui/src/card.tsx');
+  const card = fs.readFileSync(cardFile, 'utf8');
+  fs.writeFileSync(cardFile, card.replace('String(options)', 'JSON.stringify(options)'));
+  const changes = cli('query', 'changes', '--app', 'web');
+  assert.match(changes, /packages\/ui\/src\/card\.tsx/);
+  assert.match(changes, /route page \/ +app\/page\.tsx/);
+
+  fs.writeFileSync(path.join(root, 'packages/ui/src/card.tsx'), 'export const NewCard = () => <article />;\n');
+  assert.match(cli('query', 'search', 'NewCard', '--app', 'web'), /card\.tsx:1#NewCard/);
+
+  fs.mkdirSync(path.join(root, 'app'));
+  fs.writeFileSync(path.join(root, 'next.config.js'), '');
+  fs.writeFileSync(path.join(root, 'tsconfig.json'), '{"compilerOptions":{"jsx":"preserve"}}');
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), 'export default function RootOnly() { return <main />; }');
+  assert.match(cli('query', 'search', 'RootOnly'), /^\["\."\] component app\/page\.tsx:1#RootOnly/m);
+  assert.doesNotMatch(cli('query', 'search', 'AdminPage', '--app', '.'), /#AdminPage/);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'next.config.js'));
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+
+  for (const app of ['events', 'settings']) {
+    const directory = path.join(root, 'apps', app);
+    fs.cpSync(path.join(root, 'apps/admin'), directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'package.json'), JSON.stringify({ name: app, dependencies: nextDep.dependencies }));
+  }
+  const listed = cli('query', 'search', 'SharedCard');
+  assert.match(listed, /^# Next.js apps$/m);
+  assert.match(listed, /Use --app <name>/);
+  assert.doesNotMatch(listed, /^# complete:/m);
+  assert.match(cli('graph'), /--all-apps/);
+});
+
+test('workspace gaps follow traversed runtime sites and retain external call rows', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+  for (const pkg of ['sdk', 'types', 'declarations']) fs.mkdirSync(path.join(root, 'packages', pkg));
+  fs.mkdirSync(path.join(root, 'packages/sdk/dist'));
+  fs.writeFileSync(path.join(root, 'packages/sdk/package.json'), JSON.stringify({
+    name: '@fixture/sdk', main: 'dist/index.js', types: 'dist/index.d.ts'
+  }));
+  fs.writeFileSync(path.join(root, 'packages/sdk/dist/index.js'), 'exports.track = () => {};');
+  fs.writeFileSync(path.join(root, 'packages/sdk/dist/index.d.ts'), 'export declare function track(event: string): void;');
+  fs.writeFileSync(path.join(root, 'packages/declarations/package.json'), '{"name":"@fixture/declarations","types":"index.d.ts"}');
+  fs.writeFileSync(path.join(root, 'packages/declarations/index.d.ts'), 'export declare function send(): void;');
+  fs.writeFileSync(path.join(root, 'packages/types/package.json'), '{"name":"@fixture/types"}');
+  const app = path.join(root, 'apps/web/app');
+  fs.appendFileSync(path.join(app, 'layout.tsx'), `
+import type { Missing } from '@fixture/types/import';
+export type { Missing as Exported } from '@fixture/types/export';
+import { type Inline } from '@fixture/types/inline';
+export { type Inline as ExportedInline } from '@fixture/types/inline-export';
+type ImportExpression = import('@fixture/types/expression').Missing;
+`);
+  fs.mkdirSync(path.join(app, 'tracking'));
+  fs.writeFileSync(path.join(app, 'tracking/page.tsx'), `
+import { Track } from './track';
+export default function TrackingPage() { return <Track />; }
+`);
+  fs.writeFileSync(path.join(app, 'tracking/track.tsx'), `
+import { track } from '@fixture/sdk';
+import type { Event } from '@fixture/sdk';
+import { send } from '@fixture/declarations';
+import { Leaf } from './leaf';
+export function Track() { track('view'); send(); return <Leaf />; }
+export function Unrelated(event: Event) { return event; }
+export function MissingRender() { return <Missing />; }
+import { Missing } from '@fixture/types/render';
+`);
+  fs.writeFileSync(path.join(app, 'tracking/leaf.tsx'), 'export function Leaf() { return <span />; }');
+  fs.mkdirSync(path.join(app, 'wrapped'));
+  fs.writeFileSync(path.join(app, 'wrapped/page.tsx'), 'export default function WrappedPage() { return <main />; }');
+  fs.writeFileSync(path.join(app, 'wrapped/layout.tsx'), `
+import { MissingProvider } from '@fixture/types/provider';
+export default function WrappedLayout({ children }) { return <MissingProvider>{children}</MissingProvider>; }
+`);
+  const query = (kind, target, ...flags) => {
+    const result = run(['query', kind, target, '--app', 'web', ...flags]);
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout;
+  };
+  assert.match(query('wrappers', '/'), /# complete: indexed wrapper chains\s*$/);
+  assert.match(query('search', 'NoMatchingName'), /# complete: indexed name and path matches\s*$/);
+  const partial = /# partial: unresolved workspace modules @fixture\/declarations, @fixture\/sdk\s*$/;
+  const callees = query('callees', 'Track');
+  assert.match(callees, /^d1 ext @fixture\/sdk +track:6$/m);
+  assert.match(callees, /^d1 ext @fixture\/declarations +send:6$/m);
+  assert.match(callees, partial);
+  const firstHopScope = /# complete: indexed calls, renders, fetches, package calls \(depth 1\)\s*$/;
+  assert.match(query('callees', 'TrackingPage', '--depth', '1'), firstHopScope);
+  assert.match(query('callees', 'TrackingPage', '--depth', '2'), partial);
+  assert.match(query('callees', 'Unrelated'), firstHopScope);
+  assert.match(query('rename_impact', 'Unrelated'), /# complete: checker-resolved edit files\s*$/);
+  assert.match(query('who_renders', 'Leaf'), /# complete: indexed JSX paths\s*$/);
+  const search = query('search', 'Leaf');
+  assert.match(search, /^# neighbors:/m);
+  assert.match(search, /# complete: indexed name and path matches\s*$/);
+  assert.match(query('callees', 'MissingRender'), /# partial: unresolved workspace modules @fixture\/types\/render\s*$/);
+  assert.match(query('wrappers', '/wrapped'), /# partial: unresolved workspace modules @fixture\/types\/provider\s*$/);
+});
+
+test('workspace discovery orders docs and website with production apps', t => {
+  const { root, run } = fixture(t);
+  fs.rmSync(path.join(root, 'app'), { recursive: true });
+  fs.rmSync(path.join(root, 'tsconfig.json'));
+  fs.writeFileSync(path.join(root, 'package.json'), '{"workspaces":["apps/*"]}');
+  for (const name of ['web', 'website', 'docs', 'dev']) {
+    const app = path.join(root, 'apps', name);
+    fs.mkdirSync(path.join(app, 'app'), { recursive: true });
+    fs.writeFileSync(path.join(app, 'package.json'), JSON.stringify({ name, dependencies: { next: '15.0.0' } }));
+    fs.writeFileSync(path.join(app, 'app/page.tsx'), 'export default function Page() { return null; }');
+  }
+  const listed = run(['query', 'search', 'Page']);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.deepEqual([...listed.stdout.matchAll(/^  "apps\/(\w+)"/gm)].map(match => match[1]),
+    ['docs', 'web', 'website', 'dev']);
+});
+
+test('explicit --root rejects directories without a project', t => {
+  const { root, run } = fixture(t);
+  fs.mkdirSync(path.join(root, 'plain/src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'plain/package.json'), '{"name":"plain"}');
+  fs.writeFileSync(path.join(root, 'plain/src/index.ts'), 'export const plain = 1;');
+  const result = run(['query', 'search', 'plain', '--root', 'plain']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Neorion found no tsconfig\.json/);
+  assert.doesNotMatch(result.stdout, /^# complete:/m);
+});
+
 test('CLI Project line shows the full path for an unambiguous nested app', t => {
   const { root, run } = fixture(t);
   const project = moveIntoApp(root, 'apps/web');
@@ -367,7 +583,8 @@ test('CLI ranks dependency-only Next libraries below apps and omits them from th
   assert.equal(query.status, 0, query.stderr);
   assert.match(query.stdout, /app\/page\.tsx:1#DashboardShell/);
   const hint = /^# hint: .*$/m.exec(query.stdout)?.[0];
-  assert.ok(hint?.includes(`Candidates: ${JSON.stringify(app)}.`), query.stdout);
+  assert.ok(hint?.includes(`Selected ${JSON.stringify(app)}. Found 3 other packages with only a development dependency on Next.`), query.stdout);
+  assert.doesNotMatch(hint, /Candidates:/);
   for (const folder of libraries) assert.ok(!hint.includes(JSON.stringify(path.join(root, folder))), hint);
   assert.match(query.stdout, /^# partial: project root guessed$/m);
   assert.doesNotMatch(query.stdout, /^# complete:/m);
@@ -1171,6 +1388,62 @@ test('Installed Claude hook suggests queries and exits silently when out of scop
   assert.equal(invoke(payload('Grep', 'DashboardShell', undefined, 'non-next-project')), '');
 });
 
+function assertCursorLauncher({ command, args, type }, releaseFallback = true) {
+  assert.equal(command, 'node');
+  assert.equal(type, 'stdio');
+  assert.deepEqual([args[0], ...args.slice(2)], ['-e', '--', '${workspaceFolder}']);
+  assert.ok(args[1].includes(cursorWorkspaceCli));
+  assert.equal(args[1].includes(releaseSpec()), releaseFallback);
+  assert.ok(!args[1].includes(entry));
+}
+
+test('Cursor uses the local CLI and keeps release fallback for single apps', async t => {
+  for (const monorepo of [false, true]) {
+    await t.test(monorepo ? 'monorepo' : 'single app', async subtest => {
+      const { root, env, cache, home, run } = fixture(subtest);
+      if (monorepo) {
+        fs.rmSync(path.join(root, 'app'), { recursive: true });
+        fs.rmSync(path.join(root, 'tsconfig.json'));
+        fs.cpSync(path.join(__dirname, 'fixtures/monorepo'), root, { recursive: true });
+      }
+      const setup = run(['setup', 'cursor']);
+      assert.equal(setup.status, 0, setup.stderr);
+      const cached = path.join(cache, 'neorion', path.basename(cachePath(root)), cursorWorkspaceCli);
+      assert.ok(fs.existsSync(cached));
+      const config = readJson(path.join(root, '.cursor/mcp.json')).mcpServers.neorion;
+      assertCursorLauncher(config, !monorepo);
+      const launch = { ...config, args: config.args.map(arg => arg === '${workspaceFolder}' ? root : arg), cwd: home, env };
+      if (monorepo) {
+        fs.rmSync(path.dirname(cached), { recursive: true });
+        const missing = spawnSync(launch.command, launch.args, { cwd: home, env, encoding: 'utf8', timeout: cliSpawnTimeout });
+        assert.equal(missing.status, 1);
+        assert.equal(missing.stdout, '');
+        assert.match(missing.stderr, /Neorion MCP bundle missing.*neorion setup cursor.*workspace root/);
+        const repaired = run(['setup', 'cursor']);
+        assert.equal(repaired.status, 0, repaired.stderr);
+        assert.ok(fs.existsSync(cached));
+        assert.ok(fs.existsSync(path.join(path.dirname(cached), 'graph.cjs')));
+        assert.deepEqual(readJson(path.join(root, '.cursor/mcp.json')).mcpServers.neorion, config);
+      }
+      await subtest.test('stdio', async serverTest => {
+        const client = await openMcp(serverTest, root, launch);
+        const result = await client.text('query', { kind: 'search', target: monorepo ? 'SharedCard' : 'DashboardShell' });
+        if (monorepo) {
+          assert.match(result, /^App: "apps\/admin"$/m);
+          assert.match(result, /^App: "apps\/web"$/m);
+          assert.match(result, /# complete: all listed apps$/);
+          const selected = await client.text('query', { kind: 'search', target: 'SharedCard', app: 'web' });
+          assert.match(selected, /^Project: .*[/\\]apps[/\\]web$/m);
+          assert.doesNotMatch(selected, /^App:/m);
+        } else assert.match(result, /app\/page\.tsx:1#DashboardShell/);
+      });
+      const removed = run(['setup', 'cursor', '--remove']);
+      assert.equal(removed.status, 0, removed.stderr);
+      assert.ok(!fs.existsSync(path.dirname(cached)));
+    });
+  }
+});
+
 test('Claude hook removal preserves an array whose original group was deleted after setup', t => {
   const { home, root, run } = fixture(t);
   fakeAgent(home, 'claude');
@@ -1203,11 +1476,9 @@ test('Cursor setup merges MCP and shares the Claude hint, with idempotent projec
   assert.equal(run(['setup', 'claude', '--no-hook'], env).status, 0);
   const added = run(['setup', 'cursor'], env);
   assert.equal(added.status, 0, added.stderr);
-  assert.deepEqual(readJson(config), {
-    mcpServers: { ...JSON.parse(original).mcpServers, neorion: {
-      ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio'
-    } }
-  });
+  const { neorion, ...otherServers } = readJson(config).mcpServers;
+  assert.deepEqual(otherServers, JSON.parse(original).mcpServers);
+  assertCursorLauncher(neorion);
   const hint = fs.readFileSync(rule, 'utf8');
   assert.match(hint, /^---\ndescription: .+\nalwaysApply: true\n---\n/);
   assertQueryHint(hint);
@@ -1294,7 +1565,7 @@ test('Cursor migrates an owned local entry to a release archive and leaves a mat
     assert.equal(result.status, 0, result.stderr);
   };
   setup();
-  assert.deepEqual(readJson(config).mcpServers.neorion, { ...mcpCommand({ root: '${workspaceFolder}', useRelease: true }), type: 'stdio' });
+  assertCursorLauncher(readJson(config).mcpServers.neorion);
   setup('--remove');
   assert.equal(fs.readFileSync(config, 'utf8'), original);
   fs.writeFileSync(config, withServer);

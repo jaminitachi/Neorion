@@ -19,6 +19,7 @@ type Visit = { depth: number; edge?: Edge; conditional?: boolean; possible?: boo
 export type QueryRow = { text: string; files: string[]; pathEnd?: number; annotation?: string; suffix?: string };
 export type QueryResult = {
   rows: QueryRow[]; title?: string; count?: string; targets?: string[];
+  unresolvedWorkspace?: Iterable<string>;
   notes?: QueryRow[]; limit?: number; suggestedFilter?: string; partial?: string; scope?: string;
 };
 export type ChangeOrigin = { file: string; name: string; ids: NodeId[]; removed?: boolean; startsAt?: number;
@@ -178,6 +179,9 @@ export class DependencyGraph {
     for (const request of index.uncertainPropRequests ?? []) {
       append(this.propRequests, request.owner, request);
       for (const gate of request.gates ?? []) this.gateScopes.add(gate.scope);
+    }
+    for (const dependencies of Object.values(index.workspaceDependencies ?? {})) for (const entry of dependencies) {
+      for (const gate of entry.gates ?? []) this.gateScopes.add(gate.scope);
     }
     for (const issues of Object.values(index.flowIssues ?? {})) for (const issue of issues) {
       for (const gate of issue.gates) this.gateScopes.add(gate.scope);
@@ -1147,7 +1151,15 @@ export class DependencyGraph {
       ? [...contexts.filter(([scope]) => scope !== edge.to), [edge.to, edge.site ?? '']] : contexts;
   }
 
+  private addWorkspaceDependencies(modules: Set<string> | undefined, id: NodeId, contexts: RenderContexts) {
+    if (!modules || typeof id !== 'number') return;
+    for (const entry of this.index.workspaceDependencies?.[id] ?? []) {
+      if (permits(entry.gates, contexts)) modules.add(entry.module);
+    }
+  }
+
   path(starts: NodeId[], goals: NodeId[], expired: () => boolean, route?: Route, pathname?: string): QueryResult {
+    const unresolvedWorkspace = this.index.workspaceDependencies && new Set<string>();
     type Step = { id: NodeId; depth: number; weak: number; contexts: RenderContexts; previous?: Step; edge?: PathEdge; alternatives: Set<NodeId> };
     const depthBudget = 12;
     const targets = new Set(goals);
@@ -1190,6 +1202,7 @@ export class DependencyGraph {
       const next = new Map<NodeId, Step>();
       for (const current of layer) {
         if (expired()) break;
+        this.addWorkspaceDependencies(unresolvedWorkspace, current.id, current.contexts);
         trpc ??= this.coverageIssue(current.id) ?? this.unresolvedTrpc(current.id, false);
         if (apiGoals.length && typeof current.id === 'number' && this.propRequests.get(current.id)?.some(request =>
           (!isTestFile(request.file) || isTestFile(this.file(starts[0]))) &&
@@ -1260,7 +1273,7 @@ export class DependencyGraph {
         terminal.pages?.map(page => page.url) ?? []));
       const notes = [graphRow(`# from reaches ${seen.size} nodes` +
         (pages.size ? `; to is reached from routes: ${[...pages].slice(0, 5).join(', ')}${pages.size > 5 ? ', +' + (pages.size - 5) : ''}` : ''))];
-      return { rows: [], notes, count: 'no directed path',
+      return { rows: [], notes, unresolvedWorkspace, count: 'no directed path',
         partial: coverage(partial ?? (route && this.index.pagesIssues?.[route.id]?.[0]) ?? trpc) ?? flowIssue ?? trace.trpc,
         scope: 'no directed path ' + scope };
     }
@@ -1324,6 +1337,7 @@ export class DependencyGraph {
     const rows: QueryRow[] = [];
     const packages = new Set<string>();
     const notes: QueryRow[] = [];
+    const unresolvedWorkspace = this.index.workspaceDependencies && new Set<string>();
     const project = new Set<string>();
     const renders = new Set<NodeId>();
     const fetches = new Set<string>();
@@ -1345,6 +1359,7 @@ export class DependencyGraph {
       if (typeof current.id === 'number') sdkIssue = strongerTransportIssue(sdkIssue, this.uncertainTransports.get(current.id));
       const d = current.depth + 1;
       const file = this.file(current.id);
+      this.addWorkspaceDependencies(unresolvedWorkspace, current.id, current.contexts);
       const parent = d > 1 ? ` < ${this.name(current.id)}` : '';
       const edges = (this.outgoing.get(current.id) ?? []).flatMap(edge => {
         if (!uses && edge.label === 'use') return [];
@@ -1426,7 +1441,7 @@ export class DependencyGraph {
     const partial = [budget ? 'node budget' : trpc, flowIssue,
       unresolved ? `${quantity(unresolved, 'unresolved call')} on local variables or parameters` : undefined,
       sdkIssue].filter(Boolean).join('; ');
-    return { rows, notes, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
+    return { rows, notes, unresolvedWorkspace, count: `${project.size} project calls, ${renders.size} renders, ${fetches.size} fetches, ${packages.size} packages` +
       (navigation.size ? `, ${navigation.size} navigation targets` : '') + (collapsed ? ', hub collapsed' : ''), partial: partial || undefined,
     scope: `indexed calls, renders, fetches, package calls${uses ? ', uses' : ''} (depth ${depth})` };
   }

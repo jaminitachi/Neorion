@@ -37,14 +37,14 @@ test('MCP commands preserve the explicit local entry and pin registry installs',
   assert.deepEqual(mcpCommand({ root, platform: 'linux' }), {
     command: 'npx', args: ['-y', `${name}@${version}`, 'mcp', '--root', root]
   });
-  assert.deepEqual(mcpCommand({ root, platform: 'linux', discover: true }), {
-    command: 'npx', args: ['-y', `${name}@${version}`, 'mcp', '--workspace', root]
+  assert.deepEqual(mcpCommand({ localEntry, root, discover: true }), {
+    command: process.execPath, args: [localEntry, 'mcp', '--workspace', root]
   });
 });
 
 test('Windows MCP launcher keeps the project path outside the shell command', () => {
   const root = 'C:\\Workspace & Tools\\%PROJECT%';
-  for (const [discover, variable] of [[false, 'NEORION_ROOT'], [true, 'NEORION_WORKSPACE']]) {
+  for (const discover of [false, true]) {
     const { command, args } = mcpCommand({ root, platform: 'win32', discover });
     assert.equal(command, 'node');
     assert.deepEqual([args[0], ...args.slice(2)], ['-e', '--', root]);
@@ -53,7 +53,7 @@ test('Windows MCP launcher keeps the project path outside the shell command', ()
         assert.equal(commandLine, `npx -y ${name}@${version} mcp`);
         assert.equal(options.shell, true);
         assert.equal(options.stdio, 'inherit');
-        assert.equal(options.env[variable], root);
+        assert.equal(options.cwd, discover ? root : undefined);
         assert.equal(options.env.NEORION_ROOT, discover ? undefined : root);
         return { status: 7 };
       }
@@ -72,4 +72,24 @@ test('Release MCP configuration uses the same launcher on Windows and Unix', () 
   assert.deepEqual([windows.args[0], ...windows.args.slice(2)], ['-e', '--', root]);
   assert.ok(windows.args[1].includes(`npx -y ${releaseSpec()} mcp`));
   assert.ok(!windows.args[1].includes(root));
+});
+
+test('Pinned MCP launchers discover from cwd across releases', () => {
+  const root = '/workspace/tool with spaces';
+  for (const [registryVersion, useRelease] of [['0.6.0', true], ['0.8.0', false]]) {
+    const launch = mcpCommand({ root, discover: true, registryVersion, platform: 'linux', useRelease });
+    assert.equal(launch.command, 'node');
+    assert.deepEqual(launch.args.slice(2), ['--', root]);
+    const process = { argv: ['node', root], env: { NEORION_ROOT: 'inherited', NEORION_WORKSPACE: 'inherited' } };
+    new Function('require', 'process', launch.args[1])(() => ({
+      spawnSync(command, options) {
+        assert.equal(command, `npx -y ${useRelease ? releaseSpec(registryVersion) : `neorion@${registryVersion}`} mcp`);
+        assert.equal(options.cwd, root);
+        assert.equal(options.env.NEORION_ROOT, undefined);
+        assert.equal(options.env.NEORION_WORKSPACE, undefined);
+        return { status: 0 };
+      }
+    }), process);
+    assert.equal(process.exitCode, 0);
+  }
 });
