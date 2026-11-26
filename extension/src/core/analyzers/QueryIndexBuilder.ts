@@ -8,7 +8,7 @@ import {
   isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
-import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
@@ -332,8 +332,8 @@ export class QueryIndexBuilder {
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
-    const flowDeclarations = (node: Node) => flow.declarations(node);
-    const trpcFacts = new TrpcFacts(files, trpcSources, flowDeclarations);
+    const declarationsOf = (node: Node) => flow.declarations(node);
+    const trpcFacts = new TrpcFacts(files, trpcSources, declarationsOf);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
     const procedureResolvers = new Map<Node, Node>();
@@ -387,7 +387,7 @@ export class QueryIndexBuilder {
     });
 
     const projectFiles = new Set(files);
-    const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node));
+    const callableFlow = new CallableFlow(projectFiles, declarationsOf, node => flow.symbol(node));
     const localCallables = new Map<number, Node>();
     const callableId = (fn: FunctionNode, event?: string) => {
       let returned: Node = fn;
@@ -484,12 +484,12 @@ export class QueryIndexBuilder {
           binding = binding.getExpression();
         }
         if (!Node.isIdentifier(binding)) return;
-        const bindings = flowDeclarations(binding);
+        const bindings = declarationsOf(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
             (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
         if (expression === binding && bindings.some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
         const targets = callableTargets(expression);
-        if (targets.length && expression !== binding && flowDeclarations(expression)
+        if (targets.length && expression !== binding && declarationsOf(expression)
           .some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
         const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
           if (supplied) suppliedCallbacks.add(supplied);
@@ -1178,9 +1178,19 @@ export class QueryIndexBuilder {
           }
         }
       };
+      let lastLeadingPosition: number | undefined;
+      let lastTrailingPosition: number | undefined;
       const scanNodeComments = (node: ts.Node) => {
-        for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
-        for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+        const start = node.getFullStart();
+        // Parent and child nodes often share a boundary and therefore the same trivia.
+        if (start !== lastLeadingPosition) {
+          lastLeadingPosition = start;
+          for (const comment of ts.getLeadingCommentRanges(content, start) ?? []) scanComment(comment);
+        }
+        if (node.end !== lastTrailingPosition) {
+          lastTrailingPosition = node.end;
+          for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+        }
       };
       const recordNamespaceUse = (node: Node) => {
         const namespace = namespaces.get(node.getText());
@@ -1275,7 +1285,7 @@ export class QueryIndexBuilder {
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, flowDeclarations(expression),
+          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression),
             'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
@@ -1327,7 +1337,15 @@ export class QueryIndexBuilder {
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
-      }, { visitRaw: historyOnly ? undefined : scanNodeComments });
+      }, {
+        visitRaw: historyOnly ? undefined : scanNodeComments,
+        filterRaw: node => {
+          if (!ts.isIdentifier(node)) return true;
+          // Use the source spelling, including Unicode escapes, just as the reference visitor does.
+          const name = node.getText(file.compilerNode);
+          return names.has(name) || localNames.has(name) || namespaces.has(name);
+        }
+      });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {

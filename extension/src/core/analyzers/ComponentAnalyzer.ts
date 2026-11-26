@@ -213,20 +213,26 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
     cached.set(symbol, id);
     return id;
   };
+  function symbolAt(node: ts.Node): ts.Symbol | undefined {
+    // Match ts-morph's Node.getSymbol lookup without wrapping unrelated action candidates.
+    const { symbol, name } = node as ts.Node & { symbol?: ts.Symbol; name?: ts.Node };
+    return symbol ?? checker.getSymbolAtLocation(node) ?? (name && symbolAt(name));
+  }
   // ACTION_SCAN_KINDS includes the node kinds resolved by this callback.
-  return (node: Node): string | undefined => {
-    if (Node.isPropertyAccessExpression(node)) {
-      const namespace = node.getExpression().getSymbol()?.compilerSymbol;
+  return (node: ts.Node): string | undefined => {
+    if (ts.isPropertyAccessExpression(node)) {
+      const namespace = symbolAt(node.expression);
       const source = namespace && namespace.flags & ts.SymbolFlags.Alias && checker.getAliasedSymbol(namespace);
-      const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.getName()) : undefined;
+      const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.name.getText()) : undefined;
       if (id) return id;
+      return fromSymbol(symbolAt(node));
     }
-    if (Node.isIdentifier(node) && node.getParentIfKind(SyntaxKind.PropertyAccessExpression)?.getNameNode() === node) return;
-    if (Node.isShorthandPropertyAssignment(node)) return fromSymbol(node.getValueSymbol()?.compilerSymbol);
-    if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node)) return fromSymbol(node.getSymbol()?.compilerSymbol);
-    if ((Node.isArrowFunction(node) || Node.isFunctionExpression(node)) && !Node.isVariableDeclaration(actionBinding(node))) {
-      return bindings.get(node);
+    if (ts.isIdentifier(node)) {
+      if (node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
+      return fromSymbol(symbolAt(node));
     }
+    if (ts.isShorthandPropertyAssignment(node)) return fromSymbol(checker.getShorthandAssignmentValueSymbol(node));
+    if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return byDeclaration.get(node);
   };
 }
 
@@ -258,7 +264,7 @@ export class ComponentAnalyzer {
     const index = includeFacts ? new QueryIndexBuilder(exportsOf) : undefined;
     const actions = new Set<string>();
     const actionIds = new Map<Node, string>();
-    const actionNames = new Set<Node>();
+    const actionNames = new Set<ts.Node>();
     const actionModules = new Map<ts.Symbol, Map<string, string>>();
     const relativePath = (file: SourceFile) => path.relative(this.root, file.getFilePath()).split(path.sep).join('/');
     const routesByFile = new Map(routes.map(route => [route.file, route]));
@@ -281,7 +287,7 @@ export class ComponentAnalyzer {
           actionIds.set(target, id);
           if (Node.isVariableDeclaration(target) || Node.isFunctionDeclaration(target) || Node.isFunctionExpression(target)) {
             const name = target.getNameNode();
-            if (name) actionNames.add(name);
+            if (name) actionNames.add(name.compilerNode);
           }
         }
         return id;
@@ -703,6 +709,17 @@ export class ComponentAnalyzer {
     }
 
     const actionReference = actions.size && actionReferences(files[0].getProject().getTypeChecker().compilerObject, actionIds, actionModules);
+    let lastActionNode: ts.Node | undefined;
+    let lastActionId: string | undefined;
+    const actionOf = actionReference && ((node: ts.Node) => {
+      // Reuse the raw filter's lookup when the wrapped visitor receives the same node.
+      if (node !== lastActionNode) {
+        lastActionNode = node;
+        lastActionId = actionNames.has(node) ? undefined : actionReference(node);
+      }
+      return lastActionId;
+    });
+    const filterAction = actionOf ? (node: ts.Node) => RENDER_KINDS.has(node.kind) || actionOf(node) !== undefined : undefined;
     const fileHooks = new Map<string, { hooks: string[]; isClient: boolean }>();
     for (const file of files) {
       const relative = relativePath(file);
@@ -712,17 +729,16 @@ export class ComponentAnalyzer {
         .filter(specifier => HOOK.test(specifier.getName())).flatMap(specifier => specifier.getAliasNode()?.getText() ?? []));
       // RENDER_KINDS covers render and hook sites. ACTION_SCAN_KINDS also covers actionReferences().
       visitKinds(file, actionReference ? ACTION_SCAN_KINDS : RENDER_KINDS, node => {
-        if (actionReference && !actionNames.has(node)) {
-          const id = actionReference(node);
-          if (id) {
-            const ancestors = node.getAncestors();
-            if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
-              Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
-              const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
-              const line = startLine(node);
-              addEdge(owner, id, 'uses-action');
-              index?.useAction(id, relative, line, node);
-            }
+        const id = actionOf && actionOf(node.compilerNode);
+        if (id && (!(Node.isArrowFunction(node) || Node.isFunctionExpression(node)) ||
+                   !Node.isVariableDeclaration(actionBinding(node)))) {
+          const ancestors = node.getAncestors();
+          if (!Node.isExportAssignment(ancestors.find(parent => !wrappedExpression(parent))) && !ancestors.some(parent =>
+            Node.isImportDeclaration(parent) || Node.isExportDeclaration(parent) || Node.isTypeNode(parent))) {
+            const owner = componentOwners.get(node) ?? ancestors.map(parent => componentOwners.get(parent)).find(Boolean) ?? from;
+            const line = startLine(node);
+            addEdge(owner, id, 'uses-action');
+            index?.useAction(id, relative, line, node);
           }
         }
         if ((Node.isJsxOpeningElement(node) || Node.isJsxSelfClosingElement(node)) && !componentTags.has(node)) {
@@ -739,7 +755,7 @@ export class ComponentAnalyzer {
         if (!HOOK.test(name) && !aliasedHooks.has(name)) return;
         const hook = resolveHook(expression, importsFor(file));
         if (hook && hooks.get(hook)?.path) usedHooks.add(hook);
-      });
+      }, { filterRaw: filterAction });
       if (usedHooks.size) fileHooks.set(relative, { hooks: [...usedHooks], isClient: isClientFile(file) });
     }
 

@@ -10,7 +10,8 @@ function loadEncodeRanks() {
     if (!line) continue;
     const [, offset, ...tokens] = line.split(' ');
     let rank = Number.parseInt(offset, 10);
-    for (const token of tokens) table.set(Buffer.from(token, 'base64').join(','), rank++);
+    // Latin-1 maps each byte to one code unit, preserving arbitrary token bytes.
+    for (const token of tokens) table.set(Buffer.from(token, 'base64').toString('latin1'), rank++);
   }
   return table;
 }
@@ -19,7 +20,6 @@ function loadEncodeRanks() {
 export class TokenCounter {
   private readonly ranks = encodeRanks ??= loadEncodeRanks();
   private readonly pattern = new RegExp(ranks.pat_str, 'gu');
-  private readonly encoder = new TextEncoder();
   private readonly pieceCounts = new Map<string, number>();
 
   count(text: string): number {
@@ -27,7 +27,7 @@ export class TokenCounter {
     for (const [piece] of text.matchAll(this.pattern)) {
       let count = this.pieceCounts.get(piece);
       if (count === undefined) {
-        count = this.countPiece(this.encoder.encode(piece));
+        count = this.countPiece(Buffer.from(piece, 'utf8'));
         if (piece.length <= MAX_CACHED_PIECE_LENGTH && this.pieceCounts.size < MAX_CACHED_PIECES) {
           this.pieceCounts.set(piece, count);
         }
@@ -37,8 +37,8 @@ export class TokenCounter {
     return total;
   }
 
-  private countPiece(bytes: Uint8Array): number {
-    if (this.ranks.has(bytes.join(','))) return 1;
+  private countPiece(bytes: Buffer): number {
+    if (this.ranks.has(bytes.toString('latin1'))) return 1;
 
     // As in js-tiktoken, merge the lowest-ranked adjacent pair, taking the
     // leftmost pair when ranks tie. Each remaining part has a rank because
@@ -49,8 +49,8 @@ export class TokenCounter {
       let bestRank = Infinity;
       let mergeAt = -1;
       for (let i = 0; i < ends.length - 1; i++) {
-        const pair = bytes.subarray(ends[i - 1] ?? 0, ends[i + 1]);
-        const rank = this.ranks.get(pair.join(','));
+        const pair = bytes.toString('latin1', ends[i - 1] ?? 0, ends[i + 1]);
+        const rank = this.ranks.get(pair);
         if (rank !== undefined && rank < bestRank) {
           bestRank = rank;
           mergeAt = i;
