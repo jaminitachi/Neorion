@@ -12,7 +12,7 @@ import { packageMember } from './CallableFlow';
 import type { RouterProject } from '../frameworks/react-router/RouteTypes';
 import { QueryIndexBuilder } from './QueryIndexBuilder';
 import { jsxValue, PropFlow } from './PropFlow';
-import { isComponentWrapper, preferRenderBinding, renderBindings, type RenderCertainty } from './RenderBindings';
+import { forwardedComponent, isComponentWrapper, preferRenderBinding, renderBindings, unprovidedContextTruth, type RenderCertainty } from './RenderBindings';
 import { startLine } from './SourceLines';
 import { DomainExtractor } from '../utils/DomainExtractor';
 import { hasDirective, HTTP_METHODS, isClientFile } from './RouteAnalyzer';
@@ -425,6 +425,30 @@ export class ComponentAnalyzer {
       return components.get(node) ?? aliases.get(node)?.map(target => resolveComponent(target, seen)).find(Boolean);
     };
 
+    const defaultWrappers: { from: string; to: string; node: Node; conditional: number }[] = [];
+    for (const file of files) {
+      const relative = relativePath(file);
+      const route = routesByFile.get(relative);
+      if (route?.type === 'api' || isMetadata(route) || /^(?:src\/)?pages\/_app\.[jt]sx?$/.test(relative)) continue;
+      for (const assignment of file.getExportAssignments()) {
+        if (assignment.isExportEquals() || components.has(assignment) || aliases.has(assignment)) continue;
+        const call = unwrapComponent(assignment.getExpression());
+        if (!Node.isCallExpression(call)) continue;
+        const forwarding = forwardedComponent(call, projectFiles);
+        if (!forwarding) continue;
+        const inner = unwrapComponent(forwarding.argument);
+        const target = inner && declarationsOf(inner).map(node => resolveComponent(node)).find(Boolean);
+        if (!target) continue;
+        const id = `cmp:${relative}#default`;
+        components.set(assignment, { id, name: 'default', renderName: `${call.getExpression().getText()}(${target.name})`,
+          path: relative, isClient: isClientFile(file),
+          domain: DomainExtractor.extract('/' + relative), props: [], hooks: [] });
+        bodies.set(assignment, call);
+        if (route) route.componentId = id;
+        for (const site of forwarding.sites) defaultWrappers.push({ from: id, to: target.id, ...site });
+      }
+    }
+
     const pagesApps: { file: string; componentId?: string }[] = [];
     for (const file of files) {
       const relative = relativePath(file);
@@ -497,6 +521,11 @@ export class ComponentAnalyzer {
       if (!to || to === from) return;
       edges.set(JSON.stringify([type, from, to]), { from, to, type });
     };
+    for (const { from, to, node, conditional } of defaultWrappers) {
+      addEdge(from, to, 'renders');
+      index?.render(from, to, startLine(node), conditional, undefined, undefined, undefined, undefined, undefined,
+        relativePath(node.getSourceFile()));
+    }
     for (const [node, wrapper] of components) {
       const initializer = Node.isVariableDeclaration(node) ? node.getInitializer() : undefined;
       if (!Node.isCallExpression(initializer) ||
@@ -521,18 +550,21 @@ export class ComponentAnalyzer {
     // Discover component-valued bindings before assigning JSX to its owning body.
     const renderTargets = new Map<Node, ComponentNode[]>();
     const renderChoices = new Map<Node, Map<string, RenderCertainty>>();
+    const contextTruth = unprovidedContextTruth(projectFiles, file => !relativePath(file).startsWith('../'));
     const unresolvedLookups = new Map<Node, Node[]>();
+    const opaqueLookups = new Map<Node, Set<Node>>();
     const isFetcherForm = router && (require('../frameworks/react-router/Navigation') as typeof import('../frameworks/react-router/Navigation')).isFetcherForm;
     const callbackBodies = new Set<ts.Node>();
-    const componentForBinding = (target: ReturnType<typeof renderBindings>['targets'][number]['target'], tag: Node) => {
+    const indexedComponent = (node: Node) => !!resolveComponent(node);
+    const componentForBinding = (target: Node, tag: Node) => {
       let binding: Node = target;
       while (Node.isParenthesizedExpression(binding.getParent()) || Node.isAsExpression(binding.getParent()) ||
              Node.isCallExpression(binding.getParent())) binding = binding.getParentOrThrow();
       const parent = binding.getParent();
-      if (Node.isVariableDeclaration(parent)) binding = parent;
+      if (Node.isVariableDeclaration(parent) || Node.isExportAssignment(parent)) binding = parent;
       const existing = resolveComponent(binding);
       if (existing) return existing;
-      if (Node.isClassDeclaration(target)) return;
+      if (!Node.isFunctionDeclaration(target) && !Node.isArrowFunction(target) && !Node.isFunctionExpression(target)) return;
       const body = target.getBody();
       if (!body || !hasRender(body)) return;
       const source = target.getSourceFile();
@@ -570,8 +602,8 @@ export class ComponentAnalyzer {
           if (!previous) resolved.push(component);
           if (!previous || preferRenderBinding(choice, previous)) choices.set(component.id, choice);
         };
-        const traced = renderBindings(bindings, projectFiles);
-        if (traced.unresolvedLookup) unresolvedLookups.set(tag, bindings);
+        const traced = renderBindings(bindings, projectFiles, indexedComponent, undefined, undefined, contextTruth);
+        if (traced.unresolvedLookup || traced.opaqueLookups.size) unresolvedLookups.set(tag, bindings);
         for (const { target, ...choice } of traced.targets) {
           const component = componentForBinding(target, tag);
           if (component) register(component, choice);
@@ -588,32 +620,36 @@ export class ComponentAnalyzer {
       tag.getAncestors().find(parent => parent === body || Node.isJsxAttribute(parent));
     const propRenders = new Map<Node, (RenderCertainty & { target: ComponentNode; detail: string })[]>();
     for (const [tag, bindings] of unresolvedLookups) {
-      const traced = renderBindings(bindings, projectFiles, flow);
+      const traced = renderBindings(bindings, projectFiles, indexedComponent, flow, undefined, contextTruth);
       if (!traced.unresolvedLookup) unresolvedLookups.delete(tag);
+      if (traced.opaqueLookups.size) opaqueLookups.set(tag, traced.opaqueLookups);
       const attribute = propAttribute(tag);
       if (Node.isJsxAttribute(attribute) && !flow.mayRenderSlot(attribute)) continue;
-      for (const { target, supply, possible, conditional } of traced.targets) {
+      for (const { target, supply, possible, conditional, contextExcluded } of traced.targets) {
         if (!supply) continue;
         const component = componentForBinding(target, tag);
         if (!component) continue;
         const receiver = Node.isCallExpression(supply.site) ? supply.site.getArguments()[0] : supply.site.getTagNameNode();
         if (!receiver) continue;
         const entries = propRenders.get(receiver) ?? [];
-        entries.push({ target: component, possible, conditional: conditional || !!conditionalAt(tag),
+        entries.push({ target: component, possible, contextExcluded, conditional: conditional || !!conditionalAt(tag),
           detail: `prop ${supply.name} via ${receiver.getText()} (rendered at ${relativePath(tag.getSourceFile())}:${startLine(tag)})` });
         propRenders.set(receiver, entries);
       }
     }
     const render = (tag: Node, from: string, body?: Node, suppliedComponent = false) => {
       const targets = suppliedComponent ? declaredRenderTargets(declarationsOf(tag)) : renderTargets.get(tag) ?? [];
-      if (!suppliedComponent && unresolvedLookups.has(tag)) index?.unresolvedRenderLookup(from, tag);
+      const unresolved = !suppliedComponent && unresolvedLookups.get(tag);
+      if (unresolved) index?.unresolvedRenderLookup(from, tag, unresolved);
+      const opaque = !suppliedComponent && opaqueLookups.get(tag);
+      if (opaque) index?.opaqueRenderLookup(from, tag, opaque);
       const site = tag.getParent();
       if (!targets.length && Node.isPropertyAccessExpression(tag)) {
         targets.push(...declarationsOf(rootBinding(tag)).flatMap(node => resolveComponent(node) ?? []));
       }
       const transferred = suppliedComponent ? [] : propRenders.get(tag) ?? [];
       const renders = [...new Set(targets)].map(target => ({ target, ...renderChoices.get(tag)?.get(target.id), detail: undefined as string | undefined }));
-      for (const { target, possible, conditional: guarded, detail } of [...renders, ...transferred]) {
+      for (const { target, possible, conditional: guarded, contextExcluded, detail, selection } of [...renders, ...transferred]) {
         const attribute = propAttribute(tag, body);
         const element = Node.isJsxOpeningElement(site) ? site.getParent() : site;
         const parent = element?.getParent();
@@ -638,11 +674,12 @@ export class ComponentAnalyzer {
           const renderSite = Node.isJsxOpeningElement(site) || Node.isJsxSelfClosingElement(site) || Node.isCallExpression(site)
             ? site : undefined;
           if (!slot?.length) {
-            index.render(from, target.id, startLine(tag), conditional, undefined, possible || undefined, this.config && tag, lookup, renderSite);
+            index.render(from, target.id, startLine(tag), conditional, undefined, possible || undefined, this.config && tag,
+              lookup, renderSite, undefined, contextExcluded, selection);
           } else for (const transfer of slot) {
             index.render(from, target.id, startLine(tag), conditional || Number(transfer.conditional),
               undefined, possible || (transfer.partial ? true : undefined), this.config && tag,
-              lookup ? `${lookup}; ${transfer.detail}` : transfer.detail, renderSite);
+              lookup ? `${lookup}; ${transfer.detail}` : transfer.detail, renderSite, undefined, contextExcluded, selection);
           }
         }
       }

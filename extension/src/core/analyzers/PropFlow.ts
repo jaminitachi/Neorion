@@ -1,11 +1,12 @@
 import { Node, SourceFile, SyntaxKind, ts, type Symbol } from 'ts-morph';
 import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
-import { conditionalAt, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, returnsFromBranch, wrappedExpression } from './ArchitectureFacts';
 import { startLine } from './SourceLines';
+import { valueNode } from './StaticBindings';
 
 export type JsxSite = import('ts-morph').JsxOpeningElement | import('ts-morph').JsxSelfClosingElement;
 export type RenderSite = JsxSite | import('ts-morph').CallExpression;
-type Prop = { component: Node; name: string; fallback?: Node };
+export type Prop = { component: Node; name: string; fallback?: Node };
 type SiteValue = { site: RenderSite; value?: Node; unknown?: boolean };
 type BoundValue = SiteValue & { gates: PropGate[] };
 type ForwardedSpread = { site: JsxSite; excluded: Set<string> };
@@ -65,12 +66,26 @@ export class PropFlow {
     for (const [tag, definitions] of targets) {
       const site = tag.getParent();
       if (!Node.isJsxOpeningElement(site) && !Node.isJsxSelfClosingElement(site) && !Node.isCallExpression(site)) continue;
-      for (const target of definitions) {
-        const entries = this.sites.get(target) ?? [];
-        entries.push(site);
-        this.sites.set(target, entries);
-      }
+      for (const target of definitions) this.addSite(target, site);
     }
+  }
+
+  addSite(target: Node, site: RenderSite) {
+    const entries = this.sites.get(target) ?? [];
+    if (!entries.includes(site)) entries.push(site);
+    this.sites.set(target, entries);
+  }
+
+  inputsOf(component: Node) {
+    return this.sites.get(component) ?? [];
+  }
+
+  bodyOf(component: Node) {
+    return this.bodies.get(component);
+  }
+
+  propsOwner(declaration: Node) {
+    return this.parameters.get(declaration);
   }
 
   targetsOf(site: JsxSite) {
@@ -223,6 +238,53 @@ export class PropFlow {
     return (this.sites.get(prop.component) ?? []).map(site => this.value(site, prop));
   }
 
+  excludedRenderSuppliers(node: Node, component: Node): RenderSite[] {
+    const sites = this.sites.get(component);
+    const body = this.bodies.get(component);
+    if (!sites?.length || !body) return [];
+    type Test = (site: RenderSite) => Literal | undefined;
+    const compile = (input: Node): Test | undefined => {
+      const expression = wrappedExpression(input) ?? input;
+      if (expression !== input) return compile(expression);
+      const prop = this.read(expression);
+      if (prop?.component === component) return site => {
+        const { value, unknown } = this.value(site, prop);
+        if (!unknown) return Node.isJsxAttribute(value) ? true : literal(valueNode(value));
+      };
+      const constant = literal(expression);
+      if (constant !== undefined) return () => constant;
+      if (Node.isPrefixUnaryExpression(expression) && expression.getOperatorToken() === SyntaxKind.ExclamationToken) {
+        const operand = compile(expression.getOperand());
+        return site => {
+          const value = operand?.(site);
+          return value === undefined ? undefined : !value;
+        };
+      }
+      if (!Node.isBinaryExpression(expression)) return;
+      const operator = expression.getOperatorToken().getKind();
+      if (operator !== SyntaxKind.EqualsEqualsEqualsToken && operator !== SyntaxKind.ExclamationEqualsEqualsToken &&
+          operator !== SyntaxKind.AmpersandAmpersandToken && operator !== SyntaxKind.BarBarToken) return;
+      const left = compile(expression.getLeft());
+      const right = compile(expression.getRight());
+      if (!left && !right) return;
+      return site => {
+        const a = left?.(site);
+        const b = right?.(site);
+        if (operator === SyntaxKind.AmpersandAmpersandToken) return a === undefined ? undefined : a ? b : a;
+        if (operator === SyntaxKind.BarBarToken) return a === undefined ? undefined : a || b;
+        if (a !== undefined && b !== undefined) return (a === b) === (operator === SyntaxKind.EqualsEqualsEqualsToken);
+      };
+    };
+    const tests = [...this.branchConditions(node, body)].flatMap(({ expression, positive }) => {
+      const test = compile(expression);
+      return test ? [{ test, positive }] : [];
+    });
+    return tests.length ? sites.filter(site => tests.some(({ test, positive }) => {
+      const value = test(site);
+      return value !== undefined && Boolean(value) !== positive;
+    })) : [];
+  }
+
   bindings(prop: Prop): BoundValue[] {
     let names = this.resolvedBindings.get(prop.component);
     if (!names) this.resolvedBindings.set(prop.component, names = new Map());
@@ -253,10 +315,8 @@ export class PropFlow {
     });
   }
 
-  constraints(node: Node): PropConstraint[] {
-    const result: PropConstraint[] = [];
-    if (!this.parameterFiles.has(node.getSourceFile())) return result;
-    for (let child = node, parent = node.getParent(); parent; child = parent, parent = parent.getParent()) {
+  *branchConditions(node: Node, boundary?: Node) {
+    for (let child = node, parent = node.getParent(); parent && child !== boundary; child = parent, parent = parent.getParent()) {
       let condition: Node | undefined;
       let positive = true;
       if (Node.isIfStatement(parent) && parent.getExpression() !== child) {
@@ -272,8 +332,23 @@ export class PropFlow {
           positive = operator === SyntaxKind.AmpersandAmpersandToken;
         }
       }
-      if (!condition) continue;
-      let expression = condition;
+      if (condition) yield { expression: condition, positive };
+      if (boundary && Node.isBlock(parent)) for (const prior of parent.getStatements()) {
+        if (prior === child) break;
+        if (!Node.isIfStatement(prior)) continue;
+        if (returnsFromBranch(prior.getThenStatement())) yield { expression: prior.getExpression(), positive: false };
+        const other = prior.getElseStatement();
+        if (other && returnsFromBranch(other)) yield { expression: prior.getExpression(), positive: true };
+      }
+    }
+  }
+
+  constraints(node: Node): PropConstraint[] {
+    const result: PropConstraint[] = [];
+    if (!this.parameterFiles.has(node.getSourceFile())) return result;
+    for (const branch of this.branchConditions(node)) {
+      const { positive } = branch;
+      let expression = branch.expression;
       while (wrappedExpression(expression)) expression = wrappedExpression(expression)!;
       if (!Node.isBinaryExpression(expression)) continue;
       const operator = expression.getOperatorToken().getKind();

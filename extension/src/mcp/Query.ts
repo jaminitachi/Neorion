@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
-  isTestFile as testFile, renderIssue, renderSiteKey,
+import { AI_SDK_TRANSPORT, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+  advanceRenderGuards, isLazyRender, isTestFile as testFile, renderGuardKey, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -203,7 +203,11 @@ export class QueryEngine {
   private symbols: Map<number, SymbolEntry>;
   private names: Map<string, SymbolEntry[]>;
   private incoming: Map<number, Edge[]>;
+  private outgoing?: Map<number, Edge[]>;
+  private pageRenderScopes = new Map<number, Set<number>>();
+  private contextRenderExclusions: Set<string>;
   private dynamicRenderComponents: Set<number>;
+  private typedLookupIssues: Set<string>;
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean; conditional?: boolean; possible?: boolean }[]>();
@@ -213,8 +217,15 @@ export class QueryEngine {
     this.root = realpathSync(root);
     this.symbols = new Map(index.symbols.map(symbol => [symbol.id, symbol]));
     this.names = group(index.symbols, symbol => symbol.name);
+    for (const symbol of index.symbols) for (const alias of symbol.selectorAliases ?? []) {
+      const matches = this.names.get(alias) ?? [];
+      matches.push(symbol);
+      this.names.set(alias, matches);
+    }
     this.incoming = group(index.renderEdges, edge => edge[1]);
+    this.contextRenderExclusions = new Set(index.contextRenderExclusions);
     this.dynamicRenderComponents = new Set(index.dynamicRenderComponents);
+    this.typedLookupIssues = new Set(Object.values(index.renderLookupIssues ?? {}));
     for (const edges of this.incoming.values()) edges.sort((a, b) => {
       const left = this.symbols.get(a[0]);
       const right = this.symbols.get(b[0]);
@@ -419,36 +430,100 @@ export class QueryEngine {
     };
   }
 
+  private pageRenderScope(route: Route) {
+    const cached = this.pageRenderScopes.get(route.id);
+    if (cached) return cached;
+    this.outgoing ??= group(this.index.renderEdges, edge => edge[0]);
+    const pending = [route.component, route.fileSymbol, ...route.layouts ?? []];
+    const scope = new Set<number>();
+    const conditions = this.index.pagesRenderConditions?.[route.id];
+    for (let i = 0; i < pending.length; i++) {
+      const from = pending[i];
+      if (from === undefined || scope.has(from)) continue;
+      scope.add(from);
+      for (const [, to, line] of this.outgoing.get(from) ?? []) {
+        if (conditions?.[renderSiteKey(from, to, line)] !== 'excluded' && !scope.has(to)) pending.push(to);
+      }
+    }
+    this.pageRenderScopes.set(route.id, scope);
+    return scope;
+  }
+
   private renders(symbol: SymbolEntry, direct: boolean, expired: () => boolean): Result {
+    const renderName = (id: number) => {
+      const entry = this.symbols.get(id);
+      return entry?.renderName ?? entry?.name;
+    };
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
-      possible: boolean; depth: number; slots: string[]; issue?: string }>();
+      possible: boolean; depth: number; slots: string[]; issue?: string; excluded: boolean; witnessed: boolean }>();
     let directIssue: string | undefined;
     let dynamicReference = false;
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
+      const scope = only && this.pageRenderScope(only);
+      if (scope && !scope.has(symbol.id)) return;
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
-        depth: 0, slots: [] as string[], issue: undefined as string | undefined }];
-      const visited = new Set<number>();
+        depth: 0, slots: [] as string[], issue: undefined as string | undefined, excluded: false, lazy: false, guards: '',
+        context: false, lookup: false, propGuards: [] as string[][], conditionalPaths: [] as string[][],
+        witnesses: [] as string[][], witnessed: false }];
+      const visited = new Set<string | number>();
       for (let i = 0; i < pending.length && !expired(); i++) {
         const entry = pending[i];
-        if (visited.has(entry.id)) continue;
-        visited.add(entry.id);
+        const guarded = entry.propGuards.length || entry.conditionalPaths.length || entry.witnesses.length || entry.witnessed;
+        const key = entry.excluded || entry.lazy || entry.guards || entry.context || entry.lookup || guarded ?
+          `${entry.id}:${Number(entry.excluded)}:${Number(entry.lazy)}:${Number(entry.context)}:${Number(entry.lookup)}:${entry.guards}:${JSON.stringify([entry.propGuards, entry.conditionalPaths, entry.witnesses, entry.witnessed])}` : entry.id;
+        if (visited.has(key)) continue;
+        visited.add(key);
         dynamicReference ||= this.dynamicRenderComponents.has(entry.id);
         for (const { route, layout, conditional, possible } of this.pageRoots.get(entry.id) ?? []) {
           if ((!entry.depth && !route.router) || only && route !== only) continue;
           const previous = reached.get(route.id);
-          if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper,
-            conditional: entry.conditional || !!conditional, possible: entry.possible || !!possible });
+          const excluded = entry.excluded || entry.context;
+          if (!previous || (previous.excluded !== excluded ? !excluded :
+              previous.witnessed !== entry.witnessed ? entry.witnessed : previous.layout && !layout)) {
+            reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper, excluded,
+              conditional: entry.conditional || !!conditional, possible: entry.possible || !!possible });
+          }
         }
-        for (const [from, to, line, conditional, wrapper, possible, detail, , file] of this.incoming.get(entry.id) ?? []) {
+        for (const [from, to, line, conditional, wrapper, possible, detail, site, file] of this.incoming.get(entry.id) ?? []) {
           if (expired()) break;
-          if (visited.has(from)) continue;
-          const decision = conditions?.[renderSiteKey(from, to, line)];
+          if (scope && !scope.has(from)) continue;
+          const edge = renderSiteKey(from, to, line);
+          const decision = conditions?.[edge];
           if (decision === 'excluded') continue;
+          const guardKey = renderGuardKey(from, to, line, site);
+          const rules = this.index.renderGuardPaths?.[guardKey];
+          const staticBlock = rules?.some(path => !path.length);
+          const started = staticBlock ? rules?.filter(path => path.length) : rules;
+          const propGuards = entry.propGuards.length || started ? advanceRenderGuards(entry.propGuards, site, started) : entry.propGuards;
+          if (!propGuards) continue;
+          const conditionalRules = this.index.renderConditionalPaths?.[guardKey];
+          const conditionalPaths = entry.conditionalPaths.length || conditionalRules
+            ? advanceRenderGuards(entry.conditionalPaths, site, conditionalRules) : entry.conditionalPaths;
+          const witnesses = entry.depth
+            ? entry.witnesses.filter(path => path[0] === site).map(path => path.slice(1))
+            : this.index.renderWitnessPaths?.[guardKey] ?? [];
+          const witnessed = entry.witnessed || witnesses.some(path => !path.length);
+          const excluded = entry.excluded || !!staticBlock || !conditionalPaths ||
+            !!site && !!this.index.renderExclusions?.[entry.guards]?.includes(site);
+          const lazy = entry.lazy || isLazyRender(detail);
+          const contextExcluded = this.contextRenderExclusions.has(edge);
+          const context = entry.context || contextExcluded;
+          const lookup = entry.lookup || !!this.contextRenderExclusions.size && !contextExcluded &&
+            !!possible && !!detail?.startsWith(RENDER_LOOKUP_ISSUE);
+          // Ordinary JSX rows record indexed conditional structure. A guard
+          // still prevents this path from creating a recovered lazy match.
+          if (excluded && lazy || context && (lazy || lookup)) continue;
+          const guards = this.index.renderExclusions?.[edge] ? edge : '';
+          if (!excluded && !lazy && !guards && !context && !lookup && !propGuards.length && !conditionalPaths?.length &&
+              !witnesses.length && !witnessed && visited.has(from)) continue;
           const parent = this.symbols.get(from);
+          const name = renderName(from);
           pending.push({
-            id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
+            id: from, chain: name ? [name, ...entry.chain].slice(-8) : entry.chain,
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
+            excluded, lazy, guards, context, lookup, propGuards, conditionalPaths: conditionalPaths ?? [],
+            witnesses: witnessed ? [] : witnesses, witnessed,
             conditional: entry.conditional || !!conditional || decision === 'conditional',
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
@@ -465,12 +540,12 @@ export class QueryEngine {
     }
     const rows: Row[] = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
       const { route, depth, layout, conditional, possible, slots } = entry;
-      const chain = slots.length ? entry.chain : entry.chain.slice(-2);
+      const chain = slots.length || entry.witnessed ? entry.chain : entry.chain.slice(-2);
       const fileLabel = location(route.file, route.line ?? 1);
       const url = shorten(route.url, 0, Math.max(16, 340 - bytes(fileLabel))) ?? '...';
       const label = `${url}  ${fileLabel}`;
-      const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
-        chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
+      const via = (depth <= 2 || slots.length > 0 || entry.witnessed) && ((layout && route.layouts?.some(id => renderName(id) === chain[0])) ||
+        chain[0] === renderName(route.component ?? 0)) ? chain.slice(1) : chain;
       return {
         ...row(`${label}  depth ${depth}`, route.file),
         pathEnd: label.length,
@@ -489,7 +564,7 @@ export class QueryEngine {
         const route = this.pageRoots.get(from)?.[0]?.route;
         const file = site ?? parent?.file ?? route?.file;
         if (possible && detail && file) directIssue ??= `${renderIssue(detail)} (${location(file, line)})`;
-        if (file && (!prior || line < prior.line)) parents.set(from, { name: parent?.name ?? symbol.name, file, line, conditional, possible });
+        if (file && (!prior || line < prior.line)) parents.set(from, { name: renderName(from) ?? symbol.name, file, line, conditional, possible });
       }
       for (const { name, file, line, conditional, possible } of [...parents.values()].sort((a, b) =>
         compare(a.file, b.file) || a.line - b.line)) {
@@ -502,11 +577,11 @@ export class QueryEngine {
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
       issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
-    const unresolvedLookup = !reached.size && this.index.renderValueUses?.[symbol.id] ?
-      Object.values(this.index.renderLookupIssues ?? {})[0] : undefined;
+    const unresolvedLookup = !reached.size ? this.index.scopedRenderValueIssues?.[symbol.id]?.reason : undefined;
+    const dynamicIssue = unresolvedLookup && this.typedLookupIssues.has(unresolvedLookup) ? unresolvedLookup : DYNAMIC_RENDER_ISSUE;
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
-        (dynamicReference ? unresolvedLookup ?? 'rendered through a dynamic reference' : undefined) ??
+        (dynamicReference ? dynamicIssue : undefined) ??
         (this.index.queryRevision !== undefined && this.index.queryRevision < QUERY_INDEX_REVISION ? 'regenerate legacy index' : undefined) ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
@@ -1042,8 +1117,10 @@ export class QueryEngine {
     const { tool, target } = args;
     const graphKind = tool === 'impact' || tool === 'callees' || tool === 'path' || tool === 'changes';
     const configured = graphKind ? Number(process.env.NEORION_QUERY_DEADLINE_MS) : NaN;
-    const budget = tool === 'changes' ? historyBudgetMs : 1850;
-    const deadline = performance.now() + (configured > 0 ? Math.min(budget, configured) : budget);
+    const cliPath = cli && tool === 'path';
+    const budget = tool === 'changes' ? historyBudgetMs : cliPath ? 5000 : 1850;
+    const timeoutMs = configured > 0 ? Math.min(budget, configured) : budget;
+    const deadline = performance.now() + timeoutMs;
     const expired = () => performance.now() >= deadline;
     let result: Result = { rows: [] };
     let ambiguous = false;
@@ -1207,7 +1284,7 @@ export class QueryEngine {
       const more = omitted ? `# more: ${omitted} (${ambiguous ? 'use path#Name or a route file path' :
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || noteCount < (result.notes?.length ?? 0) || shortened;
-      const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
+      const reason = expired() ? cliPath ? `timed out (${timeoutMs} ms budget)` : 'timed out' : ambiguous ? 'ambiguous target' :
         staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
         !this.index.coverage ? 'regenerate legacy index' : [
           result.partial ?? (tool !== 'search' && !result.targets ? 'target unresolved' : undefined), workspaceIssue
@@ -1225,7 +1302,7 @@ export class QueryEngine {
       const targetResolved = result.targets ? true : undefined;
       if (bytes(output) <= 6000) return { text: output, targetResolved };
       if (tool === 'who_renders' && result.partial && reason === truncationWithReason) {
-        const compactReason = [truncation, workspaceIssue].filter(Boolean).join('; ');
+        const compactReason = [truncation, result.partial === DYNAMIC_RENDER_ISSUE ? 'dynamic ref' : undefined, workspaceIssue].filter(Boolean).join('; ');
         const compact = `${body}\n# partial: ${compactReason}`;
         if (bytes(compact) <= 6000) return { text: compact, targetResolved };
       }
