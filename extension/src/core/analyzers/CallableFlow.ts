@@ -25,9 +25,11 @@ export function returnedValues(fn: FunctionNode): Node[] {
   return values;
 }
 
-function packageOrigin(node: Node) {
+const symbolOf = (node: Node) => node.getSymbol();
+
+function packageOrigin(node: Node, symbol = symbolOf) {
   const root = Node.isPropertyAccessExpression(node) ? node.getExpression() : node;
-  for (const declaration of root.getSymbol()?.getDeclarations() ?? []) {
+  for (const declaration of symbol(root)?.getDeclarations() ?? []) {
     if (!Node.isImportSpecifier(declaration) && !Node.isNamespaceImport(declaration) && !Node.isImportClause(declaration)) continue;
     const module = declaration.getFirstAncestorByKind(SyntaxKind.ImportDeclaration)?.getModuleSpecifierValue();
     if (!module) continue;
@@ -65,13 +67,14 @@ export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
   private returns = new WeakMap<FunctionNode, Node[]>();
   private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
+  private stores = new WeakMap<Node, boolean>();
 
-  constructor(private files: Set<SourceFile>, private declarations = declarationsOf) {}
+  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf) {}
 
   private packageOf(node: Node) {
     const cached = this.packageOrigins.get(node);
     if (cached !== undefined) return cached ?? undefined;
-    const origin = packageOrigin(node);
+    const origin = packageOrigin(node, this.symbol);
     this.packageOrigins.set(node, origin ?? null);
     return origin;
   }
@@ -94,80 +97,113 @@ export class CallableFlow {
     if (isFunction(expression)) return [{ fn: expression, via: [] }];
     const cached = this.targets.get(expression);
     if (cached) return cached;
-    const seen = new Map<Node, Set<string>>();
+    if (Node.isIdentifier(expression)) {
+      const declarations = this.declarations(expression);
+      if (declarations.length === 1) {
+        const declaration = declarations[0];
+        const value = isFunction(declaration) ? declaration : constValue(declaration);
+        if (isFunction(value) && this.files.has(value.getSourceFile())) {
+          const result = [{ fn: value, via: [] }];
+          this.targets.set(expression, result);
+          return result;
+        }
+      }
+    }
+    const result: Target[] = [];
+    const seen = new Map<Node, string | number | Set<string | number>>();
     let budget = 64;
-    const resolve = (node: Node | undefined, members: string[], invoke: number, via: string[]): Target[] => {
-      if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return [];
-      const key = invoke + ':' + (members.length ? JSON.stringify(members) : '');
+    const resolve = (node: Node | undefined, members: string[], invoke: number, via: Node[]): void => {
+      if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return;
+      const key = members.length ? invoke + ':' + JSON.stringify(members) : invoke;
       const states = seen.get(node);
-      if (states?.has(key)) return [];
-      if (states) states.add(key);
-      else seen.set(node, new Set([key]));
-      const next = (value: Node | undefined, path = members, calls = invoke, trail = via) => resolve(value, path, calls, trail);
+      if (states === key || states instanceof Set && states.has(key)) return;
+      if (states instanceof Set) states.add(key);
+      else seen.set(node, states === undefined ? key : new Set([states, key]));
       const wrapped = wrappedExpression(node);
-      if (wrapped) return next(wrapped);
+      if (wrapped) return resolve(wrapped, members, invoke, via);
       if (isFunction(node)) {
-        if (!invoke) return members.length ? [] : [{ fn: node, via }];
+        if (!invoke) {
+          if (!members.length) result.push({ fn: node, via: via.map(callee => callee.getText()) });
+          return;
+        }
         let values = this.returns.get(node);
         if (!values) this.returns.set(node, values = returnedValues(node));
-        return values.flatMap(value => next(value, members, invoke - 1));
+        for (const value of values) resolve(value, members, invoke - 1, via);
+        return;
       }
-      if (Node.isVariableDeclaration(node)) return next(constValue(node));
-      if (Node.isPropertyAssignment(node)) return next(node.getInitializer());
+      if (Node.isVariableDeclaration(node)) return resolve(constValue(node), members, invoke, via);
+      if (Node.isPropertyAssignment(node)) return resolve(node.getInitializer(), members, invoke, via);
       if (Node.isShorthandPropertyAssignment(node)) {
-        return node.getValueSymbol()?.getDeclarations().flatMap(decl => next(decl)) ?? [];
+        for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) resolve(decl, members, invoke, via);
+        return;
       }
       if (Node.isBindingElement(node) && !node.getDotDotDotToken()) {
         const pattern = node.getParent();
         const name = node.getPropertyNameNode() ?? node.getNameNode();
         if (Node.isObjectBindingPattern(pattern) && (Node.isIdentifier(name) || Node.isStringLiteral(name))) {
-          return next(pattern.getParent(), [Node.isStringLiteral(name) ? name.getLiteralText() : name.getText(), ...members]);
+          return resolve(pattern.getParent(), [Node.isStringLiteral(name) ? name.getLiteralText() : name.getText(), ...members], invoke, via);
         }
       }
       if (Node.isObjectLiteralExpression(node) && members.length) {
         const [name, ...rest] = members;
-        for (const property of [...node.getProperties()].reverse()) {
-          if (Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode())) return [];
-          if (property.getName() === name) return next(property, rest);
+        const properties = node.getProperties();
+        for (let i = properties.length - 1; i >= 0; i--) {
+          const property = properties[i];
+          if (Node.isSpreadAssignment(property) || Node.isComputedPropertyName(property.getNameNode())) return;
+          if (property.getName() === name) return resolve(property, rest, invoke, via);
         }
       }
       if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
         const key = Node.isElementAccessExpression(node) ? node.getArgumentExpression() : undefined;
         const name = Node.isPropertyAccessExpression(node) ? node.getName() : Node.isStringLiteral(key) ? key.getLiteralText() : undefined;
         if (name && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
-          const selected = next(node.getExpression(), [name, ...members]);
-          if (selected.length) return selected;
+          const before = result.length;
+          resolve(node.getExpression(), [name, ...members], invoke, via);
+          if (result.length > before) return;
         }
-        return this.declarations(node).filter(decl => !Node.isPropertySignature(decl) && !Node.isMethodSignature(decl))
-          .flatMap(decl => next(decl));
+        for (const decl of this.declarations(node)) {
+          if (!Node.isPropertySignature(decl) && !Node.isMethodSignature(decl)) resolve(decl, members, invoke, via);
+        }
+        return;
       }
-      if (!Node.isCallExpression(node)) return [];
+      if (!Node.isCallExpression(node)) return;
       const callee = node.getExpression();
       const args = node.getArguments();
       const origin = this.packageOf(callee);
       const hook = origin?.module === 'react' ? origin.name : undefined;
-      if (hook === 'useMemo' || hook === 'useCallback') return next(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0));
+      if (hook === 'useMemo' || hook === 'useCallback') {
+        return resolve(args[0], members, invoke + (hook === 'useMemo' ? 1 : 0), via);
+      }
 
       const factory = Node.isCallExpression(callee) && !callee.getArguments().length ? callee.getExpression() : callee;
       const creation = invoke && (factory === callee ? origin : this.packageOf(factory));
       if (creation && ['zustand', 'zustand/vanilla', 'zustand/traditional'].includes(creation.module) &&
           ['create', 'default', 'createStore', 'createWithEqualityFn'].includes(creation.name)) {
         const initializer = this.storeInitializer(args[0]);
-        return next(initializer, members, invoke);
+        return resolve(initializer, members, invoke, via);
       }
 
       // Evaluate the selector against an actual Zustand binding. Local calls may
       // return a nested object or function, but do not supply selector semantics.
-      const path = selectedMembers(args[0]);
-      if (path && this.declarations(callee).some(decl => this.storeFactory(constValue(decl)))) {
-        return next(callee, [...path, ...members], invoke + 1, [...via, callee.getText()]);
+      if (isFunction(args[0]) && this.declarations(callee).some(decl => this.isStore(decl))) {
+        const path = selectedMembers(args[0]);
+        if (path) return resolve(callee, [...path, ...members], invoke + 1, [...via, callee]);
       }
-      if (!members.length && !invoke && !Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return [];
-      return next(callee, members, invoke + 1, [...via, callee.getText()]);
+      if (!members.length && !invoke && !Node.isIdentifier(callee) && !Node.isPropertyAccessExpression(callee)) return;
+      resolve(callee, members, invoke + 1, [...via, callee]);
     };
-    const result = resolve(expression, [], 0, []);
+    resolve(expression, [], 0, []);
     this.targets.set(expression, result);
     return result;
+  }
+
+  private isStore(binding: Node) {
+    let store = this.stores.get(binding);
+    if (store === undefined) {
+      store = this.storeFactory(constValue(binding));
+      this.stores.set(binding, store);
+    }
+    return store;
   }
 
   private storeFactory(node: Node | undefined) {

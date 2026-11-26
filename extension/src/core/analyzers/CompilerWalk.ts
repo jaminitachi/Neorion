@@ -2,14 +2,14 @@ import type { Node, ts } from 'ts-morph';
 
 interface WalkOptions {
   skip?: ReadonlySet<ts.Node>;
+  filterRaw?: (node: ts.Node) => boolean;
   skipNode?: (node: ts.Node) => boolean;
   visitRaw?: (node: ts.Node) => void;
-  wrapNode?: (node: ts.Node) => boolean;
 }
 
 /** Walk the compiler children in ts-morph's descendant order for read-only analysis. */
 export function visitKinds(root: Node, kinds: ReadonlySet<ts.SyntaxKind>, visitWrapped: (node: Node) => void,
-  { skip, skipNode, visitRaw, wrapNode }: WalkOptions = {}) {
+  { skip, skipNode, filterRaw, visitRaw }: WalkOptions = {}) {
   // Use the existing project context so wrapped nodes keep their identity and checker.
   // ts-morph's public createWrappedNode creates a separate context.
   const { _getNodeFromCompilerNode: wrap } = root as Node & { _getNodeFromCompilerNode?(node: ts.Node): Node };
@@ -21,7 +21,7 @@ export function visitKinds(root: Node, kinds: ReadonlySet<ts.SyntaxKind>, visitW
         traversal.skip();
         return;
       }
-      if (kinds.has(node.getKind()) && (!wrapNode || wrapNode(compilerNode))) visitWrapped(node);
+      if (kinds.has(node.getKind()) && (!filterRaw || filterRaw(node.compilerNode))) visitWrapped(node);
     });
     return;
   }
@@ -29,7 +29,7 @@ export function visitKinds(root: Node, kinds: ReadonlySet<ts.SyntaxKind>, visitW
   const visit = (node: ts.Node) => {
     visitRaw?.(node);
     if (skip?.has(node) || skipNode?.(node)) return;
-    if (kinds.has(node.kind) && (!wrapNode || wrapNode(node))) visitWrapped(wrap.call(root, node));
+    if (kinds.has(node.kind) && (!filterRaw || filterRaw(node))) visitWrapped(wrap.call(root, node));
     node.forEachChild(visit);
   };
   root.compilerNode.forEachChild(visit);

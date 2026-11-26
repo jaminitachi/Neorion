@@ -53,12 +53,13 @@ function initializer(node: Node | undefined, localValue: (node: Node) => Node | 
 
 function imported(node: Node, modulePattern: RegExp, names: RegExp) {
   const access = member(node);
+  if (access && (!access.key || !names.test(access.key))) return false;
   const binding = (access?.base ?? node).getSymbol()?.getDeclarations()[0];
   if (Node.isImportSpecifier(binding) && !access && !binding.isTypeOnly()) {
     const entry = binding.getImportDeclaration();
     return !entry.isTypeOnly() && modulePattern.test(entry.getModuleSpecifierValue()) && names.test(binding.getName());
   }
-  if (!Node.isNamespaceImport(binding) || !access?.key || !names.test(access.key)) return false;
+  if (!Node.isNamespaceImport(binding) || !access) return false;
   const entry = binding.getFirstAncestorByKindOrThrow(SyntaxKind.ImportDeclaration);
   return !entry.isTypeOnly() && modulePattern.test(entry.getModuleSpecifierValue());
 }

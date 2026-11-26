@@ -139,6 +139,7 @@ async function main([command, ...args]: string[]) {
       });
       const config = join(root, MCP_TARGETS.Cursor.file);
       if (mcp.count) console.log(`${config} (Neorion MCP setup ${remove ? 'removed' : 'configured'})`);
+      if (mcp.reusedCursorEntry) console.log(`${config} (existing Neorion entry kept)`);
       return;
     }
     const temporary = !values.local && isTemporaryCliInstall(__filename);

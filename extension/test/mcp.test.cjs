@@ -234,6 +234,155 @@ test('who_renders follows a JSX callback returned by a hook to the page route', 
   assert.doesNotMatch(dialog, /UnusedCallback/);
 });
 
+test('who_renders reports partial coverage for components passed through an opaque registry', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'forms.tsx', [
+    'export function WorkflowFieldError() { return <p />; }',
+    'export function WorkflowEmailActionForm() { return <WorkflowFieldError />; }',
+    'export function RegistryNotice() { return <aside />; }',
+    'export function MixedForm() { return <section />; }',
+    'export function StaticForm() { return <main />; }',
+    'export function UnusedForm() { return <main />; }'
+  ].join('\n'));
+  write(root, 'registry.ts', [
+    "import { WorkflowEmailActionForm as Email, RegistryNotice, MixedForm, StaticForm } from './forms';",
+    'function eraseForm(form: unknown): any { return form; }',
+    'export const registry = { email: { ConfigForm: eraseForm(Email), RegistryNotice } };',
+    'export const options = { Mixed: eraseForm(MixedForm), Static: StaticForm };'
+  ].join('\n'));
+  write(root, 'app/page.tsx', [
+    "import { registry, options } from '../registry';",
+    'function WorkflowNodeConfigPanel({ kind }: { kind: keyof typeof registry }) {',
+    '  const entry = registry[kind];',
+    '  const ConfigForm = entry.ConfigForm;',
+    '  const Notice = entry.RegistryNotice;',
+    '  return <><ConfigForm /><Notice /></>;',
+    '}',
+    'const Mixed = options.Mixed;',
+    'const Static = options.Static;',
+    'export default function Page() { return <><WorkflowNodeConfigPanel kind="email" /><Mixed /><Static /></>; }'
+  ].join('\n'));
+  write(root, 'app/direct/page.tsx', [
+    "import { MixedForm } from '../../forms';",
+    'export default function Direct() { return <MixedForm />; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const component of ['WorkflowEmailActionForm', 'WorkflowFieldError', 'RegistryNotice']) {
+    const result = await client.text('who_renders', { component, direct: true });
+    assert.match(result, /# partial: rendered through a dynamic reference/, result);
+  }
+  const mixed = await client.text('who_renders', { component: 'MixedForm' });
+  assert.match(mixed, /^\/direct  app\/direct\/page\.tsx:/m);
+  assert.match(mixed, /# partial: rendered through a dynamic reference/);
+  for (const component of ['WorkflowNodeConfigPanel', 'StaticForm', 'UnusedForm']) {
+    const result = await client.text('who_renders', { component });
+    assert.match(result, /# complete: indexed JSX paths/, result);
+  }
+});
+
+test('who_renders follows memo and forwardRef bindings without flagging their declarations as dynamic', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'leaf.tsx', 'export function Leaf() { return <span />; }');
+  write(root, 'wrappers.tsx', [
+    "import React, { memo, memo as remember, forwardRef } from 'react';",
+    "import { Leaf } from './leaf';",
+    'function PureUnused() { return <Leaf />; }',
+    'export const Unused = memo(PureUnused);',
+    'function PureRM() { return <Leaf />; }',
+    'export const UnusedRM = React.memo(PureRM);',
+    'export const UnusedFR = forwardRef(function FR() { return <Leaf />; });',
+    'function PureUsed() { return <Leaf />; }',
+    'export const Used = memo(PureUsed);',
+    'export function PureMessageActions() { return <button />; }',
+    'export const MessageActions = memo(PureMessageActions, () => true);',
+    'export function PureRefActions() { return <button />; }',
+    'export const RefActions = remember(forwardRef(PureRefActions));',
+    'export function PureOpaque() { return <button />; }',
+    'export const Opaque = memo(PureOpaque);',
+    'export const registry = { item: PureOpaque };'
+  ].join('\n'));
+  write(root, 'app/page.tsx', [
+    "import { Leaf } from '../leaf';",
+    "import { Used, MessageActions, RefActions } from '../wrappers';",
+    'export default function Page() { return <><Leaf /><Used /><MessageActions /><RefActions /></>; }'
+  ].join('\n'));
+  write(root, 'app/chat/page.tsx', [
+    "import { MessageActions, RefActions } from '../../wrappers';",
+    'export default function Page() { return <><MessageActions /><RefActions /></>; }'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  for (const component of ['Unused', 'UnusedRM', 'UnusedFR']) {
+    const result = await client.text('who_renders', { component });
+    assert.match(result, /0 results.*\n# complete: indexed JSX paths$/, result);
+  }
+  for (const component of ['Leaf', 'Used']) {
+    const result = await client.text('who_renders', { component });
+    assert.match(result, /1 route.*\n\/  app\/page\.tsx:.*\n# complete: indexed JSX paths$/, result);
+  }
+  for (const [component, wrapper] of [['PureMessageActions', 'MessageActions'], ['PureRefActions', 'RefActions']]) {
+    const result = await client.text('who_renders', { component });
+    assert.match(result, /2 routes/, result);
+    assert.match(result, new RegExp(`^/  app/page\\.tsx:.* via ${wrapper}$`, 'm'), result);
+    assert.match(result, new RegExp(`^/chat  app/chat/page\\.tsx:.* via ${wrapper}$`, 'm'), result);
+    assert.match(result, /# complete: indexed JSX paths$/, result);
+  }
+  const registry = await client.text('who_renders', { component: 'PureOpaque' });
+  assert.match(registry, /0 results.*\n# partial: rendered through a dynamic reference$/, registry);
+});
+
+test('schema aliases consumed by zod inference are indexed as constants', async t => {
+  const root = temporary(t);
+  write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');
+  write(root, 'app/page.tsx', 'export default function Page() { return <main />; }');
+  write(root, 'schemas.ts', [
+    "import { z } from 'zod';",
+    "import { ZCreateWorkflowInput } from '@example/workflows';",
+    'export const ZMcpCreateWorkflowInput = ZCreateWorkflowInput;',
+    'export type Input = z.infer<typeof ZMcpCreateWorkflowInput>;',
+    'export const args = { inputSchema: ZMcpCreateWorkflowInput };'
+  ].join('\n'));
+  await generate(root);
+  const client = await openMcp(t, root);
+  const search = await client.text('search', { text: 'ZMcpCreateWorkflowInput' });
+  assert.match(search, /^constant schemas\.ts:3#ZMcpCreateWorkflowInput/m);
+  assert.doesNotMatch(search, /^component /m);
+  const index = JSON.parse(fs.readFileSync(cachePath(root, indexFile), 'utf8'));
+  const schema = index.symbols.find(symbol => symbol.name === 'ZMcpCreateWorkflowInput');
+  assert.equal(schema.kind, 'constant');
+  assert.ok(!index.dynamicRenderComponents?.includes(schema.id));
+});
+
+test('who_renders keeps the same rows when a secondary truncation reason exceeds the byte budget', async t => {
+  const root = temporary(t);
+  const index = emptyIndex();
+  index.symbols.push(
+    { id: 1, name: 'Static', file: 'target.tsx', line: 1, kind: 'component' },
+    { id: 2, name: 'Opaque', file: 'target.tsx', line: 2, kind: 'component' }
+  );
+  index.dynamicRenderComponents = [2];
+  for (let i = 0; i < 40; i++) {
+    const id = i + 3;
+    const name = String(i).padStart(2, '0');
+    const file = `app/${'x'.repeat(199)}/${name}/page.tsx`;
+    index.symbols.push({ id, name: 'Page', file, line: 1, kind: 'component' });
+    index.routes.push({ id, kind: 'page', url: `/${name}`, file, component: id });
+    index.renderEdges.push([id, 1, 1, 0], [id, 2, 1, 0]);
+  }
+  saveIndex(root, index);
+  const client = await openMcp(t, root);
+  const plain = await client.text('who_renders', { component: 'Static' });
+  const dynamic = await client.text('who_renders', { component: 'Opaque' });
+  assert.match(plain, /40 routes, showing 25/);
+  assert.equal(dynamic, plain.replace('#Static', '#Opaque'));
+  assert.ok(Buffer.byteLength(dynamic) <= 6000);
+  const short = await client.text('who_renders', { component: 'Opaque', limit: 1 });
+  assert.match(short, /# partial: output truncated; rendered through a dynamic reference$/);
+});
+
 test('wrappers list rendered providers in chain order for each branch', async t => {
   const root = temporary(t);
   write(root, 'tsconfig.json', '{"compilerOptions":{"jsx":"preserve"}}');

@@ -3,7 +3,8 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, QUERY_INDEX_REVISION, isTestFile as testFile, renderSiteKey,
+import { AI_SDK_TRANSPORT, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+  isTestFile as testFile, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, annotatedRow, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -209,6 +210,7 @@ export class QueryEngine {
   private symbols: Map<number, SymbolEntry>;
   private names: Map<string, SymbolEntry[]>;
   private incoming: Map<number, Edge[]>;
+  private dynamicRenderComponents: Set<number>;
   private references: Map<number, Reference[]>;
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean }[]>();
@@ -220,6 +222,7 @@ export class QueryEngine {
     this.symbols = new Map(index.symbols.map(symbol => [symbol.id, symbol]));
     this.names = group(index.symbols, symbol => symbol.name);
     this.incoming = group(index.renderEdges, edge => edge[1]);
+    this.dynamicRenderComponents = new Set(index.dynamicRenderComponents);
     for (const edges of this.incoming.values()) edges.sort((a, b) => {
       const left = this.symbols.get(a[0]);
       const right = this.symbols.get(b[0]);
@@ -389,6 +392,7 @@ export class QueryEngine {
     const reached = new Map<number, { route: Route; layout: boolean; chain: string[]; conditional: boolean;
       possible: boolean; depth: number; slots: string[]; issue?: string }>();
     let directIssue: string | undefined;
+    let dynamicReference = false;
     const trace = (only?: Route) => {
       const conditions = only && this.index.pagesRenderConditions?.[only.id];
       const pending = [{ id: symbol.id, chain: [] as string[], wrapper: false, conditional: false, possible: false,
@@ -398,12 +402,13 @@ export class QueryEngine {
         const entry = pending[i];
         if (visited.has(entry.id)) continue;
         visited.add(entry.id);
+        dynamicReference ||= this.dynamicRenderComponents.has(entry.id);
         for (const { route, layout } of this.pageRoots.get(entry.id) ?? []) {
           if (!entry.depth || only && route !== only) continue;
           const previous = reached.get(route.id);
           if (!previous || (previous.layout && !layout)) reached.set(route.id, { ...entry, route, layout: layout || entry.wrapper });
         }
-        for (const [from, to, line, conditional, wrapper, possible, detail, site] of this.incoming.get(entry.id) ?? []) {
+        for (const [from, to, line, conditional, wrapper, possible, detail, site, file] of this.incoming.get(entry.id) ?? []) {
           if (expired()) break;
           if (visited.has(from)) continue;
           const decision = conditions?.[renderSiteKey(from, to, line)];
@@ -413,10 +418,10 @@ export class QueryEngine {
           pending.push({
             id: from, chain: parent ? [parent.name, ...entry.chain].slice(-8) : entry.chain,
             depth: entry.depth + 1, wrapper: entry.wrapper || !!wrapper,
-            conditional: entry.conditional || !!conditional || decision === 'conditional' || !!(render?.conditions?.length || render?.lists?.length),
+            conditional: entry.conditional || !!conditional || decision === 'conditional' || !!render?.conditions?.length,
             possible: entry.possible || !!possible || decision === 'possible',
             slots: detail ? [detail, ...entry.slots] : entry.slots,
-            issue: entry.issue ?? (possible && detail ? `JSX prop render untraced (${location(this.symbols.get(from)?.file ?? symbol.file, line)})` : undefined)
+            issue: entry.issue ?? (possible && detail ? `${renderIssue(detail)} (${location(file ?? parent?.file ?? symbol.file, line)})` : undefined)
           });
         }
       }
@@ -427,7 +432,7 @@ export class QueryEngine {
       reached.delete(route.id);
       trace(route);
     }
-    const rows = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
+    const rows: Row[] = [...reached.values()].sort((a, b) => byRoute(a.route, b.route)).map(entry => {
       const { route, depth, layout, conditional, possible, slots } = entry;
       const chain = slots.length ? entry.chain : entry.chain.slice(-2);
       const fileLabel = location(route.file, route.line ?? 1);
@@ -435,9 +440,13 @@ export class QueryEngine {
       const label = `${url}  ${fileLabel}`;
       const via = (depth <= 2 || slots.length > 0) && ((layout && route.layouts?.some(id => this.symbols.get(id)?.name === chain[0])) ||
         chain[0] === this.symbols.get(route.component ?? 0)?.name) ? chain.slice(1) : chain;
-      return { ...row(`${label}  depth ${depth}${via.length ? ' via ' + via.join(' > ') : ''}` +
-        (slots.length ? ` [${slots.join('; ')}]` : '') + (layout ? ' [via layout]' : '') +
-        (conditional ? ' [cond]' : '') + (possible ? ' [possible]' : '') + flagTest(route.file), route.file), pathEnd: label.length };
+      return {
+        ...row(`${label}  depth ${depth}`, route.file),
+        pathEnd: label.length,
+        context: (via.length ? ' via ' + via.join(' > ') : '') + (slots.length ? ` [${slots.join('; ')}]` : ''),
+        suffix: (layout ? ' [via layout]' : '') + (conditional ? ' [cond]' : '') +
+          (possible ? ' [possible]' : '') + flagTest(route.file)
+      };
     });
     const count = `${rows.length} ${rows.length === 1 ? 'route' : 'routes'}`;
     if (direct) {
@@ -448,10 +457,10 @@ export class QueryEngine {
         const parent = this.symbols.get(from);
         const file = siteFile ?? parent?.file ?? this.pageRoots.get(from)?.[0]?.route.file;
         if (!file) continue;
-        if (possible && detail) directIssue ??= `JSX prop render untraced (${location(file, line)})`;
+        if (possible && detail) directIssue ??= `${renderIssue(detail)} (${location(file, line)})`;
         const render = site ? this.index.renderEvidence?.[site] : undefined;
         const key = render && site ? site : String(from);
-        if (line < (parents.get(key)?.line ?? Infinity)) parents.set(key, { name: parent?.name ?? symbol.name, file, line, conditional: conditional || Number(!!(render?.conditions?.length || render?.lists?.length)), possible, render });
+        if (line < (parents.get(key)?.line ?? Infinity)) parents.set(key, { name: parent?.name ?? symbol.name, file, line, conditional: conditional || Number(!!render?.conditions?.length), possible, render });
       }
       for (const { name, file, line, conditional, possible, render } of [...parents.values()].sort((a, b) => compare(a.file, b.file) || a.line - b.line)) {
         const label = `direct ${location(file, line)}#${name}`;
@@ -464,11 +473,17 @@ export class QueryEngine {
     const unresolvedAppSlot = Object.values(this.index.pagesWrapperIssues ?? {}).flat().find(issue =>
       issue.startsWith('custom App ') || issue.startsWith('page slot unresolved in ') || issue.startsWith('unresolved page property ') &&
       !issue.endsWith(' in wrapper predicate'));
+    const unresolvedLookup = !reached.size && this.index.renderValueUses?.[symbol.id] ?
+      Object.values(this.index.renderLookupIssues ?? {})[0] : undefined;
     return { rows, count: rows.length ? count + directLabel : undefined,
       partial: directIssue ?? [...reached.values()].find(entry => entry.issue)?.issue ??
+        (dynamicReference ? unresolvedLookup ?? 'rendered through a dynamic reference' : undefined) ??
+        (this.index.queryRevision !== undefined && this.index.queryRevision < QUERY_INDEX_REVISION ? 'regenerate legacy index' : undefined) ??
         [...reached.values()].flatMap(({ route }) => this.index.pagesWrapperIssues?.[route.id] ?? [])[0] ??
         unresolvedAppSlot ??
-        (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) };
+        (!reached.size ? Object.values(this.index.pagesWrapperIssues ?? {})[0]?.[0] : undefined) ??
+        unresolvedLookup ??
+        (this.index.schema === INDEX_SCHEMA && this.index.graphRevision !== GRAPH_INDEX_REVISION ? 'regenerate index for component lookup coverage' : undefined) };
   }
 
   private wrappers(route: Route, includeExternal: boolean, expired: () => boolean): Result {
@@ -644,7 +659,7 @@ export class QueryEngine {
       const generated = generatedFile(fetch.file);
       if (generated) generatedFiles.add(fetch.file);
       const via = fetch.via === 'SWR key' && fetch.method === '?' ? 'SWR mutate' : fetch.via;
-      const legacyTransport = via === AI_SDK_TRANSPORT && this.index.queryRevision !== QUERY_INDEX_REVISION;
+      const legacyTransport = via === AI_SDK_TRANSPORT && (this.index.queryRevision ?? 0) < TRANSPORT_QUERY_REVISION;
       const method = legacyTransport ? '?' : fetch.method;
       const override = via === AI_SDK_TRANSPORT && (fetch.transportOverride || legacyTransport);
       transportOverride ||= override;
@@ -990,12 +1005,15 @@ export class QueryEngine {
     const notesFirst = tool === 'wrappers';
     const renderedRows: Row[] = [];
     let shortened = false;
-    const renderRow = (entry: Row, annotation = false) => {
-      const suffix = entry.files.some(stale) ? ' [stale]' : '';
-      const text = shorten(entry.text, entry.pathEnd ?? 0, 400 - bytes(suffix));
-      if (!annotation) shortened ||= text !== oneLine(entry.text);
-      // A path longer than the hard line cap cannot be represented intact.
-      return text === undefined ? [] : [{ ...entry, text: text + suffix, annotation: text === oneLine(entry.text) ? entry.annotation : undefined }];
+    const renderRow = (entry: Row, evidence = false) => {
+      const suffix = (entry.suffix ?? '') + (entry.files.some(stale) ? ' [stale]' : '');
+      const cap = 400 - bytes(suffix);
+      const text = shorten(entry.text, entry.pathEnd ?? 0, cap);
+      const intact = text === oneLine(entry.text);
+      if (!evidence) shortened ||= !intact;
+      if (text === undefined) return [];
+      const context = entry.context ? shorten(entry.context, 0, cap - bytes(text)) ?? '' : '';
+      return [{ ...entry, text: text + context + suffix, annotation: intact ? entry.annotation : undefined }];
     };
     let resultBytes = 0;
     for (const entry of result.rows) {
@@ -1027,6 +1045,8 @@ export class QueryEngine {
     const outputCap = tool === 'impact' ? totalOutputBytes - omissionBytes : graphOutputBytes;
     let shown = renderedRows.length;
     let noteCount = notes.length;
+    const truncation = 'output truncated';
+    const truncationWithReason = result.partial ? `${truncation}; ${result.partial}` : truncation;
     for (;;) {
       const visible = renderedRows.slice(0, shown);
       const extras = notes.slice(0, noteCount);
@@ -1041,8 +1061,7 @@ export class QueryEngine {
         limitHint(args, result.rows.length, cli, legacyKind(name) === 'search' ? 'kind' : 'filter', result.suggestedFilter)})` : '';
       const truncated = omitted || shortened || tool !== 'impact' && noteCount < (result.notes?.length ?? 0);
       const reason = expired() ? 'timed out' : ambiguous ? 'ambiguous target' :
-        staleCount || snapshotStale ? 'stale index' : truncated ?
-          ['output truncated', result.partial].filter(Boolean).join('; ') :
+        staleCount || snapshotStale ? 'stale index' : truncated ? truncationWithReason :
         !this.index.coverage ? 'regenerate legacy index' : result.partial ??
         (tool !== 'search' && !result.targets ? 'target unresolved' : undefined);
       const scope = result.scope ?? {
@@ -1052,8 +1071,12 @@ export class QueryEngine {
         path: 'indexed directed edges', changes: 'git diff and indexed impacts'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
-      const output = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
-        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), coverage].join('\n');
+      const body = [header, ...(notesFirst ? extras : []).map(entry => entry.text),
+        ...visible.map(entry => entry.text), ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : [])].join('\n');
+      let footer = coverage;
+      if (tool === 'who_renders' && reason === truncationWithReason &&
+          bytes(body) + 1 + bytes(footer) > outputCap) footer = `# partial: ${truncation}`;
+      const output = `${body}\n${footer}`;
       const outputBytes = bytes(output);
       if (outputBytes <= outputCap) {
         if (!evidenceTotal) return output;
@@ -1089,7 +1112,7 @@ export class QueryEngine {
         const standalone = evidenceLines(result.evidence ?? []);
         const evidenceNote = evidenceTotal > evidenceShown ? [omissionNote(evidenceTotal - evidenceShown)] : [];
         return [header, ...(notesFirst ? extras : []).map(entry => entry.text), ...withEvidence, ...standalone,
-          ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), ...evidenceNote, coverage].join('\n');
+          ...(notesFirst ? [] : extras).map(entry => entry.text), ...(more ? [more] : []), ...evidenceNote, footer].join('\n');
       }
       if (noteCount) noteCount--;
       else shown--;

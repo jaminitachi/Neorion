@@ -2155,7 +2155,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
         if (usesHttpLibrary) constructors.push(node);
       } else if (index && (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node) ||
           Node.isTemplateExpression(node) || addition(node))) literals.push(node);
-    }, { wrapNode });
+    }, { filterRaw: wrapNode });
     for (const constructor of constructors) collectRequest(constructor);
   }
   for (const node of literals) {
