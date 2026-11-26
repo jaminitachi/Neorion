@@ -4,3 +4,7 @@ send   components/chat/message-actions.tsx:64 handleUpvote ? route literal [ment
 send   components/chat/message-actions.tsx:92 handleDownvote PATCH fetch [partial url]
 send   components/chat/message-actions.tsx:109 handleDownvote ? route literal [mention] [partial url]
 send   hooks/use-active-chat.tsx:249 ActiveChatProvider GET SWR key [partial url]
+unresolved  components/chat/message-actions.tsx:59 handleUpvote
+unresolved  components/chat/message-actions.tsx:104 handleDownvote
+  event1  components/chat/message-actions.tsx:180 handleUpvote via onClick <Action>
+  event1  components/chat/message-actions.tsx:190 handleDownvote via onClick <Action>
