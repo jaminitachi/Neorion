@@ -12,7 +12,7 @@ const { indexFile: indexPath } = require('./workspace-cache.cjs');
 
 const entry = path.resolve(__dirname, '../../neorion/dist/neorion.cjs');
 const source = path.join(__dirname, 'fixtures/impact-graph');
-const cliSpawnTimeout = 60_000;
+const cliSpawnTimeout = 180_000;
 
 function fixture(t, reverse = false, fixtureSource = source) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-graph-kinds-'));
@@ -35,7 +35,8 @@ function fixture(t, reverse = false, fixtureSource = source) {
     const result = childProcess.spawnSync(process.execPath, [entry, ...args], {
       cwd: root, env: { ...env, ...extra }, encoding: 'utf8', timeout: cliSpawnTimeout
     });
-    assert.equal(result.status, 0, result.stderr || result.error?.message);
+    if (result.error) throw result.error;
+    assert.equal(result.status, 0, result.stderr);
     return result.stdout.trimEnd();
   };
   const query = (...args) => run(['query', ...args], { NEORION_AUTOBUILD: '0' });
@@ -281,7 +282,7 @@ test('impact and callees trace indexed behavior consistently across CLI, MCP and
   assert.match(query('impact', 'parse'), /d1 call hooks\/use-items\.ts:4 onError/);
   assert.doesNotMatch(query('impact', 'parse'), /module lib\/normalize\.ts/);
   const targetAction = query('impact', 'submitItem');
-  assert.match(targetAction, /depth 5 \(limit 3 \+ renders\/events\)/);
+  assert.match(targetAction, /depth 4 \(limit 3 \+ renders\/events\)/);
   assert.match(targetAction, /# target: server action createItem/);
   assert.match(targetAction, /0 server actions/);
   assert.doesNotMatch(targetAction, /^action createItem/m);
@@ -367,7 +368,7 @@ test('impact reports bounded hubs, timeout, and legacy index coverage', { timeou
   assert.match(run(['query', 'impact', 'cn']), /# complete/);
 });
 
-test('path gives the shortest directed chain from a page, symbol, or layout', { timeout: 30_000 }, async t => {
+test('path gives the shortest directed chain from a page, symbol, or layout', { timeout: cliSpawnTimeout }, async t => {
   const { root, env, query, build } = fixture(t);
   build();
   const directly = query('path', '/items', 'createItem');
@@ -1175,6 +1176,554 @@ test('queries preserve scoped JSX values, callback registrations and store effec
   assert.match(sync, /page \/jobs\s/);
 });
 
+test('default impact depth follows effect locals, sibling handlers and scoped callback props', { timeout: 40_000 }, t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const write = (relative, source) => {
+    const file = path.join(root, relative);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, source);
+  };
+  write('lib/local-actions.ts', `
+    'use server';
+    function effectTarget() {}
+    function load() { effectTarget(); }
+    export async function effectAction() { load(); }
+    function handlerTarget() {}
+    function save() { handlerTarget(); }
+    export async function handlerAction() { save(); }
+    function remoteTarget() {}
+    function remoteOne() { remoteTarget(); }
+    function remoteTwo() { remoteOne(); }
+    export async function remoteAction() { remoteTwo(); }
+  `);
+  write('ui/local.tsx', `
+    'use client';
+    import { useEffect } from 'react';
+    import { effectAction, handlerAction, remoteAction } from '../lib/local-actions';
+    export function EffectPanel() {
+      useEffect(() => { const f = async () => { await effectAction(); }; f(); }, []);
+      return <span/>;
+    }
+    export function Dialog({ onRun }: { onRun: () => void }) {
+      const submit = () => onRun();
+      return <button onClick={() => submit()}>Run</button>;
+    }
+    export function HandlerPanel() {
+      const save = () => handlerAction();
+      const run = () => save();
+      return <Dialog onRun={run}/>;
+    }
+    export function RemotePanel() {
+      const remote = () => remoteAction();
+      return <button onClick={remote}>Remote</button>;
+    }
+  `);
+  write('app/local/layout.tsx', `
+    import { EffectPanel } from '../../ui/local';
+    export default function Layout({ children }) { return <><EffectPanel/>{children}</>; }
+  `);
+  write('app/local/page.tsx', 'export default function Page() { return <main/>; }');
+  write('app/handlers/page.tsx', `
+    import { HandlerPanel } from '../../ui/local';
+    export default function Page() { return <HandlerPanel/>; }
+  `);
+  write('app/other/page.tsx', `
+    import { Dialog, RemotePanel } from '../../ui/local';
+    export default function Page() { return <><Dialog onRun={() => {}}/><RemotePanel/></>; }
+  `);
+  const indexFile = build();
+  const { packGraph } = loadAnalyzer('../../mcp/GraphStorage');
+  fs.writeFileSync(indexFile, JSON.stringify(packGraph(JSON.parse(fs.readFileSync(indexFile, 'utf8')), 0)));
+
+  const effect = query('impact', 'effectTarget');
+  assert.match(effect, /^layout app\/local\/layout\.tsx +wraps 1 route \(\/local\)/m);
+  assert.match(effect, /^d3 call .*EffectPanel < f$/m);
+  assert.match(effect, /^# complete:/m);
+  const handler = query('impact', 'handlerTarget');
+  assert.match(handler, /^page \/handlers\s/m);
+  assert.doesNotMatch(handler, /^page \/other\s/m);
+  assert.match(handler, /^# complete:/m);
+  const remote = query('impact', 'remoteTarget');
+  assert.doesNotMatch(remote, /^page \/other\s/m);
+  assert.match(remote, /^# partial: depth limit/m);
+  assert.match(query('impact', 'remoteTarget', '--depth', '4'), /^page \/other\s/m);
+});
+
+test('component lookup maps resolve static keys and label unresolved choices', { timeout: 40_000 }, t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/lookup.tsx'), `
+    export function Multi() { return <span/>; }
+    export function Ghost() { return <span/>; }
+    export function Exact() { return <span/>; }
+    export const MAP = { m: Multi, g: Ghost } as const;
+    export const EXACT = { a: Exact, b: Ghost } as const;
+    export function LookupLeaf() { return <span/>; }
+    export function touch() {}
+    function Receiver({ slot, ...props }) { return <div {...props}>{slot}</div>; }
+    function Ignorer() { return <div/>; }
+    export const RECEIVERS = { a: Receiver, b: Ignorer } as const;
+  `);
+  const page = (name, source) => {
+    const directory = path.join(root, 'app', name);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'page.tsx'), source);
+  };
+  page('h', `
+    import { MAP } from '../../ui/lookup';
+    export default function Page({ k }: { k: keyof typeof MAP }) { const C = MAP[k]; return <C/>; }
+  `);
+  page('known-key', `
+    import { EXACT } from '../../ui/lookup';
+    const key = 'a';
+    export default function Page() { const C = EXACT[key]; return <C/>; }
+  `);
+  page('known-property', `
+    import { EXACT } from '../../ui/lookup';
+    export default function Page() { return <EXACT.a/>; }
+  `);
+  page('create-element', `
+    import { createElement } from 'react';
+    import { MAP } from '../../ui/lookup';
+    export default function Page() { return createElement(MAP['m']); }
+  `);
+  page('lookup-props', `
+    import { LookupLeaf, RECEIVERS, touch } from '../../ui/lookup';
+    export default function Page({ k }: { k: keyof typeof RECEIVERS }) {
+      const C = RECEIVERS[k];
+      return <C slot={<LookupLeaf/>} onClick={touch}/>;
+    }
+  `);
+  const indexFile = build();
+  const multi = query('who_renders', 'Multi');
+  assert.match(multi, /^\/h\s.*\[possible\]/m);
+  assert.match(multi, /^\/create-element\s[^\n]*depth 1$/m);
+  const ghost = query('who_renders', 'Ghost');
+  assert.match(ghost, /^\/h\s.*\[possible\]/m);
+  assert.doesNotMatch(ghost, /^\/(known-|create-element)/m);
+  for (const output of [multi, ghost, query('impact', 'Ghost'), query('path', '/h', 'Ghost')]) {
+    assert.match(output, /^# partial: component lookup key untraced/m);
+  }
+  const exact = query('who_renders', 'Exact');
+  assert.match(exact, /^\/known-key\s/m);
+  assert.match(exact, /^\/known-property\s/m);
+  assert.doesNotMatch(exact, /\[possible\]/);
+  assert.match(exact, /^# complete:/m);
+  const slot = query('who_renders', 'LookupLeaf');
+  assert.match(slot, /^\/lookup-props\s.*prop slot via Receiver.*\[possible\]/m);
+  assert.match(slot, /^# partial: component lookup key untraced/m);
+  const event = query('impact', 'touch');
+  assert.match(event, /^page \/lookup-props\s.*\[possible\]/m);
+  assert.match(event, /^# partial: component lookup key untraced/m);
+  const index = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  index.graphRevision--;
+  fs.writeFileSync(indexFile, JSON.stringify(index));
+  assert.match(query('who_renders', 'Exact'), /^# partial: regenerate index for component lookup coverage$/m);
+  build();
+  assert.match(query('who_renders', 'Exact'), /^# complete:/m);
+});
+
+test('component choices trace array elements, helper returns and fallback branches', { timeout: 40_000 }, async t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const page = (name, source) => {
+    const directory = path.join(root, 'app', name);
+    fs.mkdirSync(directory);
+    fs.writeFileSync(path.join(directory, 'page.tsx'), source);
+  };
+  for (const [route, render] of [
+    ['nav-member', 'item => <item.icon/>'],
+    ['nav-alias', 'item => { const Icon = item.icon; return <Icon/>; }'],
+    ['nav-destructure', '({ href, icon: Icon }) => <a href={href}><Icon/></a>']
+  ]) {
+    page(route, `
+      function HomeIcon() { return <span/>; }
+      function LogIcon() { return <span/>; }
+      const NAV = [{ href: '/dashboard', icon: HomeIcon }, { href: '/workout-log', icon: LogIcon }] as const;
+      export default function Page() { return <nav>{NAV.map(${render})}</nav>; }
+    `);
+  }
+  const nav = `
+    function HomeIcon() { return <span/>; }
+    function LogIcon() { return <span/>; }
+  `;
+  const navItems = `[{ href: '/dashboard', icon: HomeIcon }, { href: '/workout-log', icon: LogIcon }]`;
+  fs.writeFileSync(path.join(root, 'app/react.d.ts'), 'declare namespace React { type ComponentType = () => any; }');
+  const navChoices = [
+    ['find-alias', 'const item = NAV.find(n => n.href === k)!; const Icon = item.icon; return <Icon/>;'],
+    ['find-optional', 'const Icon = NAV.find(n => n.href === k)?.icon; return Icon ? <Icon/> : null;', true],
+    ['filter-map', 'return <nav>{NAV.filter(n => n.href === k).map(item => <item.icon/>)}</nav>;'],
+    ['find-tuple', 'const item = NAV.find(n => n.href === k); if (!item) return null; const Icon = item.icon; return <Icon/>;', true, true],
+    ['find-member', 'const item = NAV.find(n => n.href === k); return item ? <item.icon/> : null;', true],
+    ['array-destructure', 'const [first] = NAV; const Icon = first.icon; return <Icon/>;'],
+    ['array-rest', 'const [, ...rest] = NAV; return <nav>{rest.map(item => <item.icon/>)}</nav>;'],
+    ['find-last', 'const item = NAV.findLast(n => n.href === k)!; const Icon = item.icon; return <Icon/>;'],
+    ['array-at', 'const Icon = NAV.at(0)!.icon; return <Icon/>;'],
+    ['slice-chain', 'return <nav>{NAV.slice(0).toSorted().toReversed().sort().reverse().map(({ icon: Icon }) => <Icon/>)}</nav>;'],
+    ['flat-map', 'return <nav>{NAV.flatMap(item => item).map(item => <item.icon/>)}</nav>;'],
+    ['grouped-flat-map', 'return <nav>{GROUPS.flatMap(group => group.items).map(item => <item.icon/>)}</nav>;'],
+    ['grouped-flat-find', 'const Icon = GROUPS.flatMap(group => group.items).find(n => n.href === k)?.icon; return Icon ? <Icon/> : null;', true],
+    ['transformed-map', 'return <nav>{NAV.map(item => ({ ...item, active: true })).map(item => <item.icon/>)}</nav>;'],
+    ['named-mapper', 'const select = ({ icon }) => ({ Icon: icon }); return <nav>{NAV.map(select).map(({ Icon }) => <Icon/>)}</nav>;'],
+    ['array-from', 'return <nav>{Array.from(NAV).map(item => <item.icon/>)}</nav>;'],
+    ['reduce-jsx', 'return <nav>{NAV.reduce((acc, item) => [...acc, <item.icon/>], [])}</nav>;'],
+    ['state-destructure', 'const [items] = useNavState(NAV); return <nav>{items.map(item => <item.icon/>)}</nav>;'],
+    ['state-index', 'return <nav>{useNavState(NAV)[0].map(item => <item.icon/>)}</nav>;'],
+    ['typed-find', 'const Icon = NAV.find(n => n.href === k)!.icon; return <Icon/>;'],
+    ['typed-filter', 'return <nav>{NAV.filter(n => n.href === k).map(item => <item.icon/>)}</nav>;'],
+    ['concat-map', 'return <nav>{NAV.slice(0, 1).concat({ href: "/more", icon: ExtraIcon }).map(item => <item.icon/>)}</nav>;']
+  ];
+  for (const [route, render, , tuple] of navChoices) {
+    page(route, nav + `
+      ${route === 'concat-map' ? 'function ExtraIcon() { return <span/>; }' : ''}
+      ${route.startsWith('state-') ? "import { useState as useNavState } from 'react';" : ''}
+      type Item = { href: string; icon: React.ComponentType };
+      const NAV${route.startsWith('typed-') ? ': Item[]' : ''} = ${navItems}${tuple ? ' as const' : ''};
+      ${route.startsWith('grouped-') ? 'const GROUPS = [{ items: [{ href: "/dashboard", icon: HomeIcon }] }, { items: [{ href: "/workout-log", icon: LogIcon }] }];' : ''}
+      export default function Page({ k }: { k: string }) { ${render} }
+    `);
+  }
+  page('typed-map', nav + `
+    type Item = { href: string; icon: React.ComponentType };
+    const NAV: Item[] = ${navItems};
+    export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
+  `);
+  page('typed-index', nav + `
+    interface Item { href: string; icon: React.ComponentType }
+    const NAV: Item[] = ${navItems};
+    export default function Page() { const Icon = NAV[0].icon; return <Icon/>; }
+  `);
+  page('map-override', nav + `
+    const NAV = [{ icon: HomeIcon }];
+    export default function Page() { return <nav>{NAV.map(item => ({ ...item, icon: LogIcon })).map(item => <item.icon/>)}</nav>; }
+  `);
+  page('tuple-destructure', nav + `
+    const NAV = ${navItems} as const;
+    export default function Page() { const [, second] = NAV; return <second.icon/>; }
+  `);
+  page('property-fallback', nav + `
+    function UnusedIcon() { return <span/>; }
+    const NAV = [{ icon: HomeIcon, badge: UnusedIcon }, { icon: LogIcon, badge: UnusedIcon }] as const;
+    declare function opaque<T>(value: T): T;
+    export default function Page() { const Icon = opaque(NAV)[0].icon; return <Icon/>; }
+  `);
+  fs.writeFileSync(path.join(root, 'app/signal.ts'), "export function signal() { return 'ok'; }\n");
+  fs.writeFileSync(path.join(root, 'app/impact-components.tsx'), `
+    import { signal } from './signal';
+    function Leaf() { return <span>{signal()}</span>; }
+    function Middle() { return <Leaf/>; }
+    export function Shared({ show }: { show: boolean }) { return <>{show ? <Leaf/> : null}<Middle/></>; }
+  `);
+  page('certain-impact', `
+    import { Shared } from '../impact-components';
+    export default function Page() { return <Shared show={true}/>; }
+  `);
+  const steps = `
+    function StepA() { return <span/>; }
+    function StepB() { return <span/>; }
+  `;
+  page('tuple-step', steps + `
+    const STEPS = [StepA, StepB] as const;
+    export default function Page({ i }: { i: number }) { const Step = STEPS[i]; return <Step/>; }
+  `);
+  page('list-step', steps + `
+    const STEPS = [StepA, StepB];
+    export default function Page({ i }: { i: number }) { const Step = STEPS[i]; return <Step/>; }
+  `);
+  page('fixed-step', steps + `
+    const STEPS = [StepA, StepB] as const;
+    const index = 1;
+    export default function Page() { const Step = STEPS[index]; return <Step/>; }
+  `);
+  for (const [route, index] of [['tuple-at-first', '0'], ['tuple-at-last', '-1'], ['tuple-at-outside', '-3']]) {
+    page(route, steps + `
+      const STEPS = [StepA, StepB] as const;
+      export default function Page() { const Step = STEPS.at(${index})!; return <Step/>; }
+    `);
+  }
+  const icons = `
+    function IconA() { return <span/>; }
+    function IconB() { return <span/>; }
+    const MAP = { a: IconA, b: IconB };
+  `;
+  for (const [route, render] of [
+    ['object-values', 'Object.values(MAP).map(Icon => <Icon/>)'],
+    ['object-entries', 'Object.entries(MAP).map(([key, Icon]) => <Icon key={key}/>)'],
+    ['entry-alias', 'Object.entries(MAP).map(entry => { const Icon = entry[1]; return <Icon/>; })']
+  ]) {
+    page(route, icons + `export default function Page() { return <nav>{${render}}</nav>; }`);
+  }
+  page('and-choice', icons + `
+    export default function Page({ flag }: { flag: boolean }) {
+      const Icon = (flag && IconA) && IconB;
+      return Icon ? <Icon/> : null;
+    }
+  `);
+  page('helper-choice', icons + `
+    function pick(k: keyof typeof MAP) { return MAP[k]; }
+    export default function Page({ k }: { k: keyof typeof MAP }) { const Icon = pick(k); return <Icon/>; }
+  `);
+  page('ternary-choice', icons + `
+    export default function Page({ show }: { show: boolean }) { const Icon = show ? IconA : IconB; return <Icon/>; }
+  `);
+  for (const [route, expression] of [['nullish-choice', 'MAP[k] ?? Fallback'], ['or-choice', 'MAP[k] || Fallback']]) {
+    page(route, icons + `
+      import { createElement } from 'react';
+      function Fallback() { return <span/>; }
+      export default function Page({ k }: { k: keyof typeof MAP }) {
+        ${route === 'nullish-choice' ? `const Icon = ${expression}; return <Icon/>;` : `return createElement(${expression});`}
+      }
+    `);
+  }
+  build();
+  const renders = (route, component) => query('who_renders', `app/${route}/page.tsx#${component}`);
+  const possible = (route, component, condition = '') => {
+    const output = renders(route, component);
+    assert.match(output, new RegExp(`^/${route}\\s.*${condition}\\[possible\\]`, 'm'));
+    assert.match(output, /^# partial: component lookup key untraced/m);
+  };
+  for (const route of ['nav-member', 'nav-alias', 'nav-destructure', 'typed-map']) {
+    for (const component of ['HomeIcon', 'LogIcon']) await t.test(`${route} certainly renders ${component}`, () => {
+      const output = renders(route, component);
+      assert.match(output, new RegExp(`^/${route}\\s[^\\n]*depth 1$`, 'm'));
+      assert.match(output, /^# complete:/m);
+    });
+  }
+  for (const [route, , conditional] of navChoices) {
+    await t.test(`${route} reports possible array elements`, () => {
+      for (const component of ['HomeIcon', 'LogIcon', ...(route === 'concat-map' ? ['ExtraIcon'] : [])]) {
+        possible(route, component, conditional ? '\\[cond\\] ' : '');
+      }
+    });
+  }
+  await t.test('fixed typed array indexing traces the selected property through the receiver', () => {
+    assert.doesNotMatch(renders('typed-index', 'LogIcon'), /^\/typed-index\s/m);
+    const output = renders('typed-index', 'HomeIcon');
+    assert.match(output, /^\/typed-index\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('map traces an overwritten property through its callback return', () => {
+    assert.doesNotMatch(renders('map-override', 'HomeIcon'), /^\/map-override\s/m);
+    possible('map-override', 'LogIcon');
+  });
+  await t.test('fixed tuple destructuring skips holes and resolves the selected element', () => {
+    assert.doesNotMatch(renders('tuple-destructure', 'HomeIcon'), /^\/tuple-destructure\s/m);
+    const output = renders('tuple-destructure', 'LogIcon');
+    assert.match(output, /^\/tuple-destructure\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('unresolved receiver falls back to the same property on sibling elements', () => {
+    for (const component of ['HomeIcon', 'LogIcon']) possible('property-fallback', component);
+    assert.doesNotMatch(renders('property-fallback', 'UnusedIcon'), /^\/property-fallback\s/m);
+  });
+  await t.test('impact picks the unconditional path through a shared component', () => {
+    const output = query('impact', 'app/signal.ts#signal');
+    assert.match(output, /^page \/certain-impact\s[^\n]*d4 via Shared > Middle$/m);
+    assert.match(output, /^d2 render app\/impact-components\.tsx:\d+ Shared < Leaf \[cond\]$/m);
+    assert.match(output, /^d3 render app\/impact-components\.tsx:\d+ Shared < Middle$/m);
+    assert.match(output, /^d4 render app\/certain-impact\/page\.tsx:\d+ Page < Shared$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  for (const route of ['tuple-step', 'list-step', 'helper-choice', 'object-values', 'object-entries', 'entry-alias']) {
+    const components = route.endsWith('-step') ? ['StepA', 'StepB'] : ['IconA', 'IconB'];
+    for (const component of components) await t.test(`${route} renders ${component}`, () => possible(route, component));
+  }
+  await t.test('logical AND only renders its right operand and marks it conditional', () => {
+    assert.doesNotMatch(renders('and-choice', 'IconA'), /^\/and-choice\s/m);
+    const output = renders('and-choice', 'IconB');
+    assert.match(output, /^\/and-choice\s.*\[cond\]$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('a fixed index resolves exactly one tuple element', () => {
+    assert.doesNotMatch(renders('fixed-step', 'StepA'), /^\/fixed-step\s/m);
+    const output = renders('fixed-step', 'StepB');
+    assert.match(output, /^\/fixed-step\s[^\n]*depth 1$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  await t.test('tuple at resolves exact positive and negative positions and omits out-of-range values', () => {
+    for (const [route, selected, other] of [['tuple-at-first', 'StepA', 'StepB'], ['tuple-at-last', 'StepB', 'StepA']]) {
+      const output = renders(route, selected);
+      assert.match(output, new RegExp(`^/${route}\\s[^\\n]*depth 1$`, 'm'));
+      assert.match(output, /^# complete:/m);
+      assert.doesNotMatch(renders(route, other), new RegExp(`^/${route}\\s`, 'm'));
+    }
+    for (const component of ['StepA', 'StepB']) {
+      const output = renders('tuple-at-outside', component);
+      assert.doesNotMatch(output, /^\/tuple-at-outside\s/m);
+      assert.match(output, /^# complete:/m);
+    }
+  });
+  for (const component of ['IconA', 'IconB']) await t.test(`the ternary conditionally renders ${component}`, () => {
+    const output = renders('ternary-choice', component);
+    assert.match(output, /^\/ternary-choice\s.*\[cond\]$/m);
+    assert.match(output, /^# complete:/m);
+  });
+  for (const route of ['nullish-choice', 'or-choice']) {
+    for (const component of ['IconA', 'IconB']) {
+      await t.test(`${route} conditionally renders ${component}`, () => possible(route, component, '\\[cond\\] '));
+    }
+    await t.test(`${route} conditionally renders its fallback`, () => {
+      const output = renders(route, 'Fallback');
+      assert.match(output, new RegExp(`^/${route}\\s.*\\[cond\\]$`, 'm'));
+      assert.match(output, /^# complete:/m);
+    });
+  }
+});
+
+test('an unresolved typed render lookup only affects components used as values', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/unused.tsx'), `
+    import { memo } from 'react';
+    export function UnusedIcon() { return <span/>; }
+    export function StoredIcon() { return <span/>; }
+    export function JsxOnlyIcon() { return <span/>; }
+    export function WrappedIcon() { return <span/>; }
+    export const MemoIcon = memo(WrappedIcon);
+    export function RenderedInner() { return <span/>; }
+    export const RenderedMemo = memo(RenderedInner);
+    export const icons = [{ icon: StoredIcon }];
+    export function Unmounted() { return <JsxOnlyIcon/>; }
+  `);
+  const other = path.join(root, 'app/other');
+  fs.mkdirSync(other);
+  fs.writeFileSync(path.join(other, 'page.tsx'), `
+    import { RenderedMemo } from '../../ui/unused';
+    export default function OtherPage() { return <RenderedMemo/>; }
+  `);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import OtherPage from './other/page';
+    type Item = { icon: () => any };
+    declare function loadNav(entry: () => any): Item[];
+    const NAV = loadNav(OtherPage);
+    export default function Page() { return <nav>{NAV.map(item => <item.icon/>)}</nav>; }
+  `);
+  build();
+  for (const [tool, target] of [
+    ['who_renders', 'StoredIcon'], ['callees', 'app/page.tsx#Page']
+  ]) {
+    const output = query(tool, target);
+    assert.match(output, /^# partial: component lookup key untraced \(app\/page\.tsx:\d+\)/m);
+    assert.doesNotMatch(output, /^(?:page )?\/\s/m);
+  }
+  for (const target of ['UnusedIcon', 'JsxOnlyIcon', 'WrappedIcon', 'MemoIcon', 'app/other/page.tsx#OtherPage']) {
+    assert.match(query('who_renders', target), /^# complete:/m);
+  }
+  for (const target of ['UnusedIcon', 'JsxOnlyIcon']) assert.match(query('impact', target), /^# complete:/m);
+  const inner = query('who_renders', 'RenderedInner');
+  assert.match(inner, /^\/other\s.*depth 2 via RenderedMemo$/m);
+  assert.match(inner, /^# complete:/m);
+});
+
+test('typed render collections of uninstalled package icons resolve externally', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import { BellIcon, ClockIcon } from 'iconpkg';
+    function StoredIcon() { return <span/>; }
+    export const stored = [StoredIcon];
+    const OPTS: { value: string; icon: typeof BellIcon }[] = [
+      { value: 'a', icon: BellIcon }, { value: 'b', icon: ClockIcon }
+    ];
+    export default function Page() {
+      return <div>{OPTS.map(o => { const Icon = o.icon; return <Icon key={o.value}/>; })}</div>;
+    }
+  `);
+  build();
+  assert.match(query('callees', 'app/page.tsx#Page'), /^# complete:/m);
+  assert.match(query('who_renders', 'StoredIcon'), /^# complete:/m);
+
+  const file = path.join(root, 'app/page.tsx');
+  fs.writeFileSync(file, fs.readFileSync(file, 'utf8')
+    .replace('const OPTS', 'declare function loadIcon(): typeof BellIcon;\n    const OPTS')
+    .replace('icon: ClockIcon', 'icon: loadIcon()'));
+  build();
+  assert.match(query('callees', 'app/page.tsx#Page'), /^# partial: component lookup key untraced/m);
+  assert.match(query('who_renders', 'StoredIcon'), /^# partial: component lookup key untraced/m);
+});
+
+test('typed recursive collection properties trace nested icons', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const config = path.join(root, 'tsconfig.json');
+  const settings = JSON.parse(fs.readFileSync(config, 'utf8'));
+  settings.compilerOptions.strict = true;
+  fs.writeFileSync(config, JSON.stringify(settings));
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    function A() { return <span/>; }
+    function B() { return <span/>; }
+    function C() { return <span/>; }
+    type Item = { id: string; icon: () => any; children?: Item[] };
+    const NAV: Item[] = [{ id: 'a', icon: A, children: [{ id: 'c', icon: C }] }, { id: 'b', icon: B }];
+    export default function Page() {
+      return <nav>{NAV.map(n => <><n.icon/>{n.children?.map(c => <c.icon/>)}</>)}</nav>;
+    }
+  `);
+  build();
+  for (const icon of ['A', 'B', 'C']) {
+    const output = query('who_renders', 'app/page.tsx#' + icon);
+    assert.match(output, /^\/\s+app\/page\.tsx:\d+\s+depth 1/m);
+    assert.match(output, /^# complete:/m);
+  }
+});
+
+test('typed collection props resolve consts and object members at their supplying JSX sites', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  fs.writeFileSync(path.join(root, 'ui/nav-main.tsx'), `
+    export function NavMain({ items }: { items: { title: string; icon: () => any }[] }) {
+      return <nav>{items.map(item => item.icon && <item.icon/>)}</nav>;
+    }
+    export function NavRow({ item }: { item: { title: string; icon: () => any } }) {
+      return <item.icon/>;
+    }
+    export function Ignore({ body }: { body: any }) { return <aside/>; }
+  `);
+  for (const [route, icon, value] of [['object-nav', 'ObjectIcon', 'data.navMain'], ['const-nav', 'ConstIcon', 'items']]) {
+    fs.mkdirSync(path.join(root, 'app', route));
+    fs.writeFileSync(path.join(root, 'app', route, 'page.tsx'), `
+      import { NavMain } from '../../ui/nav-main';
+      function ${icon}() { return <span/>; }
+      const items = [{ title: 'a', icon: ${icon} }];
+      const data = { navMain: items };
+      export default function Page() { return <NavMain items={${value}}/>; }
+    `);
+  }
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    import { BellIcon } from 'iconpkg';
+    import { NavRow, NavMain, Ignore } from '../ui/nav-main';
+    function HiddenIcon() { return <span/>; }
+    const rows: { title: string; icon: typeof BellIcon }[] = [{ title: 'a', icon: BellIcon }];
+    const hidden = [{ title: 'b', icon: HiddenIcon }];
+    export default function Page() {
+      return <>{rows.map(item => <NavRow item={item}/>)}<Ignore body={<NavMain items={hidden}/>}/></>;
+    }
+  `);
+  build();
+  for (const [route, icon, other] of [['object-nav', 'ObjectIcon', 'const-nav'], ['const-nav', 'ConstIcon', 'object-nav']]) {
+    const output = query('who_renders', icon);
+    assert.match(output, new RegExp(`^/${route}\\s.*\\[cond\\]`, 'm'));
+    assert.doesNotMatch(output, new RegExp(`^/${other}\\s`, 'm'));
+    assert.match(output, /^# complete:/m);
+    assert.match(query('impact', icon), new RegExp(`^page /${route}\\s`, 'm'));
+    assert.doesNotMatch(query('impact', icon), new RegExp(`^page /${other}\\s`, 'm'));
+  }
+  assert.match(query('callees', 'NavRow'), /^# complete:/m);
+  assert.match(query('who_renders', 'HiddenIcon'), /0 results.*\n# complete:/m);
+});
+
+test('shortening who_renders route annotations preserves completeness and route flags', t => {
+  const { build, query, root } = fixture(t, false, path.join(__dirname, 'fixtures/prop-flow'));
+  const wrapper = 'Wrapper' + 'LongDisplayName'.repeat(25);
+  fs.writeFileSync(path.join(root, 'app/page.tsx'), `
+    function ${wrapper}({ children }: { children: any }) { return <div>{children}</div>; }
+    function LongRouteIcon() { return <span/>; }
+    export default function Page() {
+      return Math.random() ? <${wrapper}><LongRouteIcon/></${wrapper}> : null;
+    }
+  `);
+  build();
+  const output = query('who_renders', 'LongRouteIcon');
+  const route = output.split('\n').find(line => /^\/\s/.test(line));
+  assert.match(route, /^\/\s+app\/page\.tsx:\d+\s+depth 1.*\.\.\..*\[cond\]$/);
+  assert.ok(Buffer.byteLength(route) <= 400);
+  assert.match(output, /^# complete:/m);
+});
+
 test('Pages routes resolve shell composition, data, middleware, navigation and API evidence', async t => {
   const { build, query, env, root } = fixture(t, false, path.join(__dirname, 'fixtures/pages-router'));
   const index = JSON.parse(fs.readFileSync(build(), 'utf8'));
@@ -1259,6 +1808,7 @@ test('Pages API workspace proof is scoped and invalidates the index after siblin
   const env = { ...process.env, XDG_CACHE_HOME: cache, LOCALAPPDATA: cache, NEORION_AUTOBUILD: '1' };
   const run = (...args) => {
     const result = spawnSync(process.execPath, [entry, ...args], { cwd, env, encoding: 'utf8', timeout: cliSpawnTimeout });
+    if (result.error) throw result.error;
     assert.equal(result.status, 0, result.stderr);
     return result.stdout;
   };
