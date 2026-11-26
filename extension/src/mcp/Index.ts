@@ -5,7 +5,8 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 9;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const QUERY_INDEX_REVISION = 14;
+export const CALLBACK_QUERY_REVISION = 15;
+export const QUERY_INDEX_REVISION = CALLBACK_QUERY_REVISION;
 export const GRAPH_INDEX_REVISION = 18;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
@@ -60,6 +61,8 @@ export interface Wrapper {
 }
 
 export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true; callback?: true };
+export type CallbackCreation = [factory: number, file: string, line: number, invoked?: true];
+export type CallbackInvocation = [caller: number, file: string, line: number, event?: string, possible?: true];
 export type FlowCall = [from: number, to: number, file: string, line: number, detail: string, gates?: FlowGate[]];
 
 export interface FetchEntry {
@@ -79,6 +82,7 @@ export interface FetchEntry {
   partial?: boolean;
   dynamic?: boolean;
   propUrlUnknown?: true;
+  otherTemplateRoute?: string;
   uncertainty?: string;
   binding?: { file: string; line: number; name: string; supplier?: number; site: string };
   gates?: FlowGate[];
@@ -202,6 +206,8 @@ export interface QueryIndex {
   externalModules?: string[];
   flowCalls?: FlowCall[];
   callableOwners?: Record<number, number>;
+  callbackCreations?: Record<number, CallbackCreation[]>;
+  callbackInvocations?: Record<number, CallbackInvocation[]>;
   hasFlowCalls?: boolean;
   callGates?: Record<string, FlowGate[]>;
   flowIssues?: Record<number, { reason: string; gates: FlowGate[] }[]>;

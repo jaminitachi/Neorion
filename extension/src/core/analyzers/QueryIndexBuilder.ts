@@ -5,7 +5,7 @@ import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph'
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  isMiddlewareFile, isTestFile, lexicalOwner, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -110,6 +110,33 @@ function receiver(expression: Node) {
     expression = expression.getExpression();
   }
   if (Node.isIdentifier(expression)) return { root: expression, members };
+}
+
+// An object binding can select other members without ever taking the callback.
+function usesReturnedCallback(call: CallExpression, member: string | undefined) {
+  let value: Node = call;
+  let parent = value.getParent();
+  while (parent && wrappedExpression(parent) === value) {
+    value = parent;
+    parent = value.getParent();
+  }
+  if (Node.isExpressionStatement(parent)) return false;
+  if (member === undefined) return true;
+  if (Node.isVariableDeclaration(parent) && parent.getInitializer() === value) {
+    const binding = parent.getNameNode();
+    if (Node.isObjectBindingPattern(binding)) return binding.getElements().some(element => {
+      if (element.getDotDotDotToken()) return true;
+      const name = element.getPropertyNameNode() ?? element.getNameNode();
+      return Node.isIdentifier(name) ? name.getText() === member :
+        !Node.isStringLiteral(name) || name.getLiteralText() === member;
+    });
+  }
+  if (Node.isPropertyAccessExpression(parent) && parent.getExpression() === value) return parent.getName() === member;
+  if (Node.isElementAccessExpression(parent) && parent.getExpression() === value) {
+    const key = parent.getArgumentExpression();
+    if (Node.isStringLiteral(key)) return key.getLiteralText() === member;
+  }
+  return true;
 }
 
 function dynamicExport(node: Node) {
@@ -430,6 +457,23 @@ export class QueryIndexBuilder {
       byNode.set(fn, id);
       return id;
     };
+    const returnedBy = new Map<number, Map<number, Set<string | undefined>>>();
+    if (!historyOnly && this.fetches.length) for (const [binding, factory] of [...byNode]) {
+      const value = isFunction(binding) ? binding : constValue(binding);
+      if (!isFunction(value) || value.getSourceFile() !== binding.getSourceFile()) continue;
+      for (const { fn, member } of callableFlow.returnedCallbacks(value)) {
+        if (!fn.getAncestors().includes(value)) continue;
+        const callback = callableId(fn, index.symbols[factory - 1].name + ' (returned callback)');
+        if (callback === undefined || callback === factory) continue;
+        const callbacks = returnedBy.get(factory) ?? new Map<number, Set<string | undefined>>();
+        const members = callbacks.get(callback) ?? new Set<string | undefined>();
+        members.add(member);
+        callbacks.set(callback, members);
+        returnedBy.set(factory, callbacks);
+        ((index.callbackCreations ??= {})[callback] ??= []);
+      }
+    }
+
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
       detail: string; gates?: PropGate[]; lookup: boolean }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
@@ -441,6 +485,15 @@ export class QueryIndexBuilder {
       const bindings = flow.bindings(prop);
       return bindings.flatMap(({ value, gates }) => value ? callableFlow.resolve(value).map(target =>
         ({ ...target, gates, supplied: value })) : []);
+    };
+    const invokedReturns = new WeakMap<CallExpression, Set<number>>();
+    const recordInvocation = (id: number, factories: CallExpression[] | undefined) => {
+      if (index.callbackCreations?.[id] === undefined) return;
+      for (const factory of factories ?? []) {
+        const invoked = invokedReturns.get(factory) ?? new Set<number>();
+        invoked.add(id);
+        invokedReturns.set(factory, invoked);
+      }
     };
     const suppliedCallbacks = new Set<Node>();
     for (const file of files) {
@@ -475,10 +528,12 @@ export class QueryIndexBuilder {
           }
           const label = jsxLabel(site);
           const event = isFunction(value) ? name + ' ' + label : undefined;
-          for (const { fn, via, gates, supplied } of targets) {
+          for (const { fn, via, factories, gates, supplied } of targets) {
             const target = callableId(fn, event);
             if (supplied) suppliedCallbacks.add(supplied);
-            if (target !== undefined) eventSites.push({
+            if (target === undefined) continue;
+            if (delivery !== 'possible') recordInvocation(target, factories);
+            eventSites.push({
               site, attribute: node, target, detail: `${name} <${label}>${via.length ? ' via ' + via.join(' > ') : ''}`, gates,
               lookup: delivery === 'possible'
             });
@@ -499,14 +554,19 @@ export class QueryIndexBuilder {
         const bindings = flowDeclarations(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
             (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
-        if (expression === binding && bindings.some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
+        if (expression === binding && bindings.some(decl => {
+          const id = byNode.get(decl);
+          return id !== undefined && index.symbols[id - 1].kind !== 'constant' && !Node.isBindingElement(decl);
+        })) return;
         const targets = callableTargets(expression);
-        if (targets.length && expression !== binding && flowDeclarations(expression)
-          .some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
-        const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
+        const ordinaryMember = targets.length && expression !== binding && flowDeclarations(expression)
+          .some(decl => byNode.has(decl) && !Node.isBindingElement(decl));
+        const resolved = targets.flatMap(({ fn, via, factories, gates, supplied }) => {
           if (supplied) suppliedCallbacks.add(supplied);
           const id = callableId(fn);
-          return id === undefined ? [] : [{ id, via, gates }];
+          if (id === undefined) return [];
+          recordInvocation(id, factories);
+          return ordinaryMember ? [] : [{ id, via, gates }];
         });
         if (resolved.length) indirectCalls.set(node, resolved);
         else if (flow.read(expression)) dynamicCallSites.add(node);
@@ -626,8 +686,12 @@ export class QueryIndexBuilder {
         if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
       }
     }
-    for (const [from, to, file, line] of index.flowCalls ?? []) {
+    for (const [from, to, file, line, detail, gates] of index.flowCalls ?? []) {
       actionBySymbol.get(to)?.callers.push([file, line, from]);
+      if (index.callbackCreations?.[to] === undefined) continue;
+      const event = /^on[A-Z]/.test(detail) ? detail : undefined;
+      const possible = !!index.callIssues?.[gateKey(from, to, line)] || gates?.some(gate => gate.partial);
+      ((index.callbackInvocations ??= {})[to] ??= []).push([from, file, line, event, possible ? true : undefined]);
     }
     const mapArgument = (expression: Node, remaining = 6): string | undefined => {
       if (!remaining) return;
@@ -1087,6 +1151,11 @@ export class QueryIndexBuilder {
             if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
             if (Node.isCallExpression(node)) {
               recordCallSite(gateKey(from, id, line), node);
+              for (const [callback, members] of returnedBy.get(id) ?? []) {
+                if (lexicalOwner(index.callableOwners, callback) === lexicalOwner(index.callableOwners, from) ||
+                    ![...members].some(member => usesReturnedCallback(node, member))) continue;
+                index.callbackCreations![callback].push([id, relative, line, invokedReturns.get(node)?.has(callback) ? true : undefined]);
+              }
               if (refWrites.size) {
                 const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
                 if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');

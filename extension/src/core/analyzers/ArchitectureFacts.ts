@@ -2074,6 +2074,7 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
           const prop = directProp ?? embeddedProp;
           // Retain the static route pattern from a template with runtime path segments.
           const templateMatches = embeddedProp ? matchesFor(input) : undefined;
+          const templateRoute = templateMatches?.size === 1 ? templateMatches.values().next().value : undefined;
           const bindings = prop ? flow!.bindings(prop) : [];
           const candidates = prop && typeof input !== 'string' ? (bindings.length ? bindings : [{ gates: [] }]).flatMap(binding => {
             const values = 'value' in binding && binding.value ? urlTexts(binding.value) : undefined;
@@ -2129,6 +2130,10 @@ export function collectApiFacts(root: string, files: SourceFile[], routes: Route
                 method: method ?? (isSwr && !isSwrMutate ? 'GET' : '?'), url: route.path, via,
                 partial: partial || request.partial || unknown || undefined, dynamic, prop: binding,
                 propUrlUnknown: unknown && !binding ? true : undefined, propGates: gates,
+                // If the fixed path identifies a different endpoint, keep this
+                // wider prop match as URL evidence rather than a request.
+                otherTemplateRoute: unknown && !binding && templateRoute && !templateRoute.partial && !templateRoute.dynamic &&
+                  templateRoute.route.id !== route.id ? templateRoute.route.path : undefined,
                 transportOverride: request.override || undefined, possibleReconnect: sdkRequests && request.method === 'GET' ? true : undefined
               });
               if (!facts || isSwr || !mapFact) continue;

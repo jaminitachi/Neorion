@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { AI_SDK_TRANSPORT, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
+import { AI_SDK_TRANSPORT, CALLBACK_QUERY_REVISION, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   isTestFile as testFile, lexicalOwner, renderIssue, renderSiteKey,
   type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
@@ -275,7 +275,7 @@ export class QueryEngine {
     // Also reject links in an existing ancestor when the requested leaf is absent.
     for (let candidate = absolute; candidate !== boundary; candidate = path.dirname(candidate)) {
       try {
-        if (!inside(boundary, realpathSync(candidate))) throw new Error('Path is outside the Neorion root.');
+        if (!inside(boundary, realpathSync.native(candidate))) throw new Error('Path is outside the Neorion root.');
         break;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT' && (error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error;
@@ -827,10 +827,12 @@ export class QueryEngine {
     const rows: Row[] = [];
     const evidence = new Map<string, number>();
     const propEvidence = new Map<string, Row>();
+    const urlCandidates = new Map<string, Row>();
     let propIssue: string | undefined;
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
     const requestOwners = new Set<number>();
+    const matchedOwners = new Set<number>();
     const unboundedTransports = this.index.uncertainChatTransports?.filter(([file, , unbounded]) =>
       unbounded !== false && (includeTests || !testFile(file))) ?? [];
     let transportOverride = unboundedTransports.some(([, , , , override]) => override !== false);
@@ -850,15 +852,23 @@ export class QueryEngine {
       const override = via === AI_SDK_TRANSPORT && (fetch.transportOverride || legacyTransport);
       transportOverride ||= override;
       uncertainTransport ||= via === AI_SDK_TRANSPORT && !!fetch.partial;
-      const kind = (!(override && method === '?') ? apiEvidence.get(via) : undefined) ?? 'other mention';
+      const kind = fetch.otherTemplateRoute ? 'URL candidate' :
+        (!(override && method === '?') ? apiEvidence.get(via) : undefined) ?? 'other mention';
       evidence.set(kind, (evidence.get(kind) ?? 0) + 1);
       const mention = route.pages && (kind === 'other mention' || kind === 'fallback key');
-      const label = `${mention ? 'mention ' : 'send   '}${location(fetch.file, fetch.line)}`;
+      const site = location(fetch.file, fetch.line);
+      const candidate = fetch.otherTemplateRoute;
+      const label = `${candidate ? 'candidate ' : mention ? 'mention ' : 'send   '}${site}`;
+      if (candidate) {
+        const note = `  template at ${site} matches ${candidate}`;
+        urlCandidates.set(note, row(note, fetch.file));
+      }
       const binding = fetch.binding;
       const text = `${label} ${fetch.fn ? fetch.fn + ' ' : ''}${method} ${via}` +
         (binding ? ` via prop ${binding.name} at ${location(binding.file, binding.line)}` : '') +
         (override ? ' [possible URL override]' : kind === 'other mention' && !mention ? ' [mention]' : '') +
-        (fetch.partial || override ? ' [partial url]' : '') + flagTest(fetch.file) + (generated ? ' [generated]' : '') +
+        (!candidate && (fetch.partial || override) ? ' [partial url]' : '') + flagTest(fetch.file) +
+        (generated ? ' [generated]' : '') +
         (fetch.possibleReconnect ? ' [possible reconnect]' : '') +
         (fetch.evidence ? ` (${fetch.evidence})` : '');
       rows.push({ ...row(text, fetch.file, ...binding ? [binding.file] : []), pathEnd: label.length });
@@ -866,67 +876,24 @@ export class QueryEngine {
         const result = this.graph()?.consumerEvidence(fetch.graphOwner ?? fetch.owner, includeTests, expired, fetch.gates, binding.supplier);
         propIssue ??= result?.partial;
         for (const entry of result?.rows ?? []) propEvidence.set(entry.text, entry);
-      } else if (fetch.owner !== undefined) requestOwners.add(fetch.owner);
-    }
-    let owners = new Set(requestOwners);
-    const callableOwners = levels > 0 && owners.size
-      ? this.callableOwners ??= readCallableOwners(this.index) ?? {}
-      : undefined;
-    const memoizedCallbacks = new Set(this.index.memoizedCallbacks);
-    const traversed = new Set<number>();
-    const entries = new Map<string, { file: string; line: number; name: string; level: number; evidence: boolean }>();
-    const boundary = new Set<string>();
-    for (let depth = 0; levels > 0 && depth <= levels && owners.size && !expired(); depth++) {
-      const next = new Set<number>();
-      for (const owner of owners) {
-        if (traversed.has(owner)) continue;
-        traversed.add(owner);
-        const scope = lexicalOwner(callableOwners, owner);
-        // Consumers of a returned callback may only reference the hook that creates it.
-        if (scope !== owner) owners.add(scope);
-        for (const [, file, line, kind, , caller] of this.references.get(owner) ?? []) {
-          if (expired()) break;
-          if (kind !== 'call' || (!includeTests && testFile(file)) || caller === owner) continue;
-          const name = this.symbols.get(owner)?.name ?? 'unknown';
-          const key = `${file}:${line} ${name}`;
-          const local = caller !== undefined && scope === lexicalOwner(callableOwners, caller);
-          const level = local ? Math.max(1, depth) : depth + 1;
-          if (level > levels) {
-            boundary.add(key);
-            continue;
-          }
-          // Extra calls inside the same owner should not displace consumer sites.
-          const evidence = local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner));
-          const earlier = entries.get(key);
-          if (!earlier || (evidence === earlier.evidence ? level < earlier.level : !evidence)) {
-            entries.set(key, { file, line, name, level, evidence });
-          }
-          // Drain callers in the same lexical scope before starting the next level.
-          if (caller !== undefined) (local ? owners : next).add(caller);
-        }
+      } else if (fetch.owner !== undefined) {
+        requestOwners.add(fetch.owner);
+        if (!fetch.otherTemplateRoute) matchedOwners.add(fetch.owner);
       }
-      owners = next;
     }
-    const localEvidence: Row[] = [];
-    let callerCount = 0;
-    for (const { file, line, name, level, evidence } of [...entries.values()].sort((a, b) =>
-      a.level - b.level || compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name))) {
-      const label = `${evidence ? '  ' : ''}call${level}  ${location(file, line)}`;
-      const entry = { ...row(`${label} ${name}${flagTest(file)}`, file), pathEnd: label.length };
-      if (evidence) {
-        localEvidence.push(entry);
-        continue;
-      }
-      files.add(file);
+    const callers = levels && requestOwners.size ? this.apiCallers(requestOwners, matchedOwners, levels, includeTests, expired) : undefined;
+    for (const entry of callers?.rows ?? []) {
+      files.add(entry.files[0]);
       rows.push(entry);
-      callerCount++;
     }
-    const moreCallers = [...boundary].some(key => !entries.has(key));
+    const callerCount = (callers?.rows.length ?? 0) - (callers?.candidates ?? 0);
+    const moreCallers = callers?.more;
     const similar = [...new Set(this.index.routes.filter(other => other.kind === 'api' && other.url !== route.url &&
       (route.url.startsWith(other.url + '/') || other.url.startsWith(route.url + '/')))
       .map(other => other.url))].sort().slice(0, 5);
     evidence.set('caller', callerCount);
-    const breakdown = ['read', 'mutate', 'fallback key', 'request', 'other mention', 'caller'].flatMap(kind => {
+    evidence.set('candidate caller', callers?.candidates ?? 0);
+    const breakdown = ['read', 'mutate', 'fallback key', 'request', 'other mention', 'caller', 'URL candidate', 'candidate caller'].flatMap(kind => {
       const total = evidence.get(kind);
       return total ? [`${total} ${kind}${total === 1 ? '' : 's'}`] : [];
     }).join(', ');
@@ -944,11 +911,16 @@ export class QueryEngine {
       if (urlIssue) reasons.push(urlIssue);
     }
     if (moreCallers) reasons.push('caller depth limit');
+    if (callers?.unresolved) reasons.push('unresolved caller coverage');
+    if (callers && this.index.queryRevision !== undefined && this.index.queryRevision < CALLBACK_QUERY_REVISION) {
+      reasons.push('regenerate legacy index');
+    }
     for (const reason of [this.index.trpcHttpIssues?.[route.id], ...fetches.map(fetch => fetch.uncertainty), excluded?.issue]) {
       if (reason) reasons.push(reason);
     }
     return {
-      title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file], evidence: localEvidence,
+      title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
+      evidence: [...callers?.evidence ?? [], ...urlCandidates.values()],
       count: rows.length ? count : undefined,
       partial: this.index.coverage !== 2 ? 'regenerate legacy index' : [...new Set(reasons)].join('; ') || undefined,
       notes: [
@@ -963,6 +935,124 @@ export class QueryEngine {
         ...(similar.length ? [row(`# similar routes not matched: ${similar.join(', ')}`)] : [])
       ]
     };
+  }
+
+  private apiCallers(requestOwners: Set<number>, matchedOwners: Set<number>, levels: number, includeTests: boolean, expired: () => boolean) {
+    const callableOwners = this.callableOwners ??= readCallableOwners(this.index) ?? {};
+    const memoizedCallbacks = new Set(this.index.memoizedCallbacks);
+    const visible = (file: string) => includeTests || !testFile(file);
+    const nameOf = (id: number) => this.symbols.get(id)?.name ?? 'unknown';
+    const direct = new Map<number, Reference[]>();
+    const callsTo = (owner: number) => {
+      let calls = direct.get(owner);
+      if (!calls) {
+        calls = (this.references.get(owner) ?? []).filter(([, file, , kind, , caller]) =>
+          kind === 'call' && caller !== owner && visible(file));
+        direct.set(owner, calls);
+      }
+      return calls;
+    };
+
+    // Reserve the row order of the ordinary reference walk before adding callback invocations.
+    const ordinary = new Map<string, number>();
+    const visited = new Set<number>();
+    let owners = new Set(requestOwners);
+    for (let level = 1; level <= levels && owners.size && !expired(); level++) {
+      const next = new Set<number>();
+      for (const owner of owners) {
+        visited.add(owner);
+        for (const [, file, line, , , caller] of callsTo(owner)) {
+          const key = `${file}:${line} ${nameOf(owner)}`;
+          if (!ordinary.has(key)) ordinary.set(key, level);
+          if (caller !== undefined) next.add(caller);
+        }
+      }
+      owners = new Set([...next].filter(id => !visited.has(id)));
+    }
+
+    visited.clear();
+    owners = new Set(requestOwners);
+    const entries = new Map<string, { owner: number; file: string; line: number; name: string; level: number; evidence: boolean; event?: string }>();
+    const parents = matchedOwners.size !== requestOwners.size ? new Map<number, Set<number>>() : undefined;
+    const creations = new Map<string, Row>();
+    const boundary = new Set<string>();
+    let unresolved = false;
+    for (let depth = 0; depth <= levels && owners.size && !expired(); depth++) {
+      const next = new Set<number>();
+      for (const owner of owners) {
+        if (visited.has(owner) || expired()) continue;
+        visited.add(owner);
+        const scope = lexicalOwner(callableOwners, owner);
+        const name = nameOf(owner);
+        const isLocal = (caller?: number) => caller !== undefined && scope === lexicalOwner(callableOwners, caller);
+        const add = (file: string, line: number, caller?: number, event?: string, extra = false) => {
+          const local = isLocal(caller);
+          const level = local ? Math.max(1, depth) : depth + 1;
+          const key = `${file}:${line} ${name}${event ? ' ' + event : ''}`;
+          if (level > levels) {
+            boundary.add(key);
+            return;
+          }
+          const evidence = extra || (local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner)));
+          const earlier = entries.get(key);
+          if (!earlier || earlier.evidence && !evidence || earlier.evidence === evidence && level < earlier.level) {
+            entries.set(key, { owner, file, line, name, level, evidence, event });
+          }
+          if (caller !== undefined) {
+            (local ? owners : next).add(caller);
+            if (parents) {
+              const callers = parents.get(owner) ?? new Set<number>();
+              callers.add(caller);
+              parents.set(owner, callers);
+            }
+          }
+        };
+        const directCalls = callsTo(owner);
+        const invocations = (this.index.callbackInvocations?.[owner] ?? []).filter(([caller, file]) =>
+          caller !== owner && visible(file));
+        for (const [, file, line, , , caller] of directCalls) add(file, line, caller);
+        const invocationScopes = new Set<number>();
+        for (const [caller, file, line, event] of invocations) {
+          const invocationScope = lexicalOwner(callableOwners, caller);
+          add(file, line, caller, event, invocationScopes.has(invocationScope));
+          invocationScopes.add(invocationScope);
+        }
+
+        const creationSites = (this.index.callbackCreations?.[owner] ?? []).filter(([, file]) => visible(file));
+        if (invocations.some(([, , , , possible]) => possible)) unresolved = true;
+        for (const [factory, file, line, invoked] of creationSites) {
+          unresolved ||= !invoked;
+          if (invoked && this.symbols.get(factory)?.kind !== 'hook') continue;
+          if (depth >= levels) {
+            if (!invoked) boundary.add(`${file}:${line} ${nameOf(factory)} (callback creation)`);
+            continue;
+          }
+          const label = `  create${depth + 1}  ${location(file, line)}`;
+          const text = `${label} ${nameOf(factory)}${flagTest(file)}`;
+          creations.set(text, { ...row(text, file), pathEnd: label.length });
+        }
+      }
+      owners = next;
+    }
+
+    if (parents) for (const owner of matchedOwners) {
+      for (const caller of parents.get(owner) ?? []) matchedOwners.add(caller);
+    }
+    const rows: Row[] = [];
+    const evidence: Row[] = [...creations.values()];
+    let candidates = 0;
+    const order = (file: string, line: number, name: string, level: number, event?: string) =>
+      (!event ? ordinary.get(`${file}:${line} ${name}`) : undefined) ?? levels + level;
+    for (const entry of [...entries.values()].sort((a, b) =>
+      order(a.file, a.line, a.name, a.level, a.event) - order(b.file, b.line, b.name, b.level, b.event) ||
+      compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name) || compare(a.event ?? '', b.event ?? ''))) {
+      const { owner, file, line, name, level, evidence: detail, event } = entry;
+      const candidate = parents && !matchedOwners.has(owner);
+      if (candidate && !detail) candidates++;
+      const label = `${detail ? '  ' : ''}${event ? 'event' : 'call'}${level}  ${location(file, line)}`;
+      (detail ? evidence : rows).push({ ...row(`${label} ${name}${event ? ' via ' + event : ''}${candidate ? ' [candidate URL]' : ''}${flagTest(file)}`, file), pathEnd: label.length });
+    }
+    return { rows, evidence, candidates, more: [...boundary].some(key => !entries.has(key)), unresolved };
   }
 
   private actionConsumers(action: ServerAction, includeTests: boolean, expired: () => boolean): Result {
