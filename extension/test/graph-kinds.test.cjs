@@ -129,7 +129,7 @@ test('graph callbacks give the same results with and without their kind filters'
         const raw = child.compilerNode;
         options.visitRaw?.(raw);
         if (options.skip?.has(raw) || options.skipNode?.(raw)) traversal.skip();
-        else callback(child);
+        else if (!options.filterRaw || options.filterRaw(raw)) callback(child);
       });
     }
   });
@@ -193,7 +193,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 12);
+  assert.equal(kindSets.size, 13);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
