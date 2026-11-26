@@ -117,18 +117,20 @@ test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtree
 
 test('graph callbacks give the same results with and without their kind filters', t => {
   const { root } = fixture(t);
-  const { visitKinds } = loadAnalyzer('CompilerWalk');
+  const compilerWalk = loadAnalyzer('CompilerWalk');
+  const { visitKinds } = compilerWalk;
   const { RouteAnalyzer } = loadAnalyzer('RouteAnalyzer');
   const kindSets = new Set();
   let unfiltered;
   const { ComponentAnalyzer } = loadAnalyzer('ComponentAnalyzer', {
+    ...compilerWalk,
     visitKinds(node, kinds, callback, options = {}) {
       kindSets.add(kinds);
       if (!unfiltered?.has(kinds)) return visitKinds(node, kinds, callback, options);
       node.forEachDescendant((child, traversal) => {
         const raw = child.compilerNode;
         options.visitRaw?.(raw);
-        if (options.skip?.has(raw)) traversal.skip();
+        if (options.skip?.has(raw) || options.skipNode?.(raw)) traversal.skip();
         else callback(child);
       });
     }

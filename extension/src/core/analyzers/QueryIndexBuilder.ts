@@ -8,7 +8,7 @@ import {
   isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
-import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
+import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
 import { visitKinds } from './CompilerWalk';
 import { inspectRuntimeExports } from './RuntimeExports';
@@ -180,7 +180,7 @@ function resolvedPromiseValue(call: import('ts-morph').CallExpression) {
   if (!Node.isPropertyAccessExpression(callee) || callee.getName() !== 'resolve') return;
   const promise = callee.getExpression();
   if (!Node.isIdentifier(promise) || promise.getText() !== 'Promise' ||
-      declarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
+      uncachedDeclarationsOf(promise).some(declaration => !declaration.getSourceFile().compilerNode.hasNoDefaultLib)) return;
   const value = unwrapValue(call.getArguments()[0]);
   if (Node.isIdentifier(value)) return value;
 }
@@ -370,7 +370,7 @@ function readsUrlParameter(value: Node) {
       const constructor = source.getExpression();
       const params = packageMember(constructor, 'next/navigation') === 'ReadonlyURLSearchParams' ||
         Node.isIdentifier(constructor) && constructor.getText() === 'URLSearchParams' &&
-          declarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
+          uncachedDeclarationsOf(constructor).some(declaration => declaration.getSourceFile().compilerNode.hasNoDefaultLib);
       return params && fromLocation(source.getArguments()[0]);
     }
     if (!Node.isCallExpression(source)) return false;
@@ -507,6 +507,7 @@ export class QueryIndexBuilder {
 
   build(files: SourceFile[], routes: RouteNode[], components: Map<Node, ComponentNode>,
     aliases: Map<Node, Node[]>, relativePath: RelativePath, actions: Map<Node, string>, root: string, config: NextConfig | undefined, workspace: WorkspaceBindings | undefined, flow: PropFlow, historyOnly = false, router?: RouterProject): QueryIndex {
+    const declarationsOf = (node: Node) => flow.declarations(node);
     const pages = config && collectPagesFacts(files, routes, config, relativePath, workspace, this.shells);
     const index: QueryIndex = {
       schema: INDEX_SCHEMA, coverage: 2, generator: VERSION, generatedAt: new Date().toISOString(), root: '.',
@@ -644,8 +645,16 @@ export class QueryIndexBuilder {
       (!!entry.getDefaultImport() || !!entry.getNamespaceImport() || entry.getNamedImports().some(binding => !binding.isTypeOnly()));
     const trpcSources = new Set(files.filter(file => file.getImportDeclarations().some(entry =>
       /^@trpc\/server(?:\/|$)/.test(entry.getModuleSpecifierValue()) && hasValueBinding(entry))));
-    const flowDeclarations = (node: Node) => flow.declarations(node);
-    const trpcFacts = new TrpcFacts(files, trpcSources, flowDeclarations);
+    const types = new WeakMap<Node, ReturnType<Node['getType']>>();
+    const typeOf = (node: Node) => {
+      let type = types.get(node);
+      if (type === undefined) {
+        type = node.getType();
+        types.set(node, type);
+      }
+      return type;
+    };
+    const trpcFacts = new TrpcFacts(files, trpcSources, declarationsOf);
     const procedureIds = new Map<ReturnType<TrpcFacts['procedures']>[number], number>();
     const procedureSymbols = new Map<Node, Map<string, number>>();
     const procedureResolvers = new Map<Node, Node>();
@@ -699,7 +708,7 @@ export class QueryIndexBuilder {
     });
 
     const projectFiles = new Set(files);
-    const callableFlow = new CallableFlow(projectFiles, flowDeclarations, node => flow.symbol(node));
+    const callableFlow = new CallableFlow(projectFiles, declarationsOf, node => flow.symbol(node));
     const localCallables = new Map<number, Node>();
     const workspaceEvent = (attribute: Node | undefined) => {
       if (!Node.isJsxAttribute(attribute)) return;
@@ -820,12 +829,12 @@ export class QueryIndexBuilder {
           binding = binding.getExpression();
         }
         if (!Node.isIdentifier(binding)) return;
-        const bindings = flowDeclarations(binding);
+        const bindings = declarationsOf(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
             (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
         if (expression === binding && bindings.some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
         const targets = callableTargets(expression);
-        if (targets.length && expression !== binding && flowDeclarations(expression)
+        if (targets.length && expression !== binding && declarationsOf(expression)
           .some(decl => byNode.has(decl) && !Node.isBindingElement(decl))) return;
         const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
           if (supplied) suppliedCallbacks.add(supplied);
@@ -1789,9 +1798,19 @@ export class QueryIndexBuilder {
           }
         }
       };
+      let lastLeadingPosition: number | undefined;
+      let lastTrailingPosition: number | undefined;
       const scanNodeComments = (node: ts.Node) => {
-        for (const comment of ts.getLeadingCommentRanges(content, node.getFullStart()) ?? []) scanComment(comment);
-        for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+        const start = node.getFullStart();
+        // Parent and child nodes often share a boundary and therefore the same trivia.
+        if (start !== lastLeadingPosition) {
+          lastLeadingPosition = start;
+          for (const comment of ts.getLeadingCommentRanges(content, start) ?? []) scanComment(comment);
+        }
+        if (node.end !== lastTrailingPosition) {
+          lastTrailingPosition = node.end;
+          for (const comment of ts.getTrailingCommentRanges(content, node.end) ?? []) scanComment(comment);
+        }
       };
       const recordNamespaceUse = (node: Node) => {
         const namespace = namespaces.get(node.getText());
@@ -1838,7 +1857,7 @@ export class QueryIndexBuilder {
           const initializer = Node.isVariableDeclaration(declaration) ? declaration.getInitializer() : undefined;
           const property = node.getPropertyNameNode() ?? node.getNameNode();
           if (!initializer || !Node.isIdentifier(property) || !Node.isIdentifier(node.getNameNode())) return;
-          const symbol = initializer.getType().getProperty(property.getText());
+          const symbol = typeOf(initializer).getProperty(property.getText());
           const declarations = (symbol?.getAliasedSymbol() ?? symbol)?.getDeclarations() ?? [];
           const id = declarations.map(target => byNode.get(target)).find(value => value !== undefined);
           if (id !== undefined) {
@@ -1897,7 +1916,7 @@ export class QueryIndexBuilder {
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, flowDeclarations(expression),
+          const found = Node.isCallExpression(node) && !!record(node, declarationsOf(expression),
             'call', undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
@@ -1940,7 +1959,7 @@ export class QueryIndexBuilder {
         } else if (Node.isElementAccessExpression(node)) {
           const key = node.getArgumentExpression();
           if (Node.isStringLiteral(key)) {
-            const symbol = node.getExpression().getType().getProperty(key.getLiteralText());
+            const symbol = typeOf(node.getExpression()).getProperty(key.getLiteralText());
             if (symbol) record(key, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
           }
         } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
@@ -1950,7 +1969,15 @@ export class QueryIndexBuilder {
           record(node, declarationsOf(node).filter(declaration =>
             declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
-      }, { visitRaw: historyOnly ? undefined : scanNodeComments });
+      }, {
+        visitRaw: historyOnly || !/\/[/\*]/.test(content) ? undefined : scanNodeComments,
+        filterRaw: node => {
+          if (!ts.isIdentifier(node)) return true;
+          // Use the source spelling, including Unicode escapes, just as the reference visitor does.
+          const name = node.getText(file.compilerNode);
+          return names.has(name) || localNames.has(name) || namespaces.has(name);
+        }
+      });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
       // Same-file uses need only a line number and do not affect cross-file search ranking.
       for (const [id, lines] of references) {

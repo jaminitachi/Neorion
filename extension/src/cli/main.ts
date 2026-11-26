@@ -4,16 +4,8 @@ import { homedir } from 'node:os';
 import { basename, delimiter, join, resolve } from 'node:path';
 import { isMainThread, workerData } from 'node:worker_threads';
 import { parseArgs } from 'node:util';
-import { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } from '../core/AgentInstructions';
-import { appMode, missingProject, selectedApp, selectProject } from '../core/FindProject';
-import { appList, appQueryText, ensureFresh, projectText } from '../mcp/Build';
-import { isTemporaryCliInstall, mcpCommand, packageSpec, releaseSpec } from '../core/McpCommand';
-import { MCP_TARGETS, planMcp } from '../core/McpRegistration';
 import { VERSION } from '../mcp/Index';
-import { indexReader, runQueries, serve } from '../mcp/server';
 import { kinds, queryName } from '../mcp/Tools';
-import { updateClaudeHook } from './ClaudeHook';
-import { setupAgent } from './SetupAgent';
 
 const help = `Usage:
   neorion graph [dir] [--app name | --all-apps] [--mcp-config]
@@ -54,6 +46,7 @@ function isHomeDirectory(root: string) {
 }
 
 function writeHint(file: string, instruction: string) {
+  const { updateAgentFiles } = require('../core/AgentInstructions') as typeof import('../core/AgentInstructions');
   const root = process.cwd();
   if (!isProjectDirectory(root)) {
     console.log(`Skipping ${file} hint: ${missingProjectMarker}`);
@@ -86,6 +79,7 @@ function runsCurrentEntry() {
 }
 
 function hintCommand(temporary: boolean, onPath: boolean) {
+  const { packageSpec } = require('../core/McpCommand') as typeof import('../core/McpCommand');
   if (temporary) return `npx -y ${packageSpec}`;
   if (onPath) return 'neorion';
   const entry = /[^\w./:\\-]/.test(__filename)
@@ -115,6 +109,9 @@ async function main([command, ...args]: string[]) {
     return run(resolve(positionals[0] ?? '.'), values['mcp-config'], values.app, values['all-apps']);
   }
   if (command === 'setup' && (args[0] === 'codex' || args[0] === 'claude' || args[0] === 'cursor')) {
+    const { CURSOR_EXTENSION_RULE, CURSOR_SETUP_RULE, hasActiveCursorRule, queryHint, updateAgentFiles } =
+      require('../core/AgentInstructions') as typeof import('../core/AgentInstructions');
+    const { isTemporaryCliInstall, mcpCommand, releaseSpec } = require('../core/McpCommand') as typeof import('../core/McpCommand');
     const agent = args[0];
     const codex = agent === 'codex';
     const { values } = parseArgs({
@@ -129,6 +126,8 @@ async function main([command, ...args]: string[]) {
     const root = process.cwd();
     const remove = !!values.remove;
     if (agent === 'cursor') {
+      const { selectProject } = require('../core/FindProject') as typeof import('../core/FindProject');
+      const { MCP_TARGETS, planMcp } = require('../core/McpRegistration') as typeof import('../core/McpRegistration');
       const requireWorkspaceCli = !remove && (selectProject(root)?.apps?.length ?? 0) > 1;
       const mcp = planMcp(root, root, ['Cursor'], false, '', !remove, {
         discover: true, cursorSetup: { legacyLocalEntry: __filename, requireWorkspaceCli }
@@ -149,6 +148,7 @@ async function main([command, ...args]: string[]) {
     const localEntry = temporary ? undefined : __filename;
     const file = codex ? 'AGENTS.md' : 'CLAUDE.md';
     let skippedHint = false;
+    const { setupAgent } = require('./SetupAgent') as typeof import('./SetupAgent');
     setupAgent(agent, __filename, mcpCommand({ localEntry }), remove, () => {
       if (!values['no-hint']) {
         if (remove) {
@@ -158,6 +158,7 @@ async function main([command, ...args]: string[]) {
         }
       }
       if (agent === 'claude') {
+        const { updateClaudeHook } = require('./ClaudeHook') as typeof import('./ClaudeHook');
         if (remove || values['no-hook']) updateClaudeHook(root, false);
         else if (isHomeDirectory(root)) console.warn('Skipping Neorion Claude hook: the current directory is your home directory.');
         else if (!isProjectDirectory(root)) console.warn(`Skipping Neorion Claude hook: ${missingProjectMarker}`);
@@ -194,7 +195,11 @@ async function main([command, ...args]: string[]) {
   const workspace = values.workspace ?? (configuredRoot === undefined ? process.env.NEORION_WORKSPACE : undefined);
   const root = resolve(workspace ?? configuredRoot ?? '.');
   const confirm = workspace === undefined && configuredRoot !== undefined;
+  const { indexReader, serve } = require('../mcp/server') as typeof import('../mcp/server');
   if (!query) return serve(root, { autoBuild: true, confirm });
+  const { appMode, missingProject, selectedApp, selectProject } = require('../core/FindProject') as typeof import('../core/FindProject');
+  const { appList, appQueryText, ensureFresh, projectText } = require('../mcp/Build') as typeof import('../mcp/Build');
+  const { isTemporaryCliInstall } = require('../core/McpCommand') as typeof import('../core/McpCommand');
   const [kind, target, to] = positionals;
   if (positionals.length !== (kind === 'path' ? 3 : kind === 'changes' ? 1 : 2)) throw new Error(help);
   if (values.kind !== undefined && kind !== 'search') throw new Error('--kind requires the search query.');
@@ -254,4 +259,7 @@ if (isMainThread) {
     console.error(error.message);
     process.exitCode = 1;
   });
-} else runQueries(workerData as string);
+} else {
+  const { runQueries } = require('../mcp/server') as typeof import('../mcp/server');
+  runQueries(workerData as string);
+}

@@ -1,4 +1,10 @@
-import type { Node, ts } from 'ts-morph';
+import { type Node, ts } from 'ts-morph';
+
+// Match ts-morph's FunctionLikeDeclaration guard, whose kinds differ from ts.isFunctionLike.
+export function isFunctionLikeDeclaration(node: ts.Node): boolean {
+  return ts.isArrowFunction(node) || ts.isConstructorDeclaration(node) || ts.isFunctionDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) || ts.isMethodDeclaration(node) || ts.isSetAccessorDeclaration(node);
+}
 
 interface WalkOptions {
   skip?: ReadonlySet<ts.Node>;
