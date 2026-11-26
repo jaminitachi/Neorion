@@ -1,6 +1,9 @@
 import { type CallExpression, Node, SourceFile, SyntaxKind } from 'ts-morph';
 import { declarationsOf, wrappedExpression } from './ArchitectureFacts';
 import { constValue, JsxSite } from './PropFlow';
+import { bindingSelection, CallableWrites, staticMember } from './CallableWrites';
+
+export { staticMember } from './CallableWrites';
 
 export type FunctionNode = import('ts-morph').ArrowFunction | import('ts-morph').FunctionExpression |
   import('ts-morph').FunctionDeclaration | import('ts-morph').MethodDeclaration;
@@ -62,21 +65,18 @@ function selectedMembers(selector: Node | undefined): string[] | undefined {
   if (Node.isIdentifier(expression) && declarationsOf(expression).includes(parameter)) return members;
 }
 
-export function staticMember(node: Node | undefined, identifier = true): string | undefined {
-  if (Node.isIdentifier(node) && identifier) return node.getText();
-  if (Node.isStringLiteral(node) || Node.isNumericLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) {
-    return String(node.getLiteralValue());
-  }
-}
-
-type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[] };
+type Target = { fn: FunctionNode; via: string[]; factories?: CallExpression[]; path?: string[]; write?: Node };
 export class CallableFlow {
   private targets = new WeakMap<Node, Target[]>();
   private returns = new WeakMap<FunctionNode, Node[]>();
   private packageOrigins = new WeakMap<Node, ReturnType<typeof packageOrigin> | null>();
   private stores = new WeakMap<Node, boolean>();
 
-  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf) {}
+  readonly writes: CallableWrites;
+
+  constructor(private files: Set<SourceFile>, private declarations = declarationsOf, private symbol = symbolOf) {
+    this.writes = new CallableWrites(files, declarations);
+  }
 
   private packageOf(node: Node) {
     const cached = this.packageOrigins.get(node);
@@ -99,7 +99,7 @@ export class CallableFlow {
     }
   }
 
-  /** Resolve function values through immutable bindings, returned objects and Zustand selectors. */
+  /** Resolve function values through bindings, returned objects and Zustand selectors. */
   resolve(expression: Node): Target[] {
     if (isFunction(expression)) return [{ fn: expression, via: [] }];
     const cached = this.targets.get(expression);
@@ -110,7 +110,7 @@ export class CallableFlow {
         const declaration = declarations[0];
         const value = isFunction(declaration) ? declaration : constValue(declaration);
         if (isFunction(value) && this.files.has(value.getSourceFile())) {
-          const result = [{ fn: value, via: [] }];
+          const result = [{ fn: value, via: [], write: this.writes.forBinding(declaration, []) }];
           this.targets.set(expression, result);
           return result;
         }
@@ -129,20 +129,23 @@ export class CallableFlow {
     const result: Target[] = [];
     const seen = new Map<Node, string | number | Set<string | number>>();
     let budget = 64;
-    const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], path?: string[]): void => {
+    const visit = (node: Node | undefined, members: string[], invoke: number, via: CallExpression[], path?: string[], write?: Node): void => {
       if (!node || budget-- <= 0 || !this.files.has(node.getSourceFile())) return;
-      const key = members.length || path?.length ? JSON.stringify([invoke, members, path]) : invoke;
+      const key = members.length || path?.length || write ? JSON.stringify([invoke, members, path, !!write]) : invoke;
       const states = seen.get(node);
       if (states === key || states instanceof Set && states.has(key)) return;
       if (states instanceof Set) states.add(key);
       else seen.set(node, states === undefined ? key : new Set([states, key]));
       const resolve = (value: Node | undefined, selection: string[], calls: number, factories: CallExpression[]) =>
-        visit(value, selection, calls, factories, path);
+        visit(value, selection, calls, factories, path, write);
       const wrapped = wrappedExpression(node);
       if (wrapped) return resolve(wrapped, members, invoke, via);
+      if (isFunction(node) || Node.isVariableDeclaration(node) || Node.isBindingElement(node) || Node.isObjectLiteralExpression(node)) {
+        write ??= this.writes.forBinding(node, members);
+      }
       if (isFunction(node)) {
         if (!invoke) {
-          if (!members.length) result.push({ fn: node, via: via.map(call => call.getExpression().getText()), factories: via.length ? via : undefined, path });
+          if (!members.length) result.push({ fn: node, via: via.map(call => call.getExpression().getText()), factories: via.length ? via : undefined, path, write });
           return;
         }
         let values = this.returns.get(node);
@@ -150,17 +153,15 @@ export class CallableFlow {
         for (const value of values) resolve(value, members, invoke - 1, via);
         return;
       }
-      if (Node.isVariableDeclaration(node)) return resolve(constValue(node), members, invoke, via);
+      if (Node.isVariableDeclaration(node)) return resolve(node.getInitializer(), members, invoke, via);
       if (Node.isPropertyAssignment(node)) return resolve(node.getInitializer(), members, invoke, via);
       if (Node.isShorthandPropertyAssignment(node)) {
         for (const decl of node.getValueSymbol()?.getDeclarations() ?? []) resolve(decl, members, invoke, via);
         return;
       }
-      if (Node.isBindingElement(node) && !node.getDotDotDotToken()) {
-        const pattern = node.getParent();
-        const name = Node.isArrayBindingPattern(pattern)
-          ? String(pattern.getElements().indexOf(node)) : staticMember(node.getPropertyNameNode() ?? node.getNameNode());
-        if (name !== undefined) return resolve(pattern.getParent(), [name, ...members], invoke, via);
+      if (Node.isBindingElement(node)) {
+        const selection = bindingSelection(node, members);
+        if (selection) return resolve(node.getParent().getParent(), selection, invoke, via);
       }
       if (Node.isArrayLiteralExpression(node)) {
         const elements = node.getElements();
@@ -172,7 +173,7 @@ export class CallableFlow {
           return;
         }
         if (collectMembers && !invoke) fixed.forEach((element, index) =>
-          visit(element, [], 0, via, [...path ?? [], String(index)]));
+          visit(element, [], 0, via, [...path ?? [], String(index)], write));
         return;
       }
       if (Node.isConditionalExpression(node)) {
@@ -187,7 +188,7 @@ export class CallableFlow {
           if (collectMembers && !invoke) for (const property of properties) {
             if (Node.isSpreadAssignment(property)) continue;
             const key = staticMember(property.getNameNode());
-            if (key !== undefined) visit(property, [], 0, via, [...path ?? [], key]);
+            if (key !== undefined) visit(property, [], 0, via, [...path ?? [], key], write);
           }
           return;
         }
@@ -198,9 +199,10 @@ export class CallableFlow {
         }
       }
       if (Node.isIdentifier(node) || Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node)) {
+        write ??= this.writes.forRead(node);
         const key = Node.isElementAccessExpression(node) ? node.getArgumentExpression() : undefined;
         const name = Node.isPropertyAccessExpression(node) ? node.getName() : staticMember(key, false);
-        if (name && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
+        if (name !== undefined && (Node.isPropertyAccessExpression(node) || Node.isElementAccessExpression(node))) {
           const before = result.length;
           resolve(node.getExpression(), [name, ...members], invoke, via);
           if (result.length > before) return;

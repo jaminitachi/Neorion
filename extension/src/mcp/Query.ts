@@ -5,8 +5,8 @@ import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, CALLBACK_QUERY_REVISION, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
-  isTestFile as testFile, lexicalOwner, renderIssue, renderSiteKey,
-  type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+  apiCallKey, isTestFile as testFile, lexicalOwner, renderIssue, renderSiteKey,
+  type BooleanArguments, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, annotatedRow, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { scanExcludedRequests } from './ExcludedRequests';
@@ -831,7 +831,7 @@ export class QueryEngine {
     let propIssue: string | undefined;
     const files = new Set<string>();
     const generatedFiles = new Set<string>();
-    const requestOwners = new Set<number>();
+    const requestOwners = new Map<number, Map<string, BooleanArguments | undefined>>();
     const matchedOwners = new Set<number>();
     const unboundedTransports = this.index.uncertainChatTransports?.filter(([file, , unbounded]) =>
       unbounded !== false && (includeTests || !testFile(file))) ?? [];
@@ -878,7 +878,9 @@ export class QueryEngine {
         propIssue ??= result?.partial;
         for (const entry of result?.rows ?? []) propEvidence.set(entry.text, entry);
       } else if (fetch.owner !== undefined) {
-        requestOwners.add(fetch.owner);
+        const guards = requestOwners.get(fetch.owner) ?? new Map<string, BooleanArguments | undefined>();
+        guards.set(JSON.stringify(fetch.argumentGuards) ?? '', fetch.argumentGuards);
+        requestOwners.set(fetch.owner, guards);
         if (!fetch.otherTemplateRoute) matchedOwners.add(fetch.owner);
       }
     }
@@ -939,7 +941,7 @@ export class QueryEngine {
     };
   }
 
-  private apiCallers(requestOwners: Set<number>, matchedOwners: Set<number>, levels: number, includeTests: boolean, expired: () => boolean) {
+  private apiCallers(requestOwners: Map<number, Map<string, BooleanArguments | undefined>>, matchedOwners: Set<number>, levels: number, includeTests: boolean, expired: () => boolean) {
     const callableOwners = this.callableOwners ??= readCallableOwners(this.index) ?? {};
     const memoizedCallbacks = new Set(this.index.memoizedCallbacks);
     const visible = (file: string) => includeTests || !testFile(file);
@@ -958,7 +960,7 @@ export class QueryEngine {
     // Reserve the row order of the ordinary reference walk before adding callback invocations.
     const ordinary = new Map<string, number>();
     const visited = new Set<number>();
-    let owners = new Set(requestOwners);
+    let owners = new Set(requestOwners.keys());
     for (let level = 1; level <= levels && owners.size && !expired(); level++) {
       const next = new Set<number>();
       for (const owner of owners) {
@@ -972,23 +974,36 @@ export class QueryEngine {
       owners = new Set([...next].filter(id => !visited.has(id)));
     }
 
-    visited.clear();
-    owners = new Set(requestOwners);
-    const entries = new Map<string, { owner: number; file: string; line: number; name: string; level: number; evidence: boolean; event?: string }>();
+    let states = requestOwners;
+    const examined = new Set<string>();
+    const addState = (pending: typeof states, id: number, guards: BooleanArguments | undefined) => {
+      const alternatives = pending.get(id) ?? new Map<string, BooleanArguments | undefined>();
+      alternatives.set(JSON.stringify(guards) ?? '', guards);
+      pending.set(id, alternatives);
+    };
+    const entries = new Map<string, { owner: number; file: string; line: number; name: string; level: number; evidence: boolean; event?: string; possible?: boolean }>();
     const parents = matchedOwners.size !== requestOwners.size ? new Map<number, Set<number>>() : undefined;
     const creations = new Map<string, Row>();
     const gaps = new Map<string, Row>();
     const boundary = new Set<string>();
     let unresolved = false;
-    for (let depth = 0; depth <= levels && owners.size && !expired(); depth++) {
-      const next = new Set<number>();
-      for (const owner of owners) {
-        if (visited.has(owner) || expired()) continue;
-        visited.add(owner);
+    for (let depth = 0; depth <= levels && states.size && !expired(); depth++) {
+      const next = new Map<number, Map<string, BooleanArguments | undefined>>();
+      // Local callback hops use the current caller level. A guarded and an
+      // unguarded path through the same owner may admit different callers.
+      const queue = [...states].flatMap(([id, alternatives]) =>
+        [...alternatives].map(([key, guards]) => ({ id, key, guards })));
+      for (const { id: owner, key: variant, guards } of queue) {
+        const stateKey = `${owner}:${variant}`;
+        if (examined.has(stateKey) || expired()) continue;
+        examined.add(stateKey);
         const scope = lexicalOwner(callableOwners, owner);
         const name = nameOf(owner);
         const isLocal = (caller?: number) => caller !== undefined && scope === lexicalOwner(callableOwners, caller);
-        const add = (file: string, line: number, caller?: number, event?: string, extra = false) => {
+        const add = (file: string, line: number, caller?: number, event?: string, extra = false, possible = false) => {
+          const fact = event ? undefined : this.index.apiCallFacts?.[apiCallKey(file, line, owner, caller)];
+          const [args, callerGuards] = fact ?? [];
+          if (guards?.some(([parameter, required]) => args?.some(([index, value]) => index === parameter && value !== required))) return;
           const local = isLocal(caller);
           const level = local ? Math.max(1, depth) : depth + 1;
           const key = `${file}:${line} ${name}${event ? ' ' + event : ''}`;
@@ -996,13 +1011,16 @@ export class QueryEngine {
             boundary.add(key);
             return;
           }
-          const evidence = extra || local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner));
+          const evidence = possible || extra || local && (memoizedCallbacks.has(owner) || !requestOwners.has(owner));
           const earlier = entries.get(key);
-          if (!earlier || earlier.evidence && !evidence || earlier.evidence === evidence && level < earlier.level) {
-            entries.set(key, { owner, file, line, name, level, evidence, event });
+          if (!earlier || earlier.possible && !possible ||
+              earlier.possible === possible && (earlier.evidence && !evidence || earlier.evidence === evidence && level < earlier.level)) {
+            entries.set(key, { owner, file, line, name, level, evidence, event, possible });
           }
-          if (caller !== undefined) {
-            (local ? owners : next).add(caller);
+          if (possible) unresolved = true;
+          else if (caller !== undefined) {
+            if (local) queue.push({ id: caller, key: JSON.stringify(callerGuards) ?? '', guards: callerGuards });
+            else addState(next, caller, callerGuards);
             if (parents) {
               const callers = parents.get(owner) ?? new Set<number>();
               callers.add(caller);
@@ -1013,12 +1031,12 @@ export class QueryEngine {
         const directCalls = callsTo(owner);
         const invocations = (this.index.callbackInvocations?.[owner] ?? []).filter(([caller, file]) =>
           caller !== owner && visible(file));
-        for (const [, file, line, , , caller] of directCalls) add(file, line, caller);
+        for (const [, file, line, , , caller, , possible] of directCalls) add(file, line, caller, undefined, false, !!possible);
         const invocationScopes = new Set<number>();
-        for (const [caller, file, line, event] of invocations) {
+        for (const [caller, file, line, event, possible] of invocations) {
           const invocationScope = lexicalOwner(callableOwners, caller);
           add(file, line, caller, event, this.index.callbackCreations?.[owner] === undefined ||
-            invocationScopes.has(invocationScope));
+            invocationScopes.has(invocationScope), possible === 'write');
           invocationScopes.add(invocationScope);
         }
 
@@ -1039,7 +1057,7 @@ export class QueryEngine {
           creations.set(text, { ...row(text, file), pathEnd: label.length });
         }
       }
-      owners = next;
+      states = next;
     }
 
     if (parents) for (const owner of matchedOwners) {
@@ -1053,12 +1071,12 @@ export class QueryEngine {
     for (const entry of [...entries.values()].sort((a, b) =>
       order(a.file, a.line, a.name, a.level, a.event) - order(b.file, b.line, b.name, b.level, b.event) ||
       compare(a.file, b.file) || a.line - b.line || compare(a.name, b.name) || compare(a.event ?? '', b.event ?? ''))) {
-      const { owner, file, line, name, level, evidence: detail, event } = entry;
+      const { owner, file, line, name, level, evidence: detail, event, possible } = entry;
       const candidate = parents && !matchedOwners.has(owner);
       const label = `${detail ? '  ' : ''}${event ? 'event' : 'call'}${level}  ${location(file, line)}`;
       if (candidate && !detail) candidates++;
       (detail ? evidence : rows).push({
-        ...row(`${label} ${name}${event ? ' via ' + event : ''}${candidate ? ' [candidate URL]' : ''}${flagTest(file)}`, file),
+        ...row(`${label} ${name}${event ? ' via ' + event : ''}${candidate ? ' [candidate URL]' : ''}${possible ? ' [possible]' : ''}${flagTest(file)}`, file),
         pathEnd: label.length, candidate: candidate ? true : undefined
       });
     }

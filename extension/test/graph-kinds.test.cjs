@@ -193,7 +193,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 9);
+  assert.equal(kindSets.size, 10);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
@@ -2590,6 +2590,132 @@ test('API callback coverage handles tuple bindings and accounts for uses of one 
   const exported = query('api_consumers', '/api/exported');
   assert.match(exported, /^  create1 +callback-uses\.tsx:23 useExported$/m);
   assert.match(exported, /^# partial: unresolved caller coverage$/m);
+});
+
+test('API consumers treat indirect calls through written bindings or members as possible', async t => {
+  const { root, env, build, query } = fixture(t);
+  const cases = [
+    ['replaced-member', 'const actions = makeActions();', 'actions.run = offline;', 'actions.run()', true],
+    ['late-write', 'const actions = makeActions();', 'export const replace = () => { actions.run = offline; };', 'actions.run()', true],
+    ['binding', 'let run = makeActions().run;', 'if (Math.random()) run = offline;', 'run()', true],
+    ['alias', 'const actions = makeActions();', 'const alias = actions; alias.run = offline;', 'actions.run()', true],
+    ['computed', 'const actions = makeActions();', "const key = Math.random() ? 'run' : 'label'; actions[key] = offline;", 'actions.run()', true],
+    ['delete', 'const actions = makeActions();', "delete actions['run'];", 'actions.run()', true],
+    ['destructure', 'const actions = makeActions();', '({ run: actions.run } = { run: offline });', 'actions.run()', true],
+    ['assign', 'const actions = makeActions();', 'Object.assign(actions, { run: offline });', 'actions.run()', true],
+    ['method-write', 'const actions = makeActions();', 'actions.reset();', 'actions.run()', true],
+    ['helper-write', 'const actions = makeActions();', 'function replace(obj: typeof actions) { obj.run = offline; } replace(actions);', 'actions.run()', true],
+    ['sibling-assign', 'const actions = makeActions();', "Object.assign(actions, { label: 'new' });", 'actions.run()', false],
+    ['sibling', 'const actions = makeActions();', "actions.label = 'new';", 'actions.run()', false],
+    ['dead-write', 'const actions = makeActions();', 'if (false) actions.run = offline;', 'actions.run()', false],
+    ['separate-creation', 'const actions = makeActions();', 'const other = makeActions(); other.run = offline;', 'actions.run()', false]
+  ];
+  for (const [name, binding, write, invocation] of cases) {
+    const route = '/api/' + name;
+    const directory = path.join(root, 'app', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+    fs.writeFileSync(path.join(root, name + '.tsx'), [
+      'const offline = () => Promise.resolve(new Response("offline"));',
+      'function makeActions() {',
+      `  const run = () => fetch('${route}');`,
+      name === 'method-write' ? "  return { run, reset() { this.run = offline; } };" : "  return { run, label: 'initial' };",
+      '}',
+      binding,
+      name === 'late-write' ? '' : write,
+      'export function Store() {',
+      `  return <button onClick={() => ${invocation}}>Run</button>;`,
+      '}',
+      name === 'late-write' ? write : ''
+    ].join('\n'));
+  }
+  build();
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  for (const [name, , , , written] of cases) {
+    const route = '/api/' + name;
+    for (const out of [
+      query('api_consumers', route, '--limit', '2'),
+      await mcp.text('query', { kind: 'api_consumers', target: route, depth: 6 })
+    ]) {
+      const call = out.split('\n').find(line => new RegExp(`^ *call\\d+ +${name}\\.tsx:9 run`).test(line));
+      assert.ok(call, out);
+      if (written) {
+        assert.match(call, /\[possible\]$/);
+        assert.match(out, /^# partial: .*unresolved caller coverage/m);
+        assert.doesNotMatch(out, /^ *event\d+ /m);
+      } else {
+        assert.doesNotMatch(call, /\[possible\]/);
+        assert.match(out, /^ *event\d+ /m);
+        if (name !== 'separate-creation' && name !== 'sibling-assign') assert.match(out, /^# complete:/m);
+      }
+    }
+  }
+});
+
+test('API consumers locate native listener escapes through object rest', t => {
+  const { root, build, query } = fixture(t);
+  const directory = path.join(root, 'app/api/rest-escape');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  fs.writeFileSync(path.join(root, 'rest-escape.tsx'), [
+    "const makeWidget = () => ({ label: 'Run', actions: { run: () => fetch('/api/rest-escape') } });",
+    'export function Widget() {',
+    '  const { label, ...rest } = makeWidget();',
+    "  window.addEventListener('online', rest.actions.run);",
+    "  window.removeEventListener('online', rest.actions.run);",
+    '  return <button onClick={() => rest.actions.run()}>{label}</button>;',
+    '}'
+  ].join('\n'));
+  build();
+  for (const depth of ['1', '6']) {
+    const out = query('api_consumers', '/api/rest-escape', '--depth', depth, '--limit', '2');
+    assert.match(out, /^unresolved +rest-escape\.tsx:4 /m);
+    assert.match(out, /^unresolved +rest-escape\.tsx:5 /m);
+    assert.match(out, /^ *call1 +rest-escape\.tsx:6 /m);
+    assert.match(out, /^# partial: .*unresolved caller coverage/m);
+  }
+});
+
+test('API consumers apply literal arguments to guarded requests and guarded helper calls', async t => {
+  const { root, env, build, query } = fixture(t);
+  for (const route of ['preview', 'also-save']) {
+    const directory = path.join(root, 'app/api', route);
+    fs.mkdirSync(directory, { recursive: true });
+    fs.writeFileSync(path.join(directory, 'route.ts'), 'export function GET() { return Response.json({}); }');
+  }
+  fs.writeFileSync(path.join(root, 'preview.tsx'), [
+    'declare const unknown: boolean;',
+    'export function Preview() {',
+    "  const sendPreview = () => fetch('/api/preview');",
+    '  const handleSubmit = (event: unknown, preview = false) => {',
+    '    if (preview) sendPreview();',
+    "    if (preview) fetch('/api/also-save');",
+    "    fetch('/api/also-save');",
+    '  };',
+    '  return <form onSubmit={event => handleSubmit(event, false)}>',
+    '    <button onClick={event => handleSubmit(event)}>Save</button>',
+    '    <button onClick={event => handleSubmit(event, true)}>Preview</button>',
+    '    <button onClick={event => handleSubmit(event, unknown)}>Unknown</button>',
+    '  </form>;',
+    '}'
+  ].join('\n'));
+  build();
+  const mcp = await openMcp(t, root, {
+    command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
+  });
+  for (const out of [
+    query('api_consumers', '/api/preview', '--limit', '2'),
+    await mcp.text('query', { kind: 'api_consumers', target: '/api/preview', depth: 6, limit: 2 })
+  ]) {
+    assert.doesNotMatch(out, /preview\.tsx:(9|10)\b/);
+    assert.match(out, /^ *event\d+ +preview\.tsx:11 /m);
+    assert.match(out, /^ *event\d+ +preview\.tsx:12 /m);
+  }
+  const alsoSave = query('api_consumers', '/api/also-save');
+  assert.match(alsoSave, /^ *event\d+ +preview\.tsx:9 /m);
+  assert.match(alsoSave, /^ *event\d+ +preview\.tsx:10 /m);
 });
 
 test('API callback coverage follows escapes of wrappers and factories used as callback values', t => {

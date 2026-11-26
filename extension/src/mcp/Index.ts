@@ -5,15 +5,16 @@ import type { NextUrlConfig } from '../core/analyzers/NextRouteMatch';
 
 export const WRAPPER_INDEX_REVISION = 9;
 export const TRANSPORT_QUERY_REVISION = 9;
-export const CALLBACK_QUERY_REVISION = 16;
+export const CALLBACK_QUERY_REVISION = 17;
 export const QUERY_INDEX_REVISION = CALLBACK_QUERY_REVISION;
-export const GRAPH_INDEX_REVISION = 18;
+export const GRAPH_INDEX_REVISION = 19;
 export const ROUTER_INDEX_REVISION = 2;
 export const INDEX_SCHEMA = 2;
 export const INDEX_PATH = '.neorion/index.v2.json';
 export const LEGACY_INDEX_PATH = '.neorion/index.v1.json';
 export const AI_SDK_TRANSPORT = 'AI SDK transport';
 export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
+export const CALLABLE_WRITE_ISSUE = 'callable binding or member written';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
 export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE : 'JSX prop render untraced';
 export const AI_SDK_URL_UNCERTAIN = 'uncertain AI SDK URL matches';
@@ -61,8 +62,12 @@ export interface Wrapper {
 }
 
 export type FlowGate = { scope: number; sites: string[]; partial?: boolean; uncertainSites?: string[]; unscoped?: true; callback?: true };
+export type BooleanArguments = [parameter: number, value: boolean][];
+export type ApiCallFact = [args?: BooleanArguments, guards?: BooleanArguments];
+export const apiCallKey = (file: string, line: number, target: number, caller?: number) =>
+  `${caller ?? file}:${target}:${line}`;
 export type CallbackCreation = [factory: number, file: string, line: number, covered?: true];
-export type CallbackInvocation = [caller: number, file: string, line: number, event?: string, possible?: true];
+export type CallbackInvocation = [caller: number, file: string, line: number, event?: string, possible?: true | 'write'];
 export type FlowCall = [from: number, to: number, file: string, line: number, detail: string, gates?: FlowGate[]];
 
 export interface FetchEntry {
@@ -86,6 +91,7 @@ export interface FetchEntry {
   uncertainty?: string;
   binding?: { file: string; line: number; name: string; supplier?: number; site: string };
   gates?: FlowGate[];
+  argumentGuards?: BooleanArguments;
 }
 
 type ReferenceSite = [line: number, kind: string, detail?: string, caller?: number, graphOwner?: number, possible?: true];
@@ -208,6 +214,7 @@ export interface QueryIndex {
   callableOwners?: Record<number, number>;
   callbackCoverageGaps?: Record<number, [file: string, line: number][]>;
   callbackCreations?: Record<number, CallbackCreation[]>;
+  apiCallFacts?: Record<string, ApiCallFact>;
   callbackInvocations?: Record<number, CallbackInvocation[]>;
   hasFlowCalls?: boolean;
   callGates?: Record<string, FlowGate[]>;

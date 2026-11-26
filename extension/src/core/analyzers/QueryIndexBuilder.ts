@@ -5,7 +5,7 @@ import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph'
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
-  isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
+  apiCallKey, CALLABLE_WRITE_ISSUE, isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderSiteKey, type ApiCallFact, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
   type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
@@ -15,6 +15,7 @@ import { inspectRuntimeExports } from './RuntimeExports';
 import { endLine, lineAt, startLine } from './SourceLines';
 import { CallableFlow, callbackRefWrites, FunctionNode, isFunction, jsxLabel, jsxRefContainer, packageMember, refBinding, sectionLabels, useRefBinding } from './CallableFlow';
 import { CallbackCoverage } from './CallbackCoverage';
+import { argumentGuards, booleanArguments } from './ArgumentGuards';
 import { constValue, JsxSite, jsxValue, PropFlow, PropGate, RenderSite } from './PropFlow';
 import { collectPagesFacts, type PagesDependency } from './PagesFacts';
 import type { RouterProject } from '../frameworks/react-router/RouteTypes';
@@ -514,16 +515,17 @@ export class QueryIndexBuilder {
     };
 
     const eventSites: { site: JsxSite; attribute: import('ts-morph').JsxAttribute; target: number;
-      detail: string; gates?: PropGate[]; lookup: boolean; supplied?: Node }[] = [];
+      detail: string; gates?: PropGate[]; lookup: boolean; supplied?: Node; write?: Node }[] = [];
     const refWrites = new Map<Node, { site: JsxSite; assignment: Node; key?: string; direct?: boolean }[]>();
-    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[]; supplied?: Node }[]>();
+    const indirectCalls = new Map<Node, { id: number; via: string[]; gates?: PropGate[]; supplied?: Node; write?: Node }[]>();
     const dynamicCallSites = new Set<Node>();
     const callableTargets = (expression: Node) => {
       const prop = flow.read(expression);
       if (!prop) return callableFlow.resolve(expression).map(target => ({ ...target, gates: undefined, supplied: undefined }));
+      const write = callableFlow.writes.forRead(expression);
       const bindings = flow.bindings(prop);
       return bindings.flatMap(({ value, gates }) => value ? callableFlow.resolve(value).map(target =>
-        ({ ...target, gates, supplied: value })) : []);
+        ({ ...target, write: write ?? target.write, gates, supplied: value })) : []);
     };
     const suppliedCallbacks = new Set<Node>();
     for (const file of files) {
@@ -558,14 +560,14 @@ export class QueryIndexBuilder {
           }
           const label = jsxLabel(site);
           const event = isFunction(value) ? name + ' ' + label : undefined;
-          for (const { fn, via, gates, supplied } of targets) {
+          for (const { fn, via, gates, supplied, write } of targets) {
             const target = callableId(fn, event);
             if (supplied) suppliedCallbacks.add(supplied);
             if (target === undefined) continue;
             if (!historyOnly && this.fetches.length) associateReturns(target, fn);
             eventSites.push({
               site, attribute: node, target, detail: `${name} <${label}>${via.length ? ' via ' + via.join(' > ') : ''}`, gates,
-              lookup: delivery === 'possible', supplied
+              lookup: delivery === 'possible', supplied, write
             });
           }
           return;
@@ -584,7 +586,7 @@ export class QueryIndexBuilder {
         if (!Node.isIdentifier(binding)) return;
         const bindings = flowDeclarations(binding);
         if (!bindings.some(decl => projectFiles.has(decl.getSourceFile()) &&
-            (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || constValue(decl) || isFunction(decl)))) return;
+            (Node.isBindingElement(decl) || Node.isParameterDeclaration(decl) || Node.isVariableDeclaration(decl) && !!decl.getInitializer() || isFunction(decl)))) return;
         if (expression === node.getExpression() && expression === binding && bindings.some(decl => {
           const id = byNode.get(decl);
           return id !== undefined && index.symbols[id - 1].kind !== 'constant' && !Node.isBindingElement(decl);
@@ -592,12 +594,12 @@ export class QueryIndexBuilder {
         const targets = callableTargets(expression);
         const ordinaryMember = targets.length && expression !== binding && flowDeclarations(expression)
           .some(decl => byNode.has(decl) && !Node.isBindingElement(decl));
-        const resolved = targets.flatMap(({ fn, via, gates, supplied }) => {
+        const resolved = targets.flatMap(({ fn, via, gates, supplied, write }) => {
           if (supplied) suppliedCallbacks.add(supplied);
           const id = callableId(fn);
           if (id === undefined) return [];
           if (!historyOnly && this.fetches.length) associateReturns(id, fn);
-          return ordinaryMember ? [] : [{ id, via, gates, supplied }];
+          return ordinaryMember && !write ? [] : [{ id, via, gates, supplied, write }];
         });
         if (resolved.length) indirectCalls.set(node, resolved);
         else if (flow.read(expression)) dynamicCallSites.add(node);
@@ -668,12 +670,35 @@ export class QueryIndexBuilder {
       const sites = ((index.callLiterals ??= {})[key] ??= []);
       if (!sites.includes(args)) sites.push(args);
     };
+    const callFacts = new Map<string, ApiCallFact | undefined>();
+    const definition = (id: number | undefined) => id === undefined ? undefined :
+      callableDefinitions.get(id) ?? factoryDefinitions.get(id);
+    const guardsAt = (site: Node, owner: number | undefined) =>
+      argumentGuards(site, definition(owner), flowDeclarations, callableFlow.writes);
+    const recordApiCall = (from: number | undefined, to: number, site: CallExpression) => {
+      if (historyOnly || !this.fetches.length) return;
+      const key = apiCallKey(relativePath(site.getSourceFile()), startLine(site), to, from);
+      const args = booleanArguments(site, definition(to), flowDeclarations);
+      const guards = guardsAt(site, from);
+      const fact: ApiCallFact | undefined = args || guards ? [args, guards] : undefined;
+      if (!callFacts.has(key)) callFacts.set(key, fact);
+      else if (JSON.stringify(callFacts.get(key)) !== JSON.stringify(fact)) callFacts.set(key, undefined);
+    };
     const addFlowCall = (from: number, to: number, node: Node, detail: string, gates: PropGate[] = []) => {
       const line = startLine(node);
       const applicable = [...gatesOf(flow.gates(node)), ...gatesOf(gates, true)];
-      if (Node.isCallExpression(node)) recordCallSite(gateKey(from, to, line), node);
+      if (Node.isCallExpression(node)) {
+        recordCallSite(gateKey(from, to, line), node);
+        recordApiCall(from, to, node);
+      }
       (index.flowCalls ??= []).push([from, to, relativePath(node.getSourceFile()), line, detail,
         applicable.length ? applicable : undefined]);
+    };
+    const writtenCalls = new Set<string>();
+    const recordWriteIssue = (from: number, to: number, site: Node, write: Node) => {
+      const key = gateKey(from, to, startLine(site));
+      writtenCalls.add(key);
+      (index.callIssues ??= {})[key] = `${CALLABLE_WRITE_ISSUE} (${relativePath(write.getSourceFile())}:${startLine(write)})`;
     };
     const eventReferences = suppliedCallbacks;
     const actionBySymbol = new Map([...actionSymbols].map(([id, symbol]) => [symbol, this.actions.get(id)]));
@@ -683,10 +708,11 @@ export class QueryIndexBuilder {
       if (value && !isFunction(value)) eventReferences.add(value);
       const owner = owners(event.site)[1] ?? fileIdOf(event.site);
       addFlowCall(owner, event.target, event.attribute, event.detail, event.gates);
-      const possible = event.lookup || event.gates?.some(gate => gate.partial);
+      const possible = !!event.write || event.lookup || event.gates?.some(gate => gate.partial);
       recordCallbackUse(event.target, event.attribute, possible);
       if (event.supplied) recordCallbackUse(event.target, event.supplied, possible);
-      if (event.lookup) {
+      if (event.write) recordWriteIssue(owner, event.target, event.attribute, event.write);
+      else if (event.lookup) {
         const file = relativePath(event.attribute.getSourceFile());
         const line = startLine(event.attribute);
         (index.callIssues ??= {})[gateKey(owner, event.target, line)] = `${RENDER_LOOKUP_ISSUE} (${file}:${line})`;
@@ -710,25 +736,27 @@ export class QueryIndexBuilder {
             (key ? ` (key ${key})` : '') + (container ? ' ' + container : '');
         });
       });
-      for (const { id, via, gates, supplied: input } of targets) {
+      for (const { id, via, gates, supplied: input, write } of targets) {
         const prop = flow.read(call.getExpression());
         const supplied = prop && gates?.[0]?.sites[0];
         const viaProp = prop ? 'prop ' + prop.name +
           (supplied ? ` supplied at ${relativePath(supplied.getSourceFile())}:${startLine(supplied)}` : '') : '';
         const detail = [viaProp, via.length ? 'via ' + via.join(' > ') : '', ...refs].filter(Boolean).join(' | ');
         addFlowCall(from, id, call, detail, gates);
-        const possible = !!issue || gates?.some(gate => gate.partial);
+        const possible = !!write || !!issue || gates?.some(gate => gate.partial);
         recordCallbackUse(id, call, possible);
         if (input) recordCallbackUse(id, input, possible);
-        if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
+        if (write) recordWriteIssue(from, id, call, write);
+        else if (issue) (index.callIssues ??= {})[gateKey(from, id, startLine(call))] = issue;
       }
     }
     for (const [from, to, file, line, detail, gates] of index.flowCalls ?? []) {
       actionBySymbol.get(to)?.callers.push([file, line, from]);
       if (!callableDefinitions.has(to)) continue;
       const event = /^on[A-Z]/.test(detail) ? detail : undefined;
-      const possible = !!index.callIssues?.[gateKey(from, to, line)] || gates?.some(gate => gate.partial);
-      ((index.callbackInvocations ??= {})[to] ??= []).push([from, file, line, event, possible ? true : undefined]);
+      const key = gateKey(from, to, line);
+      const possible = !!index.callIssues?.[key] || gates?.some(gate => gate.partial);
+      ((index.callbackInvocations ??= {})[to] ??= []).push([from, file, line, event, writtenCalls.has(key) ? 'write' : possible ? true : undefined]);
     }
     const mapArgument = (expression: Node, remaining = 6): string | undefined => {
       if (!remaining) return;
@@ -917,7 +945,7 @@ export class QueryIndexBuilder {
         supplier: owners(prop.site)[1], site: key
       } : undefined;
       index.fetches.push({ ...entry, route: routeIds.get(route)!, owner, graphOwner: graphOwner === owner ? undefined : graphOwner,
-        lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
+        argumentGuards: guardsAt(node, owner), lifecyclePossible: possible ? true : undefined, fn: owner ? index.symbols[owner - 1].name : null, binding,
         gates: propGates?.length ? gatesOf([...flow.gates(node), ...propGates]) : undefined });
     }
     const suppliers = new Set(index.fetches.flatMap(fetch => fetch.binding?.supplier ?? []));
@@ -1183,13 +1211,21 @@ export class QueryIndexBuilder {
           if (!id) continue;
           line ??= startLine(node);
           found = true;
+          let uncertain = possible;
           if (kind === 'call') {
             const from = graphOwner ?? caller ?? fileId;
             const gates = gatesOf(flow.gates(node));
             if (gates.length) (index.callGates ??= {})[gateKey(from, id, line)] = gates;
             if (Node.isCallExpression(node)) {
+              const write = indirectCalls.get(node)?.find(target => target.id === id && target.write)?.write ??
+                callableFlow.writes.forRead(node.getExpression());
+              if (write) {
+                recordWriteIssue(from, id, node, write);
+                uncertain = true;
+              }
               recordCallSite(gateKey(from, id, line), node);
-              recordCallbackUse(id, node, !!possible);
+              recordApiCall(caller, id, node);
+              recordCallbackUse(id, node, !!uncertain);
               if (refWrites.size) {
                 const args = node.getArguments().flatMap(argument => mapArgument(argument) ?? []);
                 if (args.length) (index.refEvidence ??= {})[gateKey(from, id, line)] = 'argument ' + args.join(', ');
@@ -1241,13 +1277,13 @@ export class QueryIndexBuilder {
           const lines = references.get(id) ?? new Map<number, Reference[]>();
           const entries = lines.get(line) ?? [];
           const same = entries.some(entry => entry[3] === referenceKind && entry[4] === detail && entry[5] === referenceCaller &&
-            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller) && !!entry[7] === !!possible);
+            (entry[6] ?? entry[5]) === (referenceOwner ?? referenceCaller) && !!entry[7] === !!uncertain);
           if (same || (kind === 'use' && entries.some(entry => entry[3] === 'call'))) continue;
           const entry: Reference = [id, relative, line, referenceKind];
           if (detail !== undefined || referenceCaller !== undefined) entry[4] = detail;
           if (referenceCaller !== undefined) entry[5] = referenceCaller;
           if (referenceOwner !== undefined && referenceOwner !== referenceCaller) entry[6] = referenceOwner;
-          if (possible) entry[7] = possible;
+          if (uncertain) entry[7] = uncertain;
           // A call on the same line already records the resolved use for rename.
           lines.set(line, kind === 'call' ? [...entries.filter(entry => entry[3] !== 'use' && entry[3] !== 'jsx-use'), entry] :
             [...entries, entry]);
@@ -1474,8 +1510,8 @@ export class QueryIndexBuilder {
               }
             }
           }
-          const found = Node.isCallExpression(node) && !!record(node, flowDeclarations(expression),
-            'call', undefined, owner, graphOwner, possible ? true : undefined);
+          const found = Node.isCallExpression(node) && !!record(node, flowDeclarations(expression), 'call',
+            undefined, owner, graphOwner, possible ? true : undefined);
           if (graphOwner !== undefined) recordCall(node, expression, graphOwner, found || indirectCalls.has(node));
           if (!Node.isCallExpression(node)) return;
           const [module, factory] = node.getArguments();
@@ -1667,6 +1703,7 @@ export class QueryIndexBuilder {
         }
       }
     }
+    for (const [key, fact] of callFacts) if (fact) (index.apiCallFacts ??= {})[key] = fact;
     const unbound = [...unboundProcedures].filter(id => !boundProcedures.has(id));
     if (unbound.length) index.trpcUnbound = unbound;
     const scopes = new Set([

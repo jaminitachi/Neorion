@@ -1,5 +1,5 @@
 import { compileMiddlewareMatcher, middlewareMatcher } from '../core/analyzers/NextRouteMatch';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, renderIssue, renderSiteKey,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, CALLABLE_WRITE_ISSUE, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, renderIssue, renderSiteKey,
   type ExternalCall, type FetchEntry, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
   type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
@@ -717,14 +717,14 @@ export class DependencyGraph {
     if (symbol || site) return `tRPC client proxy not traced (${location(file, symbol?.line ?? site?.line)})`;
   }
 
-  traceImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, initialGates: FlowGate[] = []) {
-    const trace = this.walkImpact(seeds, depth, includeTests, expired, undefined, initialGates);
+  traceImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, initialGates: FlowGate[] = [], stopAtWrittenBindings = false) {
+    const trace = this.walkImpact(seeds, depth, includeTests, expired, undefined, initialGates, stopAtWrittenBindings);
     if (!trace.renderSites.size) return trace;
     trace.terminals = trace.terminals.flatMap(entry => {
       const route = entry.terminal.route;
       const conditions = route && this.index.pagesRenderConditions?.[route.id];
       if (!conditions || expired() || !Object.keys(conditions).some(site => trace.renderSites.has(site))) return [entry];
-      const scoped = this.walkImpact(seeds, depth, includeTests, expired, route, initialGates);
+      const scoped = this.walkImpact(seeds, depth, includeTests, expired, route, initialGates, stopAtWrittenBindings);
       const match = scoped.terminals.find(result => terminalKey(result.terminal) === terminalKey(entry.terminal));
       if (match?.visit.possible) trace.partial ??= scoped.partial;
       return match ? [match] : [];
@@ -732,7 +732,7 @@ export class DependencyGraph {
     return trace;
   }
 
-  private walkImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, route?: Route, initialGates: FlowGate[] = []) {
+  private walkImpact(seeds: NodeId[], depth: number, includeTests: boolean, expired: () => boolean, route: Route | undefined, initialGates: FlowGate[], stopAtWrittenBindings: boolean) {
     const conditions = route && this.index.pagesRenderConditions?.[route.id];
     const renderSites = new Set<string>();
     const visited = new Map<NodeId, Visit[]>();
@@ -855,9 +855,11 @@ export class DependencyGraph {
           if (edge.partial && edge.label !== 'fetch') pagesIssue ??= edge.uncertainty ?? (this.index.router ? 'possible router dependency' : 'possible Pages dependency');
           if (edge.label === 'fetch' && edge.uncertainty) flowIssue ??= edge.uncertainty;
           reachedEdges.add(edge);
+          const written = edge.uncertainty?.startsWith(CALLABLE_WRITE_ISSUE);
+          if (written && stopAtWrittenBindings) continue;
           const nextSteps = steps + cost;
           const next = { depth: current.depth + (memoized || reachedOwner ? 1 : cost), steps: nextSteps, edge,
-            conditional: current.conditional || edge.conditional, possible: current.possible || edge.label === 'render' && edge.partial };
+            conditional: current.conditional || edge.conditional, possible: current.possible || written || edge.label === 'render' && edge.partial };
           const flags = certaintyFlags(next);
           if (coversVisit(states.get(key), flags, nextSteps)) continue;
           const pending = additions.get(key) ?? { gates: awaiting, visits: [], depths: [] };
@@ -900,13 +902,14 @@ export class DependencyGraph {
   }
 
   consumerEvidence(owner: number, includeTests: boolean, expired: () => boolean, gates: FlowGate[] = [], supplier?: number) {
-    const trace = this.traceImpact([owner], 6, includeTests, expired, gates);
+    const trace = this.traceImpact([owner], 6, includeTests, expired, gates, true);
     const rows: QueryRow[] = [];
     for (const edge of trace.reachedEdges) {
+      const flags = edge.uncertainty?.startsWith(CALLABLE_WRITE_ISSUE) ? ' [possible]' : '';
       if (edge.label === 'event') {
-        rows.push(graphRow(`event  ${location(edge.file, edge.line)} ${edge.detail} -> ${this.name(edge.to)}`, edge.file));
-      } else if (edge.label === 'call' && edge.detail && (edge.detail.startsWith('prop ') || edge.detail.startsWith('via '))) {
-        rows.push(graphRow(`call   ${location(edge.file, edge.line)} ${this.name(edge.from)} -> ${this.name(edge.to)} (${edge.detail})`, edge.file));
+        rows.push(graphRow(`event  ${location(edge.file, edge.line)} ${edge.detail} -> ${this.name(edge.to)}${flags}`, edge.file));
+      } else if (edge.label === 'call' && (flags || edge.detail?.startsWith('prop ') || edge.detail?.startsWith('via '))) {
+        rows.push(graphRow(`call   ${location(edge.file, edge.line)} ${this.name(edge.from)} -> ${this.name(edge.to)}${edge.detail ? ` (${edge.detail})` : ''}${flags}`, edge.file));
       }
     }
     if (supplier !== undefined) for (const edge of trace.reachedEdges) {

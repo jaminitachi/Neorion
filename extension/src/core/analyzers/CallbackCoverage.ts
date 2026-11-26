@@ -2,6 +2,7 @@ import { Node, SyntaxKind, type JsxAttribute, type JsxSpreadAttribute } from 'ts
 import { wrappedExpression } from './ArchitectureFacts';
 import { isFunction, packageMember, staticMember, type FunctionNode } from './CallableFlow';
 import { constValue } from './PropFlow';
+import { staticallyUnreachable } from './CallableWrites';
 
 const enum Coverage {
   Covered,
@@ -32,7 +33,8 @@ export class CallbackCoverage {
         if (!references) this.references.set(name, references = name.findReferencesAsNodes());
         const symbol = name.getSymbol();
         const uses = references.filter(use => {
-          if (use === name || !this.inProject(use) || use.getFirstAncestor(Node.isTypeNode)) return false;
+          if (use === name || !this.inProject(use) || use.getFirstAncestor(Node.isTypeNode) ||
+              staticallyUnreachable(use)) return false;
           const parent = use.getParent();
           const useSymbol = use.getSymbol();
           return useSymbol === symbol || factory && useSymbol?.getAliasedSymbol() === symbol ||
@@ -53,8 +55,12 @@ export class CallbackCoverage {
         if (elements.some(element => Node.isBindingElement(element) &&
             Node.isComputedPropertyName(element.getPropertyNameNode()))) return Coverage.Unresolved;
         const spread = elements.find(element => Node.isBindingElement(element) && element.getDotDotDotToken());
-        if (Node.isBindingElement(spread)) return eventProp && Node.isObjectBindingPattern(name)
-          ? binding(spread.getNameNode(), members, stored, eventProp) : Coverage.Unresolved;
+        if (Node.isBindingElement(spread)) {
+          if (Node.isObjectBindingPattern(name)) return binding(spread.getNameNode(), members, stored, eventProp);
+          const offset = Number(member) - elements.indexOf(spread);
+          return Number.isInteger(offset) && offset >= 0 && String(Number(member)) === member
+            ? binding(spread.getNameNode(), [String(offset), ...rest], stored, eventProp) : Coverage.Unresolved;
+        }
         return stored ? Coverage.Unresolved : Coverage.Covered;
       }
       return Coverage.Unresolved;
