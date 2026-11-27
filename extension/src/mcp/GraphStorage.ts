@@ -1,5 +1,5 @@
 import { deflateRawSync, inflateRawSync } from 'node:zlib';
-import type { IndexedReference, QueryIndex } from './Index';
+import type { DetailFacts, IndexedReference, QueryIndex } from './Index';
 
 type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'externalCalls' | 'externalModules' | 'fileSymbols' |
   'defaultSymbols' | 'exportSymbols' | 'runtimeExports' | 'moduleImports' | 'routeFiles' | 'layoutStyles' | 'unresolvedCalls' |
@@ -13,6 +13,29 @@ type PackedFacts = Pick<QueryIndex, 'graphReferences' | 'graphNames' | 'external
   renderSites?: [offset: number, site: string][];
   routeDetails?: [number, Pick<QueryIndex['routes'][number], 'methods' | 'handlers'>][];
 };
+
+const maxPackedBytes = 32 * 1024 * 1024;
+
+export function packDetailFacts(details: DetailFacts) {
+  const text = JSON.stringify(details);
+  if (text.length < 128 * 1024 || Buffer.byteLength(text) > maxPackedBytes) return ['detailFacts', text] as const;
+  const packed = deflateRawSync(text, { level: 1 }).toString('base64');
+  return packed.length + 8 < text.length
+    ? ['packedDetailFacts', JSON.stringify(packed)] as const
+    : ['detailFacts', text] as const;
+}
+
+export function readDetailFacts(index: QueryIndex): DetailFacts | undefined {
+  const { detailFacts, packedDetailFacts } = index;
+  if (detailFacts || typeof packedDetailFacts !== 'string') return detailFacts;
+  if (packedDetailFacts.length > maxPackedBytes) return;
+  try {
+    return JSON.parse(inflateRawSync(Buffer.from(packedDetailFacts, 'base64'),
+      { maxOutputLength: maxPackedBytes }).toString('utf8'));
+  } catch {
+    return undefined;
+  }
+}
 
 // Pack graph additions on large projects so existing query kinds can read
 // the base index fields without inflating the graph data.
@@ -95,7 +118,7 @@ export function packGraph(index: QueryIndex, minimumBytes = 128 * 1024): QueryIn
 }
 
 function unpackFacts(packedGraph: string): PackedFacts {
-  const bytes = inflateRawSync(Buffer.from(packedGraph, 'base64'), { maxOutputLength: 32 * 1024 * 1024 });
+  const bytes = inflateRawSync(Buffer.from(packedGraph, 'base64'), { maxOutputLength: maxPackedBytes });
   return JSON.parse(bytes.toString('utf8')) as PackedFacts;
 }
 

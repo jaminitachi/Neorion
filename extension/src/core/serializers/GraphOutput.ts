@@ -1,6 +1,6 @@
 import { workspaceCache } from '../WorkspaceCache';
 import { INDEX_PATH, LEGACY_INDEX_PATH } from '../../mcp/Index';
-import { packGraph } from '../../mcp/GraphStorage';
+import { packDetailFacts, packGraph } from '../../mcp/GraphStorage';
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
@@ -53,6 +53,7 @@ export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = t
     }
   }
   for (const [name, content] of details) fs.writeFileSync(path.join(directory, name), content);
+  details.clear();
   const output = path.join(cache, 'codebase_graph.md');
   if (fs.lstatSync(output, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error('Graph overview is a symbolic link');
   fs.writeFileSync(output, overview);
@@ -66,7 +67,26 @@ export function writeGraph(root: string, graph: CodebaseGraph, migrateLegacy = t
     fs.mkdirSync(parent, { recursive: true });
     const temporary = target + '.' + randomUUID();
     try {
-      fs.writeFileSync(temporary, JSON.stringify(packGraph(graph.index)), { flag: 'wx', mode: 0o600 });
+      const packed = packGraph(graph.index);
+      const fd = fs.openSync(temporary, 'wx', 0o600);
+      try {
+        // Serialize sections separately so the complete JSON text and its
+        // UTF-8 copy don't coexist with the in-memory graph.
+        let prefix = '{';
+        for (const [name, value] of Object.entries(packed)) {
+          if (value === undefined) continue;
+          if (name === 'detailFacts' && packed.detailFacts) {
+            const [key, text] = packDetailFacts(packed.detailFacts);
+            fs.writeFileSync(fd, prefix + JSON.stringify(key) + ':' + text);
+          } else {
+            fs.writeFileSync(fd, prefix + JSON.stringify(name) + ':' + JSON.stringify(value));
+          }
+          prefix = ',';
+        }
+        fs.writeFileSync(fd, prefix === '{' ? '{}' : '}');
+      } finally {
+        fs.closeSync(fd);
+      }
       fs.renameSync(temporary, target);
     } finally {
       fs.rmSync(temporary, { force: true });

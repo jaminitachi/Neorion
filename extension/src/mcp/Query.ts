@@ -6,12 +6,12 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, CALLBACK_QUERY_REVISION, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   advanceRenderGuards, apiCallKey, isLazyRender, isTestFile as testFile, lexicalOwner, renderGuardKey, renderIssue, renderSiteKey,
-  type BooleanArguments, type DetailFact, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+  type BooleanArguments, type DetailFact, type DetailFacts, type FetchEntry, type IndexedReference, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, annotatedRow, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { scanExcludedRequests } from './ExcludedRequests';
 import type { RenderEvidence } from '../core/analyzers/RenderEvidence';
-import { readCallableOwners, unpackGraph } from './GraphStorage';
+import { readCallableOwners, readDetailFacts, unpackGraph } from './GraphStorage';
 import { changes, validBase, type ChangeScope } from './Changes';
 import { historyBudgetMs } from './ChangesHistory';
 
@@ -219,15 +219,20 @@ export class QueryEngine {
   private contextRenderExclusions: Set<string>;
   private dynamicRenderComponents: Set<number>;
   private typedLookupIssues: Set<string>;
-  private references: Map<number, Reference[]>;
+  private readonly baseReferences: QueryIndex['references'];
+  private referenceGroups?: Map<number, IndexedReference[]>;
+  private decodedReferences = new Map<number, Reference[]>();
+  private filePaths?: string[];
   private fetches: Map<number, FetchEntry[]>;
   private pageRoots = new Map<number, { route: Route; layout: boolean; conditional?: boolean; possible?: boolean }[]>();
   private excluded?: ReturnType<typeof scanExcludedRequests>;
   private dependencyGraph?: DependencyGraph | null;
+  private details?: DetailFacts | null;
   private callableOwners?: NonNullable<QueryIndex['callableOwners']>;
 
   constructor(root: string, private index: QueryIndex) {
     this.root = realpathSync(root);
+    this.baseReferences = index.references;
     this.symbols = new Map(index.symbols.map(symbol => [symbol.id, symbol]));
     this.names = group(index.symbols, symbol => symbol.name);
     for (const symbol of index.symbols) for (const alias of symbol.selectorAliases ?? []) {
@@ -245,13 +250,6 @@ export class QueryEngine {
       return compare(left?.file ?? '', right?.file ?? '') || compare(left?.name ?? '', right?.name ?? '') ||
         Number(!!a[5]) - Number(!!b[5]) || a[3] - b[3] || a[2] - b[2] || a[0] - b[0];
     });
-    const paths = Object.keys(index.files);
-    const references = index.references.map((reference): Reference => {
-      const [id, file, ...site] = reference;
-      if (typeof file === 'string') return reference as Reference;
-      return [id, typeof file === 'number' ? paths[file] : this.symbols.get(id)?.file ?? '', ...site];
-    });
-    this.references = group(references, reference => reference[0]);
     this.fetches = group(index.fetches, fetch => fetch.route);
     for (const route of index.routes) {
       if (route.kind !== 'page' || route.router?.renderable === false) continue;
@@ -267,6 +265,27 @@ export class QueryEngine {
       add(route.fileSymbol, false);
       for (const layout of route.layouts ?? []) add(layout, true);
     }
+  }
+
+  private get references() {
+    return this.referenceGroups ??= group(this.baseReferences, reference => reference[0]);
+  }
+
+  private referencesTo(id: number) {
+    const cached = this.decodedReferences.get(id);
+    if (cached) return cached;
+    const references = this.references.get(id);
+    if (!references) return [];
+    const paths = this.filePaths ??= Object.keys(this.index.files);
+    const decoded = references.map((reference): Reference => {
+      const [, file] = reference;
+      if (typeof file === 'string') return reference as Reference;
+      const site = reference.slice() as Reference;
+      site[1] = typeof file === 'number' ? paths[file] : this.symbols.get(id)?.file ?? '';
+      return site;
+    });
+    this.decodedReferences.set(id, decoded);
+    return decoded;
   }
 
   private excludedRequests() {
@@ -298,6 +317,28 @@ export class QueryEngine {
       }
     }
     return absolute;
+  }
+
+  private snapshotFileStale(file: string, indexed: QueryIndex['files'][string],
+    directories: Map<string, boolean>, fullCheck: (file: string) => boolean) {
+    if (!validRelative(file)) return fullCheck(file);
+    try {
+      const absolute = path.resolve(this.root, file);
+      const directory = path.dirname(absolute);
+      let withinRoot = directories.get(directory);
+      if (withinRoot === undefined) {
+        withinRoot = inside(this.root, realpathSync.native(directory));
+        directories.set(directory, withinRoot);
+      }
+      if (!withinRoot || absolute === this.root) return true;
+      const current = lstatSync(absolute);
+      // Recheck the whole path before hashing a changed file or following a symlink.
+      if (current.isSymbolicLink()) return fullCheck(file);
+      return !current.isFile() || current.size !== indexed.size ||
+        current.mtimeMs !== indexed.mtimeMs && fullCheck(file);
+    } catch {
+      return true;
+    }
   }
 
   private symbolTarget(text: string) {
@@ -717,7 +758,7 @@ export class QueryEngine {
     const label = `decl ${location(symbol.file, symbol.line)}`;
     const rows = [{ ...row(label + flagTest(symbol.file), symbol.file), pathEnd: label.length }];
     const files = new Set([symbol.file]);
-    const references = this.references.get(symbol.id) ?? [];
+    const references = this.referencesTo(symbol.id);
     const sourceLines = new Map<string, string[]>();
     const exportStar = (ref: Reference) => {
       if (ref[3] === 'export-star') return true;
@@ -1027,7 +1068,7 @@ export class QueryEngine {
     const callsTo = (owner: number) => {
       let calls = direct.get(owner);
       if (!calls) {
-        calls = (this.references.get(owner) ?? []).filter(([, file, , kind, , caller]) =>
+        calls = (this.referencesTo(owner)).filter(([, file, , kind, , caller]) =>
           kind === 'call' && caller !== owner && visible(file));
         direct.set(owner, calls);
       }
@@ -1116,7 +1157,7 @@ export class QueryEngine {
             // Keep that state at this depth so recursion costs no caller row.
             queue.push({ id: owner, key: JSON.stringify(callerGuards) ?? '', guards: callerGuards });
           };
-          for (const [, file, line, kind, , caller, , possible] of this.references.get(owner) ?? []) {
+          for (const [, file, line, kind, , caller, , possible] of this.referencesTo(owner)) {
             if (kind === 'call' && caller === owner && !possible) reenter(file, line);
           }
           for (const [caller, file, line, event, possible] of this.index.callbackInvocations?.[owner] ?? []) {
@@ -1250,7 +1291,8 @@ export class QueryEngine {
   }
 
   private detailQuery(target: string, cli: CliReplay | undefined, expired: () => boolean): { result: Result; ambiguous?: boolean } {
-    const details = this.index.detailFacts;
+    if (this.details === undefined) this.details = readDetailFacts(this.index) ?? null;
+    const details = this.details;
     if (!details || !Array.isArray(details.requests)) {
       return { result: { rows: [], partial: 'regenerate index for handler and state facts' } };
     }
@@ -1556,9 +1598,11 @@ export class QueryEngine {
     let snapshotStale = false;
     if (this.index.coverage && !ambiguous && !result.partial && !shortened &&
         confirmedShown === confirmedTotal && (tool === 'search' || result.targets)) {
-      for (const file of Object.keys(this.index.files)) {
+      const directories = new Map<string, boolean>();
+      for (const [file, indexed] of Object.entries(this.index.files)) {
         if (expired()) break;
-        if (stale(file)) {
+        if (status.has(file) ? status.get(file) :
+            this.snapshotFileStale(file, indexed, directories, stale)) {
           snapshotStale = true;
           break;
         }

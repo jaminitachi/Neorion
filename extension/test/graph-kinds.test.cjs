@@ -94,6 +94,23 @@ test('facts connects handler operations, state handoffs, and request transports'
   assert.match(project.run(['--help']), /facts ItemDialog/);
 });
 
+test('facts reads a compressed section without rebuilding the index', t => {
+  const { deflateRawSync } = require('node:zlib');
+  const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  const file = project.build();
+  const targets = ['PATCH /api/media/[slug]', 'MediaDialog'];
+  const expected = targets.map(target => project.query('facts', target));
+  const { detailFacts, ...index } = JSON.parse(fs.readFileSync(file, 'utf8'));
+  index.packedDetailFacts = deflateRawSync(JSON.stringify(detailFacts)).toString('base64');
+  const packed = JSON.stringify(index);
+  fs.writeFileSync(file, packed);
+
+  for (const [offset, target] of targets.entries()) {
+    assert.equal(project.run(['query', 'facts', target], { NEORION_AUTOBUILD: '1' }), expected[offset]);
+  }
+  assert.equal(fs.readFileSync(file, 'utf8'), packed);
+});
+
 test('facts handles the review cases', async t => {
   const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
   const index = JSON.parse(fs.readFileSync(project.build(), 'utf8'));

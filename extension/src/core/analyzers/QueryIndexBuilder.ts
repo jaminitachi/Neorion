@@ -30,6 +30,11 @@ import { bindingOf, executionSites, functionNode, importBinding, returns, valueN
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 import type { ReactFacts, IndexedRequest } from './ReactFacts';
 
+function fingerprint(file: string) {
+  const { size, mtimeMs } = statSync(file);
+  return { size, mtimeMs, sha1: createHash('sha1').update(readFileSync(file)).digest('hex') };
+}
+
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
   route: string; node: Node; prop?: { site: RenderSite; value: Node; name: string }; propGates?: PropGate[];
@@ -537,7 +542,10 @@ export class QueryIndexBuilder {
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
     const exports = new Map(files.map(file => [file, this.exportsOf(file)]));
-    const exported = new Set<Node>([...exports.values()].flatMap(entries => [...entries.values()].flat()));
+    const exported = new Set<Node>();
+    for (const entries of exports.values()) {
+      for (const declarations of entries.values()) for (const node of declarations) exported.add(node);
+    }
     const fileByName = new Map<string, SourceFile>(files.map(file => [file.getFilePath(), file]));
     const resolveDynamicModules = (specifier: Node | undefined, source: SourceFile, allowTemplate: boolean) => {
       const resolve = (text: string) => fileByName.get(ts.resolveModuleName(text, source.getFilePath(),
@@ -613,10 +621,7 @@ export class QueryIndexBuilder {
     for (const file of files) {
       const relative = relativePath(file);
       if (historyOnly) index.files[relative] = { size: 0, mtimeMs: 0, sha1: '' };
-      else {
-        const { size, mtimeMs } = statSync(file.getFilePath());
-        index.files[relative] = { size, mtimeMs, sha1: createHash('sha1').update(readFileSync(file.getFilePath())).digest('hex') };
-      }
+      else index.files[relative] = fingerprint(file.getFilePath());
       for (const node of [...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getInterfaces(), ...file.getTypeAliases(), ...file.getEnums()]) {
         const name = node.getName() ?? 'default';
@@ -1675,8 +1680,9 @@ export class QueryIndexBuilder {
     for (const relative of orderedFiles) {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
-      const content = historyOnly ? '' : file.getFullText();
-      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(file.compilerNode.text);
+      const sourceText = file.compilerNode.text;
+      const content = historyOnly ? '' : sourceText;
+      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(sourceText);
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -2088,11 +2094,12 @@ export class QueryIndexBuilder {
           }
         }
       };
-      const recordNamespaceUse = (node: Node) => {
-        const namespace = namespaces.get(node.getText());
+      const identifierText = (node: ts.Identifier) => escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
+      const recordNamespaceUse = (node: Node, name: string) => {
+        const namespace = namespaces.get(name);
+        if (!namespace) return;
         let parent = node.getParent();
-        if (!namespace || parent === namespace.declaration ||
-            insideType(node.compilerNode.parent)) return;
+        if (parent === namespace.declaration || insideType(node.compilerNode.parent)) return;
         const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : node.getSymbol();
         if (!symbol?.getDeclarations().includes(namespace.declaration)) return;
         let receiver = node;
@@ -2121,7 +2128,18 @@ export class QueryIndexBuilder {
       };
       // Keep REFERENCE_KINDS in sync with the node kinds handled below, including tRPC calls and resolver owners.
       visitKinds(file, REFERENCE_KINDS, node => {
-        if (namespaces.size && Node.isIdentifier(node)) recordNamespaceUse(node);
+        const raw = node.compilerNode;
+        if (ts.isIdentifier(raw)) {
+          const name = identifierText(raw);
+          if (namespaces.size) recordNamespaceUse(node, name);
+          if ((!names.has(name) && !localNames.has(name)) || dynamicSelectors.has(node)) return;
+          const parent = raw.parent;
+          if (parent.kind === SyntaxKind.ImportSpecifier || parent.kind === SyntaxKind.ImportClause ||
+              parent.kind === SyntaxKind.ExportSpecifier) return;
+          record(node, declarationsOf(node).filter(declaration =>
+            declaration.compilerNode !== parent || !byNode.has(declaration)), 'use');
+          return;
+        }
         if (Node.isReturnStatement(node)) {
           const expression = node.getExpression();
           const value = expression && wrappedExpression(expression) || expression;
@@ -2250,19 +2268,16 @@ export class QueryIndexBuilder {
             const symbol = typeOf(node.getExpression()).getProperty(key.getLiteralText());
             if (symbol) record(key, (symbol.getAliasedSymbol() ?? symbol).getDeclarations(), 'use');
           }
-        } else if (Node.isIdentifier(node) && (names.has(node.getText()) || localNames.has(node.getText()))) {
-          const parent = node.getParent();
-          if (Node.isImportSpecifier(parent) || Node.isImportClause(parent) || Node.isExportSpecifier(parent) ||
-              dynamicSelectors.has(node)) return;
-          record(node, declarationsOf(node).filter(declaration =>
-            declaration.compilerNode !== parent?.compilerNode || !byNode.has(declaration)), 'use');
         }
       }, {
         visitRaw: commentBoundaries ? scanNodeComments : undefined,
         filterRaw: node => {
           if (!ts.isIdentifier(node)) return !historyOnly || !ts.isReturnStatement(node);
-          const text = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
-          return names.has(text) || localNames.has(text) || namespaces.has(text);
+          const text = identifierText(node);
+          if (namespaces.has(text)) return true;
+          if (!names.has(text) && !localNames.has(text)) return false;
+          const kind = node.parent.kind;
+          return kind !== SyntaxKind.ImportSpecifier && kind !== SyntaxKind.ImportClause && kind !== SyntaxKind.ExportSpecifier;
         }
       });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);
