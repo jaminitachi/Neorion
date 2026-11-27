@@ -565,14 +565,23 @@ test('publishes distinct literal paths for percent, route-group and tilde names'
 const benchRepos = process.env.NEORION_BENCH_REPOS;
 for (const name of ['ai-chatbot', 'papermark']) {
   test(`${name} overview links open literally and remain within independent token budgets`, { skip: !benchRepos }, async t => {
-    const { execFileSync } = require('node:child_process');
+    const { execFileSync, spawnSync } = require('node:child_process');
     const source = path.resolve(benchRepos, name);
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'neorion-bench-test-'));
     t.after(() => fs.rmSync(tmp, { recursive: true, force: true }));
     const project = path.join(tmp, name);
-    execFileSync('git', ['clone', '--quiet', '--shared', source, project]);
-    const listing = execFileSync('git', ['-C', project, 'ls-files', '-z'], { encoding: 'utf8' })
-      .split('\0').filter(Boolean).join('\n') + '\n';
+    const gitRoot = spawnSync('git', ['-C', source, 'rev-parse', '--show-toplevel'], { encoding: 'utf8' });
+    let files;
+    if (gitRoot.status === 0 && fs.realpathSync(gitRoot.stdout.trim()) === fs.realpathSync(source)) {
+      execFileSync('git', ['clone', '--quiet', '--shared', source, project]);
+      files = execFileSync('git', ['-C', project, 'ls-files', '-z'], { encoding: 'utf8' }).split('\0').filter(Boolean);
+    } else {
+      const excluded = new Set(['.git', 'node_modules', '.next', '.neorion']);
+      fs.cpSync(source, project, { recursive: true, filter: file => file === source || !excluded.has(path.basename(file)) });
+      files = fs.readdirSync(project, { recursive: true, withFileTypes: true }).filter(entry => !entry.isDirectory())
+        .map(entry => path.relative(project, path.join(entry.parentPath ?? entry.path, entry.name))).sort();
+    }
+    const listing = files.join('\n') + '\n';
     const overview = await generate(project);
     assertOverviewLinks(project, overview);
     assert.ok(count(overview) <= overviewBudget(listing));

@@ -13,11 +13,40 @@ export function unwrapFact(node: Node | undefined) {
   return node;
 }
 
+export function syntaxLabel(node: Node): string {
+  let text = node.getText();
+  if (text.includes('//') && /[\r\n\u2028\u2029]/.test(text)) {
+    const source = node.getSourceFile().compilerNode;
+    const start = node.getStart();
+    const ends = new Map<number, number>();
+    const visit = (current: ts.Node) => {
+      const children = current.getChildren(source);
+      if (children.length) {
+        for (const child of children) visit(child);
+      } else if (!ts.isJsxText(current)) {
+        const tokenStart = current.getStart(source);
+        const comments = [...ts.getLeadingCommentRanges(source.text, current.pos) ?? [],
+          ...ts.getTrailingCommentRanges(source.text, current.pos) ?? []];
+        for (const comment of comments) {
+          if (comment.kind === SyntaxKind.SingleLineCommentTrivia && comment.pos >= start && comment.end <= tokenStart) {
+            ends.set(comment.pos, comment.end);
+          }
+        }
+      }
+    };
+    visit(node.compilerNode);
+    for (const [from, to] of [...ends].sort(([a], [b]) => b - a)) {
+      text = text.slice(0, from - start) + text.slice(to - start);
+    }
+  }
+  return text.replace(/[\r\n\t\u2028\u2029]+/g, ' ').replace(/ {2,}/g, ' ');
+}
+
 // Preserve literal string values in a one-line representation.
 export function expressionLabel(node: Node | undefined): string {
   if (!node) return '<missing>';
   if (Node.isStringLiteral(node) || Node.isNoSubstitutionTemplateLiteral(node)) return JSON.stringify(node.getLiteralText());
-  return node.getText().replace(/[\r\n\t]+/g, ' ').replace(/ {2,}/g, ' ');
+  return syntaxLabel(node);
 }
 
 export function literalLabel(node: Node | undefined, depth = 4): string | undefined {

@@ -47,7 +47,7 @@ function nameOf(node: Node) {
     Node.isStringLiteral(node) || Node.isNumericLiteral(node) ? node.getLiteralText() : undefined;
 }
 
-export type RenderGuard = { expression: Node; positive: boolean };
+export type RenderGuard = { expression: Node; positive: boolean; earlyReturn?: boolean };
 export type RenderSelection = { selector: Node; members: string[] };
 
 /** Prove that a JSX branch is blocked for a particular chain of prop suppliers. */
@@ -58,6 +58,7 @@ export function evaluateRenderGuards(flow: PropFlow, guards: RenderGuard[], sele
   const bound = new Set<Node>();
   let budget = 360;
   let supplied = false;
+  let usedFalseDefault = false;
   let strict = false;
   const read = (owner: Node, key: string): Value[] => {
     const site = suppliers.get(owner);
@@ -140,8 +141,11 @@ export function evaluateRenderGuards(flow: PropFlow, guards: RenderGuard[], sele
       if (declaration && !env.has(declaration) && assumed.has(declaration)) return [assumed.get(declaration)];
     }
     const prop = flow.read(node);
-    if (prop) return finite(read(prop.component, prop.name).flatMap(value =>
-      value === undefined && prop.fallback ? evaluate(prop.fallback, env) : [value]));
+    if (prop) return finite(read(prop.component, prop.name).flatMap(value => {
+      if (value !== undefined || !prop.fallback) return [value];
+      usedFalseDefault ||= Node.isFalseLiteral(prop.fallback);
+      return evaluate(prop.fallback, env);
+    }));
     if (Node.isIdentifier(node)) {
       const parent = node.getParent();
       const declaration = Node.isShorthandPropertyAssignment(parent)
@@ -267,12 +271,15 @@ export function evaluateRenderGuards(flow: PropFlow, guards: RenderGuard[], sele
   // A branch must itself be possible before imposing its equality on earlier
   // guards (for example find(x => x.type === mode) under mode === "email").
   let supported = false;
-  const impossible = ({ expression, positive }: RenderGuard) => {
+  const impossible = ({ expression, positive, earlyReturn }: RenderGuard) => {
     budget = 360;
     supplied = false;
+    usedFalseDefault = false;
     const values = evaluate(expression).map(truth);
     if (supplied && !values.includes(undefined) && values.includes(positive)) supported = true;
-    return values.length > 0 && values.every(value => value === !positive);
+    const blocked = values.length > 0 && values.every(value => value === !positive);
+    if (blocked && earlyReturn && usedFalseDefault) strict = true;
+    return blocked;
   };
   let blocked = guards.some(impossible);
   if (!blocked) {

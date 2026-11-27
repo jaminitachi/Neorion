@@ -1,5 +1,5 @@
 import { compileMiddlewareMatcher, middlewareMatcher } from '../core/analyzers/NextRouteMatch';
-import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, advanceRenderGuards, CALLABLE_WRITE_ISSUE, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, renderGuardKey, renderIssue, renderSiteKey,
+import { AI_SDK_TRANSPORT, AI_SDK_URL_OVERRIDE, transportIssue, advanceRenderGuards, CALLABLE_WRITE_ISSUE, GRAPH_INDEX_REVISION, GraphReferenceKind, isTestFile, lexicalOwner, pagesUrlIssues, renderGuardKey, renderIssue, renderSiteKey,
   type ExternalCall, type FetchEntry, type FlowGate, type ModuleImport, type PageRenderCondition, type QueryIndex,
   type RuntimeExportState, type ServerAction, type SymbolEntry, type TrpcUse } from './Index';
 
@@ -869,7 +869,8 @@ export class DependencyGraph {
           if (written && stopAtWrittenBindings) continue;
           const nextSteps = steps + cost;
           const next = { depth: current.depth + (memoized || reachedOwner ? 1 : cost), steps: nextSteps, edge,
-            conditional: current.conditional || edge.conditional, possible: current.possible || written || (edge.label === 'render' || edge.label === 'event') && edge.partial,
+            conditional: current.conditional || edge.conditional, possible: current.possible || written ||
+              (edge.label === 'render' || edge.label === 'event' || edge.label === 'load' || edge.label === 'submit') && edge.partial,
             valueOnly: current.valueOnly || !current.edge && edge.returnedValue };
           const flags = certaintyFlags(next);
           if (coversVisit(states.get(key), flags, nextSteps)) continue;
@@ -1000,10 +1001,14 @@ export class DependencyGraph {
     if (targetAction) notes.push(graphRow(`# target: server action ${targetAction.name}`, targetAction.file));
     const pageIds = new Set<number>();
     const apiFiles = new Set<string>();
+    const urlIssues = new Set<string>();
     let layouts = 0;
     let other = 0;
     for (const { terminal } of trace.terminals) {
-      if (terminal.kind === 'api') apiFiles.add(terminal.route?.router?.id ?? terminal.file);
+      if (terminal.kind === 'api') {
+        apiFiles.add(terminal.route?.router?.id ?? terminal.file);
+        if (terminal.route) for (const issue of pagesUrlIssues(this.index, terminal.route)) urlIssues.add(issue);
+      }
       else if (terminal.kind === 'action') continue;
       else if (terminal.pages) {
         layouts++;
@@ -1125,7 +1130,7 @@ export class DependencyGraph {
       (used > depth ? ` (limit ${depth} + renders/events${[...trace.visited.values()].some(visits =>
         visits.some(visit => visit.depth > depth && visit.edge?.label === 'fetch')) ? '/HTTP' : ''}${trace.localCallbackUsed ? '/callbacks' : ''})` : '') +
       (trace.hubs.length ? ', hub collapsed' : ''),
-      partial: [...middlewareReasons, trace.partial ?? scopedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
+      partial: [...middlewareReasons, ...urlIssues, trace.partial ?? scopedLookup, unknownMiddleware ? 'middleware matcher coverage not enumerated' : undefined]
         .filter(Boolean).join('; ') || undefined,
       scope: 'indexed call, event, render, action, use, dyn, fetch edges' +
         ([...trace.visited.values()].some(visits => visits.some(visit => visit.edge?.label === 'trpc')) ? ', including tRPC' : '') };

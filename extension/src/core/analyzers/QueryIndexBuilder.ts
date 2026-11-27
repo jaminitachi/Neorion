@@ -29,6 +29,7 @@ import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 import type { ReactFacts, IndexedRequest } from './ReactFacts';
+import { syntaxLabel } from './FactSyntax';
 
 function fingerprint(file: string) {
   const { size, mtimeMs } = statSync(file);
@@ -2675,7 +2676,7 @@ export class QueryIndexBuilder {
             if (name === 'onClick') untracedHandlers.add(from);
             if (Node.isJsxSpreadAttribute(attr) || name === 'open' || /^on(?!Click$)[A-Z]/.test(name)) {
               rows.push([file, startLine(attr), '<' + node.getTagNameNode().getText() + '> in ' +
-                index.symbols[from - 1].name + ' ' + attr.getText(), 'prop supplier not traced to React state']);
+                index.symbols[from - 1].name + ' ' + syntaxLabel(attr), 'prop supplier not traced to React state']);
             }
           }
         }
