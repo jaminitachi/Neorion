@@ -6,7 +6,7 @@ import type { ComponentNode, RouteNode } from '../types/GraphTypes';
 import {
   GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, GraphReferenceKind, WRAPPER_INDEX_REVISION, VERSION,
   apiCallKey, CALLABLE_WRITE_ISSUE, isMiddlewareFile, isTestFile, RENDER_LOOKUP_ISSUE, renderGuardKey, renderSiteKey, type ApiCallFact, type ExternalCall, type FetchEntry, type FlowGate, type GraphReference,
-  type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
+  type DetailFact, type DetailFacts, type ModuleImport, type NamespaceUse, type PageRenderCondition, type QueryIndex, type Reference, type ServerAction, type Wrapper
 } from '../../mcp/Index';
 import { conditionalAt, declarationsOf as uncachedDeclarationsOf, isPackageSpecifier, wrappedExpression } from './ArchitectureFacts';
 import { middlewareMatcher } from './ChangeSource';
@@ -28,6 +28,7 @@ import { renderEvidence } from './RenderEvidence';
 import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
+import type { ReactFacts, IndexedRequest } from './ReactFacts';
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -879,7 +880,13 @@ export class QueryIndexBuilder {
         ({ ...target, write: write ?? target.write, gates, supplied: value })) : []);
     };
     const suppliedCallbacks = new Set<Node>();
+    const reactFacts = historyOnly ? undefined : (require('./ReactFacts') as typeof import('./ReactFacts')).ReactFacts;
+    const factCandidates = new Map<SourceFile, NonNullable<ReturnType<typeof ReactFacts.candidates>>>();
     for (const file of files) {
+      // Keep call sites from the existing walk, in source order. Facts still
+      // resolve owners and fetch targets after the index has been assembled.
+      const candidates = reactFacts?.candidates(file);
+      if (candidates) factCandidates.set(file, candidates);
       visitKinds(file, FLOW_KINDS, node => {
         if (Node.isJsxAttribute(node)) {
           const site = node.getParent()?.getParent();
@@ -929,6 +936,7 @@ export class QueryIndexBuilder {
           return;
         }
         if (!Node.isCallExpression(node)) return;
+        if (candidates?.accepts(node.compilerNode)) candidates.calls.push(node);
         let expression: Node = node.getExpression();
         for (let inner = wrappedExpression(expression); inner; inner = wrappedExpression(expression)) expression = inner;
         // Existing references cover ordinary declarations. Resolve value flow for
@@ -2571,6 +2579,98 @@ export class QueryIndexBuilder {
       });
       if (packages.length) index.workspacePackages = Object.fromEntries(packages);
       if (workspace.discoveryLimited) index.workspaceDiscoveryLimited = true;
+    }
+    if (reactFacts) {
+      const details: DetailFacts = index.detailFacts = {
+        handlers: {}, symbols: {}, renders: {}, requests: [], untracedStateOwners: [], unresolvedJsxHandlers: []
+      };
+      const add = <K extends string | number>(table: Record<K, DetailFact[]>, key: K, row: DetailFact) =>
+        (table[key] ??= []).push(row);
+      for (const route of index.routes) {
+        if (route.kind !== 'api' || route.pages || route.router) continue;
+        const source = filesByRelative.get(route.file);
+        const entries = source && exports.get(source);
+        const methods = (route.methods ?? []).map(method => {
+          const declarations = entries?.get(method);
+          const { handlerFacts } = require('./HandlerFacts') as typeof import('./HandlerFacts');
+          return [method, handlerFacts(declarations?.length === 1 ? declarations[0] : undefined,
+            node => relativePath(node.getSourceFile()))] as const;
+        });
+        details.handlers[route.id] = Object.fromEntries(methods);
+      }
+      const apiRoutesByUrl = new Map<string, number[]>();
+      for (const { kind, url, id } of index.routes) if (kind === 'api') {
+        const ids = apiRoutesByUrl.get(url) ?? [];
+        ids.push(id);
+        apiRoutesByUrl.set(url, ids);
+      }
+      const indexedRequests = new Map<Node, Map<string, IndexedRequest>>();
+      for (const { node, via, route, method, url, partial, propUrlUnknown } of this.fetches) {
+        if (via !== 'fetch') continue;
+        let matches = indexedRequests.get(node);
+        if (!matches) indexedRequests.set(node, matches = new Map());
+        const prior = matches.get(route);
+        const partialUrl = !!(partial || propUrlUnknown);
+        if (!prior || prior.partialUrl && !partialUrl) matches.set(route, { method, url, partialUrl });
+      }
+      const jsxFiles = new Set(renderSites.map(site => site.file));
+      const react = new Map<SourceFile, ReactFacts>();
+      const untracedStateOwners = new Set<number>();
+      const scope = (node: Node) => {
+        for (let parent = node.compilerNode.parent; parent; parent = parent.parent) {
+          const id = graphOwners.get(parent);
+          const kind = id === undefined ? undefined : index.symbols[id - 1].kind;
+          if (kind === 'component' || kind === 'hook') return id;
+        }
+        return owners(node)[1];
+      };
+      for (const [relative, source] of filesByRelative) {
+        const candidates = factCandidates.get(source);
+        if (!candidates?.calls.length || candidates.requiresJsx && !jsxFiles.has(relative)) continue;
+        const collector = new reactFacts(source, relative, flow, scope,
+          (owner, fact) => add(details.symbols, owner, fact), indexedRequests,
+          (method, routes, fact) => {
+            const candidates = routes.flatMap(route => apiRoutesByUrl.get(route) ?? []);
+            if (candidates.length) details.requests.push([method, candidates, fact]);
+          }, untracedStateOwners);
+        if (collector.collect(candidates)) react.set(source, collector);
+      }
+      const untracedHandlers = new Set<number>();
+      for (const site of renderSites) {
+        const { node, owner, file } = site;
+        if (owner === undefined || !Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) continue;
+        const supplier = react.get(node.getSourceFile());
+        const targets = resolvedRenderSites.get(node);
+        if (!supplier) {
+          const attributes = node.compilerNode.attributes.properties;
+          if (!targets?.size) {
+            if (attributes.some(attr => ts.isJsxAttribute(attr) &&
+              ts.isIdentifier(attr.name) && /^on[A-Z]/.test(attr.name.text))) untracedHandlers.add(scope(node) ?? owner);
+            continue;
+          }
+          if (!attributes.some(attr => ts.isJsxSpreadAttribute(attr) || !ts.isIdentifier(attr.name) ||
+            attr.name.text === 'open' || /^on[A-Z]/.test(attr.name.text))) continue;
+        }
+        const from = scope(node) ?? owner;
+        const rows = supplier?.render(node, from, index.symbols[from - 1].name, !!targets?.size, untracedHandlers) ?? [];
+        if (!supplier) {
+          // A matching render in an unsupported state source can still supply an open flag or callback.
+          for (const attr of node.getAttributes()) {
+            const name = Node.isJsxAttribute(attr) ? attr.getNameNode().getText() : '';
+            if (name === 'onClick') untracedHandlers.add(from);
+            if (Node.isJsxSpreadAttribute(attr) || name === 'open' || /^on(?!Click$)[A-Z]/.test(name)) {
+              rows.push([file, startLine(attr), '<' + node.getTagNameNode().getText() + '> in ' +
+                index.symbols[from - 1].name + ' ' + attr.getText(), 'prop supplier not traced to React state']);
+            }
+          }
+        }
+        for (const fact of rows) {
+          add(details.symbols, from, fact);
+          for (const target of targets ?? []) if (from !== target) add(details.renders, target, fact);
+        }
+      }
+      details.unresolvedJsxHandlers = [...untracedHandlers];
+      details.untracedStateOwners = [...untracedStateOwners];
     }
     return index;
   }

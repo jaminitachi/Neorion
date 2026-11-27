@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, CALLBACK_QUERY_REVISION, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
   advanceRenderGuards, apiCallKey, isLazyRender, isTestFile as testFile, lexicalOwner, renderGuardKey, renderIssue, renderSiteKey,
-  type BooleanArguments, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
+  type BooleanArguments, type DetailFact, type FetchEntry, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, annotatedRow, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
 import { scanExcludedRequests } from './ExcludedRequests';
@@ -103,7 +103,7 @@ function validate(name: string, value: unknown) {
   const options = {
     who_renders: ['direct'], wrappers: ['includeExternal'], rename_impact: ['includeTests'],
     api_consumers: ['callers', 'depth', 'includeTests'], search: [filterKey],
-    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base', 'depth']
+    impact: ['depth', 'includeTests'], callees: ['depth', 'uses'], path: ['to'], changes: ['scope', 'base', 'depth'], facts: []
   }[tool];
   for (const key of Object.keys(input)) {
     if (![...(tool === 'changes' ? [] : [targetKey]), 'limit', ...options, ...(!legacy ? ['kind'] : [])].includes(key)) {
@@ -1249,6 +1249,85 @@ export class QueryEngine {
     return graph.actionMatches(name, file).sort(bySymbol);
   }
 
+  private detailQuery(target: string, cli: CliReplay | undefined, expired: () => boolean): { result: Result; ambiguous?: boolean } {
+    const details = this.index.detailFacts;
+    if (!details || !Array.isArray(details.requests)) {
+      return { result: { rows: [], partial: 'regenerate index for handler and state facts' } };
+    }
+    const methodTarget = /^(GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)\s+(.+)$/i.exec(target);
+    const routeTarget = methodTarget?.[2] ?? target;
+    const notes = new Set<string>();
+    const rows: Row[] = [];
+    const append = (facts: DetailFact[], label = '') => {
+      for (const [file, line, evidence, partial] of facts) {
+        const text = location(file, line) + ' ' + label + evidence;
+        rows.push(row(text, file));
+        if (partial) notes.add(partial);
+      }
+    };
+    if (methodTarget || routeTarget.startsWith('/') || routeTarget.startsWith('route:') ||
+      !routeTarget.includes('#') && /\.[cm]?[jt]sx?$/.test(routeTarget)) {
+      const routes = this.matchRoute(routeTarget, 'api');
+      if (routes.length > 1) return { ambiguous: true, result: {
+        rows: routes.map(route => row(this.routeLabel(route), route.file)), limit: 10
+      } };
+      const [route] = routes;
+      if (!route) return { result: { rows, notes: this.suggestions(routeTarget, 'api', expired) } };
+      const title = methodTarget ? methodTarget[1].toUpperCase() + ' ' + route.url : route.url;
+      const handlers = details.handlers[route.id];
+      const methods = methodTarget ? [methodTarget[1].toUpperCase()] : Object.keys(handlers ?? {});
+      const requests = new Map<string, DetailFact[]>();
+      for (const [method, candidates, fact] of details.requests) {
+        if (!candidates.includes(route.id)) continue;
+        const found = requests.get(method) ?? [];
+        found.push(fact);
+        requests.set(method, found);
+      }
+      if (!methods.length) {
+        notes.add('method exports unresolved');
+        for (const [method, facts] of requests) if (method !== '?') append(facts, 'client ');
+      }
+      for (const method of methods) {
+        const facts = handlers?.[method];
+        if (facts?.length) append(facts.slice(0, 1), method + ' ');
+        else notes.add(method + ' handler unresolved');
+        append(requests.get(method) ?? [], 'client ');
+        if (facts) append(facts.slice(1), method + ' ');
+      }
+      append(requests.get('?') ?? [], 'client ');
+      return { result: { title, rows, targets: [route.file], scope: 'direct handler and indexed request syntax',
+        partial: [...notes].join('; ') || undefined } };
+    }
+    const matches = this.matchSymbol(target);
+    if (matches.length > 1) return { ambiguous: true, result: {
+      rows: matches.map(symbol => row(declaration(symbol) + ' ' + symbol.kind, symbol.file)), limit: 10
+    } };
+    const [symbol] = matches;
+    if (!symbol) {
+      const { file, name } = this.symbolTarget(target);
+      const suggestions = this.suggestions(name, undefined, expired, file);
+      if ([...name].length >= 2 && [...name].length <= 200) suggestions.push(row(retryHint(cli, 'search', name, {})));
+      return { result: { rows, notes: suggestions } };
+    }
+    const incoming = details.renders[symbol.id] ?? [];
+    const own = details.symbols[symbol.id] ?? [];
+    const isSetter = (fact: DetailFact) => fact[2].startsWith('set ');
+    const isRender = (fact: DetailFact) => fact[2].startsWith('<');
+    const isControl = (fact: DetailFact) => fact[2].includes(' onClick=');
+    append(own.filter(fact => !isSetter(fact) && !isRender(fact)));
+    append(incoming);
+    append(own.filter(fact => isRender(fact) && isControl(fact)));
+    append(own.filter(fact => isRender(fact) && !isControl(fact)));
+    append(own.filter(isSetter));
+    if (details.untracedStateOwners.includes(symbol.id)) notes.add('state or setter use outside indexed owner facts');
+    if (details.unresolvedJsxHandlers?.includes(symbol.id)) notes.add('JSX callback handoff unresolved');
+    if (!rows.length) notes.add('no supported state or prop facts resolved');
+    if (this.index.dynamicRenderComponents?.includes(symbol.id) ||
+        this.index.renderEdges.some(([, child, , , , possible]) => child === symbol.id && possible)) notes.add('possible render suppliers unresolved');
+    return { result: { title: symbol.file + '#' + symbol.name, rows, targets: [symbol.file],
+      scope: 'direct React state and indexed JSX prop syntax', partial: [...notes].join('; ') || undefined } };
+  }
+
   private graphQuery(args: ReturnType<typeof validate>, expired: () => boolean, deadline: number): { result: Result; ambiguous?: boolean } {
     const { tool, target, depth, includeTests, limit, uses } = args;
     const graph = this.graph();
@@ -1334,6 +1413,10 @@ export class QueryEngine {
     let ambiguous = false;
     if (graphKind) {
       const answer = this.graphQuery(args, expired, deadline);
+      result = answer.result;
+      ambiguous = !!answer.ambiguous;
+    } else if (tool === 'facts') {
+      const answer = this.detailQuery(target, cli, expired);
       result = answer.result;
       ambiguous = !!answer.ambiguous;
     } else if (tool === 'search') result = this.search(target, args.filter, expired);
@@ -1517,7 +1600,7 @@ export class QueryEngine {
         who_renders: 'indexed JSX paths', wrappers: 'indexed wrapper chains',
         rename_impact: 'checker-resolved edit files', api_consumers: 'indexed route literals' + (args.depth ? ' and callers' : ''),
         search: 'indexed name and path matches', impact: 'indexed dependency edges', callees: 'indexed outgoing edges',
-        path: 'indexed directed edges', changes: 'git diff and indexed impacts'
+        path: 'indexed directed edges', changes: 'git diff and indexed impacts', facts: 'indexed direct syntax'
       }[tool];
       const coverage = reason ? `# partial: ${reason}` : `# complete: ${scope}`;
       const body = [header, ...(notesFirst ? extras : []).map(entry => entry.text),

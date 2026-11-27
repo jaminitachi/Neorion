@@ -18,6 +18,8 @@ const help = `Usage:
   neorion query callees <symbol> [--depth n] [--uses]
   neorion query path <from> <to>
   neorion query changes [--base ref | --staged | --unstaged] [--depth n]
+  neorion query facts '<METHOD> <API route>'
+  neorion query facts <Component|path#Name>
   neorion mcp [--root dir | --workspace dir]
   neorion setup codex [--local] [--no-hint]
   neorion setup claude [--no-hint] [--no-hook]
@@ -26,6 +28,10 @@ const help = `Usage:
   neorion --version | --help | -h
 
 Query kinds: ${kinds.join(', ')}
+
+Facts:
+  Use facts 'POST /api/items/[id]' for handler operations and request bodies.
+  Use facts ItemDialog for state initializers, JSX props, setter calls, and effect dependencies.
 
 Wrapper flags:
   --no-external hides third-party non-provider wrappers. Providers stay visible.

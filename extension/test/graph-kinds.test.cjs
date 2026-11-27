@@ -50,6 +50,215 @@ function fixture(t, reverse = false, fixtureSource = source) {
 const stable = output => output.replace(/^Project: [^\n]+\n/, '')
   .replace(/index \d{4}-\d\d-\d\dT\d\d:\d\dZ/g, 'index TIMESTAMP');
 
+test('facts connects handler operations, state handoffs, and request transports', t => {
+  const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  project.build();
+  const facts = target => project.query('facts', target);
+  const patch = facts('PATCH /api/media/[slug]');
+  assert.match(patch, /^# facts PATCH \/api\/media\/\[slug\] : \d+ results/m);
+  assert.match(patch, /PATCH await params destructures slug/);
+  assert.match(patch, /PATCH Prisma store\.asset\.update\(\{ where: \{ slug: slug \}, data: \{ archivedOn: null, visible: true \} \}\)/);
+  assert.match(patch, /PATCH call signalChange/);
+  assert.match(patch, /PATCH JSON response \{ asset: asset, ok: true \}/);
+  assert.doesNotMatch(patch, /DELETE exported handler|asset\.delete/);
+  assert.match(patch, /# partial: .*callee bodies not inspected/);
+  assert.match(facts('GET /api/media'), /# complete: direct handler and indexed request syntax$/);
+
+  const dialog = facts('MediaDialog');
+  assert.match(dialog, /open=\{drawerOpen\} ← state drawerOpen via pickAsset → setDrawerOpen\(true\)/);
+  assert.match(dialog, /onDismiss=\{closeDialog\} → drawerOpen via setDrawerOpen\(false\)/);
+  assert.match(dialog, /slug=\{active\.slug\} ← state active via pickAsset → setActive\(\{ slug: 'picked' \}\)/);
+  assert.doesNotMatch(dialog, /shadowed → setDrawerOpen/);
+  assert.match(dialog, /onSuccess=\{saveFinished\} → revision via setRevision\(value => value \+ 1\) @\d+ → useEffect \[revision\] → refreshLibrary → GET \/api\/media/);
+  assert.match(dialog, /save calls prop onSuccess\(\) after guard !response\.ok exits/);
+  assert.match(dialog, /state retention ← useState\("3w"\)/);
+  assert.match(dialog, /JSON fields \{ retention: retention \[state retention\] \}/);
+  assert.match(dialog, /# partial: /);
+
+  const native = facts('NativeUploader');
+  assert.match(native, /onDrop=\{enqueue\} → setJobs.*status: "waiting"/);
+  assert.match(native, /onClick=\{flush\} → send\(job\.source\)/);
+  assert.match(native, /flush reads state via jobs\.filter\(job => job\.status === 'waiting'\)/);
+  assert.match(native, /PUT \/api\/imports via XMLHttpRequest\.open → send FormData \{ "source": source \}/);
+  const immediate = facts('ImmediateUploader');
+  assert.match(immediate, /onDrop=\{receive\} → setBusy\(true\) → send\(files\)/);
+  assert.match(immediate, /PUT \/api\/imports via fetch FormData \{ "source": file, "directory": directory if directory \}/);
+  const put = facts('PUT /api/imports');
+  assert.match(put, /client .*via XMLHttpRequest/);
+  assert.match(put, /client .*via fetch/);
+  assert.match(put, /<unresolved keys>/);
+  assert.match(put, /# partial: .*ORM argument values unresolved/);
+  assert.match(facts('GET /api/imports'), /# partial: request binding unresolved/);
+  assert.match(facts('POST /api/imports'), /# partial: POST handler unresolved/);
+  assert.match(facts('GET app/api/media/route.ts'), /# facts GET \/api\/media : /);
+  assert.match(project.run(['--help']), /facts ItemDialog/);
+});
+
+test('facts handles the review cases', async t => {
+  const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  const index = JSON.parse(fs.readFileSync(project.build(), 'utf8'));
+  const facts = target => project.query('facts', target);
+  const handlerRows = (url, method) => {
+    const route = index.routes.find(route => route.url === url);
+    return index.detailFacts.handlers[route.id][method];
+  };
+
+  await t.test('B1 marks escaped or mutated Prisma and JSON objects opaque', () => {
+    for (const [url, method, operation, shape] of [
+      ['/api/admin/users/[id]', 'PATCH', 'store.user.update', 'data: <unresolved keys>'],
+      ['/api/admin/file-types', 'GET', 'store.fileType.findMany', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.findMany', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.count', 'where: <unresolved keys>'],
+      ['/api/faqs', 'GET', 'store.faq.aggregate', 'where: <unresolved keys>'],
+    ]) {
+      const row = handlerRows(url, method).find(([, , label]) => label.startsWith('Prisma ' + operation + '('));
+      assert.ok(row?.[2].includes(shape), operation);
+      assert.equal(row[3], 'ORM argument values unresolved');
+      assert.match(facts(method + ' ' + url), /# partial: .*ORM argument values unresolved/);
+    }
+    const original = handlerRows('/api/faqs', 'GET').find(([, , text]) => text.startsWith('Prisma store.faq.findFirst('));
+    assert.match(original[2], /where: \{ status: "PUBLISHED" \}/);
+    assert.equal(original[3], null);
+    const userRoute = index.routes.find(route => route.url === '/api/admin/users/[id]');
+    const bodyRows = index.detailFacts.requests.filter(([method, routes, [, , text]]) =>
+      method === 'PATCH' && routes.includes(userRoute.id) && text.includes('JSON fields')).map(([, , fact]) => fact);
+    assert.equal(bodyRows.length, 2);
+    for (const [, , text, partial] of bodyRows) {
+      assert.match(text, /JSON fields \{ <unresolved keys> \}/);
+      assert.equal(partial, 'request body keys unresolved');
+    }
+  });
+
+  await t.test('B2 shows the source URL and marks non-exact route matches', () => {
+    const output = facts('GET /api/teams/[teamId]/documents/[id]/views/[viewId]/stats');
+    assert.match(output, /client fetchStatus → GET `\/api\/teams\/\$\{teamId\}\/downloads\/\$\{jobId\}` \[partial url\] via fetch/);
+    assert.match(output, /client fetchStatic → GET \/api\/teams\/sample\/documents\/example\/views\/v1\/stats\?format=short via fetch$/m);
+    assert.match(output, /# partial: .*request binding unresolved/);
+  });
+
+  await t.test('B3 reports compound state props and untraced JSX handlers', () => {
+    const output = facts('app/review-cases.tsx#RequestFolderEditAccessButton');
+    for (const prop of ['disabled={isRequested || requestSent}', 'text={isRequested ?', 'visible={!requestSent}',
+      'pending={false === requestSent}', 'onTouchStart={requestSent ? finished : setRequestSent}',
+      'onClick={async () => await executeAsync()}']) {
+      assert.ok(output.includes(prop), prop);
+    }
+    assert.match(output, /# partial: .*JSX callback handoff unresolved/);
+    assert.match(output, /# partial: .*JSX state or setter binding depends on runtime/);
+    assert.doesNotMatch(output, /^# complete:/m);
+    assert.match(facts('EditApprovalButton'), /^# partial:/m);
+  });
+
+  await t.test('B1 prime keeps mutated const values opaque in updates and JSON responses', () => {
+    const rows = handlerRows('/api/workflows/[workflowId]/steps', 'POST');
+    const update = rows.find(([, , text]) => text.startsWith('Prisma store.link.update('));
+    assert.match(update[2], /data: \{ allowList: <unresolved keys> \}/);
+    assert.equal(update[3], 'ORM argument values unresolved');
+    const response = rows.find(([, , text]) => text.startsWith('JSON response 500 '));
+    for (const name of ['runs', 'errors', 'indexed', 'names', 'members', 'recipients', 'aliasTarget']) {
+      assert.ok(response[2].includes(name + ': <unresolved keys>'), name);
+    }
+    assert.match(response[2], /unchanged: \["keep"\]/);
+    assert.equal(response[3], 'response values unresolved');
+  });
+
+  await t.test('B3 prime marks returned and forwarded state or setters partial on their owners', () => {
+    for (const owner of ['useArchiveLinkModal', 'useReturnedSetter', 'useReturnedCallback', 'ModalProvider', 'useContextSetter']) {
+      const output = facts(owner);
+      assert.match(output, /state .* ← useState\(false\) setter/);
+      assert.match(output, /^# partial: .*state or setter use outside indexed owner facts/m);
+      assert.doesNotMatch(output, /^# complete:/m);
+    }
+    assert.match(facts('useLocalState'), /^# complete:/m);
+  });
+
+  await t.test('G1 includes client requests when Pages Router handler methods are unresolved', () => {
+    const url = '/api/teams/[teamId]/documents/[id]/preview-pages';
+    const post = facts('POST ' + url).split('\n').find(line => line.includes('ensurePagesLoaded → POST'));
+    assert.ok(post);
+    const output = facts(url);
+    assert.ok(output.split('\n').includes(post));
+    assert.match(output, /^# partial: method exports unresolved/m);
+  });
+
+  await t.test('G2 reports conditional effect calls after an early exit', () => {
+    const output = facts('MaintenanceChecker');
+    assert.match(output, /useEffect \[pathname\] → checkMaintenance \[conditional\] → GET \/api\/maintenance\/check/);
+    assert.match(output, /^# partial: .*effect call execution is conditional/m);
+  });
+
+  await t.test('G3 stores one uncertain request row for a call with multiple candidate routes', () => {
+    const entries = index.detailFacts.requests.filter(([, , [, , text]]) => text.includes('fetchStatus → GET'));
+    assert.equal(entries.length, 1);
+    const [method, candidates, [, , text]] = entries[0];
+    const routes = ['/api/teams/[teamId]/downloads/[jobId]', '/api/teams/[teamId]/documents/[id]/views/[viewId]/stats'];
+    for (const url of routes) {
+      assert.ok(candidates.includes(index.routes.find(route => route.url === url).id), url);
+      assert.equal(facts(method + ' ' + url).split('\n').filter(line => line.endsWith(text)).length, 1);
+    }
+    assert.doesNotMatch(facts('GET /api/media'), /fetchStatus/);
+  });
+
+  await t.test('G4 retains a filter across trusted Prisma reads and marks untrusted calls opaque', () => {
+    const rows = handlerRows('/api/trash', 'GET');
+    const count = rows.find(([, , text]) => text.startsWith('Prisma prisma.file.count('));
+    const lists = rows.filter(([, , text]) => text.startsWith('Prisma prisma.file.findMany('));
+    assert.equal(lists.length, 2);
+    for (const [, , text, partial] of [count, lists[0]]) {
+      assert.match(text, /where: \{ ownerId: "owner", deletedAt: \{ not: null \} \}/);
+      assert.equal(partial, null);
+    }
+    assert.match(lists[1][2], /where: <unresolved keys>/);
+    assert.equal(lists[1][3], 'ORM argument values unresolved');
+  });
+
+  await t.test('F1 deduplicates fetch rows at a route and at the source symbol', () => {
+    for (const target of ['DownloadProgress', 'GET /api/teams/[teamId]/documents/[id]/views/[viewId]/stats',
+      'GET /api/teams/[teamId]/downloads/[jobId]']) {
+      const requestRows = facts(target).split('\n').filter(line => line.includes('fetchStatus → GET'));
+      assert.equal(requestRows.length, 1, target);
+    }
+    const downloads = '/api/teams/[teamId]/downloads/[jobId]';
+    const route = index.routes.find(route => route.url === downloads);
+    const propMatches = index.fetches.filter(match => match.route === route.id && match.via === 'fetch' &&
+      match.fn === 'download' && match.binding?.name === 'url');
+    assert.equal(propMatches.length, 2);
+    assert.equal(propMatches[0].line, propMatches[1].line);
+    assert.equal(facts('GET ' + downloads).split('\n').filter(line => line.includes('client download →')).length, 1);
+    assert.equal(facts('PATCH /api/admin/users/[id]').split('\n').filter(line => line.includes('client save')).length, 2);
+  });
+
+  await t.test('F2 records prop calls in a JSX card without hooks or React imports', () => {
+    assert.match(facts('RecycleCard'), /handleRestore calls prop onRestore\(file.id, file.name\)/);
+  });
+
+  await t.test('F3 marks short-circuited and if-branch setters conditional', () => {
+    const output = facts('PreviewSettings');
+    assert.match(output, /set locked in unlock via setLocked\(false\) \[conditional\]/);
+    assert.match(output, /set locked in unlock via setLocked\(true\) \[conditional\]/);
+    assert.match(output, /^# partial: .*setter execution is conditional/m);
+  });
+
+  await t.test('F4 describes direct effect setters without treating them as unresolved calls', () => {
+    const output = facts('PreviewSettings');
+    assert.match(output, /useEffect \[open, fileId\] → setFileUrl\(url\)/);
+    assert.doesNotMatch(output, /effect calls or dependencies unresolved/);
+  });
+
+  await t.test('F5 displays one row for the outermost fluent call', () => {
+    const rows = handlerRows('/api/faqs', 'POST').filter(([, , label]) => label.startsWith('call db.'));
+    assert.deepEqual(rows.map(([, , label]) => label), ["call db.select().from('faq').where('published').limit"]);
+  });
+
+  await t.test('F6 uses the same setter label in handoffs and handlers', () => {
+    const output = facts('DownloadProgress');
+    const setter = "setStatus('loading')";
+    assert.ok(output.includes('data-status={status} ← state status via <inline> → ' + setter + ' @'));
+    assert.ok(output.includes('via ' + setter + ' @'));
+    assert.ok(output.includes('set status in <inline> via ' + setter));
+  });
+});
+
 function loadAnalyzer(name, compilerWalk) {
   const { outputFiles } = buildSync({
     entryPoints: [path.join(__dirname, '../src/core/analyzers', name + '.ts')],
@@ -63,7 +272,7 @@ function loadAnalyzer(name, compilerWalk) {
 }
 
 test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtrees on both paths', t => {
-  const { visitKinds } = loadAnalyzer('CompilerWalk');
+  const { someIdentifier, visitKinds } = loadAnalyzer('CompilerWalk');
   const file = new Project({ useInMemoryFileSystem: true }).createSourceFile('mixed.tsx', `
     /** Render a label.
      * @param label The label to render.
@@ -112,7 +321,20 @@ test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtree
       for (const [i, node] of expectedRaw.entries()) assert.equal(raw[i], node, `compiler node at ${i}`);
     }
   }
-  assert.equal(publicWalks, 2);
+  const labels = [];
+  forEachDescendant(node => {
+    if (node.getKind() === SyntaxKind.Identifier && node.getText() === 'label') labels.push(node);
+  });
+  for (const root of [file, fallback]) {
+    const visited = [];
+    assert.equal(someIdentifier(root, name => name === 'label', node => {
+      visited.push(node);
+      return visited.length === 2;
+    }), true);
+    assert.deepEqual(visited, labels.slice(0, 2));
+    assert.equal(someIdentifier(root, name => name === 'missing', () => assert.fail('unexpected identifier')), false);
+  }
+  assert.equal(publicWalks, 4);
 });
 
 test('graph callbacks give the same results with and without their kind filters', t => {
@@ -137,6 +359,7 @@ test('graph callbacks give the same results with and without their kind filters'
   });
   fs.writeFileSync(path.join(root, '__tests__/kind-walk.test.tsx'), `
     import { html } from 'lit';
+    import { useEffect, useState } from 'react';
     import * as UI from '../components/providers';
     import * as helpers from '../lib/normalize';
     import { normalize } from '../lib/normalize';
@@ -159,8 +382,11 @@ test('graph callbacks give the same results with and without their kind filters'
       return <button onClick={() => actions.act('test')}>Fetch item</button>;
     }
     export function InlineButton() {
+      const [visible, setVisible] = useState(false);
+      useEffect(() => { console.log(visible); }, [visible]);
       const trim = helpers['normalize'];
       return <UI.Providers>
+        <button onClick={() => setVisible(true)}>Show</button>
         <button onClick={() => InlineAction(trim('test'))}>Send</button>
         <ActionButton actions={{ act }} />
       </UI.Providers>;
@@ -195,7 +421,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 13);
+  assert.equal(kindSets.size, 15);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);
