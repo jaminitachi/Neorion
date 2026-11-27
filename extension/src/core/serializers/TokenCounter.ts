@@ -5,24 +5,12 @@ let encoding: ReturnType<typeof loadEncoding> | undefined;
 function loadEncoding() {
   const ranks = require('js-tiktoken/ranks/o200k_base') as typeof import('js-tiktoken/ranks/o200k_base').default;
   const table = new Map<string, number>();
-  const text = ranks.bpe_ranks;
-  // Each line starts with "!" and its initial rank, followed by consecutive tokens.
-  // Scan the delimiters directly instead of splitting the table into transient arrays.
-  for (let start = 0; start < text.length;) {
-    const newline = text.indexOf('\n', start);
-    const end = newline === -1 ? text.length : newline;
-    if (start !== end) {
-      const rankEnd = text.indexOf(' ', start + 2);
-      let rank = Number(text.slice(start + 2, rankEnd));
-      start = rankEnd + 1;
-      while (start < end) {
-        const space = text.indexOf(' ', start);
-        const tokenEnd = space === -1 ? end : Math.min(space, end);
-        table.set(text.slice(start, tokenEnd), rank++);
-        start = tokenEnd + 1;
-      }
-    }
-    start = end + 1;
+  for (const line of ranks.bpe_ranks.split('\n')) {
+    if (!line) continue;
+    const tokens = line.split(' ');
+    let rank = Number.parseInt(tokens[1], 10);
+    // The source table already uses canonical base64 keys for arbitrary token bytes.
+    for (let i = 2; i < tokens.length; i++) table.set(tokens[i], rank++);
   }
   return { table, pattern: ranks.pat_str };
 }

@@ -41,7 +41,9 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
     useInMemoryFileSystem: true, skipLoadingLibFiles: true, compilerOptions: { allowJs: true, noResolve: true, noLib: true }
   }).createSourceFile(file, text) :
     files.find(source => source.getFilePath() === file) ??
-      new Project({ compilerOptions: { allowJs: true } }).addSourceFileAtPath(file);
+      // Config extraction follows source initializers and still needs its
+      // imports. A standalone config does not need default library declarations.
+      new Project({ skipLoadingLibFiles: true, compilerOptions: { allowJs: true, noLib: true } }).addSourceFileAtPath(file);
   const exported = source.getExportedDeclarations().get('default')?.[0] ??
     source.getStatements().flatMap(statement => {
       const expression = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;
