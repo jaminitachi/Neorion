@@ -881,12 +881,12 @@ export class QueryIndexBuilder {
     };
     const suppliedCallbacks = new Set<Node>();
     const reactFacts = historyOnly ? undefined : (require('./ReactFacts') as typeof import('./ReactFacts')).ReactFacts;
-    const factCalls = new Map<SourceFile, CallExpression[]>();
+    const factCandidates = new Map<SourceFile, NonNullable<ReturnType<typeof ReactFacts.candidates>>>();
     for (const file of files) {
       // Keep call sites from the existing walk, in source order. Facts still
       // resolve owners and fetch targets after the index has been assembled.
-      const calls: CallExpression[] | undefined = reactFacts?.appliesTo(file, true) ? [] : undefined;
-      if (calls) factCalls.set(file, calls);
+      const candidates = reactFacts?.candidates(file);
+      if (candidates) factCandidates.set(file, candidates);
       visitKinds(file, FLOW_KINDS, node => {
         if (Node.isJsxAttribute(node)) {
           const site = node.getParent()?.getParent();
@@ -936,7 +936,7 @@ export class QueryIndexBuilder {
           return;
         }
         if (!Node.isCallExpression(node)) return;
-        calls?.push(node);
+        if (candidates?.accepts(node.compilerNode)) candidates.calls.push(node);
         let expression: Node = node.getExpression();
         for (let inner = wrappedExpression(expression); inner; inner = wrappedExpression(expression)) expression = inner;
         // Existing references cover ordinary declarations. Resolve value flow for
@@ -2625,15 +2625,15 @@ export class QueryIndexBuilder {
         return owners(node)[1];
       };
       for (const [relative, source] of filesByRelative) {
-        const calls = factCalls.get(source);
-        if (!calls?.length || !reactFacts.appliesTo(source, jsxFiles.has(relative))) continue;
+        const candidates = factCandidates.get(source);
+        if (!candidates?.calls.length || candidates.requiresJsx && !jsxFiles.has(relative)) continue;
         const collector = new reactFacts(source, relative, flow, scope,
           (owner, fact) => add(details.symbols, owner, fact), indexedRequests,
           (method, routes, fact) => {
             const candidates = routes.flatMap(route => apiRoutesByUrl.get(route) ?? []);
             if (candidates.length) details.requests.push([method, candidates, fact]);
           }, untracedStateOwners);
-        if (collector.collect(calls)) react.set(source, collector);
+        if (collector.collect(candidates)) react.set(source, collector);
       }
       const untracedHandlers = new Set<number>();
       for (const site of renderSites) {
@@ -2641,10 +2641,15 @@ export class QueryIndexBuilder {
         if (owner === undefined || !Node.isJsxOpeningElement(node) && !Node.isJsxSelfClosingElement(node)) continue;
         const supplier = react.get(node.getSourceFile());
         const targets = resolvedRenderSites.get(node);
-        if (!supplier && !targets?.size) {
-          if (node.compilerNode.attributes.properties.some(attr => ts.isJsxAttribute(attr) &&
-            ts.isIdentifier(attr.name) && /^on[A-Z]/.test(attr.name.text))) untracedHandlers.add(scope(node) ?? owner);
-          continue;
+        if (!supplier) {
+          const attributes = node.compilerNode.attributes.properties;
+          if (!targets?.size) {
+            if (attributes.some(attr => ts.isJsxAttribute(attr) &&
+              ts.isIdentifier(attr.name) && /^on[A-Z]/.test(attr.name.text))) untracedHandlers.add(scope(node) ?? owner);
+            continue;
+          }
+          if (!attributes.some(attr => ts.isJsxSpreadAttribute(attr) || !ts.isIdentifier(attr.name) ||
+            attr.name.text === 'open' || /^on[A-Z]/.test(attr.name.text))) continue;
         }
         const from = scope(node) ?? owner;
         const rows = supplier?.render(node, from, index.symbols[from - 1].name, !!targets?.size, untracedHandlers) ?? [];

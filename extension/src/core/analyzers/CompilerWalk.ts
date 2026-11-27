@@ -40,3 +40,22 @@ export function visitKinds(root: Node, kinds: ReadonlySet<ts.SyntaxKind>, visitW
   };
   ts.forEachChild(root.compilerNode, visit);
 }
+
+/** Search identifiers in descendant order, stopping as soon as the caller has enough evidence. */
+export function someIdentifier(root: Node, matches: (name: string) => boolean, test: (node: Node) => boolean): boolean {
+  const { _getNodeFromCompilerNode: wrap } = root as Node & { _getNodeFromCompilerNode?(node: ts.Node): Node };
+  if (typeof wrap !== 'function') {
+    return root.forEachDescendant((node, traversal) => {
+      const raw = node.compilerNode;
+      if (ts.isIdentifier(raw) && matches(raw.text) && test(node)) {
+        traversal.stop();
+        return true;
+      }
+    }) ?? false;
+  }
+  const visit = (node: ts.Node): true | undefined => {
+    if (ts.isIdentifier(node) && matches(node.text) && test(wrap.call(root, node))) return true;
+    return ts.forEachChild(node, visit);
+  };
+  return !!ts.forEachChild(root.compilerNode, visit);
+}

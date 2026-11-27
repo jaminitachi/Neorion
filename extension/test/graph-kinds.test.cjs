@@ -272,7 +272,7 @@ function loadAnalyzer(name, compilerWalk) {
 }
 
 test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtrees on both paths', t => {
-  const { visitKinds } = loadAnalyzer('CompilerWalk');
+  const { someIdentifier, visitKinds } = loadAnalyzer('CompilerWalk');
   const file = new Project({ useInMemoryFileSystem: true }).createSourceFile('mixed.tsx', `
     /** Render a label.
      * @param label The label to render.
@@ -321,7 +321,20 @@ test('visitKinds preserves ts-morph wrapper identity, order, and skipped subtree
       for (const [i, node] of expectedRaw.entries()) assert.equal(raw[i], node, `compiler node at ${i}`);
     }
   }
-  assert.equal(publicWalks, 2);
+  const labels = [];
+  forEachDescendant(node => {
+    if (node.getKind() === SyntaxKind.Identifier && node.getText() === 'label') labels.push(node);
+  });
+  for (const root of [file, fallback]) {
+    const visited = [];
+    assert.equal(someIdentifier(root, name => name === 'label', node => {
+      visited.push(node);
+      return visited.length === 2;
+    }), true);
+    assert.deepEqual(visited, labels.slice(0, 2));
+    assert.equal(someIdentifier(root, name => name === 'missing', () => assert.fail('unexpected identifier')), false);
+  }
+  assert.equal(publicWalks, 4);
 });
 
 test('graph callbacks give the same results with and without their kind filters', t => {
@@ -408,7 +421,7 @@ test('graph callbacks give the same results with and without their kind filters'
   };
 
   const filtered = analyze(files);
-  assert.equal(kindSets.size, 16);
+  assert.equal(kindSets.size, 15);
   assert.ok(filtered.index.references.some(reference => reference[3] === 'mock'));
   assert.ok(filtered.index.serverActions.some(action => action.name === 'InlineAction' && action.callers.length));
   assert.ok(filtered.index.fetches.length);

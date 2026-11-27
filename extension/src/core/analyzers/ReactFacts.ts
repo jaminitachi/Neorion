@@ -1,7 +1,7 @@
 import { Node, SyntaxKind, ts, type CallExpression, type SourceFile } from 'ts-morph';
 import type { DetailFact, FetchEntry } from '../../mcp/Index';
 import { conditionalAt } from './ArchitectureFacts';
-import { visitKinds } from './CompilerWalk';
+import { someIdentifier, visitKinds } from './CompilerWalk';
 import { expressionLabel, constInitializer, factValue, literalLabel, objectFields, unwrapFact } from './FactSyntax';
 import { jsxValue, PropFlow, type JsxSite } from './PropFlow';
 import { startLine } from './SourceLines';
@@ -17,7 +17,7 @@ type Request = {
   body?: Node; partial?: boolean; partialUrl?: boolean;
 };
 const callKind = new Set([SyntaxKind.CallExpression]);
-const identifierKind = new Set([SyntaxKind.Identifier]);
+const reactHooks = ['useState', 'useEffect', 'useDropzone'];
 const callbackName = /^on[A-Z]/;
 const propCall = /\bon[A-Z]\w*\s*(?:<[^>\n]+>\s*)?(?:\?\.\s*)?\(/;
 const statePropPartial = 'JSX state or setter binding depends on runtime';
@@ -81,10 +81,27 @@ function earlyExitGuard(node: Node) {
 }
 
 export class ReactFacts {
-  static appliesTo(file: SourceFile, hasJsx: boolean) {
+  static candidates(file: SourceFile) {
     const text = file.compilerNode.text;
-    return text.includes('useState') || text.includes('useEffect') ||
-      text.includes('useDropzone') || text.includes('XMLHttpRequest') || hasJsx && propCall.test(text);
+    const hasHooks = reactHooks.some(name => text.includes(name));
+    const hasXhr = text.includes('XMLHttpRequest');
+    const requiresJsx = !hasHooks && !hasXhr;
+    const imports = hasHooks ?
+      file.getImportDeclarations().filter(entry => ['react', 'react-dropzone'].includes(entry.getModuleSpecifierValue())) : [];
+    const scanHooks = imports.length > 0 || hasXhr;
+    if (!scanHooks && !propCall.test(text)) return;
+    const hooks = new Set(reactHooks);
+    for (const entry of imports) for (const specifier of entry.getNamedImports()) {
+      if (hooks.has(specifier.getName())) hooks.add(specifier.getAliasNode()?.getText() ?? specifier.getName());
+    }
+    const members = new Set(['append', 'set', 'open', 'send', 'filter', 'fetch', ...hooks]);
+    const accepts = (node: ts.CallExpression) => {
+      const callee = node.expression;
+      if (ts.isIdentifier(callee)) return scanHooks || callbackName.test(callee.text);
+      return ts.isPropertyAccessExpression(callee) &&
+        (callbackName.test(callee.name.text) || scanHooks && members.has(callee.name.text));
+    };
+    return { requiresJsx, scanHooks, hasXhr, hooks, accepts, calls: [] as CallExpression[] };
   }
 
   private states = new Map<Node, State>();
@@ -110,26 +127,11 @@ export class ReactFacts {
     private addRequest: (method: string, routes: string[], fact: DetailFact) => void,
     private untracedStateOwners: Set<number>) {}
 
-  collect(calls: readonly CallExpression[]) {
-    const text = this.file.compilerNode.text;
-    const hasXhr = text.includes('XMLHttpRequest');
-    const imports = /useState|useEffect|useDropzone/.test(text) ?
-      this.file.getImportDeclarations().filter(entry => ['react', 'react-dropzone'].includes(entry.getModuleSpecifierValue())) : [];
-    const scanHooks = imports.length > 0 || hasXhr;
-    if (!scanHooks && !propCall.test(text)) return false;
-    const maybeHooks = new Set(['useState', 'useEffect', 'useDropzone']);
-    for (const entry of imports) for (const specifier of entry.getNamedImports()) {
-      if (maybeHooks.has(specifier.getName())) maybeHooks.add(specifier.getAliasNode()?.getText() ?? specifier.getName());
-    }
-    const memberCandidates = new Set(['append', 'set', 'open', 'send', 'filter', ...maybeHooks]);
+  collect({ calls, hasXhr, scanHooks, hooks }: NonNullable<ReturnType<typeof ReactFacts.candidates>>) {
     for (const node of calls) {
-      const callee = node.compilerNode.expression;
-      const rawName = ts.isIdentifier(callee) ? callee.text : ts.isPropertyAccessExpression(callee) ? callee.name.text : '';
-      if (!callbackName.test(rawName) && !(scanHooks &&
-        (ts.isIdentifier(callee) || memberCandidates.has(rawName) || rawName === 'fetch'))) continue;
       const expression = node.getExpression();
       const name = Node.isIdentifier(expression) ? expression.getText() : Node.isPropertyAccessExpression(expression) ? expression.getName() : '';
-      if (maybeHooks.has(name)) {
+      if (hooks.has(name)) {
         const hook = hookName(expression, 'react');
         if (hook === 'useState') this.state(node);
         else if (hook === 'useEffect') this.effectCalls.push(node);
@@ -491,9 +493,14 @@ export class ReactFacts {
 
   private recordUntracedStateUses() {
     if (!this.states.size) return;
+    const remaining = new Set<number>();
+    for (const { owner } of this.states.values()) if (!this.untracedStateOwners.has(owner)) remaining.add(owner);
+    if (!remaining.size) return;
     this.visitStateReferences(this.file, (identifier, state) => {
-      if (!this.indexedStateUses.has(identifier)) this.untracedStateOwners.add(state.owner);
-      return false;
+      if (!this.indexedStateUses.has(identifier) && remaining.delete(state.owner)) {
+        this.untracedStateOwners.add(state.owner);
+      }
+      return remaining.size === 0;
     });
   }
 
@@ -502,14 +509,13 @@ export class ReactFacts {
   }
 
   private visitStateReferences(root: Node, visit: (identifier: Node, state: State) => boolean) {
-    let stopped = false;
-    visitKinds(root, identifierKind, identifier => {
-      const declaration = binding(identifier);
+    return someIdentifier(root, name => this.stateNames.has(name) || this.settersNames.has(name), identifier => {
+      const parent = identifier.getParent();
+      const symbol = Node.isShorthandPropertyAssignment(parent) ? parent.getValueSymbol() : this.flow.symbol(identifier);
+      const declaration = symbol?.getDeclarations()[0];
       const state = declaration && (this.states.get(declaration) ?? this.setters.get(declaration));
-      if (state) stopped = visit(identifier, state);
-    }, { filterRaw: node => !stopped && ts.isIdentifier(node) &&
-      (this.stateNames.has(node.text) || this.settersNames.has(node.text)) });
-    return stopped;
+      return !!state && visit(identifier, state);
+    });
   }
 }
 
