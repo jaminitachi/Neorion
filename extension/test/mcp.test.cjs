@@ -677,6 +677,10 @@ test('render paths through lazy views respect props and prefer feasible JSX chai
       if (!showClear) return <input/>;
       return <Clear/>;
     }
+    function OptionalLabel() { return <span/>; }
+    export function LabelSlot({showLabel = false}) {
+      return showLabel && <OptionalLabel/>;
+    }
     export function Picker({disabled, ...aria}) { return <Input {...aria}/>; }
     export function Image() { return <img/>; }
     function Icon({ type, display }) {
@@ -726,14 +730,22 @@ test('render paths through lazy views respect props and prefer feasible JSX chai
     import { Input } from '../../ui/controls';
     export default function Page() { return <Input showClear/>; }
   `);
+  write(root, 'app/never/page.tsx', `
+    import { Input, LabelSlot } from '../../ui/controls';
+    function NoPicker() { return <Input/>; }
+    export default function Never() { return <><NoPicker/><LabelSlot/></>; }
+  `);
   await generate(root);
   const client = await openMcp(t, root);
   const renders = component => client.text('who_renders', { component });
   const clear = await renders('Clear');
   assert.match(clear, /^\/enabled\s.*\[cond\]$/m);
+  assert.doesNotMatch(clear, /^\/never\s/m);
   assert.doesNotMatch(clear, /^\/\s/m);
   const impact = await client.text('query', { kind: 'impact', target: 'Clear' });
   assert.match(impact, /^page \/enabled\s.*\[cond\]$/m);
+  assert.doesNotMatch(impact, /^page \/never\s/m);
+  assert.match(await renders('OptionalLabel'), /^\/never\s.*\[cond\]$/m);
   const lazyImpact = impact.split('\n').find(line => line.startsWith('page /  '));
   if (lazyImpact) assert.match(lazyImpact, /\[cond\]$/);
   const image = await renders('Image');

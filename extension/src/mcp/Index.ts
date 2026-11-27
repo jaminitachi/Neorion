@@ -17,6 +17,10 @@ export const AI_SDK_URL_OVERRIDE = 'possible AI SDK transport URL override';
 export const CALLABLE_WRITE_ISSUE = 'callable binding or member written';
 export const RENDER_LOOKUP_ISSUE = 'component lookup key untraced';
 export const DYNAMIC_RENDER_ISSUE = 'rendered through a dynamic reference';
+export function pagesUrlIssues(index: QueryIndex, route: QueryIndex['routes'][number]) {
+  return index.pagesIssues?.[route.id]?.filter(reason =>
+    reason === 'dynamic next.config basePath' || reason === 'dynamic next.config locales') ?? [];
+}
 export const isLazyRender = (detail: string | undefined) => !!detail &&
   (detail.startsWith('imported via ') || detail.startsWith('loaded via '));
 export const renderIssue = (detail: string) => detail.startsWith(RENDER_LOOKUP_ISSUE) ? RENDER_LOOKUP_ISSUE :
@@ -172,7 +176,7 @@ export type RouterEdge = {
 export type RouterIssue =
   | { kind: 'import' | 'module' | 'wrapper'; reason: string; file: string; route?: number }
   | { kind: 'navigation'; reason: string; file: string; route?: number; owner: number; request: boolean; destinations?: number[] }
-  | { kind: 'missing-action'; reason: string; file: string; route?: number; owner: number }
+  | { kind: 'missing-action'; reason: string; file: string; route?: number; owner: number; destination?: number }
   | { kind: 'registry'; reason: string; file: string; route?: number; owner: number; destinations: number[] };
 
 export type RouterRegistryIssue = { reason: string; registration?: { url: string; file: string; id: string } };

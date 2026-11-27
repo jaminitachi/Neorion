@@ -329,7 +329,7 @@ export function indexRouterFacts({ index, project, files, relative, exports, sym
           const runtime = destination.fileSymbol === undefined ? undefined : index.runtimeExports?.[destination.fileSymbol];
           if (runtime && !runtime.unknownStar && (!runtime.names.action || runtime.names.action === 'type') &&
               (!clientAllowed || !runtime.names.clientAction || runtime.names.clientAction === 'type')) {
-            recordIssue({ kind: 'missing-action', file: position.file, route: source?.id, owner: from,
+            recordIssue({ kind: 'missing-action', file: position.file, route: source?.id, owner: from, destination: destination.id,
               reason: `${via}: target route has no action (${method} ${destination.url} → route:${target.id}, ${position.file}:${position.line})` });
           }
         }

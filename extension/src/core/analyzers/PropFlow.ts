@@ -349,9 +349,9 @@ export class PropFlow {
       if (boundary && Node.isBlock(parent)) for (const prior of parent.getStatements()) {
         if (prior === child) break;
         if (!Node.isIfStatement(prior)) continue;
-        if (returnsFromBranch(prior.getThenStatement())) yield { expression: prior.getExpression(), positive: false };
+        if (returnsFromBranch(prior.getThenStatement())) yield { expression: prior.getExpression(), positive: false, earlyReturn: true };
         const other = prior.getElseStatement();
-        if (other && returnsFromBranch(other)) yield { expression: prior.getExpression(), positive: true };
+        if (other && returnsFromBranch(other)) yield { expression: prior.getExpression(), positive: true, earlyReturn: true };
       }
     }
   }

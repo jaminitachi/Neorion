@@ -5,7 +5,7 @@ import { lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { AI_SDK_TRANSPORT, CALLBACK_QUERY_REVISION, DYNAMIC_RENDER_ISSUE, RENDER_LOOKUP_ISSUE, transportIssue, GRAPH_INDEX_REVISION, INDEX_SCHEMA, QUERY_INDEX_REVISION, ROUTER_INDEX_REVISION, TRANSPORT_QUERY_REVISION,
-  advanceRenderGuards, apiCallKey, isLazyRender, isTestFile as testFile, lexicalOwner, renderGuardKey, renderIssue, renderSiteKey,
+  advanceRenderGuards, apiCallKey, isLazyRender, isTestFile as testFile, lexicalOwner, pagesUrlIssues, renderGuardKey, renderIssue, renderSiteKey,
   type BooleanArguments, type DetailFact, type DetailFacts, type FetchEntry, type IndexedReference, type QueryIndex, type Reference, type ServerAction, type SymbolEntry } from './Index';
 import { legacyKind, legacyTargets, kinds, queryName, tools, type QueryKind } from './Tools';
 import { DependencyGraph, annotatedRow, renderSuffix, hasGraph, type QueryResult as Result, type QueryRow as Row } from './Graph';
@@ -144,6 +144,12 @@ function validate(name: string, value: unknown) {
 function limitHint(args: ReturnType<typeof validate>, count: number, cli?: CliReplay, mcpFilterKey = 'filter', suggestedFilter?: string) {
   const { tool, target, to, depth, uses, scope, base, filter, includeTests, includeExternal } = args;
   const limit = Math.min(count, args.maxLimit);
+  if (tool === 'api_consumers' && count > 100) {
+    if (args.maxLimit < expandedApiLimit) return cli
+      ? `set --include-tests --limit ${expandedApiLimit}`
+      : `set includeTests=true and limit=${expandedApiLimit}`;
+    if (args.limit < limit) return cli ? `set --limit ${limit}` : `set limit=${limit}`;
+  }
   let narrow = '';
   if (tool === 'search') {
     narrow = 'narrow the text';
@@ -187,14 +193,23 @@ function takeBytes(text: string, cap: number, tail = false) {
   return (tail ? kept.reverse() : kept).join('');
 }
 
-function shorten(text: string, preserve = 0, cap = 400) {
+function shorten(text: string, preserve = 0, cap = 400, wholeIdentifiers = false) {
   text = oneLine(text);
   if (bytes(text) <= cap) return text;
   const prefix = text.slice(0, preserve);
   const budget = cap - 3 - bytes(prefix);
   if (budget < 8) return undefined;
   const left = Math.floor(budget / 2);
-  return prefix + takeBytes(text.slice(preserve), left) + '...' + takeBytes(text.slice(preserve), budget - left, true);
+  const body = text.slice(preserve);
+  let head = takeBytes(body, left);
+  let tail = takeBytes(body, budget - left, true);
+  if (wholeIdentifiers) {
+    const identifierStart = /^[$\u200c\u200d\p{ID_Continue}]/u;
+    const identifierEnd = /[$\u200c\u200d\p{ID_Continue}]$/u;
+    if (identifierStart.test(body.slice(head.length))) head = head.replace(/[$\u200c\u200d\p{ID_Continue}]+$/u, '');
+    if (identifierEnd.test(body.slice(0, body.length - tail.length))) tail = tail.replace(/^[$\u200c\u200d\p{ID_Continue}]+/u, '');
+  }
+  return prefix + head + '...' + tail;
 }
 
 function distance(a: string, b: string) {
@@ -929,8 +944,15 @@ export class QueryEngine {
       const affected = routes.find(route => route.id === issue.route);
       return !!affected && [...reachable([affected.file])].some(file => targetFiles.has(file));
     });
-    if (tool === 'callees') {
-      const notes = new Map(router.issues.flatMap(issue => issue.kind === 'missing-action' && inForwardScope(issue.owner, issue.route)
+    if (tool === 'callees' || tool === 'api_consumers') {
+      const indexRequest = new URLSearchParams(target.split('#', 1)[0].split('?', 2)[1]).getAll('index').includes('');
+      const sameUrlParents = tool === 'api_consumers' && target.startsWith('/') && !indexRequest
+        ? new Set(matched.flatMap(route => routerAncestry(route, byRouteId)
+          .filter(parent => parent.url === route.url).map(parent => parent.id))) : undefined;
+      const notes = new Map(router.issues.flatMap(issue => issue.kind === 'missing-action' &&
+        (tool === 'callees' ? inForwardScope(issue.owner, issue.route) :
+          issue.destination !== undefined && (ids.has(issue.destination) || sameUrlParents?.has(issue.destination)) &&
+          (includeTests || !testFile(issue.file)))
         ? [[issue.reason, row(`# ${issue.reason}`, issue.file)] as const] : []));
       if (notes.size) (result.notes ??= []).push(...notes.values());
     }
@@ -1040,6 +1062,7 @@ export class QueryEngine {
     for (const reason of [this.index.trpcHttpIssues?.[route.id], ...fetches.map(fetch => fetch.uncertainty), excluded?.issue]) {
       if (reason) reasons.push(reason);
     }
+    reasons.push(...pagesUrlIssues(this.index, route));
     return {
       title: `${route.url} -> ${location(route.file, route.line ?? 1)}`, rows, targets: [route.file],
       evidence: [...callers?.evidence ?? [], ...urlCandidates.values()],
@@ -1302,8 +1325,8 @@ export class QueryEngine {
     const rows: Row[] = [];
     const append = (facts: DetailFact[], label = '') => {
       for (const [file, line, evidence, partial] of facts) {
-        const text = location(file, line) + ' ' + label + evidence;
-        rows.push(row(text, file));
+        const site = location(file, line) + ' ' + label;
+        rows.push({ ...row(site + evidence, file), pathEnd: site.length });
         if (partial) notes.add(partial);
       }
     };
@@ -1565,7 +1588,7 @@ export class QueryEngine {
     const renderRow = (entry: Row, evidence = false) => {
       const suffix = (entry.suffix ?? '') + (entry.files.some(stale) ? ' [stale]' : '');
       const cap = 400 - bytes(suffix);
-      const text = shorten(entry.text, entry.pathEnd ?? 0, cap);
+      const text = shorten(entry.text, entry.pathEnd ?? 0, cap, tool === 'facts');
       const intact = text === oneLine(entry.text);
       if (!evidence) shortened ||= !intact;
       if (text === undefined) return [];

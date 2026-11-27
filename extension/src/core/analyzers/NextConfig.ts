@@ -37,13 +37,31 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
   const text = appOnly ? readFileSync(file, 'utf8').replace(/^\uFEFF/, '') : undefined;
   // Only App Router page extensions and URL settings are needed in the isolated parse.
   if (text !== undefined && !/\b(?:pageExtensions|basePath|i18n|trailingSlash)\b|\\[ux]/.test(text)) return result;
+  const indexedSource = text === undefined ? files.find(source => source.getFilePath() === file) : undefined;
   const source = text !== undefined ? new Project({
     useInMemoryFileSystem: true, skipLoadingLibFiles: true, compilerOptions: { allowJs: true, noResolve: true, noLib: true }
   }).createSourceFile(file, text) :
-    files.find(source => source.getFilePath() === file) ??
+    indexedSource ??
       // Config extraction follows source initializers and still needs its
       // imports. A standalone config does not need default library declarations.
       new Project({ skipLoadingLibFiles: true, compilerOptions: { allowJs: true, noLib: true } }).addSourceFileAtPath(file);
+  const parsed = parseConfig(source, result, appOnly);
+  if (!indexedSource && !appOnly && parsed.libTypedUrl) {
+    // The checker can resolve a property through a library type such as
+    // Readonly<T> only when the library declarations are present.
+    const withLib = new Project({ compilerOptions: { allowJs: true } }).addSourceFileAtPath(file);
+    const fallback: NextConfig = { url: {}, rules: [], issues: [] };
+    parseConfig(withLib, fallback, false);
+    result.url.basePath ??= fallback.url.basePath;
+    result.url.locales ??= fallback.url.locales;
+    result.issues = result.issues.filter(issue =>
+      !(issue === 'dynamic next.config basePath' && result.url.basePath !== undefined) &&
+      !(issue === 'dynamic next.config locales' && result.url.locales !== undefined));
+  }
+  return result;
+}
+
+function parseConfig(source: SourceFile, result: NextConfig, appOnly: boolean) {
   const exported = source.getExportedDeclarations().get('default')?.[0] ??
     source.getStatements().flatMap(statement => {
       const expression = Node.isExpressionStatement(statement) ? statement.getExpression() : undefined;
@@ -63,7 +81,7 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
       const index = Node.isPropertyAccessExpression(callee) && callee.getName() === 'reduce' ? 1 : 0;
       config = valueNode(config.getArguments()[index]);
     }
-    if (!Node.isObjectLiteralExpression(config)) return result;
+    if (!Node.isObjectLiteralExpression(config)) return { libTypedUrl: false };
   }
   if (config.getProperties().some(Node.isSpreadAssignment)) result.issues.push('next.config spreads unresolved');
   const extensions = property(config, 'pageExtensions');
@@ -72,7 +90,8 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
   const trailingSlash = valueNode(property(config, 'trailingSlash'));
   result.extensions = strings(extensions);
   result.url.basePath = textValue(basePath);
-  result.url.locales = strings(property(valueNode(i18n), 'locales'));
+  const localeValues = property(valueNode(i18n), 'locales');
+  result.url.locales = strings(localeValues);
   if (trailingSlash?.getKind() === SyntaxKind.TrueKeyword || trailingSlash?.getKind() === SyntaxKind.FalseKeyword) {
     result.url.trailingSlash = trailingSlash.getKind() === SyntaxKind.TrueKeyword;
   }
@@ -80,7 +99,7 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
   if (basePath && result.url.basePath === undefined) result.issues.push('dynamic next.config basePath');
   if (i18n && !result.url.locales) result.issues.push('dynamic next.config locales');
   if (trailingSlash && result.url.trailingSlash === undefined) result.issues.push('dynamic next.config trailingSlash');
-  if (appOnly) return result;
+  if (appOnly) return { libTypedUrl: false };
   for (const kind of ['redirect', 'rewrite'] as const) {
     const member = valueNode(property(config, kind + 's'));
     if (!member) continue;
@@ -107,5 +126,11 @@ export function readNextConfig(root: string, files: SourceFile[], appOnly = fals
       }
     }
   }
-  return result;
+  const unresolvedProperty = (node: Node | undefined) => {
+    const value = valueNode(node);
+    return Node.isPropertyAccessExpression(value) && Node.isVariableDeclaration(
+      value.getExpression().getSymbol()?.getDeclarations()[0]);
+  };
+  return { libTypedUrl: result.url.basePath === undefined && unresolvedProperty(basePath) ||
+    !result.url.locales && (unresolvedProperty(i18n) || unresolvedProperty(localeValues)) };
 }

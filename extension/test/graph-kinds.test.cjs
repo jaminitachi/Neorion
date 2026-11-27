@@ -94,6 +94,29 @@ test('facts connects handler operations, state handoffs, and request transports'
   assert.match(project.run(['--help']), /facts ItemDialog/);
 });
 
+test('facts collapse source comments without cutting identifiers or hiding trailing syntax', t => {
+  const { root, build, query } = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+  const directory = path.join(root, 'app/api/commented');
+  fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'route.ts'), [
+    'export function POST() {',
+    '  return first + // folds away',
+    '    "https://example.com";',
+    '}',
+    'export function GET() {',
+    `  return [first, ${'x'.repeat(240)}, ${'y'.repeat(240)}, last];`,
+    '}'
+  ].join('\n'));
+  build();
+  const short = query('facts', 'POST /api/commented');
+  assert.match(short, /return first \+ "https:\/\/example\.com"/);
+  assert.doesNotMatch(short, /folds away/);
+  const long = query('facts', 'GET /api/commented');
+  assert.match(long, /return \[first, .*\.\.\..*, last\]/);
+  assert.doesNotMatch(long, /x{2,}|y{2,}/);
+  assert.match(long, /^# partial: output truncated/m);
+});
+
 test('facts reads a compressed section without rebuilding the index', t => {
   const { deflateRawSync } = require('node:zlib');
   const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
@@ -2340,6 +2363,39 @@ test('Pages lifecycle callbacks need reachable invocation or forwarding', t => {
   assert.match(uncertain, /# partial:.*callback invocation/);
 });
 
+test('Pages API queries reflect dynamic or lib-typed Next URL settings', t => {
+  for (const [config, issue] of [
+    ["export default { basePath: process.env.BASE_PATH ?? '/lf' };", 'basePath'],
+    ["export default { i18n: { locales: process.env.LOCALES?.split(',') ?? ['lf'], defaultLocale: 'lf' } };", 'locales'],
+    ["const site = Object.freeze({ basePath: '/lf' }); export default { basePath: site.basePath };"],
+    ["const base = { basePath: '/lf' }; const site: Readonly<typeof base> = base; export default { basePath: site.basePath };"]
+  ]) {
+    const project = fixture(t, false, path.join(__dirname, 'fixtures/detail-facts'));
+    fs.writeFileSync(path.join(project.root, 'tsconfig.json'), '{"include":["pages/**/*"],"compilerOptions":{"jsx":"preserve"}}');
+    fs.writeFileSync(path.join(project.root, 'next.config.ts'), config);
+    fs.mkdirSync(path.join(project.root, 'pages/api'), { recursive: true });
+    fs.writeFileSync(path.join(project.root, 'pages/api/hello.ts'), 'export default function Hello(req, res) { res.end("hello"); }');
+    fs.writeFileSync(path.join(project.root, 'pages/index.tsx'), [
+      'export default function Home() {',
+      '  fetch("/lf/api/hello");',
+      '  return <main/>;',
+      '}'
+    ].join('\n'));
+    project.build();
+    const consumers = project.query('api_consumers', '/api/hello');
+    const impact = project.query('impact', 'pages/api/hello.ts');
+    if (issue) {
+      for (const result of [consumers, impact]) assert.match(result, new RegExp(`^# partial: .*dynamic next.config ${issue}`, 'm'));
+      assert.doesNotMatch(consumers, /^send /m);
+      assert.match(project.query('impact', 'Home'), /^# complete:/m);
+    } else {
+      assert.match(consumers, /^send +pages\/index\.tsx:2 Home GET fetch/m);
+      assert.match(impact, /^page \/  pages\/index\.tsx:/m);
+      for (const result of [consumers, impact]) assert.match(result, /^# complete:/m);
+    }
+  }
+});
+
 test('Pages API methods follow unconditional rejection and Pages handlers receive HEAD as sent', t => {
   const query = pagesReviewFixture(t, {
     'pages/index.page.tsx': `
@@ -3210,13 +3266,16 @@ test('an expanded API consumer window reaches test callers beyond the normal row
   build();
   const limited = query('api_consumers', '/api/expanded', '--include-tests', '--limit', '100');
   assert.doesNotMatch(limited, /late-caller/);
-  assert.match(limited, /^# more: .*--include-tests --limit 161\b/m);
+  assert.match(limited, /^# more: \d+ \(set --limit 161\)$/m);
+  assert.match(query('api_consumers', '/api/expanded'), /^# more: \d+ \(set --include-tests --limit 2000\)$/m);
   const assertCaller = result => assert.match(result, /^call1 +late-caller[.]test[.]ts:2 request \[test\]$/m);
   assertCaller(query('api_consumers', '/api/expanded', '--include-tests', '--limit', '200'));
   const mcp = await openMcp(t, root, {
     command: process.execPath, args: [entry, 'mcp'], cwd: root, env: { ...env, NEORION_AUTOBUILD: '0' }
   });
   assertCaller(await mcp.text('query', { kind: 'api_consumers', target: '/api/expanded', includeTests: true, limit: 200 }));
+  assert.match(await mcp.text('query', { kind: 'api_consumers', target: '/api/expanded' }),
+    /^# more: \d+ \(set includeTests=true and limit=2000\)$/m);
 });
 
 test('API callback coverage follows escapes of wrappers and factories used as callback values', t => {
@@ -4223,10 +4282,14 @@ test('pathless index data requests target their path-contributing parent unless 
     }
   `);
   app.build();
-  assert.match(app.query('api_consumers', 'route:section'), /: 1 results /);
+  const layoutConsumers = app.query('api_consumers', 'route:section');
+  assert.match(layoutConsumers, /: 1 results /);
+  assert.match(layoutConsumers, /Form: target route has no action \(POST \/users → route:section,/);
+  assert.match(app.query('api_consumers', '/site/users'), /Form: target route has no action \(POST \/users → route:section,/);
   const indexConsumers = app.query('api_consumers', 'route:index-form');
   assert.match(indexConsumers, /: 2 results /);
   assert.match(indexConsumers, /GET fetcher.load/);
+  assert.doesNotMatch(indexConsumers, /target route has no action/);
   const home = app.query('callees', 'Home');
   assert.match(home, /Form: target route has no action \(POST \/users → route:section, src\/ui\/home\.tsx:\d+\)/);
   assert.match(home, /^# complete:/m);
@@ -4424,6 +4487,24 @@ test('router useSubmit follows a form passed through an event callback and leave
   assert.doesNotMatch(unknown, /^d1 (?:load|submit) /m);
   assert.match(unknown, /^# partial: .*useSubmit destination or method unresolved/m);
   assert.match(app.query('callees', 'Override', '--depth', '2'), /^d2 submit .*POST \/guarded .*useSubmit → action/m);
+});
+
+test('router impact keeps the definite form site when useSubmit also reaches its loader', t => {
+  const app = routerFixture(t, 'react-router-config');
+  fs.writeFileSync(path.join(app.root, 'src/ui/root.tsx'), [
+    "import { Form, Outlet, useSubmit } from 'react-router';",
+    'declare function useDebounce<T>(callback: T, delay: number): T;',
+    'export default function Root() {',
+    '  const submit = useSubmit();',
+    '  const change = useDebounce((form: HTMLFormElement) => submit(form), 400);',
+    '  return <><Form method="GET" action="/receiver" onChange={event => change(event.currentTarget)} /><Outlet/></>;',
+    '}'
+  ].join('\n'));
+  app.build();
+  const impact = app.query('impact', 'src/ui/receiver.ts');
+  assert.match(impact, /^special layout \/  src\/ui\/root\.tsx:3 +d1$/m);
+  assert.match(impact, /^d1 load src\/ui\/root\.tsx:6 [^\n]+(?<!\[possible\])$/m);
+  assert.match(impact, /^# partial: .*possible router dependency/m);
 });
 
 test('router consumer uncertainty follows the possible destination', t => {
