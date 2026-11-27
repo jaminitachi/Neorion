@@ -61,7 +61,7 @@ export function incrementalHistory(base: string, { root, edits, live }: HistoryP
     if (sourceFile.test(file)) sources.set(file, before.toString('utf8'));
   }
   if ([...fileIds.keys()].some(file => !beforeFiles.has(file))) return;
-  const project = new Project({ useInMemoryFileSystem: true, compilerOptions: { noLib: true, skipLibCheck: true } });
+  const project = new Project({ useInMemoryFileSystem: true, skipLoadingLibFiles: true, compilerOptions: { noLib: true, skipLibCheck: true } });
   for (const [file, names] of editsByFile) {
     const text = sources.get(file);
     const module = fileIds.get(file);

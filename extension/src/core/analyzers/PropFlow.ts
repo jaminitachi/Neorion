@@ -55,7 +55,7 @@ export class PropFlow {
   private slots = new Map<Node, Map<string, SlotUse[]>>();
 
   constructor(private bodies: Map<Node, Node>, private targets: Map<Node, Node[]>, private files: Set<SourceFile>,
-    private relativePath: (file: SourceFile) => string, private uncertainLookups: ReadonlySet<Node>) {
+    private relativePath: (file: SourceFile) => string, private uncertainLookups: ReadonlySet<Node>, private readSymbol = (node: Node) => node.getSymbol()) {
     for (const [component, body] of bodies) {
       const fn = body.getParent();
       if (Node.isArrowFunction(fn) || Node.isFunctionDeclaration(fn) || Node.isFunctionExpression(fn)) {
@@ -111,7 +111,7 @@ export class PropFlow {
   symbol(node: Node): Symbol | undefined {
     const cached = this.symbolsByNode.get(node);
     if (cached !== undefined) return cached ?? undefined;
-    const symbol = node.getSymbol();
+    const symbol = this.readSymbol(node);
     this.symbolsByNode.set(node, symbol ?? null);
     return symbol;
   }

@@ -216,6 +216,7 @@ export interface QueryIndex {
   }[];
   renderEdges: [from: number, to: number, line: number, conditional: number, layout?: true, possible?: true, detail?: string, site?: string | null, file?: string][];
   detailFacts?: DetailFacts;
+  packedDetailFacts?: string;
   renderExclusions?: Record<string, string[]>;
   renderGuardPaths?: Record<string, string[][]>;
   renderConditionalPaths?: Record<string, string[][]>;

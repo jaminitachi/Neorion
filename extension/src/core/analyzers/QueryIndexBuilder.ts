@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import * as path from 'node:path';
 import { type CallExpression, Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
 import type { ComponentNode, RouteNode } from '../types/GraphTypes';
@@ -29,6 +29,20 @@ import { isComponentWrapper, renderBindings } from './RenderBindings';
 import { bindingOf, executionSites, functionNode, importBinding, returns, valueNode } from './StaticBindings';
 import { evaluateRenderGuards, type RenderSelection } from './RenderGuards';
 import type { ReactFacts, IndexedRequest } from './ReactFacts';
+
+function fingerprint(file: string, buffer: Buffer) {
+  const fd = openSync(file, 'r');
+  try {
+    const { size, mtimeMs } = fstatSync(fd);
+    const hash = createHash('sha1');
+    for (let length = readSync(fd, buffer); length; length = readSync(fd, buffer)) {
+      hash.update(buffer.subarray(0, length));
+    }
+    return { size, mtimeMs, sha1: hash.digest('hex') };
+  } finally {
+    closeSync(fd);
+  }
+}
 
 type RelativePath = (source: SourceFile) => string;
 type PendingFetch = Omit<FetchEntry, 'route' | 'fn' | 'owner' | 'binding' | 'gates'> & {
@@ -537,7 +551,10 @@ export class QueryIndexBuilder {
     const byNode = new Map<Node, number>();
     const byGraphId = new Map<string, number>();
     const exports = new Map(files.map(file => [file, this.exportsOf(file)]));
-    const exported = new Set<Node>([...exports.values()].flatMap(entries => [...entries.values()].flat()));
+    const exported = new Set<Node>();
+    for (const entries of exports.values()) {
+      for (const declarations of entries.values()) for (const node of declarations) exported.add(node);
+    }
     const fileByName = new Map<string, SourceFile>(files.map(file => [file.getFilePath(), file]));
     const resolveDynamicModules = (specifier: Node | undefined, source: SourceFile, allowTemplate: boolean) => {
       const resolve = (text: string) => fileByName.get(ts.resolveModuleName(text, source.getFilePath(),
@@ -610,13 +627,11 @@ export class QueryIndexBuilder {
       if (action) action.symbol = symbol;
       byNode.set(node, symbol);
     }
+    const hashBuffer = historyOnly ? undefined : Buffer.allocUnsafe(64 * 1024);
     for (const file of files) {
       const relative = relativePath(file);
-      if (historyOnly) index.files[relative] = { size: 0, mtimeMs: 0, sha1: '' };
-      else {
-        const { size, mtimeMs } = statSync(file.getFilePath());
-        index.files[relative] = { size, mtimeMs, sha1: createHash('sha1').update(readFileSync(file.getFilePath())).digest('hex') };
-      }
+      if (!hashBuffer) index.files[relative] = { size: 0, mtimeMs: 0, sha1: '' };
+      else index.files[relative] = fingerprint(file.getFilePath(), hashBuffer);
       for (const node of [...file.getFunctions(), ...file.getVariableDeclarations(), ...file.getClasses(),
         ...file.getInterfaces(), ...file.getTypeAliases(), ...file.getEnums()]) {
         const name = node.getName() ?? 'default';
@@ -1675,8 +1690,9 @@ export class QueryIndexBuilder {
     for (const relative of orderedFiles) {
       const file = filesByRelative.get(relative)!;
       const fileId = byGraphId.get(`file:${relative}`)!;
-      const content = historyOnly ? '' : file.getFullText();
-      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(file.compilerNode.text);
+      const sourceText = file.compilerNode.text;
+      const content = historyOnly ? '' : sourceText;
+      const escapedIdentifiers = /\\u(?:[a-f\d]{4}|\{[a-f\d]+\})/i.test(sourceText);
       const comments = new Set<number>();
       const noteLines = new Map<string, Set<number>>();
       const references = new Map<number, Map<number, Reference[]>>();
@@ -2262,7 +2278,10 @@ export class QueryIndexBuilder {
         filterRaw: node => {
           if (!ts.isIdentifier(node)) return !historyOnly || !ts.isReturnStatement(node);
           const text = escapedIdentifiers ? node.getText(file.compilerNode) : node.text;
-          return names.has(text) || localNames.has(text) || namespaces.has(text);
+          if (namespaces.has(text)) return true;
+          const parent = node.parent;
+          return !ts.isImportSpecifier(parent) && !ts.isImportClause(parent) && !ts.isExportSpecifier(parent) &&
+            (names.has(text) || localNames.has(text));
         }
       });
       for (const comment of ts.getLeadingCommentRanges(content, 0) ?? []) scanComment(comment);

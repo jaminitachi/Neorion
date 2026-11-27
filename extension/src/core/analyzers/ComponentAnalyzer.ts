@@ -1,6 +1,6 @@
 import type { NextConfig } from './NextConfig';
 import type { WorkspaceBindings } from './WorkspaceBindings';
-import { Node, SourceFile, SyntaxKind, ts } from 'ts-morph';
+import { Node, SourceFile, SyntaxKind, ts, type Symbol } from 'ts-morph';
 import * as path from 'path';
 import type { ComponentEdge, ComponentNode, DetailFacts, HookNode, RouteNode } from '../types/GraphTypes';
 import { RENDER_LOOKUP_ISSUE } from '../../mcp/Index';
@@ -144,7 +144,34 @@ function exportedAction(node: Node, seen = new Set<Node>()): Node | undefined {
   }
 }
 
-function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, modules: Map<ts.Symbol, Map<string, string>>) {
+function symbolLookup(file: SourceFile) {
+  const project = file.getProject();
+  const checker = project.getTypeChecker().compilerObject;
+  // Use the original compiler factory so wrapped symbols keep their identity.
+  const compilerFactory = (file as Node & {
+    _context?: { compilerFactory: { getSymbol(symbol: ts.Symbol): Symbol } };
+  })._context?.compilerFactory;
+  const symbols = new WeakMap<ts.Node, ts.Symbol | null>();
+  function compilerSymbol(node: ts.Node): ts.Symbol | undefined {
+    // Match ts-morph's Node.getSymbol lookup without wrapping unrelated action candidates.
+    const { symbol, name } = node as ts.Node & { symbol?: ts.Symbol; name?: ts.Node };
+    if (symbol) return symbol;
+    const cached = symbols.get(node);
+    if (cached !== undefined) return cached ?? undefined;
+    const resolved = checker.getSymbolAtLocation(node) ?? (name && compilerSymbol(name));
+    symbols.set(node, resolved ?? null);
+    return resolved;
+  }
+  const wrappedSymbol = (node: Node) => {
+    if (node.getProject() !== project || !compilerFactory) return node.getSymbol();
+    const symbol = compilerSymbol(node.compilerNode);
+    return symbol && compilerFactory.getSymbol(symbol);
+  };
+  return { checker, compilerSymbol, wrappedSymbol };
+}
+
+function actionReferences({ checker, compilerSymbol }: ReturnType<typeof symbolLookup>,
+  bindings: Map<Node, string>, modules: Map<ts.Symbol, Map<string, string>>) {
   const byDeclaration = new Map([...bindings].map(([node, id]) => [node.compilerNode, id]));
   const exports = new Map<ts.Symbol, Map<string, ts.Symbol>>();
   const cached = new Map<ts.Symbol, string | undefined>();
@@ -208,29 +235,18 @@ function actionReferences(checker: ts.TypeChecker, bindings: Map<Node, string>, 
     cached.set(symbol, id);
     return id;
   };
-  const symbols = new WeakMap<ts.Node, ts.Symbol | null>();
-  function symbolAt(node: ts.Node): ts.Symbol | undefined {
-    // Match ts-morph's Node.getSymbol lookup without wrapping unrelated action candidates.
-    const { symbol, name } = node as ts.Node & { symbol?: ts.Symbol; name?: ts.Node };
-    if (symbol) return symbol;
-    const cached = symbols.get(node);
-    if (cached !== undefined) return cached ?? undefined;
-    const resolved = checker.getSymbolAtLocation(node) ?? (name && symbolAt(name));
-    symbols.set(node, resolved ?? null);
-    return resolved;
-  }
   // ACTION_SCAN_KINDS includes the node kinds resolved by this callback.
   return (node: ts.Node): string | undefined => {
     if (ts.isPropertyAccessExpression(node)) {
-      const namespace = symbolAt(node.expression);
+      const namespace = compilerSymbol(node.expression);
       const source = namespace && namespace.flags & ts.SymbolFlags.Alias && checker.getAliasedSymbol(namespace);
       const id = source && source.flags & ts.SymbolFlags.Module ? fromModule(source, node.name.getText()) : undefined;
       if (id) return id;
-      return fromSymbol(symbolAt(node));
+      return fromSymbol(compilerSymbol(node));
     }
     if (ts.isIdentifier(node)) {
       if (node.parent && ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) return;
-      return fromSymbol(symbolAt(node));
+      return fromSymbol(compilerSymbol(node));
     }
     if (ts.isShorthandPropertyAssignment(node)) return fromSymbol(checker.getShorthandAssignmentValueSymbol(node));
     if (ts.isArrowFunction(node) || ts.isFunctionExpression(node)) return byDeclaration.get(node);
@@ -614,8 +630,9 @@ export class ComponentAnalyzer {
     const definitions = new Map([...components].map(([node, component]) => [component.id, node]));
     const uncertainLookups = new Set([...renderChoices].flatMap(([tag, choices]) =>
       [...choices.values()].some(choice => choice.possible) ? [tag] : []));
+    const symbols = actions.size ? symbolLookup(files[0]) : undefined;
     const flow = new PropFlow(bodies, new Map([...renderTargets].map(([tag, targets]) =>
-      [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath, uncertainLookups);
+      [tag, targets.flatMap(target => definitions.get(target.id) ?? [])])), projectFiles, relativePath, uncertainLookups, symbols?.wrappedSymbol);
     const propAttribute = (tag: Node, body?: Node) =>
       tag.getAncestors().find(parent => parent === body || Node.isJsxAttribute(parent));
     const propRenders = new Map<Node, (RenderCertainty & { target: ComponentNode; detail: string })[]>();
@@ -754,8 +771,7 @@ export class ComponentAnalyzer {
       component.hooks = [...usedHooks];
     }
 
-    const actionReference = actions.size
-      ? actionReferences(files[0].getProject().getTypeChecker().compilerObject, actionIds, actionModules) : undefined;
+    const actionReference = symbols ? actionReferences(symbols, actionIds, actionModules) : undefined;
     let lastActionNode: ts.Node | undefined;
     let lastActionId: string | undefined;
     const actionOf = actionReference && ((node: ts.Node) => {

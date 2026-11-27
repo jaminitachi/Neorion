@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, unlink } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { lstat, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { workspaceCache } from '../core/WorkspaceCache';
@@ -13,17 +14,51 @@ const builds = new Map<string, Promise<BuildResult>>();
 const enabled = () => process.env.NEORION_AUTOBUILD !== '0';
 const firstLine = (message: string) => message.split(/\r?\n/, 1)[0];
 
-async function fresh(root: string, indexPath: string) {
-  let index: QueryIndex;
+type BuildInputs = Pick<QueryIndex, 'projectSnapshot' | 'pagesWorkspaceInputs' | 'workspaceSources'> & {
+  router?: Pick<NonNullable<QueryIndex['router']>, 'revision' | 'dependencies'>;
+};
+let lastIndex: { path: string; signature: string; inputs: BuildInputs } | undefined;
+
+function indexSignature(stat: Stats) {
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs].join(':');
+}
+
+async function buildInputs(path: string): Promise<BuildInputs | undefined> {
   try {
-    index = JSON.parse(await readFile(indexPath, 'utf8'));
+    const file = await stat(path);
+    if (!file.isFile()) return;
+    const signature = indexSignature(file);
+    if (lastIndex?.path === path && lastIndex.signature === signature) return lastIndex.inputs;
+
+    const handle = await open(path, 'r');
+    let index: QueryIndex;
+    let readSignature: string;
+    try {
+      const opened = await handle.stat();
+      if (!opened.isFile()) return;
+      readSignature = indexSignature(opened);
+      index = JSON.parse(await handle.readFile('utf8'));
+    } finally {
+      await handle.close();
+    }
+    if (index?.schema !== INDEX_SCHEMA || index.generator !== VERSION || !index.files) return;
+    if (index.wrapperRevision !== WRAPPER_INDEX_REVISION || !Array.isArray(index.serverActions)) return;
+    if (index.queryRevision !== QUERY_INDEX_REVISION || index.graphRevision !== GRAPH_INDEX_REVISION) return;
+    if (typeof index.packedDetailFacts !== 'string' &&
+        (!Array.isArray(index.detailFacts?.requests) || !Array.isArray(index.detailFacts.untracedStateOwners))) return;
+    const { projectSnapshot, pagesWorkspaceInputs, workspaceSources, router } = index;
+    const inputs = { projectSnapshot, pagesWorkspaceInputs, workspaceSources,
+      router: router && { revision: router.revision, dependencies: router.dependencies } };
+    lastIndex = { path, signature: readSignature, inputs };
+    return inputs;
   } catch {
-    return false;
+    return undefined;
   }
-  if (index?.schema !== INDEX_SCHEMA || index.generator !== VERSION || !index.files) return false;
-  if (index.wrapperRevision !== WRAPPER_INDEX_REVISION || !Array.isArray(index.serverActions)) return false;
-  if (index.queryRevision !== QUERY_INDEX_REVISION || index.graphRevision !== GRAPH_INDEX_REVISION) return false;
-  if (!Array.isArray(index.detailFacts?.requests) || !Array.isArray(index.detailFacts.untracedStateOwners)) return false;
+}
+
+async function fresh(root: string, indexPath: string) {
+  const index = await buildInputs(indexPath);
+  if (!index) return false;
   if (index.router && (index.router.revision !== ROUTER_INDEX_REVISION ||
     index.router.dependencies !== routerDependencySnapshot(root))) return false;
   const inputs = index.pagesWorkspaceInputs;
